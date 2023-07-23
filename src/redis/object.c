@@ -269,24 +269,6 @@ robj *createHashObject(void) {
     return o;
 }
 
-robj *createZsetObject(void) {
-    zset *zs = zmalloc(sizeof(*zs));
-    robj *o;
-
-    zs->dict = dictCreate(&zsetDictType);
-    zs->zsl = zslCreate();
-    o = createObject(OBJ_ZSET,zs);
-    o->encoding = OBJ_ENCODING_SKIPLIST;
-    return o;
-}
-
-robj *createZsetListpackObject(void) {
-    unsigned char *lp = lpNew(0);
-    robj *o = createObject(OBJ_ZSET,lp);
-    o->encoding = OBJ_ENCODING_LISTPACK;
-    return o;
-}
-
 robj *createStreamObject(void) {
     stream *s = streamNew();
     robj *o = createObject(OBJ_STREAM,s);
@@ -328,23 +310,6 @@ void freeSetObject(robj *o) {
         break;
     default:
         serverPanic("Unknown set encoding type");
-    }
-}
-
-void freeZsetObject(robj *o) {
-    zset *zs;
-    switch (o->encoding) {
-    case OBJ_ENCODING_SKIPLIST:
-        zs = o->ptr;
-        dictRelease(zs->dict);
-        zslFree(zs->zsl);
-        zfree(zs);
-        break;
-    case OBJ_ENCODING_LISTPACK:
-        zfree(o->ptr);
-        break;
-    default:
-        serverPanic("Unknown sorted set encoding");
     }
 }
 
@@ -392,8 +357,7 @@ void decrRefCount(robj *o) {
         switch(o->type) {
         case OBJ_STRING: freeStringObject(o); break;
         case OBJ_LIST: freeListObject(o); break;
-        case OBJ_SET: freeSetObject(o); break;
-        case OBJ_ZSET: freeZsetObject(o); break;
+        case OBJ_SET: freeSetObject(o); break;        
         case OBJ_HASH: freeHashObject(o); break;
         case OBJ_MODULE:
             serverPanic("Unsupported OBJ_MODULE type");
@@ -472,32 +436,6 @@ void dismissSetObject(robj *o, size_t size_hint) {
     }
 }
 
-/* See dismissObject() */
-void dismissZsetObject(robj *o, size_t size_hint) {
-    if (o->encoding == OBJ_ENCODING_SKIPLIST) {
-        zset *zs = o->ptr;
-        zskiplist *zsl = zs->zsl;
-        serverAssert(zsl->length != 0);
-        /* We iterate all nodes only when average member size is bigger than a
-         * page size, and there's a high chance we'll actually dismiss something. */
-        if (size_hint / zsl->length >= server.page_size) {
-            zskiplistNode *zn = zsl->tail;
-            while (zn != NULL) {
-                dismissSds(zn->ele);
-                zn = zn->backward;
-            }
-        }
-
-        /* Dismiss hash table memory. */
-        dict *d = zs->dict;
-        dismissMemory(d->ht_table[0], DICTHT_SIZE(d->ht_size_exp[0])*sizeof(dictEntry*));
-        dismissMemory(d->ht_table[1], DICTHT_SIZE(d->ht_size_exp[1])*sizeof(dictEntry*));
-    } else if (o->encoding == OBJ_ENCODING_LISTPACK) {
-        dismissMemory(o->ptr, lpBytes((unsigned char*)o->ptr));
-    } else {
-        serverPanic("Unknown zset encoding type");
-    }
-}
 
 /* See dismissObject() */
 void dismissHashObject(robj *o, size_t size_hint) {
@@ -753,8 +691,6 @@ size_t streamRadixTreeMemoryUsage(rax *rax) {
     return size;
 }
 
-#endif
-
 /* Returns the size in bytes consumed by the key's value in RAM.
  * Note that the returned value is just an approximation, especially in the
  * case of aggregated data types where only "sample_size" elements
@@ -928,6 +864,8 @@ size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid) {
     }
     return asize;
 }
+#endif
+
 
 #ifdef ROMAN_CLIENT_DISABLE
 /* Release data obtained with getMemoryOverheadData(). */

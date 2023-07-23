@@ -27,6 +27,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json_object.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
@@ -321,7 +322,7 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   }
 
   if (obj_type == OBJ_ZSET) {
-    return SaveZSetObject(pv.AsRObj());
+    return SaveZSetObject(pv);
   }
 
   if (obj_type == OBJ_STREAM) {
@@ -441,13 +442,14 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveZSetObject(const robj* obj) {
-  DCHECK_EQ(OBJ_ZSET, obj->type);
-  if (obj->encoding == OBJ_ENCODING_SKIPLIST) {
-    zset* zs = (zset*)obj->ptr;
-    zskiplist* zsl = zs->zsl;
+error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
+  DCHECK_EQ(OBJ_ZSET, pv.ObjType());
+  const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
+  if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
 
-    RETURN_ON_ERR(SaveLen(zsl->length));
+    RETURN_ON_ERR(SaveLen(zs->Size()));
+    std::error_code ec;
 
     /* We save the skiplist elements from the greatest to the smallest
      * (that's trivial since the elements are already ordered in the
@@ -455,15 +457,18 @@ error_code RdbSerializer::SaveZSetObject(const robj* obj) {
      * element will always be the smaller, so adding to the skiplist
      * will always immediately stop at the head, making the insertion
      * O(1) instead of O(log(N)). */
-    zskiplistNode* zn = zsl->tail;
-    while (zn != NULL) {
-      RETURN_ON_ERR(SaveString(string_view{zn->ele, sdslen(zn->ele)}));
-      RETURN_ON_ERR(SaveBinaryDouble(zn->score));
-      zn = zn->backward;
-    }
+    zs->Iterate(0, zs->Size(), true, [&](sds ele, double score) {
+      ec = SaveString(string_view{ele, sdslen(ele)});
+      if (ec)
+        return false;
+      ec = SaveBinaryDouble(score);
+      if (ec)
+        return false;
+      return true;
+    });
   } else {
-    CHECK_EQ(obj->encoding, unsigned(OBJ_ENCODING_LISTPACK)) << "Unknown zset encoding";
-    uint8_t* lp = (uint8_t*)obj->ptr;
+    CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK)) << "Unknown zset encoding";
+    uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
     RETURN_ON_ERR(SaveListPackAsZiplist(lp));
   }
 

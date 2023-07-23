@@ -61,6 +61,7 @@ struct Metrics {
   uint64_t ooo_tx_transaction_cnt = 0;
   uint32_t traverse_ttl_per_sec = 0;
   uint32_t delete_ttl_per_sec = 0;
+  bool is_master = true;
 
   facade::ConnectionStats conn_stats;
   absl::flat_hash_map<const char*, std::pair<uint64_t, uint64_t>>

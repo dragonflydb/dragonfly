@@ -23,11 +23,15 @@ class Journal {
   // and false otherwise.
   bool EnterLameDuck();  // still logs ongoing transactions but refuses to start new ones.
 
+  void StartInThread();
+
   // Requires: journal is in lameduck mode.
   std::error_code Close();
 
+#if 0
   // Opens journal inside a Dragonfly thread. Must be called in each thread.
   std::error_code OpenInThread(bool persistent, std::string_view dir);
+#endif
 
   //******* The following functions must be called in the context of the owning shard *********//
 

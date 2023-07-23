@@ -75,14 +75,12 @@ return 'OK'
 """
 
 
-def DJANGO_CACHEOPS_SCHEMA(vs): return {
-    "table_1": [
-        {"f-1": f'v-{vs[0]}'}, {"f-2": f'v-{vs[1]}'}
-    ],
-    "table_2": [
-        {"f-1": f'v-{vs[2]}'}, {"f-2": f'v-{vs[3]}'}
-    ]
-}
+def DJANGO_CACHEOPS_SCHEMA(vs):
+    return {
+        "table_1": [{"f-1": f"v-{vs[0]}"}, {"f-2": f"v-{vs[1]}"}],
+        "table_2": [{"f-1": f"v-{vs[2]}"}, {"f-2": f"v-{vs[3]}"}],
+    }
+
 
 """
 Test the main caching script of https://github.com/Suor/django-cacheops.
@@ -91,21 +89,25 @@ so Dragonfly must run in global (1) or non-atomic (4) multi eval mode.
 """
 
 
-@dfly_multi_test_args({'default_lua_flags': 'allow-undeclared-keys', 'proactor_threads': 4},
-                      {'default_lua_flags': 'allow-undeclared-keys disable-atomicity', 'proactor_threads': 4})
+@dfly_multi_test_args(
+    {"default_lua_flags": "allow-undeclared-keys", "proactor_threads": 4},
+    {"default_lua_flags": "allow-undeclared-keys disable-atomicity", "proactor_threads": 4},
+)
 async def test_django_cacheops_script(async_client, num_keys=500):
     script = async_client.register_script(DJANGO_CACHEOPS_SCRIPT)
 
-    data = [(f'k-{k}', [random.randint(0, 10) for _ in range(4)])
-            for k in range(num_keys)]
+    data = [(f"k-{k}", [random.randint(0, 10) for _ in range(4)]) for k in range(num_keys)]
     for k, vs in data:
         schema = DJANGO_CACHEOPS_SCHEMA(vs)
-        assert await script(keys=['', k, ''], args=['a' * 10, json.dumps(schema, sort_keys=True), 100]) == 'OK'
+        assert (
+            await script(keys=["", k, ""], args=["a" * 10, json.dumps(schema, sort_keys=True), 100])
+            == "OK"
+        )
 
     # Check schema was built correctly
     base_schema = DJANGO_CACHEOPS_SCHEMA([0] * 4)
     for table, fields in base_schema.items():
-        schema = await async_client.smembers(f'schemes:{table}')
+        schema = await async_client.smembers(f"schemes:{table}")
         fields = set.union(*(set(part.keys()) for part in fields))
         assert schema == fields
 
@@ -114,9 +116,9 @@ async def test_django_cacheops_script(async_client, num_keys=500):
         assert await async_client.exists(k)
         for table, fields in DJANGO_CACHEOPS_SCHEMA(vs).items():
             for sub_schema in fields:
-                conj_key = f'conj:{table}:' + \
-                    '&'.join("{}={}".format(f, v)
-                             for f, v in sub_schema.items())
+                conj_key = f"conj:{table}:" + "&".join(
+                    "{}={}".format(f, v) for f, v in sub_schema.items()
+                )
                 assert await async_client.sismember(conj_key, k)
 
 
@@ -158,24 +160,29 @@ the task system should work reliably.
 """
 
 
-@dfly_multi_test_args({'default_lua_flags': 'allow-undeclared-keys', 'proactor_threads': 4},
-                      {'default_lua_flags': 'allow-undeclared-keys disable-atomicity', 'proactor_threads': 4})
+@dfly_multi_test_args(
+    {"default_lua_flags": "allow-undeclared-keys", "proactor_threads": 4},
+    {"default_lua_flags": "allow-undeclared-keys disable-atomicity", "proactor_threads": 4},
+)
 async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
     async def enqueue_worker(queue):
         client = aioredis.Redis(connection_pool=async_pool)
         enqueue = client.register_script(ASYNQ_ENQUEUE_SCRIPT)
 
-        task_ids = 2*list(range(num_tasks))
+        task_ids = 2 * list(range(num_tasks))
         random.shuffle(task_ids)
-        res = [await enqueue(keys=[f"asynq:{{{queue}}}:t:{task_id}", f"asynq:{{{queue}}}:pending"],
-                             args=[f"{task_id}", task_id, int(time.time())])
-               for task_id in task_ids]
+        res = [
+            await enqueue(
+                keys=[f"asynq:{{{queue}}}:t:{task_id}", f"asynq:{{{queue}}}:pending"],
+                args=[f"{task_id}", task_id, int(time.time())],
+            )
+            for task_id in task_ids
+        ]
 
         assert sum(res) == num_tasks
 
     # Start filling the queues
-    jobs = [asyncio.create_task(enqueue_worker(
-        f"q-{queue}")) for queue in range(num_queues)]
+    jobs = [asyncio.create_task(enqueue_worker(f"q-{queue}")) for queue in range(num_queues)]
 
     collected = 0
 
@@ -185,15 +192,19 @@ async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
         dequeue = client.register_script(ASYNQ_DEQUE_SCRIPT)
 
         while collected < num_tasks * num_queues:
-            #pct = round(collected/(num_tasks*num_queues), 2)
-            #print(f'\r    \r{pct}', end='', flush=True)
+            # pct = round(collected/(num_tasks*num_queues), 2)
+            # print(f'\r    \r{pct}', end='', flush=True)
             for queue in (f"q-{queue}" for queue in range(num_queues)):
                 prefix = f"asynq:{{{queue}}}:t:"
-                msg = await dequeue(keys=[f"asynq:{{{queue}}}:"+t for t in ["pending", "paused", "active", "lease"]],
-                                    args=[int(time.time()), prefix])
+                msg = await dequeue(
+                    keys=[
+                        f"asynq:{{{queue}}}:" + t for t in ["pending", "paused", "active", "lease"]
+                    ],
+                    args=[int(time.time()), prefix],
+                )
                 if msg is not None:
                     collected += 1
-                    assert await client.hget(prefix+msg, 'state') == 'active'
+                    assert await client.hget(prefix + msg, "state") == "active"
 
     # Run many contending workers
     await asyncio.gather(*(dequeue_worker() for _ in range(num_queues * 2)))
@@ -204,19 +215,19 @@ async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
 
 ERROR_CALL_SCRIPT_TEMPLATE = [
     "redis.{}('LTRIM', 'l', 'a', 'b')",  # error only on evaluation
-    "redis.{}('obviously wrong')"  # error immediately on preprocessing
+    "redis.{}('obviously wrong')",  # error immediately on preprocessing
 ]
 
 
 @dfly_args({"proactor_threads": 1})
 @pytest.mark.asyncio
 async def test_eval_error_propagation(async_client):
-    CMDS = ['call', 'pcall', 'acall', 'apcall']
+    CMDS = ["call", "pcall", "acall", "apcall"]
 
     for cmd, template in itertools.product(CMDS, ERROR_CALL_SCRIPT_TEMPLATE):
-        does_abort = 'p' not in cmd
+        does_abort = "p" not in cmd
         try:
-            await async_client.eval(template.format(cmd), 1, 'l')
+            await async_client.eval(template.format(cmd), 1, "l")
             if does_abort:
                 assert False, "Eval must have thrown an error: " + cmd
         except aioredis.RedisError as e:
@@ -230,12 +241,12 @@ async def test_global_eval_in_multi(async_client: aioredis.Redis):
         return redis.call('GET', 'any-key');
     """
 
-    await async_client.set('any-key', 'works')
+    await async_client.set("any-key", "works")
 
     pipe = async_client.pipeline(transaction=True)
-    pipe.set('another-key', 'ok')
+    pipe.set("another-key", "ok")
     pipe.eval(GLOBAL_SCRIPT, 0)
     res = await pipe.execute()
 
     print(res)
-    assert res[1] == 'works'
+    assert res[1] == "works"

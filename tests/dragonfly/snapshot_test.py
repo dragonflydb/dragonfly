@@ -18,9 +18,10 @@ class SnapshotTestBase:
         self.tmp_dir = tmp_dir
 
     def get_main_file(self, pattern):
-        def is_main(f): return "summary" in f if pattern.endswith(
-            "dfs") else True
-        files = glob.glob(str(self.tmp_dir.absolute()) + '/' + pattern)
+        def is_main(f):
+            return "summary" in f if pattern.endswith("dfs") else True
+
+        files = glob.glob(str(self.tmp_dir.absolute()) + "/" + pattern)
         possible_mains = list(filter(is_main, files))
         assert len(possible_mains) == 1, possible_mains
         return possible_mains[0]
@@ -29,6 +30,7 @@ class SnapshotTestBase:
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-rdb-{{timestamp}}"})
 class TestRdbSnapshot(SnapshotTestBase):
     """Test single file rdb snapshot"""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         super().setup(tmp_dir)
@@ -51,6 +53,7 @@ class TestRdbSnapshot(SnapshotTestBase):
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-rdbexact.rdb", "nodf_snapshot_format": None})
 class TestRdbSnapshotExactFilename(SnapshotTestBase):
     """Test single file rdb snapshot without a timestamp"""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         super().setup(tmp_dir)
@@ -74,6 +77,7 @@ class TestRdbSnapshotExactFilename(SnapshotTestBase):
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-dfs"})
 class TestDflySnapshot(SnapshotTestBase):
     """Test multi file snapshot"""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
@@ -88,9 +92,12 @@ class TestDflySnapshot(SnapshotTestBase):
         # save + flush + load
         await async_client.execute_command("SAVE DF")
         assert await async_client.flushall()
-        await async_client.execute_command("DEBUG LOAD " + super().get_main_file("test-dfs-summary.dfs"))
+        await async_client.execute_command(
+            "DEBUG LOAD " + super().get_main_file("test-dfs-summary.dfs")
+        )
 
         assert await seeder.compare(start_capture)
+
 
 # We spawn instances manually, so reduce memory usage of default to minimum
 
@@ -98,6 +105,7 @@ class TestDflySnapshot(SnapshotTestBase):
 @dfly_args({"proactor_threads": "1"})
 class TestDflyAutoLoadSnapshot(SnapshotTestBase):
     """Test automatic loading of dump files on startup with timestamp"""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
@@ -115,8 +123,8 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
     @pytest.mark.parametrize("save_type, dbfilename", cases)
     async def test_snapshot(self, df_local_factory, save_type, dbfilename):
         df_args = {"dbfilename": dbfilename, **BASIC_ARGS, "port": 1111}
-        if save_type == 'rdb':
-            df_args['nodf_snapshot_format'] = ""
+        if save_type == "rdb":
+            df_args["nodf_snapshot_format"] = ""
         df_server = df_local_factory.create(**df_args)
         df_server.start()
 
@@ -135,6 +143,7 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "save_schedule": "*:*"})
 class TestPeriodicSnapshot(SnapshotTestBase):
     """Test periodic snapshotting"""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         super().setup(tmp_dir)
@@ -142,7 +151,8 @@ class TestPeriodicSnapshot(SnapshotTestBase):
     @pytest.mark.asyncio
     async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(
-            port=df_server.port, keys=10, multi_transaction_probability=0)
+            port=df_server.port, keys=10, multi_transaction_probability=0
+        )
         await seeder.run(target_deviation=0.5)
 
         time.sleep(60)
@@ -154,14 +164,14 @@ class TestPeriodicSnapshot(SnapshotTestBase):
 class TestPathEscapes(SnapshotTestBase):
     """Test that we don't allow path escapes. We just check that df_server.start()
     fails because we don't have a much better way to test that."""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
     async def test_snapshot(self, df_local_factory):
-        df_server = df_local_factory.create(
-            dbfilename="../../../../etc/passwd")
+        df_server = df_local_factory.create(dbfilename="../../../../etc/passwd")
         try:
             df_server.start()
             assert False, "Server should not start correctly"
@@ -172,6 +182,7 @@ class TestPathEscapes(SnapshotTestBase):
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-shutdown"})
 class TestDflySnapshotOnShutdown(SnapshotTestBase):
     """Test multi file snapshot"""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
@@ -192,15 +203,17 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
 
         assert await seeder.compare(start_capture)
 
+
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-info-persistence"})
 class TestDflyInfoPersistenceLoadingField(SnapshotTestBase):
     """Test is_loading field on INFO PERSISTENCE during snapshot loading"""
+
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
 
     def extract_is_loading_field(self, res):
-        matcher = b'loading:'
+        matcher = b"loading:"
         start = res.find(matcher)
         pos = start + len(matcher)
         return chr(res[pos])
@@ -211,9 +224,9 @@ class TestDflyInfoPersistenceLoadingField(SnapshotTestBase):
         await seeder.run(target_deviation=0.05)
         a_client = aioredis.Redis(port=df_server.port)
 
-        #Wait for snapshot to finish loading and try INFO PERSISTENCE
+        # Wait for snapshot to finish loading and try INFO PERSISTENCE
         await wait_available_async(a_client)
         res = await a_client.execute_command("INFO PERSISTENCE")
-        assert '0' == self.extract_is_loading_field(res)
+        assert "0" == self.extract_is_loading_field(res)
 
         await a_client.connection_pool.disconnect()

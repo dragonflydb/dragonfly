@@ -11,6 +11,7 @@ extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/object.h"
+#include "redis/redis_aux.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
@@ -24,6 +25,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/pod_array.h"
 #include "core/detail/bitpacking.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 
@@ -43,14 +45,6 @@ constexpr size_t kAlignSize = 8u;
 size_t QlMAllocSize(quicklist* ql) {
   size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
   return res + ql->count * 16;  // we account for each member 16 bytes.
-}
-
-// Approximated dictionary size.
-size_t DictMallocSize(dict* d) {
-  size_t res = zmalloc_usable_size(d->ht_table[0]) + zmalloc_usable_size(d->ht_table[1]) +
-               znallocx(sizeof(dict));
-
-  return res + dictSize(d) * 16;  // approximation.
 }
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
@@ -106,8 +100,8 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
     case OBJ_ENCODING_LISTPACK:
       return lpBytes(reinterpret_cast<uint8_t*>(ptr));
     case OBJ_ENCODING_SKIPLIST: {
-      zset* zs = (zset*)ptr;
-      return DictMallocSize(zs->dict);
+      detail::SortedMap* ss = (detail::SortedMap*)ptr;
+      return ss->MallocSize();  // DictMallocSize(zs->dict);
     }
   }
   LOG(DFATAL) << "Unknown set encoding type " << encoding;
@@ -133,13 +127,10 @@ inline void FreeObjHash(unsigned encoding, void* ptr) {
 }
 
 inline void FreeObjZset(unsigned encoding, void* ptr) {
-  zset* zs = (zset*)ptr;
+  detail::SortedMap* zs = (detail::SortedMap*)ptr;
   switch (encoding) {
     case OBJ_ENCODING_SKIPLIST:
-      zs = (zset*)ptr;
-      dictRelease(zs->dict);
-      zslFree(zs->zsl);
-      zfree(zs);
+      delete zs;
       break;
     case OBJ_ENCODING_LISTPACK:
       zfree(ptr);
@@ -237,12 +228,16 @@ size_t RobjWrapper::Size() const {
     case OBJ_LIST:
       return quicklistCount((quicklist*)inner_obj_);
     case OBJ_ZSET: {
-      robj self{.type = type_,
-                .encoding = encoding_,
-                .lru = 0,
-                .refcount = OBJ_STATIC_REFCOUNT,
-                .ptr = inner_obj_};
-      return zsetLength(&self);
+      switch (encoding_) {
+        case OBJ_ENCODING_SKIPLIST: {
+          SortedMap* ss = (SortedMap*)inner_obj_;
+          return ss->Size();
+        }
+        case OBJ_ENCODING_LISTPACK:
+          return lpLength((uint8_t*)inner_obj_) / 2;
+        default:
+          LOG(FATAL) << "Unknown sorted set encoding" << encoding_;
+      }
     }
     case OBJ_SET:
       switch (encoding_) {
@@ -359,6 +354,91 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
     }
   }
   return false;
+}
+
+int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
+  // copied from zsetAdd for listpack only.
+  /* Turn options into simple to check vars. */
+  int incr = (in_flags & ZADD_IN_INCR) != 0;
+  int nx = (in_flags & ZADD_IN_NX) != 0;
+  int xx = (in_flags & ZADD_IN_XX) != 0;
+  int gt = (in_flags & ZADD_IN_GT) != 0;
+  int lt = (in_flags & ZADD_IN_LT) != 0;
+  *out_flags = 0; /* We'll return our response flags. */
+  double curscore;
+
+  /* NaN as input is an error regardless of all the other parameters. */
+  if (isnan(score)) {
+    *out_flags = ZADD_OUT_NAN;
+    return 0;
+  }
+
+  /* Update the sorted set according to its encoding. */
+  if (encoding_ == OBJ_ENCODING_LISTPACK) {
+    unsigned char* eptr;
+    uint8_t* lp = (uint8_t*)inner_obj_;
+
+    if ((eptr = zzlFind(lp, ele, &curscore)) != NULL) {
+      /* NX? Return, same element already exists. */
+      if (nx) {
+        *out_flags |= ZADD_OUT_NOP;
+        return 1;
+      }
+
+      /* Prepare the score for the increment if needed. */
+      if (incr) {
+        score += curscore;
+        if (isnan(score)) {
+          *out_flags |= ZADD_OUT_NAN;
+          return 0;
+        }
+      }
+
+      /* GT/LT? Only update if score is greater/less than current. */
+      if ((lt && score >= curscore) || (gt && score <= curscore)) {
+        *out_flags |= ZADD_OUT_NOP;
+        return 1;
+      }
+
+      if (newscore)
+        *newscore = score;
+
+      /* Remove and re-insert when score changed. */
+      if (score != curscore) {
+        lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
+        lp = zzlInsert(lp, ele, score);
+        inner_obj_ = lp;
+        *out_flags |= ZADD_OUT_UPDATED;
+      }
+
+      return 1;
+    } else if (!xx) {
+      unsigned zl_len = lpLength(lp) / 2;
+
+      /* check if the element is too large or the list
+       * becomes too long *before* executing zzlInsert. */
+      if (zl_len + 1 > server.zset_max_listpack_entries ||
+          sdslen(ele) > server.zset_max_listpack_value || !lpSafeToAdd(lp, sdslen(ele))) {
+        unique_ptr<SortedMap> ss = SortedMap::FromListPack(lp);
+        lpFree(lp);
+        inner_obj_ = ss.release();
+        encoding_ = OBJ_ENCODING_SKIPLIST;
+      } else {
+        inner_obj_ = zzlInsert(lp, ele, score);
+        if (newscore)
+          *newscore = score;
+        *out_flags |= ZADD_OUT_ADDED;
+        return 1;
+      }
+    } else {
+      *out_flags |= ZADD_OUT_NOP;
+      return 1;
+    }
+  }
+
+  CHECK_EQ(encoding_, OBJ_ENCODING_SKIPLIST);
+  SortedMap* ss = (SortedMap*)inner_obj_;
+  return ss->Add(score, ele, in_flags, out_flags, newscore);
 }
 
 bool RobjWrapper::Reallocate(MemoryResource* mr) {
@@ -531,6 +611,7 @@ unsigned CompactObj::Encoding() const {
 void CompactObj::ImportRObj(robj* o) {
   CHECK(1 == o->refcount || o->refcount == OBJ_STATIC_REFCOUNT);
   CHECK_NE(o->encoding, OBJ_ENCODING_EMBSTR);  // need regular one
+  CHECK_NE(o->type, OBJ_ZSET);
 
   SetMeta(ROBJ_TAG);
 
@@ -563,7 +644,7 @@ robj* CompactObj::AsRObj() const {
   unsigned enc = u_.r_obj.encoding();
   res->type = u_.r_obj.type();
 
-  if (res->type == OBJ_SET || res->type == OBJ_HASH) {
+  if (res->type == OBJ_SET || res->type == OBJ_HASH || res->type == OBJ_ZSET) {
     LOG(DFATAL) << "Should not call AsRObj for type " << res->type;
   }
 
@@ -585,7 +666,8 @@ void CompactObj::SyncRObj() {
 
   DCHECK_EQ(ROBJ_TAG, taglen_);
   DCHECK_EQ(u_.r_obj.type(), obj->type);
-  CHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
+  DCHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
+  CHECK_NE(OBJ_ZSET, obj->type) << "zsets should be handled without robj";
 
   unsigned enc = obj->encoding;
   u_.r_obj.Init(obj->type, enc, obj->ptr);

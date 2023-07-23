@@ -28,8 +28,19 @@ thread_local JournalSlice journal_slice;
 Journal::Journal() {
 }
 
-error_code Journal::OpenInThread(bool persistent, string_view dir) {
+void Journal::StartInThread() {
   journal_slice.Init(unsigned(ProactorBase::GetIndex()));
+
+  ServerState::tlocal()->set_journal(this);
+  EngineShard* shard = EngineShard::tlocal();
+  if (shard) {
+    shard->set_journal(this);
+  }
+}
+
+#if 0
+error_code Journal::OpenInThread(bool persistent, string_view dir) {
+
 
   error_code ec;
 
@@ -40,14 +51,9 @@ error_code Journal::OpenInThread(bool persistent, string_view dir) {
     }
   }
 
-  ServerState::tlocal()->set_journal(this);
-  EngineShard* shard = EngineShard::tlocal();
-  if (shard) {
-    shard->set_journal(this);
-  }
-
   return ec;
 }
+#endif
 
 error_code Journal::Close() {
   CHECK(lameduck_.load(memory_order_relaxed));
@@ -65,12 +71,12 @@ error_code Journal::Close() {
       shard->set_journal(nullptr);
     }
 
-    auto ec = journal_slice.Close();
+    /*auto ec = journal_slice.Close();
 
     if (ec) {
       lock_guard lk2(ec_mu);
       res = ec;
-    }
+    }*/
   };
 
   shard_set->pool()->AwaitFiberOnAll(close_cb);

@@ -808,12 +808,14 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
+  AppendMetricHeader("role", "", MetricType::GAUGE, &resp->body());
+  AppendMetricValue("role", 1, {"role"}, {m.is_master ? "master" : "replica"}, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
 
   // Clients metrics
   AppendMetricWithoutLabels("connected_clients", "", m.conn_stats.num_conns, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("client_read_buf_capacity", "", m.conn_stats.read_buf_capacity,
+  AppendMetricWithoutLabels("client_read_buffer_bytes", "", m.conn_stats.read_buf_capacity,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
@@ -1413,7 +1415,18 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SET") {
-    return (*cntx)->SendOk();
+    if (args.size() < 3) {
+      return (*cntx)->SendError(WrongNumArgsError("config|set"));
+    }
+
+    ToLower(&args[1]);
+    string_view config_name = ArgS(args, 1);
+    bool success = config_registry.Set(config_name, ArgS(args, 2));
+    if (success) {
+      return (*cntx)->SendOk();
+    } else {
+      return (*cntx)->SendError(ConfigSetFailed(config_name), kSyntaxErrType);
+    }
   } else if (sub_cmd == "GET" && args.size() == 2) {
     // Send empty response, like Redis does, unless the param is supported
     std::vector<std::string> res;
@@ -1542,8 +1555,11 @@ Metrics ServerFamily::GetMetrics() const {
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  if (ServerState::tlocal() && ServerState::tlocal()->is_master)
+  result.is_master = false;
+  if (ServerState::tlocal() && ServerState::tlocal()->is_master) {
+    result.is_master = true;
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
+  }
 
   return result;
 }
@@ -1584,7 +1600,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     ADD_HEADER("# Server");
 
     append("redis_version", kRedisVersion);
-    append("dfly_version", GetVersion());
+    append("dragonfly_version", GetVersion());
     append("redis_mode", "standalone");
     append("arch_bits", 64);
     append("multiplexing_api", multiplex_api);
@@ -1605,7 +1621,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("CLIENTS")) {
     ADD_HEADER("# Clients");
     append("connected_clients", m.conn_stats.num_conns);
-    append("client_read_buf_capacity", m.conn_stats.read_buf_capacity);
+    append("client_read_buffer_bytes", m.conn_stats.read_buf_capacity);
     append("blocked_clients", m.conn_stats.num_blocked_clients);
   }
 
@@ -1893,7 +1909,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");
   (*cntx)->SendBulkString(kRedisVersion);
-  (*cntx)->SendBulkString("dfly_version");
+  (*cntx)->SendBulkString("dragonfly_version");
   (*cntx)->SendBulkString(GetVersion());
   (*cntx)->SendBulkString("proto");
   (*cntx)->SendLong(proto_version);

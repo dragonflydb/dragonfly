@@ -355,6 +355,14 @@ TEST_F(ZSetFamilyTest, ZUnion) {
 
   resp = Run({"zunion", "1", "z1", "weights", "2", "aggregate", "max", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "2", "b", "6"));
+
+  for (unsigned i = 0; i < 256; ++i) {
+    Run({"zadd", "large1", "1000", absl::StrCat("aaaaaaaaaa", i)});
+    Run({"zadd", "large2", "1000", absl::StrCat("bbbbbbbbbb", i)});
+    Run({"zadd", "large2", "1000", absl::StrCat("aaaaaaaaaa", i)});
+  }
+  resp = Run({"zunion", "2", "large2", "large1"});
+  EXPECT_THAT(resp, ArrLen(512));
 }
 
 TEST_F(ZSetFamilyTest, ZUnionStore) {
@@ -635,6 +643,14 @@ TEST_F(ZSetFamilyTest, ZDiff) {
 
   resp = Run({"zdiff", "2", "z1", "z2", "WITHSCORES"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("two", "2", "three", "3", "four", "4"));
+}
+
+TEST_F(ZSetFamilyTest, GeoAdd) {
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo"}));
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "15.087269", "37.502669", "Catania"}));
+  EXPECT_EQ(0, CheckedInt({"geoadd", "Sicily", "15.087269", "37.502669", "Catania"}));
+  auto resp = Run({"geohash", "Sicily", "Palermo", "Catania"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("sqc8b49rny0", "sqdtr74hyu0")));
 }
 
 }  // namespace dfly

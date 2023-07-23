@@ -25,7 +25,7 @@ RUN build-opt/dragonfly --version
 
 FROM alpine:3
 
-RUN apk --no-cache add libgcc libstdc++ libunwind boost1.80-fiber \
+RUN apk --no-cache add libgcc libstdc++ libunwind boost-context \
     zstd-dev su-exec netcat-openbsd openssl libxml2
 
 RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly

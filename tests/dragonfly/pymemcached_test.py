@@ -8,11 +8,13 @@ def test_add_get(memcached_connection):
     assert memcached_connection.add(b"key", b"data", noreply=False)
     assert memcached_connection.get(b"key") == b"data"
 
+
 @dfly_args({"memcached_port": 11211})
 def test_add_set(memcached_connection):
     assert memcached_connection.add(b"key", b"data", noreply=False)
     memcached_connection.set(b"key", b"other")
     assert memcached_connection.get(b"key") == b"other"
+
 
 @dfly_args({"memcached_port": 11211})
 def test_set_add(memcached_connection):
@@ -22,6 +24,7 @@ def test_set_add(memcached_connection):
     # expects to see NOT_STORED
     memcached_connection.set(b"key", b"other")
     assert memcached_connection.get(b"key") == b"other"
+
 
 @dfly_args({"memcached_port": 11211})
 def test_mixed_reply(memcached_connection):

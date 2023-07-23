@@ -20,9 +20,11 @@ namespace fs = std::filesystem;
 
 namespace {
 
+/*
 string ShardName(std::string_view base, unsigned index) {
   return absl::StrCat(base, "-", absl::Dec(index, absl::kZeroPad4), ".log");
 }
+*/
 
 }  // namespace
 
@@ -42,17 +44,18 @@ JournalSlice::JournalSlice() {
 }
 
 JournalSlice::~JournalSlice() {
-  CHECK(!shard_file_);
+  // CHECK(!shard_file_);
 }
 
 void JournalSlice::Init(unsigned index) {
-  if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
-    return;
+  // if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
+  //   return;
 
   slice_index_ = index;
-  ring_buffer_.emplace(128);  // TODO: to make it configurable
+  // ring_buffer_.emplace(128);  // TODO: to make it configurable
 }
 
+#if 0
 std::error_code JournalSlice::Open(std::string_view dir) {
   CHECK(!shard_file_);
   DCHECK_NE(slice_index_, UINT32_MAX);
@@ -111,15 +114,17 @@ error_code JournalSlice::Close() {
 
   return ec;
 }
+#endif
 
 void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
-  DCHECK(ring_buffer_);
-
+  // DCHECK(ring_buffer_);
   if (entry.opcode != Op::NOOP) {
-    // TODO: This is preparation for AOC style journaling, currently unused.
-    RingItem item;
-    item.lsn = lsn_;
     lsn_++;
+// TODO: This is preparation for AOC style journaling, currently unused.
+#if 0
+    RingItem item;
+    item.lsn = prev_lsn;
+
     item.opcode = entry.opcode;
     item.txid = entry.txid;
     VLOG(1) << "Writing item [" << item.lsn << "]: " << entry.ToString();
@@ -131,6 +136,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
       CHECK_EC(ec);
       file_offset_ += line.size();
     }
+#endif
   }
 
   {

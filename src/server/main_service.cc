@@ -41,18 +41,26 @@ extern "C" {
 #include "server/transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
+#include "strings/human_readable.h"
 #include "util/html/sorted_table.h"
 #include "util/varz.h"
 
 using namespace std;
 using dfly::operator""_KB;
 
+struct MaxMemoryFlag {
+  uint64_t value = 0;
+};
+
+static bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err);
+static std::string AbslUnparseFlag(const MaxMemoryFlag& flag);
+
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
-ABSL_FLAG(uint32_t, multi_exec_mode, 1,
+ABSL_FLAG(uint32_t, multi_exec_mode, 2,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
@@ -63,6 +71,26 @@ ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed com
 ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without auth "
           "token needed.");
+
+ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
+          "Limit on maximum-memory that is used by the database. "
+          "0 - means the program will automatically determine its maximum memory usage. "
+          "default: 0");
+
+bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err) {
+  int64_t val;
+  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
+    flag->value = val;
+    return true;
+  }
+
+  *err = "Use human-readable format, eg.: 500MB, 1G, 1TB";
+  return false;
+}
+
+std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
+  return strings::HumanReadableNumBytes(flag.value);
+}
 
 namespace dfly {
 
@@ -537,6 +565,15 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                    const InitOpts& opts) {
   InitRedisTables();
 
+  config_registry.Register("maxmemory", [](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<MaxMemoryFlag>();
+    if (!res)
+      return false;
+
+    max_memory_limit = res->value;
+    return true;
+  });
+
   pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
@@ -567,6 +604,8 @@ void Service::Shutdown() {
     ServerState::tlocal()->EnterLameDuck();
     facade::Connection::ShutdownThreadLocal();
   });
+
+  config_registry.Reset();
 
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
@@ -1537,38 +1576,20 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgVec arg_vec, tmp_keys;
 
-  // We ignore transaction mode in case it's filled only with EVAL-like commands.
-  // This is done to support OptimalBits/bull js framework
-  // that for some reason uses MULTI to send multiple jobs via EVAL(SHA) commands,
-  // instead of using pipeline mode.
-  // TODO: to check with BullMQ developers if this is a bug or a feature.
-  if (state == ExecEvalState::ALL) {
-    string cmd_name;
-    auto body = move(exec_info.body);
-    exec_info.Clear();
-    Transaction* trans = cntx->transaction;
-    cntx->transaction = nullptr;
-
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(body.size());
-    for (auto& scmd : body) {
-      arg_vec.resize(scmd.NumArgs() + 1);
-      // We need to copy command name to the first argument.
-      cmd_name = scmd.Cid()->name();
-      arg_vec.front() = MutableSlice{cmd_name.data(), cmd_name.size()};
-      auto args = absl::MakeSpan(arg_vec);
-      scmd.Fill(args.subspan(1));
-
-      DispatchCommand(args, cntx);
-    }
-    cntx->transaction = trans;
-    cntx->cid = exec_cid;
-
-    return;
-  }
 
   // Check if script most LIKELY has global eval transactions
-  bool global_script = (state == ExecEvalState::SOME) && script_mgr()->AreGlobalByDefault();
+  bool global_script = script_mgr()->AreGlobalByDefault();
+  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
+
+  if (state != ExecEvalState::NONE) {
+    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
+    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
+    // lock ahead and we run global script in the transaction then multi mode will be global.
+    if (!global_script || (multi_mode == Transaction::NON_ATOMIC)) {
+      return rb->SendError(
+          "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
+    }
+  }
 
   bool scheduled =
       StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, &tmp_keys, global_script);
@@ -1956,6 +1977,14 @@ void Service::RegisterCommands() {
       }
     });
   }
+}
+
+void SetMaxMemoryFlag(uint64_t value) {
+  absl::SetFlag(&FLAGS_maxmemory, {value});
+}
+
+uint64_t GetMaxMemoryFlag() {
+  return absl::GetFlag(FLAGS_maxmemory).value;
 }
 
 }  // namespace dfly

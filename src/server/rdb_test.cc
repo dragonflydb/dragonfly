@@ -220,6 +220,10 @@ TEST_F(RdbTest, Reload) {
   Run({"zadd", "zs1", "1.1", "a", "-1.1", "b"});
   Run({"zadd", "zs2", "1.1", string(510, 'a'), "-1.1", string(502, 'b')});
 
+  Run({"hset", "large_keyname", string(240, 'X'), "-5"});
+  Run({"hset", "large_keyname", string(240, 'Y'), "-500"});
+  Run({"hset", "large_keyname", string(240, 'Z'), "-50000"});
+
   auto resp = Run({"debug", "reload"});
   ASSERT_EQ(resp, "OK");
 
@@ -230,6 +234,10 @@ TEST_F(RdbTest, Reload) {
   EXPECT_EQ(4, CheckedInt({"LLEN", "list_key2"}));
   EXPECT_EQ(2, CheckedInt({"ZCARD", "zs1"}));
   EXPECT_EQ(2, CheckedInt({"ZCARD", "zs2"}));
+
+  EXPECT_EQ(-5, CheckedInt({"hget", "large_keyname", string(240, 'X')}));
+  EXPECT_EQ(-500, CheckedInt({"hget", "large_keyname", string(240, 'Y')}));
+  EXPECT_EQ(-50000, CheckedInt({"hget", "large_keyname", string(240, 'Z')}));
 }
 
 TEST_F(RdbTest, ReloadTtl) {

@@ -13,9 +13,9 @@ BASE_PORT = 30001
 
 async def push_config(config, admin_connections):
     print("Pushing config ", config)
-    await asyncio.gather(*(c_admin.execute_command(
-        "DFLYCLUSTER", "CONFIG", config)
-        for c_admin in admin_connections))
+    await asyncio.gather(
+        *(c_admin.execute_command("DFLYCLUSTER", "CONFIG", config) for c_admin in admin_connections)
+    )
 
 
 async def get_node_id(admin_connection):
@@ -38,15 +38,13 @@ class TestNotEmulated:
 @dfly_args({"cluster_mode": "emulated"})
 class TestEmulated:
     def test_cluster_slots_command(self, cluster_client: redis.RedisCluster):
-        expected = {(0, 16383): {'primary': (
-            '127.0.0.1', 6379), 'replicas': []}}
+        expected = {(0, 16383): {"primary": ("127.0.0.1", 6379), "replicas": []}}
         res = cluster_client.execute_command("CLUSTER SLOTS")
         assert expected == res
 
     def test_cluster_help_command(self, cluster_client: redis.RedisCluster):
         # `target_nodes` is necessary because CLUSTER HELP is not mapped on redis-py
-        res = cluster_client.execute_command(
-            "CLUSTER HELP", target_nodes=redis.RedisCluster.RANDOM)
+        res = cluster_client.execute_command("CLUSTER HELP", target_nodes=redis.RedisCluster.RANDOM)
         assert "HELP" in res
         assert "SLOTS" in res
 
@@ -61,31 +59,31 @@ class TestEmulated:
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 class TestEmulatedWithAnnounceIp:
     def test_cluster_slots_command(self, cluster_client: redis.RedisCluster):
-        expected = {(0, 16383): {'primary': (
-            '127.0.0.2', 6379), 'replicas': []}}
+        expected = {(0, 16383): {"primary": ("127.0.0.2", 6379), "replicas": []}}
         res = cluster_client.execute_command("CLUSTER SLOTS")
         assert expected == res
 
 
-def verify_slots_result(ip: str, port: int, answer: list, rep_ip: str = None, rep_port: int = None) -> bool:
+def verify_slots_result(
+    ip: str, port: int, answer: list, rep_ip: str = None, rep_port: int = None
+) -> bool:
     def is_local_host(ip: str) -> bool:
-        return ip == '127.0.0.1' or ip == 'localhost'
+        return ip == "127.0.0.1" or ip == "localhost"
 
-    assert answer[0] == 0       # start shard
-    assert answer[1] == 16383   # last shard
+    assert answer[0] == 0  # start shard
+    assert answer[1] == 16383  # last shard
     if rep_ip is not None:
         assert len(answer) == 4  # the network info
         rep_info = answer[3]
         assert len(rep_info) == 3
-        ip_addr = str(rep_info[0], 'utf-8')
-        assert ip_addr == rep_ip or (
-            is_local_host(ip_addr) and is_local_host(ip))
+        ip_addr = str(rep_info[0], "utf-8")
+        assert ip_addr == rep_ip or (is_local_host(ip_addr) and is_local_host(ip))
         assert rep_info[1] == rep_port
     else:
         assert len(answer) == 3
     info = answer[2]
     assert len(info) == 3
-    ip_addr = str(info[0], 'utf-8')
+    ip_addr = str(info[0], "utf-8")
     assert ip_addr == ip or (is_local_host(ip_addr) and is_local_host(ip))
     assert info[1] == port
     return True
@@ -94,7 +92,7 @@ def verify_slots_result(ip: str, port: int, answer: list, rep_ip: str = None, re
 @dfly_args({"proactor_threads": 4, "cluster_mode": "emulated"})
 async def test_cluster_slots_in_replicas(df_local_factory):
     master = df_local_factory.create(port=BASE_PORT)
-    replica = df_local_factory.create(port=BASE_PORT+1, logtostdout=True)
+    replica = df_local_factory.create(port=BASE_PORT + 1, logtostdout=True)
 
     df_local_factory.start_all([master, replica])
 
@@ -103,45 +101,46 @@ async def test_cluster_slots_in_replicas(df_local_factory):
 
     res = await c_replica.execute_command("CLUSTER SLOTS")
     assert len(res) == 1
-    assert verify_slots_result(
-        ip="127.0.0.1", port=replica.port, answer=res[0])
+    assert verify_slots_result(ip="127.0.0.1", port=replica.port, answer=res[0])
     res = await c_master.execute_command("CLUSTER SLOTS")
-    assert verify_slots_result(
-        ip="127.0.0.1", port=master.port, answer=res[0])
+    assert verify_slots_result(ip="127.0.0.1", port=master.port, answer=res[0])
 
     # Connect replica to master
     rc = await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    assert str(rc, 'utf-8') == "OK"
+    assert str(rc, "utf-8") == "OK"
     await asyncio.sleep(0.5)
     res = await c_replica.execute_command("CLUSTER SLOTS")
     assert verify_slots_result(
-        ip="127.0.0.1", port=master.port, answer=res[0], rep_ip="127.0.0.1", rep_port=replica.port)
+        ip="127.0.0.1", port=master.port, answer=res[0], rep_ip="127.0.0.1", rep_port=replica.port
+    )
     res = await c_master.execute_command("CLUSTER SLOTS")
     assert verify_slots_result(
-        ip="127.0.0.1", port=master.port, answer=res[0], rep_ip="127.0.0.1", rep_port=replica.port)
+        ip="127.0.0.1", port=master.port, answer=res[0], rep_ip="127.0.0.1", rep_port=replica.port
+    )
 
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 async def test_cluster_info(async_client):
     res = await async_client.execute_command("CLUSTER INFO")
     assert len(res) == 16
-    assert res == {'cluster_current_epoch': '1',
-                   'cluster_known_nodes': '1',
-                   'cluster_my_epoch': '1',
-                   'cluster_size': '1',
-                   'cluster_slots_assigned': '16384',
-                   'cluster_slots_fail': '0',
-                   'cluster_slots_ok': '16384',
-                   'cluster_slots_pfail': '0',
-                   'cluster_state': 'ok',
-                   'cluster_stats_messages_meet_received': '0',
-                   'cluster_stats_messages_ping_received': '1',
-                   'cluster_stats_messages_ping_sent': '1',
-                   'cluster_stats_messages_pong_received': '1',
-                   'cluster_stats_messages_pong_sent': '1',
-                   'cluster_stats_messages_received': '1',
-                   'cluster_stats_messages_sent': '1'
-                   }
+    assert res == {
+        "cluster_current_epoch": "1",
+        "cluster_known_nodes": "1",
+        "cluster_my_epoch": "1",
+        "cluster_size": "1",
+        "cluster_slots_assigned": "16384",
+        "cluster_slots_fail": "0",
+        "cluster_slots_ok": "16384",
+        "cluster_slots_pfail": "0",
+        "cluster_state": "ok",
+        "cluster_stats_messages_meet_received": "0",
+        "cluster_stats_messages_ping_received": "1",
+        "cluster_stats_messages_ping_sent": "1",
+        "cluster_stats_messages_pong_received": "1",
+        "cluster_stats_messages_pong_sent": "1",
+        "cluster_stats_messages_received": "1",
+        "cluster_stats_messages_sent": "1",
+    }
 
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
@@ -149,14 +148,14 @@ async def test_cluster_info(async_client):
 async def test_cluster_nodes(async_client):
     res = await async_client.execute_command("CLUSTER NODES")
     assert len(res) == 1
-    info = res['127.0.0.2:6379']
+    info = res["127.0.0.2:6379"]
     assert res is not None
-    assert info['connected'] == True
-    assert info['epoch'] == '0'
-    assert info['flags'] == 'myself,master'
-    assert info['last_ping_sent'] == '0'
-    assert info['slots'] == [['0', '16383']]
-    assert info['master_id'] == "-"
+    assert info["connected"] == True
+    assert info["epoch"] == "0"
+    assert info["flags"] == "myself,master"
+    assert info["last_ping_sent"] == "0"
+    assert info["slots"] == [["0", "16383"]]
+    assert info["master_id"] == "-"
 
 
 """
@@ -166,11 +165,13 @@ Add a key to node0, then move the slot ownership to node1 and see that they both
 intended.
 Also add keys to each of them that are *not* moved, and see that they are unaffected by the move.
 """
+
+
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_slot_ownership_changes(df_local_factory):
     # Start and configure cluster with 2 nodes
     nodes = [
-        df_local_factory.create(port=BASE_PORT+i, admin_port=BASE_PORT+i+1000)
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
         for i in range(2)
     ]
 
@@ -214,7 +215,10 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
       ]
     """
 
-    await push_config(config.replace('LAST_SLOT_CUTOFF', '5259').replace('NEXT_SLOT_CUTOFF', '5260'), c_nodes_admin)
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes_admin,
+    )
 
     # Slot for "KEY1" is 5259
 
@@ -243,7 +247,10 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
 
     print("Moving ownership over 5259 ('KEY1') to other node")
 
-    await push_config(config.replace('LAST_SLOT_CUTOFF', '5258').replace('NEXT_SLOT_CUTOFF', '5259'), c_nodes_admin)
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5258").replace("NEXT_SLOT_CUTOFF", "5259"),
+        c_nodes_admin,
+    )
 
     # node0 should have removed "KEY1" as it no longer owns it
     assert await c_nodes[0].execute_command("DBSIZE") == 1
@@ -292,8 +299,8 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
-    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT+1000)
-    replica = df_local_factory.create(port=BASE_PORT+1, admin_port=BASE_PORT+1001)
+    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
+    replica = df_local_factory.create(port=BASE_PORT + 1, admin_port=BASE_PORT + 1001)
     df_local_factory.start_all([master, replica])
 
     c_master = aioredis.Redis(port=master.port)
@@ -404,8 +411,8 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_flush_slots_after_config_change(df_local_factory):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
-    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT+1000)
-    replica = df_local_factory.create(port=BASE_PORT+1, admin_port=BASE_PORT+1001)
+    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
+    replica = df_local_factory.create(port=BASE_PORT + 1, admin_port=BASE_PORT + 1001)
     df_local_factory.start_all([master, replica])
 
     c_master = aioredis.Redis(port=master.port)
@@ -453,7 +460,7 @@ async def test_cluster_flush_slots_after_config_change(df_local_factory):
     resp = await c_master_admin.execute_command("dflycluster", "getslotinfo", "slots", "0")
     assert resp[0][0] == 0
     slot_0_size = resp[0][2]
-    print(f'Slot 0 size = {slot_0_size}')
+    print(f"Slot 0 size = {slot_0_size}")
     assert slot_0_size > 0
 
     config = f"""
@@ -512,7 +519,7 @@ async def test_cluster_flush_slots_after_config_change(df_local_factory):
 async def test_cluster_native_client(df_local_factory):
     # Start and configure cluster with 3 masters and 3 replicas
     masters = [
-        df_local_factory.create(port=BASE_PORT+i, admin_port=BASE_PORT+i+1000)
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
         for i in range(3)
     ]
     df_local_factory.start_all(masters)
@@ -521,7 +528,7 @@ async def test_cluster_native_client(df_local_factory):
     master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters_admin))
 
     replicas = [
-        df_local_factory.create(port=BASE_PORT+100+i, admin_port=BASE_PORT+i+1100)
+        df_local_factory.create(port=BASE_PORT + 100 + i, admin_port=BASE_PORT + i + 1100)
         for i in range(3)
     ]
     df_local_factory.start_all(replicas)
@@ -597,22 +604,23 @@ async def test_cluster_native_client(df_local_factory):
 
     client = aioredis.RedisCluster(decode_responses=True, host="localhost", port=masters[0].port)
 
-    assert await client.set('key0', 'value') == True
-    assert await client.get('key0') == 'value'
+    assert await client.set("key0", "value") == True
+    assert await client.get("key0") == "value"
 
     async def test_random_keys():
         for i in range(100):
-            key = 'key' + str(random.randint(0, 100_000))
-            assert await client.set(key, 'value') == True
-            assert await client.get(key) == 'value'
+            key = "key" + str(random.randint(0, 100_000))
+            assert await client.set(key, "value") == True
+            assert await client.get(key) == "value"
 
     await test_random_keys()
     await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
 
     # Make sure that getting a value from a replica works as well.
     replica_response = await client.execute_command(
-            'get', 'key0', target_nodes=aioredis.RedisCluster.REPLICAS)
-    assert 'value' in replica_response.values()
+        "get", "key0", target_nodes=aioredis.RedisCluster.REPLICAS
+    )
+    assert "value" in replica_response.values()
 
     # Push new config
     config = f"""

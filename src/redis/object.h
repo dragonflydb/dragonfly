@@ -96,8 +96,6 @@ robj *createQuicklistObject(void);
 robj *createSetObject(void);
 robj *createIntsetObject(void);
 robj *createHashObject(void);
-robj *createZsetObject(void);
-robj *createZsetListpackObject(void);
 unsigned long long estimateObjectIdleTime(const robj *o);
 uint8_t LFUDecrAndReturn(time_t epoch_sec, const robj *o);
 void listTypeConvert(robj *subject, int enc);

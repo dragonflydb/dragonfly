@@ -15,10 +15,11 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blo
 cxx_link(dfly_transaction dfly_core strings_lib)
 
 add_library(dragonfly_lib channel_store.cc command_registry.cc
-            config_flags.cc conn_context.cc debugcmd.cc dflycmd.cc
+            config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc json_family.cc
             search/search_family.cc search/doc_index.cc search/doc_accessors.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
+            protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
@@ -29,6 +30,11 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4)
+
+if (DF_USE_SSL)
+  set(TLS_LIB tls_lib)
+  target_compile_definitions(dragonfly_lib PRIVATE DFLY_USE_SSL)
+endif()
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)

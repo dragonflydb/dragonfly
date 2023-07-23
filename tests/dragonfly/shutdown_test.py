@@ -9,13 +9,16 @@ from . import dfly_args
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
 
-@pytest.mark.skip(reason='Currently we can not guarantee that on shutdown if command is executed and value is written we response before breaking the connection')
+@pytest.mark.skip(
+    reason="Currently we can not guarantee that on shutdown if command is executed and value is written we response before breaking the connection"
+)
 @dfly_args({"proactor_threads": "4"})
-class TestDflyAutoLoadSnapshot():
+class TestDflyAutoLoadSnapshot:
     """
     Test automatic loading of dump files on startup with timestamp.
     When command is executed if a value is written we should send the response before shutdown
     """
+
     @pytest.mark.asyncio
     async def test_gracefull_shutdown(self, df_local_factory):
         df_args = {"dbfilename": "dump", **BASIC_ARGS, "port": 1111}
@@ -39,7 +42,9 @@ class TestDflyAutoLoadSnapshot():
             await client.execute_command("SHUTDOWN")
             await client.connection_pool.disconnect()
 
-        _, *results = await asyncio.gather(delayed_takeover(), *[counter(f"key{i}") for i in range(16)])
+        _, *results = await asyncio.gather(
+            delayed_takeover(), *[counter(f"key{i}") for i in range(16)]
+        )
 
         df_server.start()
         client = aioredis.Redis(port=df_server.port)
