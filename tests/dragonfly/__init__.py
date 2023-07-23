@@ -153,9 +153,14 @@ class DflyInstance:
             )
         except subprocess.CalledProcessError:
             raise RuntimeError("lsof problem")
+        ports = set()
         for line in lsof_output.split(b"\n"):
             if line.startswith(b"n*:"):
-                return int(line[3:])
+                ports.add(int(line[3:]))
+        ports.difference_update({self.admin_port, self.mc_port})
+        assert len(ports) < 2, "Open ports detection found too many ports"
+        if ports:
+            return ports.pop()
         raise RuntimeError("Couldn't parse port")
 
     @staticmethod

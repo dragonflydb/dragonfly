@@ -50,7 +50,7 @@ async def test_replication_all(
 
     # Start master
     master.start()
-    c_master = aioredis.Redis(port=master.port)
+    c_master = master.client()
 
     # Fill master with test data
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
@@ -59,7 +59,7 @@ async def test_replication_all(
     # Start replicas
     df_local_factory.start_all(replicas)
 
-    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+    c_replicas = [replica.client() for replica in replicas]
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run(target_ops=3000))
@@ -89,9 +89,13 @@ async def test_replication_all(
     # Check data after stable state stream
     await check_all_replicas_finished(c_replicas, c_master)
     await check_data(seeder, replicas, c_replicas)
+    await disconnect_clients(c_master, *c_replicas)
 
 
 async def check_replica_finished_exec(c_replica, c_master):
+    role = await c_replica.execute_command("role")
+    if role[0] != b"replica" or role[3] != b"stable_sync":
+        return False
     syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
     m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
 
@@ -1315,7 +1319,7 @@ async def test_tls_replication(
     master = df_local_factory.create(
         tls_replication="true",
         **with_ca_tls_server_args,
-        port=BASE_PORT,
+        port=1111,
         admin_port=ADMIN_PORT,
         proactor_threads=t_master,
     )
@@ -1329,7 +1333,6 @@ async def test_tls_replication(
     replica = df_local_factory.create(
         tls_replication="true",
         **with_ca_tls_server_args,
-        port=BASE_PORT + 1,
         proactor_threads=t_replica,
     )
     replica.start()
