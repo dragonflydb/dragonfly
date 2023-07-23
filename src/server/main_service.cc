@@ -1576,7 +1576,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgVec arg_vec, tmp_keys;
 
-
   // Check if script most LIKELY has global eval transactions
   bool global_script = script_mgr()->AreGlobalByDefault();
   int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
