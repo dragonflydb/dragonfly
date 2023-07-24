@@ -423,6 +423,10 @@ void SlowLog(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
+// Check that if TLS is used at least one form of client authentication is
+// enabled. That means either using a password or giving a root
+// certificate for authenticating client certificates which will
+// be required.
 void ValidateServerTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls)) {
     return;

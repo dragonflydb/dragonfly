@@ -24,6 +24,10 @@ class DflyParams:
     env: any
 
 
+class DflyStartException(Exception):
+    pass
+
+
 class DflyInstance:
     """
     Represents a runnable and stoppable Dragonfly instance
@@ -81,7 +85,7 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
-                raise Exception(f"Failed to start instance, return code {return_code}")
+                raise DflyStartException(f"Failed to start instance, return code {return_code}")
 
     def __getitem__(self, k):
         return self.args.get(k)
