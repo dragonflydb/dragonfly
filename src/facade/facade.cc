@@ -16,12 +16,18 @@ namespace facade {
 using namespace std;
 
 #define ADD(x) (x) += o.x
+#define ADD_M(m)                  \
+  do {                            \
+    for (const auto& k_v : o.m) { \
+      m[k_v.first] += k_v.second; \
+    }                             \
+  } while (0)
 
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 176);
+  static_assert(kSizeConnStats == 136u);
 
   ADD(read_buf_capacity);
   ADD(pipeline_cache_capacity);
@@ -37,13 +43,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(num_replicas);
   ADD(num_blocked_clients);
 
-  for (const auto& k_v : o.err_count_map) {
-    err_count_map[k_v.first] += k_v.second;
-  }
-
-  for (const auto& k_v : o.cmd_count_map) {
-    cmd_count_map[k_v.first] += k_v.second;
-  }
+  ADD_M(err_count_map);
 
   return *this;
 }
