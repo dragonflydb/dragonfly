@@ -60,7 +60,7 @@ ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
-ABSL_FLAG(uint32_t, multi_exec_mode, 1,
+ABSL_FLAG(uint32_t, multi_exec_mode, 2,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
@@ -854,7 +854,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (!VerifyCommand(cid, args, dfly_cntx))
     return;
 
-  etl.connection_stats.cmd_count_map[cid->name()]++;
   auto args_no_cmd = args.subspan(1);
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
@@ -874,7 +873,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     DispatchMonitor(dfly_cntx, args);
   }
 
-  uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
+  uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
@@ -921,8 +920,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
-  end_usec = ProactorBase::GetMonotonicTimeNs();
-  request_latency_usec.IncBy(cid->name(), (end_usec - start_usec) / 1000);
+  end_ns = ProactorBase::GetMonotonicTimeNs();
+  request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
@@ -1573,40 +1572,23 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
+  const CommandId* const exec_cid = cntx->cid;
 
   CmdArgVec arg_vec, tmp_keys;
 
-  // We ignore transaction mode in case it's filled only with EVAL-like commands.
-  // This is done to support OptimalBits/bull js framework
-  // that for some reason uses MULTI to send multiple jobs via EVAL(SHA) commands,
-  // instead of using pipeline mode.
-  // TODO: to check with BullMQ developers if this is a bug or a feature.
-  if (state == ExecEvalState::ALL) {
-    string cmd_name;
-    auto body = move(exec_info.body);
-    exec_info.Clear();
-    Transaction* trans = cntx->transaction;
-    cntx->transaction = nullptr;
-
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(body.size());
-    for (auto& scmd : body) {
-      arg_vec.resize(scmd.NumArgs() + 1);
-      // We need to copy command name to the first argument.
-      cmd_name = scmd.Cid()->name();
-      arg_vec.front() = MutableSlice{cmd_name.data(), cmd_name.size()};
-      auto args = absl::MakeSpan(arg_vec);
-      scmd.Fill(args.subspan(1));
-
-      DispatchCommand(args, cntx);
-    }
-    cntx->transaction = trans;
-
-    return;
-  }
-
   // Check if script most LIKELY has global eval transactions
-  bool global_script = (state == ExecEvalState::SOME) && script_mgr()->AreGlobalByDefault();
+  bool global_script = script_mgr()->AreGlobalByDefault();
+  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
+
+  if (state != ExecEvalState::NONE) {
+    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
+    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
+    // lock ahead and we run global script in the transaction then multi mode will be global.
+    if (!global_script || (multi_mode == Transaction::NON_ATOMIC)) {
+      return rb->SendError(
+          "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
+    }
+  }
 
   bool scheduled =
       StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, &tmp_keys, global_script);
@@ -1657,6 +1639,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
+
+  cntx->cid = exec_cid;
 
   VLOG(1) << "Exec completed";
 }
