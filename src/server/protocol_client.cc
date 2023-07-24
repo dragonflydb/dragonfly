@@ -59,6 +59,7 @@ static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
   // Load client certificate if given.
   if (!tls_key_file.empty()) {
     CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+    // We checked that the flag is non empty in ValidateClientTlsFlags.
     const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
 
     CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
