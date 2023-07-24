@@ -170,12 +170,17 @@ bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
                                        const std::string_view current) const {
   const std::vector<absl::string_view> remote_xyz = absl::StrSplit(remote, ".");
   const std::vector<absl::string_view> current_xyz = absl::StrSplit(current, ".");
-  CHECK_EQ(remote_xyz.size(), current_xyz.size());
+  if (remote_xyz.size() != current_xyz.size()) {
+    LOG(WARNING) << "Remote and current version fields must be of equal size";
+    return false;
+  }
   for (size_t i = 0; i < remote_xyz.size(); ++i) {
     size_t remote_x = 0;
     size_t current_x = 0;
-    CHECK_EQ(absl::SimpleAtoi(remote, &remote_x), true);
-    CHECK_EQ(absl::SimpleAtoi(current, &current_x), true);
+    if (!absl::SimpleAtoi(remote, &remote_x) || !absl::SimpleAtoi(current, &current_x)) {
+      LOG(WARNING) << "Conversion error on version string_view";
+      return false;
+    }
     if (remote_x > current_x) {
       return true;
     }
