@@ -3,6 +3,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include "absl/strings/numbers.h"
 #ifdef NDEBUG
 #include <mimalloc-new-delete.h>
 #endif
@@ -161,8 +162,27 @@ struct VersionMonitor {
   }
 
  private:
+  bool IsVersionOutdated(std::string_view remote, std::string_view current) const;
   void RunTask(SSL_CTX* ssl_ctx);
 };
+
+bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
+                                       const std::string_view current) const {
+  const std::vector<absl::string_view> remote_xyz = absl::StrSplit(remote, ".");
+  const std::vector<absl::string_view> current_xyz = absl::StrSplit(current, ".");
+  CHECK_EQ(remote_xyz.size(), current_xyz.size());
+  for (size_t i = 0; i < remote_xyz.size(); ++i) {
+    size_t remote_x = 0;
+    size_t current_x = 0;
+    CHECK_EQ(absl::SimpleAtoi(remote, &remote_x), true);
+    CHECK_EQ(absl::SimpleAtoi(current, &current_x), true);
+    if (remote_x > current_x) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
   // Avoid running dev environments.
@@ -205,8 +225,8 @@ void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
     const std::optional<std::string> remote_version =
         GetRemoteVersion(my_pb, ssl_ctx, host_name, port, resource, version_header);
     if (remote_version) {
-      const std::string rv = remote_version.value();
-      if (rv > current_version) {
+      const std::string_view rv = remote_version.value();
+      if (IsVersionOutdated(rv, current_version)) {
         LOG_FIRST_N(INFO, 1) << "Your current version '" << current_version
                              << "' is not the latest version. A newer version '" << rv
                              << "' is now available. Please consider an update.";
