@@ -874,6 +874,28 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                       &db_key_expire_metrics);
   }
 
+  // Command stats
+  {
+    vector<pair<const char*, pair<uint64_t, uint64_t>>> commands(m.cmd_stats_map.cbegin(),
+                                                                 m.cmd_stats_map.cend());
+
+    sort(commands.begin(), commands.end(),
+         [](const auto& s1, const auto& s2) { return std::strcmp(s1.first, s2.first) < 0; });
+
+    string command_metrics;
+
+    AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
+                       &command_metrics);
+    for (const auto& [name, stat] : commands) {
+      const auto calls = stat.first, sum = stat.second;
+      AppendMetricValue(StrCat("cmd_", name, "_calls"), calls, {}, {}, &command_metrics);
+      AppendMetricValue(StrCat("cmd_", name, "_sum_usec"), sum, {}, {}, &command_metrics);
+      AppendMetricValue(StrCat("cmd_", name, "_avg_usec"), static_cast<double>(sum) / calls, {}, {},
+                        &command_metrics);
+    }
+    absl::StrAppend(&resp->body(), command_metrics);
+  }
+
   if (!m.replication_metrics.empty()) {
     string replication_lag_metrics;
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
@@ -1421,11 +1443,13 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
-      auto* stats = ServerState::tl_connection_stats();
-      stats->cmd_count_map.clear();
-      stats->err_count_map.clear();
-      stats->command_cnt = 0;
-      stats->async_writes_cnt = 0;
+      auto& sstate = *ServerState::tlocal();
+      sstate.cmd_stats_map.clear();
+
+      auto& stats = sstate.connection_stats;
+      stats.err_count_map.clear();
+      stats.command_cnt = 0;
+      stats.async_writes_cnt = 0;
     });
     return (*cntx)->SendOk();
   } else {
@@ -1507,6 +1531,11 @@ Metrics ServerFamily::GetMetrics() const {
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
+    for (const auto& [k, v] : ss->cmd_stats_map) {
+      auto& ent = result.cmd_stats_map[k];
+      ent.first += v.first;
+      ent.second += v.second;
+    }
 
     if (shard) {
       MergeInto(shard->db_slice().GetStats(), &result);
@@ -1742,14 +1771,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     auto unknown_cmd = service_.UknownCmdMap();
 
-    auto append_sorted = [&append](string_view prefix, const auto& map) {
-      vector<pair<string_view, uint64_t>> display;
-      display.reserve(map.size());
-
-      for (const auto& k_v : map) {
-        display.push_back(k_v);
-      };
-
+    auto append_sorted = [&append](string_view prefix, auto display) {
       sort(display.begin(), display.end());
 
       for (const auto& k_v : display) {
@@ -1757,8 +1779,19 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       }
     };
 
-    append_sorted("unknown_", unknown_cmd);
-    append_sorted("cmd_", m.conn_stats.cmd_count_map);
+    vector<pair<string_view, string>> commands;
+
+    for (const auto& [name, stats] : m.cmd_stats_map) {
+      const auto calls = stats.first, sum = stats.second;
+      commands.push_back(
+          {name, absl::StrJoin({absl::StrCat("calls=", calls), absl::StrCat("usec=", sum),
+                                absl::StrCat("usec_per_call=", static_cast<double>(sum) / calls)},
+                               ",")});
+    }
+
+    append_sorted("cmdstat_", move(commands));
+    append_sorted("unknown_",
+                  vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
   }
 
   if (should_enter("ERRORSTATS", true)) {

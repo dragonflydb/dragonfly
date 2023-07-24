@@ -854,7 +854,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (!VerifyCommand(cid, args, dfly_cntx))
     return;
 
-  etl.connection_stats.cmd_count_map[cid->name()]++;
   auto args_no_cmd = args.subspan(1);
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
@@ -874,7 +873,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     DispatchMonitor(dfly_cntx, args);
   }
 
-  uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
+  uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
@@ -921,8 +920,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
-  end_usec = ProactorBase::GetMonotonicTimeNs();
-  request_latency_usec.IncBy(cid->name(), (end_usec - start_usec) / 1000);
+  end_ns = ProactorBase::GetMonotonicTimeNs();
+  request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
@@ -1573,6 +1572,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
+  const CommandId* const exec_cid = cntx->cid;
 
   CmdArgVec arg_vec, tmp_keys;
 
@@ -1639,6 +1639,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
+
+  cntx->cid = exec_cid;
 
   VLOG(1) << "Exec completed";
 }
