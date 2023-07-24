@@ -72,6 +72,8 @@ static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
   const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
   if (file || dir) {
     CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+  } else {
+    CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
   }
 
   CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
