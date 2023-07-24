@@ -161,15 +161,15 @@ struct VersionMonitor {
   }
 
  private:
-  struct ssl_deleter {
+  struct SslDeleter {
     void operator()(SSL_CTX* ssl) {
       if (ssl) {
-        free(ssl);
+        TlsClient::FreeContext(ssl);
       }
     }
   };
-  using ssl_ptr = std::unique_ptr<SSL_CTX, ssl_deleter>;
-  void RunTask(ssl_ptr);
+  using SslPtr = std::unique_ptr<SSL_CTX, SslDeleter>;
+  void RunTask(SslPtr);
 };
 
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
@@ -177,13 +177,14 @@ void VersionMonitor::Run(ProactorPool* proactor_pool) {
   if (getenv("DFLY_DEV_ENV")) {
     LOG(WARNING) << "Running in dev environment (DFLY_DEV_ENV is set) - version monitoring is "
                     "disabled";
+    return;
   }
   // not a production release tag.
   if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v' || strchr(kGitTag, '-')) {
     return;
   }
 
-  ssl_ptr ssl_ctx(TlsClient::CreateSslContext());
+  SslPtr ssl_ctx(TlsClient::CreateSslContext());
   if (!ssl_ctx) {
     VLOG(1) << "Remote version - failed to create SSL context - cannot run version monitoring";
     return;
@@ -193,7 +194,7 @@ void VersionMonitor::Run(ProactorPool* proactor_pool) {
       [ssl_ctx = std::move(ssl_ctx), this]() mutable { RunTask(std::move(ssl_ctx)); });
 }
 
-void VersionMonitor::RunTask(ssl_ptr ssl_ctx) {
+void VersionMonitor::RunTask(SslPtr ssl_ctx) {
   const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
 
   const std::string host_name = "version.dragonflydb.io";
