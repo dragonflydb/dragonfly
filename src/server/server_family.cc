@@ -53,6 +53,18 @@ extern "C" {
 
 using namespace std;
 
+struct ReplicaOfFlag {
+  string host;
+  string port;
+
+  operator bool() const {
+    return !host.empty() && !port.empty();
+  }
+};
+
+static bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err);
+static std::string AbslUnparseFlag(const ReplicaOfFlag& flag);
+
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump-{timestamp}", "the filename to save/load the DB");
 ABSL_FLAG(string, requirepass, "",
@@ -65,10 +77,69 @@ ABSL_FLAG(bool, df_snapshot_format, true,
 ABSL_FLAG(int, epoll_file_threads, 0,
           "thread size for file workers when running in epoll mode, default is hardware concurrent "
           "threads");
+ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
+          "Specifies a host and port which point to a target master "
+          "to replicate. "
+          "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
+ABSL_FLAG(bool, continue_on_replication_fail, false,
+          "When true, Dragonfly will continue operation "
+          "even if replication via '--replicaof' fails.");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
+
+bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
+#define BadFmt(m) \
+  do {            \
+    *err = m;     \
+    return false; \
+  } while (0)
+  if (in.empty()) {
+    flag->host = "";
+    flag->port = "";
+    return true;
+  }
+
+  auto pos = in.find_last_of(':');
+  if (pos == string::npos)
+    BadFmt("missing ':'.");
+
+  string_view ip = in.substr(0, pos);
+  flag->port = in.substr(pos + 1);
+
+  if (ip.empty() || flag->port.empty())
+    BadFmt("IP/host or port are empty.");
+
+  // For IPv6: ip1.front == '[' AND ip1.back == ']'
+  // For IPv4: ip1.front != '[' AND ip1.back != ']'
+  // Together, this ip1.front == '[' iff ip1.back == ']', which can be implemented as XNOR (NOT XOR)
+  if ((ip.front() == '[') ^ (ip.back() == ']'))
+    BadFmt("unclosed brackets.");
+
+  if (ip.front() == '[') {
+    if (ip.length() <= 2)
+      BadFmt("IPv6 host name is too short.");
+
+    flag->host = ip.substr(1, ip.length() - 2);
+    VLOG(1) << "received IP of type IPv6: " << flag->host;
+  } else {
+    flag->host = ip;
+    VLOG(1) << "received IP of type IPv4 (or a host): " << flag->host;
+  }
+
+  LOG(INFO) << flag->host << " :  " << flag->port;
+
+  return true;
+#undef BadFmt
+}
+
+std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
+  if (flag)
+    return absl::StrCat(flag.host, ":", flag.port);
+  else
+    return "";
+}
 
 namespace dfly {
 
@@ -526,6 +597,17 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   uint32_t period_ms = max(1u, 1000 / cache_hz);
   stats_caching_task_ =
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
+
+  // check for '--replicaof' before loading anything
+  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag) {
+    bool success = false;
+    service_.proactor_pool()[0].Await([this, flag = move(flag), &success]() {
+      this->Replicate(move(flag.host), move(flag.port), &success);
+    });
+
+    if (!success && !GetFlag(FLAGS_continue_on_replication_fail))
+      exit(EXIT_FAILURE);
+  }
 
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
@@ -1889,8 +1971,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-void ServerFamily::ReplicaOfGeneric(CmdArgList args, ConnectionContext* cntx,
-                                    bool flush_transactions) {
+void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db) {
   std::string_view host = ArgS(args, 0);
   std::string_view port_s = ArgS(args, 1);
   auto& pool = service_.proactor_pool();
@@ -1948,7 +2029,7 @@ void ServerFamily::ReplicaOfGeneric(CmdArgList args, ConnectionContext* cntx,
     return;
   }
 
-  if (flush_transactions) {
+  if (flush_db) {
     // Flushing all the data after we marked this instance as replica.
     Transaction* transaction = cntx->transaction;
     transaction->Schedule();
@@ -1981,31 +2062,34 @@ void ServerFamily::ReplicaOfGeneric(CmdArgList args, ConnectionContext* cntx,
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  ReplicaOfGeneric(args, cntx, true);
+  ReplicaOfInternal(args, cntx, true);
 }
 
-void ServerFamily::Replicate(string ip_s, string port_s, bool* success) {
+void ServerFamily::Replicate(string host_s, string port_s, bool* success) {
   io::StringSink sink;
   ConnectionContext ctxt{&sink, nullptr};
 
   vector<MutableSlice> vargs{
-      {ip_s.data(), ip_s.size()},
+      {host_s.data(), host_s.size()},
       {port_s.data(), port_s.size()},
   };
 
   CmdArgList args{vargs.data(), vargs.size()};
 
-  // we don't flush transacitons as the context is null
-  // (and also because there are none to flush)
-  ReplicaOfGeneric(args, &ctxt, false);
+  // we don't flush the database as the context is null
+  // (and also because there is nothing to flush)
+  ReplicaOfInternal(args, &ctxt, false);
 
   // Check whether replication succeeded
+  using namespace facade::constants;
   const string& st = sink.str();
-  if (absl::StartsWith(st, facade::constants::kSimplePref)) {
+  string_view sv{st};
+  if (absl::StartsWith(sv, kSimplePref)) {
     LOG(INFO) << "Replication success!";
     *success = true;
   } else {
     LOG(ERROR) << "Replication failure!";
+    LOG(ERROR) << "Error: " << sv.substr(kErrPref.length(), sv.size() - kErrPref.length());
     *success = false;
   }
 }
