@@ -31,7 +31,7 @@ On openSUSE:
 ```bash
 sudo zypper install automake boost-devel gcc-c++ git cmake libtool ninja libzstd-devel  \
      openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel \
-     libboost_context-devel libboost_system-devel libboost_fiber-devel
+     libboost_context-devel libboost_system-devel
 ```
 
 ## Step 2 - clone the project
