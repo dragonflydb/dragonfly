@@ -18,7 +18,7 @@ jobs:
       matrix:
         # Build with these flags
         flags: ["-DMARCH_OPT=-march=x86-64"]
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     container:
       image: ghcr.io/romange/alpine-dev:latest
@@ -30,6 +30,12 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: true
+      - name: Install NodeJs
+        run: |
+          apk add --no-cache nodejs npm yarn
+          node --version
+          npm --version
+          yarn --version
       - name: Install dependencies
         run: |
           uname -a
@@ -50,11 +56,23 @@ jobs:
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
-          cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=Debug -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ${{ matrix.flags }}
+          cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=Release -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ${{ matrix.flags }}
           cd ${{github.workspace}}/build && pwd
           du -hcs _deps/
-      - name: Build
+      - name: Build & Run
         run: |
           cd ${{github.workspace}}/build
           ninja src/all
           ccache --show-stats
+          ./dragonfly --alsologtostderr --default_lua_flags=allow-undeclared-keys &
+      - name: Clone and build BullMQ
+        run: |
+          cd ${{github.workspace}}
+          git clone https://github.com/taskforcesh/bullmq.git
+          cd bullmq
+          yarn install --ignore-engines --frozen-lockfile --non-interactive
+          yarn build
+      - name: Test BullMQ with dragonfly
+        run: |
+          cd ${{github.workspace}}/bullmq
+          yarn test -i -g "should process delayed jobs with several workers respecting delay"
