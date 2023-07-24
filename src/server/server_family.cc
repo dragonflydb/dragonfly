@@ -2001,7 +2001,7 @@ void ServerFamily::Replicate(string ip_s, string port_s, bool* success) {
 
   // Check whether replication succeeded
   const string& st = sink.str();
-  if (st.starts_with(facade::constants::kSimplePref)) {
+  if (absl::StartsWith(st, facade::constants::kSimplePref)) {
     LOG(INFO) << "Replication success!";
     *success = true;
   } else {
