@@ -890,8 +890,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
       const auto calls = stat.first;
       const auto duration_seconds = stat.second * 0.001;
       AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
-      AppendMetricValue("commands_duration_seconds_total", duration_seconds, {"cmd"},
-                        {name}, &command_metrics);
+      AppendMetricValue("commands_duration_seconds_total", duration_seconds, {"cmd"}, {name},
+                        &command_metrics);
     }
     absl::StrAppend(&resp->body(), command_metrics);
   }
