@@ -887,11 +887,11 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
                        &command_metrics);
     for (const auto& [name, stat] : commands) {
-      const auto calls = stat.first, sum = stat.second;
-      AppendMetricValue(StrCat("cmd_", name, "_calls"), calls, {}, {}, &command_metrics);
-      AppendMetricValue(StrCat("cmd_", name, "_sum_usec"), sum, {}, {}, &command_metrics);
-      AppendMetricValue(StrCat("cmd_", name, "_avg_usec"), static_cast<double>(sum) / calls, {}, {},
-                        &command_metrics);
+      const auto calls = stat.first;
+      const auto duration_seconds = stat.second * 0.001;
+      AppendMetricValue(StrCat("commands_total"), calls, {"cmd"}, {name}, &command_metrics);
+      AppendMetricValue(StrCat("commands_duration_seconds_total"), duration_seconds, {"cmd"},
+                        {name}, &command_metrics);
     }
     absl::StrAppend(&resp->body(), command_metrics);
   }
