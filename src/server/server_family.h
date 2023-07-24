@@ -162,8 +162,10 @@ class ServerFamily {
   bool AwaitDispatches(absl::Duration timeout,
                        const std::function<bool(util::Connection*)>& filter);
 
-  // Sets the server to replicate another instance. Used with --replicaof flag.
-  void Replicate(std::string ip, std::string port, bool* success);
+  // Sets the server to replicate another instance. Does not flush the database beforehand!
+  // Sets 'success' to true/false depending on whether the replication connected successfully or
+  // not.
+  void Replicate(std::string host, std::string port, bool* success);
 
  private:
   uint32_t shard_count() const {
@@ -193,9 +195,9 @@ class ServerFamily {
   void Sync(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
-  void ReplicaOfGeneric(CmdArgList args, ConnectionContext* cntx, bool flush_transactions);
+  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db);
 
-  // Returns the number of loaded keys if successfull.
+  // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
 
   void SnapshotScheduling(const SnapshotSpec& time);

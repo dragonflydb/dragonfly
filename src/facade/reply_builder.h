@@ -14,9 +14,9 @@
 namespace facade {
 // some constants, used in reply_builder.cc; can be used elsewhere.
 namespace constants {
-constexpr char kCRLF[] = "\r\n";
-constexpr char kErrPref[] = "-ERR ";
-constexpr char kSimplePref[] = "+";
+constexpr std::string_view kCRLF = "\r\n";
+constexpr std::string_view kErrPref = "-ERR ";
+constexpr std::string_view kSimplePref = "+";
 };  // namespace constants
 
 // Reply mode allows filtering replies.
