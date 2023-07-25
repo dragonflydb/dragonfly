@@ -164,8 +164,8 @@ class ServerFamily {
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   // Sets 'success' to true/false depending on whether the replication connected successfully or
-  // not.
-  void Replicate(std::string host, std::string port, bool* success);
+  // not. Note: the method does not  modify host, port but requires them to be references.
+  void Replicate(std::string& port, std::string& host, bool* success);
 
  private:
   uint32_t shard_count() const {

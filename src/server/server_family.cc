@@ -57,7 +57,7 @@ struct ReplicaOfFlag {
   string host;
   string port;
 
-  operator bool() const {
+  bool has_value() const {
     return !host.empty() && !port.empty();
   }
 };
@@ -90,36 +90,36 @@ ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
-#define BadFmt(m) \
-  do {            \
-    *err = m;     \
-    return false; \
+#define RETURN_ERROR(m) \
+  do {                  \
+    *err = m;           \
+    return false;       \
   } while (0)
+
   if (in.empty()) {
-    flag->host = "";
-    flag->port = "";
+    *flag = ReplicaOfFlag{};
     return true;
   }
 
   auto pos = in.find_last_of(':');
   if (pos == string::npos)
-    BadFmt("missing ':'.");
+    RETURN_ERROR("missing ':'.");
 
   string_view ip = in.substr(0, pos);
   flag->port = in.substr(pos + 1);
 
   if (ip.empty() || flag->port.empty())
-    BadFmt("IP/host or port are empty.");
+    RETURN_ERROR("IP/host or port are empty.");
 
   // For IPv6: ip1.front == '[' AND ip1.back == ']'
   // For IPv4: ip1.front != '[' AND ip1.back != ']'
   // Together, this ip1.front == '[' iff ip1.back == ']', which can be implemented as XNOR (NOT XOR)
   if ((ip.front() == '[') ^ (ip.back() == ']'))
-    BadFmt("unclosed brackets.");
+    RETURN_ERROR("unclosed brackets.");
 
   if (ip.front() == '[') {
     if (ip.length() <= 2)
-      BadFmt("IPv6 host name is too short.");
+      RETURN_ERROR("IPv6 host name is too short.");
 
     flag->host = ip.substr(1, ip.length() - 2);
     VLOG(1) << "received IP of type IPv6: " << flag->host;
@@ -131,14 +131,11 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
   LOG(INFO) << flag->host << " :  " << flag->port;
 
   return true;
-#undef BadFmt
+#undef RETURN_ERROR
 }
 
 std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
-  if (flag)
-    return absl::StrCat(flag.host, ":", flag.port);
-  else
-    return "";
+  return (flag.has_value()) ? absl::StrCat(flag.host, ":", flag.port) : "";
 }
 
 namespace dfly {
@@ -599,11 +596,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
 
   // check for '--replicaof' before loading anything
-  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag) {
+  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     bool success = false;
-    service_.proactor_pool()[0].Await([this, flag = move(flag), &success]() {
-      this->Replicate(move(flag.host), move(flag.port), &success);
-    });
+    service_.proactor_pool().GetNextProactor()->Await(
+        [this, &flag, &success]() { this->Replicate(flag.host, flag.port, &success); });
 
     if (!success && !GetFlag(FLAGS_continue_on_replication_fail))
       exit(EXIT_FAILURE);
@@ -2065,13 +2061,13 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   ReplicaOfInternal(args, cntx, true);
 }
 
-void ServerFamily::Replicate(string host_s, string port_s, bool* success) {
+void ServerFamily::Replicate(string& host, string& port, bool* success) {
   io::StringSink sink;
   ConnectionContext ctxt{&sink, nullptr};
 
   vector<MutableSlice> vargs{
-      {host_s.data(), host_s.size()},
-      {port_s.data(), port_s.size()},
+      {host.data(), host.size()},
+      {port.data(), port.size()},
   };
 
   CmdArgList args{vargs.data(), vargs.size()};
@@ -2082,8 +2078,7 @@ void ServerFamily::Replicate(string host_s, string port_s, bool* success) {
 
   // Check whether replication succeeded
   using namespace facade::constants;
-  const string& st = sink.str();
-  string_view sv{st};
+  string_view sv = sink.str();
   if (absl::StartsWith(sv, kSimplePref)) {
     LOG(INFO) << "Replication success!";
     *success = true;
