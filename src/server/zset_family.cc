@@ -2396,37 +2396,61 @@ OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, ConnectionCont
 void ZSetFamily::GeoAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
-  // TODO: to handle options and multiple elements
   ZParams zparams;
+  size_t i = 1;
+  for (; i < args.size(); ++i) {
+    ToUpper(&args[i]);
 
-  string_view longitude = ArgS(args, 1);
-  string_view latitude = ArgS(args, 2);
-  string_view member = ArgS(args, 3);
+    string_view cur_arg = ArgS(args, i);
 
-  // TODO: to remove this check once the TODO above is handled.
-  if (args.size() != 4) {
-    return (*cntx)->SendError(kSyntaxErr);
-  }
-
-  // TODO: the code handles only a single tripple of long,lat,member.
-  //       it has to be extended to handle multiple elements.
-  pair<double, double> longlat;
-  for (int i = 0; i < 1; i++) {
-    if (!ParseLongLat(longitude, latitude, &longlat)) {
-      string err = absl::StrCat("-ERR invalid longitude,latitude pair ", longitude, ",", latitude);
-
-      return (*cntx)->SendError(err, kSyntaxErrType);
+    if (cur_arg == "XX") {
+      zparams.flags |= ZADD_IN_XX;  // update only
+    } else if (cur_arg == "NX") {
+      zparams.flags |= ZADD_IN_NX;  // add new only.
+    } else if (cur_arg == "CH") {
+      zparams.ch = true;
+    } else {
+      break;
     }
   }
 
-  /* Turn the coordinates into the score of the element. */
-  GeoHashBits hash;
-  geohashEncodeWGS84(longlat.first, longlat.second, GEO_STEP_MAX, &hash);
-  GeoHashFix52Bits bits = geohashAlign52Bits(hash);
+  args.remove_prefix(i);
+  if (args.empty() || args.size() % 3 != 0) {
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  if ((zparams.flags & ZADD_IN_NX) && (zparams.flags & ZADD_IN_XX)) {
+    (*cntx)->SendError(kNxXxErr);
+    return;
+  }
 
   absl::InlinedVector<ScoredMemberView, 4> members;
-  members.emplace_back(bits, member);
-  ZAddGeneric(key, zparams, absl::Span{members.data(), members.size()}, cntx);
+  for (i = 0; i < args.size(); i += 3) {
+    string_view longitude = ArgS(args, i);
+    string_view latitude = ArgS(args, i + 1);
+    string_view member = ArgS(args, i + 2);
+
+    pair<double, double> longlat;
+
+    if (!ParseLongLat(longitude, latitude, &longlat)) {
+      string err = absl::StrCat("-ERR invalid longitude,latitude pair ", longitude, ",", latitude,
+                                ",", member);
+
+      return (*cntx)->SendError(err, kSyntaxErrType);
+    }
+
+    /* Turn the coordinates into the score of the element. */
+    GeoHashBits hash;
+    geohashEncodeWGS84(longlat.first, longlat.second, GEO_STEP_MAX, &hash);
+    GeoHashFix52Bits bits = geohashAlign52Bits(hash);
+
+    members.emplace_back(bits, member);
+  }
+  DCHECK(cntx->transaction);
+
+  absl::Span memb_sp{members.data(), members.size()};
+  ZAddGeneric(key, zparams, memb_sp, cntx);
 }
 
 void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
