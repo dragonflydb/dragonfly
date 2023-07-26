@@ -189,15 +189,26 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
   return it;
 }
 
+bool ScoreToLongLat(const std::optional<double>& val, double* xy) {
+  if (!val.has_value())
+    return false;
+
+  double score = *val;
+
+  GeoHashBits hash = {.bits = (uint64_t)score, .step = GEO_STEP_MAX};
+
+  return geohashDecodeToLongLatType(hash, xy) == 1;
+}
+
 bool ToAsciiGeoHash(const std::optional<double>& val, array<char, 12>* buf) {
   if (!val.has_value())
     return false;
 
   double score = *val;
 
-  double xy[2];
   GeoHashBits hash = {.bits = (uint64_t)score, .step = GEO_STEP_MAX};
 
+  double xy[2];
   if (!geohashDecodeToLongLatType(hash, xy)) {
     return false;
   }
@@ -2173,18 +2184,7 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZMScore(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-
-  absl::InlinedVector<string_view, 8> members(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    members[i - 1] = ArgS(args, i);
-  }
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpMScore(t->GetOpArgs(shard), key, members);
-  };
-
-  OpResult<MScoreResponse> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return (*cntx)->SendError(kWrongTypeErr);
@@ -2378,6 +2378,21 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
   OutputScoredArrayResult(result, range_params, cntx);
 }
 
+OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+
+  absl::InlinedVector<string_view, 8> members(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i) {
+    members[i - 1] = ArgS(args, i);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpMScore(t->GetOpArgs(shard), key, members);
+  };
+
+  return cntx->transaction->ScheduleSingleHopT(std::move(cb));
+}
+
 void ZSetFamily::GeoAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
@@ -2415,18 +2430,7 @@ void ZSetFamily::GeoAdd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-
-  absl::InlinedVector<string_view, 8> members(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    members[i - 1] = ArgS(args, i);
-  }
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpMScore(t->GetOpArgs(shard), key, members);
-  };
-
-  OpResult<MScoreResponse> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return (*cntx)->SendError(kWrongTypeErr);
@@ -2439,6 +2443,28 @@ void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
   for (const auto& p : arr) {
     if (ToAsciiGeoHash(p, &buf)) {
       (*cntx)->SendBulkString(string_view{buf.data(), buf.size() - 1});
+    } else {
+      (*cntx)->SendNull();
+    }
+  }
+}
+
+void ZSetFamily::GeoPos(CmdArgList args, ConnectionContext* cntx) {
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
+
+  if (result.status() != OpStatus::OK) {
+    return (*cntx)->SendError(result.status());
+  }
+
+  (*cntx)->StartArray(result->size());  // Array return type.
+  const MScoreResponse& arr = result.value();
+
+  double xy[2];
+  for (const auto& p : arr) {
+    if (ScoreToLongLat(p, xy)) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendDouble(xy[0]);
+      (*cntx)->SendDouble(xy[1]);
     } else {
       (*cntx)->SendNull();
     }
@@ -2487,7 +2513,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
 
       // GEO functions
       << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, 1}.HFUNC(GeoAdd)
-      << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoHash);
+      << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoHash)
+      << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoPos);
 }
 
 }  // namespace dfly

@@ -3,6 +3,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include "absl/container/inlined_vector.h"
 #include "absl/strings/numbers.h"
 #ifdef NDEBUG
 #include <mimalloc-new-delete.h>
@@ -178,8 +179,8 @@ struct VersionMonitor {
 
 bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
                                        const std::string_view current) const {
-  const std::vector<absl::string_view> remote_xyz = absl::StrSplit(remote, ".");
-  const std::vector<absl::string_view> current_xyz = absl::StrSplit(current, ".");
+  const absl::InlinedVector<absl::string_view, 3> remote_xyz = absl::StrSplit(remote, ".");
+  const absl::InlinedVector<absl::string_view, 3> current_xyz = absl::StrSplit(current, ".");
   if (remote_xyz.size() != current_xyz.size()) {
     LOG(WARNING) << "Can't compare Dragonfly version " << current << " to latest version "
                  << remote;
