@@ -444,13 +444,9 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
 
-  // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
-  // Therefore we differentiate between concluding, which says that this specific
-  // runnable concludes current operation, and should_release which tells
-  // whether we should unlock the keys. should_release is false for multi and
-  // equal to concluding otherwise.
   bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
-  bool should_release = is_concluding && !IsAtomicMulti();
+  bool concluding_not_multi = is_concluding && !IsAtomicMulti();
+
   IntentLock::Mode mode = Mode();
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
@@ -499,17 +495,18 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   // and successive hops are run by continuation_trans_ in engine shard.
   // Otherwise we can remove ourselves only when we're concluding (so no more hops will follow).
   // In case of multi transaction is_concluding represents only if the current running op is
-  // concluding, therefore we remove from txq in unlock multi funcion which is when the transaction
+  // concluding, therefore we remove from txq in unlock multi function which is when the transaction
   // is concluding.
-  bool remove_txq = should_release || !txq_ooo;
+  bool remove_txq = concluding_not_multi || !txq_ooo;
   if (remove_txq && sd.pq_pos != TxQueue::kEnd) {
     VLOG(2) << "Remove from txq" << this->DebugId();
     shard->txq()->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
   }
 
+  // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // If it's a final hop we should release the locks.
-  if (should_release) {
+  if (concluding_not_multi) {
     bool became_suspended = sd.local_mask & SUSPENDED_Q;
     KeyLockArgs largs;
 
@@ -554,7 +551,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   CHECK_GE(DecreaseRunCnt(), 1u);
   // From this point on we can not access 'this'.
 
-  return !should_release;  // keep
+  return !concluding_not_multi;  // keep
 }
 
 void Transaction::ScheduleInternal() {
