@@ -381,7 +381,7 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
         if (decompressed)
           zfree(decompressed);
       });
-      RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      RETURN_ON_ERR(SaveListPack(lp));
     }
     node = node->next;
   }
