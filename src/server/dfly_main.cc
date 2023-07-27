@@ -163,8 +163,18 @@ struct VersionMonitor {
   }
 
  private:
+  struct SslDeleter {
+    void operator()(SSL_CTX* ssl) {
+      if (ssl) {
+        TlsClient::FreeContext(ssl);
+      }
+    }
+  };
+
+  using SslPtr = std::unique_ptr<SSL_CTX, SslDeleter>;
+  void RunTask(SslPtr);
+
   bool IsVersionOutdated(std::string_view remote, std::string_view current) const;
-  void RunTask(SSL_CTX* ssl_ctx);
 };
 
 bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
@@ -200,30 +210,27 @@ bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
 
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
   // Avoid running dev environments.
-  bool is_dev_env = false;
-  const char* env_var = getenv("DFLY_DEV_ENV");
-  if (env_var) {
+  if (getenv("DFLY_DEV_ENV")) {
     LOG(WARNING) << "Running in dev environment (DFLY_DEV_ENV is set) - version monitoring is "
                     "disabled";
-    is_dev_env = true;
+    return;
   }
-  if (!GetFlag(FLAGS_version_check) || is_dev_env ||
-      // not a production release tag.
-      kGitTag[0] != 'v' || strchr(kGitTag, '-') != NULL) {
+  // not a production release tag.
+  if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v' || strchr(kGitTag, '-')) {
     return;
   }
 
-  SSL_CTX* ssl_ctx = TlsClient::CreateSslContext();
+  SslPtr ssl_ctx(TlsClient::CreateSslContext());
   if (!ssl_ctx) {
     VLOG(1) << "Remote version - failed to create SSL context - cannot run version monitoring";
     return;
   }
 
-  version_fiber_ =
-      proactor_pool->GetNextProactor()->LaunchFiber([ssl_ctx, this] { RunTask(ssl_ctx); });
+  version_fiber_ = proactor_pool->GetNextProactor()->LaunchFiber(
+      [ssl_ctx = std::move(ssl_ctx), this]() mutable { RunTask(std::move(ssl_ctx)); });
 }
 
-void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
+void VersionMonitor::RunTask(SslPtr ssl_ctx) {
   const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
 
   const std::string host_name = "version.dragonflydb.io";
@@ -237,7 +244,7 @@ void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
   ProactorBase* my_pb = ProactorBase::me();
   while (true) {
     const std::optional<std::string> remote_version =
-        GetRemoteVersion(my_pb, ssl_ctx, host_name, port, resource, version_header);
+        GetRemoteVersion(my_pb, ssl_ctx.get(), host_name, port, resource, version_header);
     if (remote_version) {
       const std::string_view rv = remote_version.value();
       if (IsVersionOutdated(rv, current_version)) {
@@ -247,7 +254,6 @@ void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
       }
     }
     if (monitor_ver_done_.WaitFor(loop_sleep_time)) {
-      TlsClient::FreeContext(ssl_ctx);
       VLOG(1) << "finish running version monitor task";
       return;
     }
