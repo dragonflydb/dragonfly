@@ -11,7 +11,6 @@ def test_tls_no_auth(df_factory, with_tls_server_args):
         server.start()
 
 
-@pytest.mark.skip("Enable after #1562 is merged")
 def test_tls_no_key(df_factory):
     # Needs a private key and certificate.
     server = df_factory.create(port=1112, tls=None, requirepass="XXX")
