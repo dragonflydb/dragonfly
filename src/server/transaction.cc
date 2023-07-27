@@ -498,8 +498,12 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
   // and successive hops are run by continuation_trans_ in engine shard.
   // Otherwise we can remove ourselves only when we're concluding (so no more hops will follow).
-  bool remove_txq = is_concluding || !txq_ooo;
+  // In case of multi transaction is_concluding represents only if the current running op is
+  // concluding, therefore we remove from txq in unlock multi funcion which is when the transaction
+  // is concluding.
+  bool remove_txq = should_release || !txq_ooo;
   if (remove_txq && sd.pq_pos != TxQueue::kEnd) {
+    VLOG(2) << "Remove from txq" << this->DebugId();
     shard->txq()->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
   }
