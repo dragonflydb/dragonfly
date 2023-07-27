@@ -963,9 +963,9 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned char* lp = (unsigned char*)blob.data();
     auto iterate_and_apply_f = [lp](auto f) {
       for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-        unsigned int* slen = nullptr;
-        long long* lval = nullptr;
-        unsigned char* res = lpGetValue(cur, slen, lval);
+        unsigned int slen = 0;
+        long long lval = 0;
+        unsigned char* res = lpGetValue(cur, &slen, &lval);
         f(res, slen, lval);
       }
     };
@@ -975,8 +975,8 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       StringSet* set = new StringSet{CompactObj::memory_resource()};
       res = createObject(OBJ_SET, set);
       res->encoding = OBJ_ENCODING_HT;
-      auto f = [this, res](unsigned char* val, unsigned int* slen, const long long* lval) {
-        sds sdsele = (val) ? sdsnewlen(val, *lval) : sdsfromlonglong(*lval);
+      auto f = [this, res](unsigned char* val, unsigned int slen, long long lval) {
+        sds sdsele = (val) ? sdsnewlen(val, slen) : sdsfromlonglong(lval);
         if (!((StringSet*)res->ptr)->AddSds(sdsele)) {
           LOG(ERROR) << "Error adding to member set22";
           ec_ = RdbError(errc::duplicate_key);
@@ -985,8 +985,8 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       iterate_and_apply_f(f);
     } else {
       res = createSetObject();
-      auto f = [this, res](unsigned char* val, unsigned int* slen, const long long* lval) {
-        sds sdsele = (val) ? sdsnewlen(val, *lval) : sdsfromlonglong(*lval);
+      auto f = [this, res](unsigned char* val, unsigned int slen, long long lval) {
+        sds sdsele = (val) ? sdsnewlen(val, slen) : sdsfromlonglong(lval);
         if (!dictAdd((dict*)res->ptr, sdsele, nullptr)) {
           LOG(ERROR) << "Error adding to member set";
           ec_ = RdbError(errc::duplicate_key);
@@ -1361,7 +1361,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       break;
     case RDB_TYPE_HASH_ZIPLIST:
     case RDB_TYPE_HASH_LISTPACK:
-    case RDB_TYPE_SET_LISTPACK:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
@@ -1382,7 +1381,19 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadStreams();
       break;
     case RDB_TYPE_JSON:
-      iores = ReadJson();
+    case RDB_TYPE_SET_LISTPACK:
+      // We need to deal with protocol versions 9 and older because in these
+      // RDB_TYPE_JSON == 20. On newer versions > 9, RDB_TYPE_JSON == 30
+      if (rdb_version_ < 10 && rdbtype == 20) {
+        iores = ReadJson();
+        break;
+      }
+      if (rdbtype == RDB_TYPE_JSON) {
+        iores = ReadJson();
+        break;
+      }
+
+      iores = ReadGeneric(rdbtype);
       break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
@@ -1882,9 +1893,9 @@ error_code RdbLoader::Load(io::Source* src) {
     char buf[64] = {0};
     ::memcpy(buf, cb.data() + 5, 4);
 
-    int rdbver = atoi(buf);
-    if (rdbver < 5 || rdbver > RDB_VERSION) {  // We accept starting from 5.
-      LOG(ERROR) << "RDB Version " << rdbver << " is not supported";
+    rdb_version_ = atoi(buf);
+    if (rdb_version_ < 5 || rdb_version_ > RDB_VERSION) {  // We accept starting from 5.
+      LOG(ERROR) << "RDB Version " << rdb_version_ << " is not supported";
       return RdbError(errc::bad_version);
     }
 

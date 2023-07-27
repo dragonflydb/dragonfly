@@ -112,8 +112,8 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (compact_enc == OBJ_ENCODING_QUICKLIST)
-        return RDB_TYPE_LIST_QUICKLIST;
+      if (compact_enc == OBJ_ENCODING_QUICKLIST || compact_enc == OBJ_ENCODING_LISTPACK)
+        return RDB_TYPE_LIST_QUICKLIST_2;
       break;
     case OBJ_SET:
       if (compact_enc == kEncodingIntSet)
@@ -348,6 +348,8 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   while (node) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
+    RETURN_ON_ERR(SaveLen(node->container));
+
     if (QL_NODE_IS_PLAIN(node)) {
       if (quicklistNodeIsCompressed(node)) {
         void* data;
@@ -379,7 +381,10 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
         if (decompressed)
           zfree(decompressed);
       });
-      RETURN_ON_ERR(SaveListPackAsZiplist(lp));
+      //      RETURN_ON_ERR(SaveLen(1));
+      //      RETURN_ON_ERR(SaveLen(QUICKLIST_NODE_CONTAINER_PACKED));
+      //      RETURN_ON_ERR(SaveListPack(lp));
+      RETURN_ON_ERR(SaveString(node->entry, node->sz));
     }
     node = node->next;
   }
