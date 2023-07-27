@@ -1628,6 +1628,20 @@ void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_
   }
 }
 
+double ExtractUnit(std::string_view arg) {
+  if (arg == "M") {
+    return 1;
+  } else if (arg == "KM") {
+    return 1000;
+  } else if (arg == "FT") {
+    return 0.3048;
+  } else if (arg == "MI") {
+    return 1609.34;
+  } else {
+    return -1;
+  }
+}
+
 }  // namespace
 
 void ZSetFamily::BZPopMin(CmdArgList args, ConnectionContext* cntx) {
@@ -2495,6 +2509,43 @@ void ZSetFamily::GeoPos(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
+  double distance_multiplier = 1;
+  if (args.size() == 4) {
+    ToUpper(&args[3]);
+    string_view unit = ArgS(args, 3);
+    distance_multiplier = ExtractUnit(unit);
+    args.remove_suffix(1);
+    if (distance_multiplier < 0) {
+      return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
+    }
+  } else if (args.size() != 3) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
+
+  if (result.status() != OpStatus::OK) {
+    return (*cntx)->SendError(result.status());
+  }
+
+  const MScoreResponse& arr = result.value();
+
+  if (arr.size() != 2) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  double xyxy[4];  // 2 pairs of score holding 2 locations
+  for (size_t i = 0; i < arr.size(); i++) {
+    if (!ScoreToLongLat(arr[i], xyxy + (i * 2))) {
+      return (*cntx)->SendNull();
+    }
+  }
+
+  return (*cntx)->SendDouble(geohashGetDistance(xyxy[0], xyxy[1], xyxy[2], xyxy[3]) /
+                             distance_multiplier);
+}
+
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 void ZSetFamily::Register(CommandRegistry* registry) {
@@ -2538,7 +2589,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       // GEO functions
       << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, 1}.HFUNC(GeoAdd)
       << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoHash)
-      << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoPos);
+      << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoPos)
+      << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1}.HFUNC(GeoDist);
 }
 
 }  // namespace dfly
