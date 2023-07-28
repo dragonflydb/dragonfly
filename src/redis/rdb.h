@@ -41,6 +41,10 @@
  * backward compatible this number gets incremented. */
 #define RDB_VERSION 11
 
+/* We would like to serialize to version 9 such that our rdb files
+ * can be loaded by redis version 6 (RDB_VERSION 9) */
+#define RDB_SER_VERSION 9
+
 /* Defines related to the dump file format. To store 32 bits lengths for short
  * keys requires a lot of space, so we check the most significant 2 bits of
  * the first byte to interpreter the length:

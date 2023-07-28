@@ -199,66 +199,6 @@ int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsi
   return ret;
 }
 
-/* callback for to check the listpack doesn't have duplicate records */
-static int _lpEntryValidation(unsigned char* p, unsigned int head_count, void* userdata) {
-  struct cb_args {
-    int pairs;
-    long count;
-    dict* fields;
-  }* data = (cb_args*)userdata;
-
-  if (data->fields == NULL) {
-    data->fields = dictCreate(&hashDictType);
-    dictExpand(data->fields, data->pairs ? head_count / 2 : head_count);
-  }
-
-  /* If we're checking pairs, then even records are field names. Otherwise
-   * we're checking all elements. Add to dict and check that's not a dup */
-  if (!data->pairs || ((data->count) & 1) == 0) {
-    unsigned char* str;
-    int64_t slen;
-    unsigned char buf[LP_INTBUF_SIZE];
-
-    str = lpGet(p, &slen, buf);
-    sds field = sdsnewlen(str, slen);
-    if (dictAdd(data->fields, field, NULL) != DICT_OK) {
-      /* Duplicate, return an error */
-      sdsfree(field);
-      return 0;
-    }
-  }
-
-  (data->count)++;
-  return 1;
-}
-
-/* Validate the integrity of the listpack structure.
- * when `deep` is 0, only the integrity of the header is validated.
- * when `deep` is 1, we scan all the entries one by one.
- * when `pairs` is 0, all elements need to be unique (it's a set)
- * when `pairs` is 1, odd elements need to be unique (it's a key-value map) */
-int lpValidateIntegrityAndDups(unsigned char* lp, size_t size, int deep, int pairs) {
-  if (!deep)
-    return lpValidateIntegrity(lp, size, 0, NULL, NULL);
-
-  /* Keep track of the field names to locate duplicate ones */
-  struct {
-    int pairs;
-    long count;
-    dict* fields; /* Initialisation at the first callback. */
-  } data = {pairs, 0, NULL};
-
-  int ret = lpValidateIntegrity(lp, size, 1, _lpEntryValidation, &data);
-
-  /* make sure we have an even number of records. */
-  if (pairs && data.count & 1)
-    ret = 0;
-
-  if (data.fields)
-    dictRelease(data.fields);
-  return ret;
-}
-
 bool resizeStringSet(robj* set, size_t size, bool use_set2) {
   if (use_set2) {
     ((dfly::StringSet*)set->ptr)->Reserve(size);
@@ -705,7 +645,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
     if (rdb_type_ == RDB_TYPE_LIST_QUICKLIST_2) {
       uint8_t* src = (uint8_t*)sv.data();
-      if (!lpValidateIntegrity(src, sv.size(), 0, NULL, NULL)) {
+      if (!lpValidateIntegrity(src, sv.size(), 0, nullptr, nullptr)) {
         LOG(ERROR) << "Listpack integrity check failed.";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return false;
@@ -955,7 +895,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     }
     pv_->ImportRObj(res);
   } else if (rdb_type_ == RDB_TYPE_SET_LISTPACK) {
-    if (!lpValidateIntegrityAndDups((uint8_t*)blob.data(), blob.size(), 0, 1)) {
+    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
       LOG(ERROR) << "ListPack integrity check failed.";
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
@@ -978,7 +918,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       auto f = [this, res](unsigned char* val, unsigned int slen, long long lval) {
         sds sdsele = (val) ? sdsnewlen(val, slen) : sdsfromlonglong(lval);
         if (!((StringSet*)res->ptr)->AddSds(sdsele)) {
-          LOG(ERROR) << "Error adding to member set22";
+          LOG(ERROR) << "Error adding to member set2";
           ec_ = RdbError(errc::duplicate_key);
         }
       };
@@ -995,7 +935,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       iterate_and_apply_f(f);
     }
     if (ec_) {
-      zfree(res);
+      decrRefCount(res);
       return;
     }
     pv_->ImportRObj(res);
@@ -1012,7 +952,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
         }
         break;
       case RDB_TYPE_HASH_LISTPACK:
-        if (!lpValidateIntegrityAndDups((uint8_t*)blob.data(), blob.size(), 0, 1)) {
+        if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
           LOG(ERROR) << "ListPack integrity check failed.";
           zfree(lp);
           ec_ = RdbError(errc::rdb_file_corrupted);
@@ -1383,8 +1323,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_JSON:
     case RDB_TYPE_SET_LISTPACK:
       // We need to deal with protocol versions 9 and older because in these
-      // RDB_TYPE_JSON == 20. On newer versions > 9, RDB_TYPE_JSON == 30
-      if (rdb_version_ < 10 && rdbtype == 20) {
+      // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
+      // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
+      if (rdb_version_ < 10 && rdbtype == RDB_TYPE_JSON_OLD) {
         iores = ReadJson();
         break;
       }

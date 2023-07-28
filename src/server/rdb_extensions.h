@@ -9,6 +9,7 @@ extern "C" {
 }
 
 //  Custom types: Range 30-35 is used by DF RDB types.
+const uint8_t RDB_TYPE_JSON_OLD = 20;
 const uint8_t RDB_TYPE_JSON = 30;
 
 constexpr bool rdbIsObjectTypeDF(uint8_t type) {

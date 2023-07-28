@@ -112,8 +112,8 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (compact_enc == OBJ_ENCODING_QUICKLIST || compact_enc == OBJ_ENCODING_LISTPACK)
-        return RDB_TYPE_LIST_QUICKLIST_2;
+      if (compact_enc == OBJ_ENCODING_QUICKLIST)
+        return RDB_TYPE_LIST_QUICKLIST;
       break;
     case OBJ_SET:
       if (compact_enc == kEncodingIntSet)
@@ -129,7 +129,7 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
       break;
     case OBJ_HASH:
       if (compact_enc == kEncodingListPack)
-        return RDB_TYPE_HASH_LISTPACK;
+        return RDB_TYPE_HASH_ZIPLIST;
       else if (compact_enc == kEncodingStrMap2)
         return RDB_TYPE_HASH;
       break;
@@ -138,7 +138,7 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
-      return RDB_TYPE_JSON;
+      return RDB_TYPE_JSON_OLD;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -348,7 +348,6 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   while (node) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
-    RETURN_ON_ERR(SaveLen(node->container));
 
     if (QL_NODE_IS_PLAIN(node)) {
       if (quicklistNodeIsCompressed(node)) {
@@ -381,7 +380,7 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
         if (decompressed)
           zfree(decompressed);
       });
-      RETURN_ON_ERR(SaveListPack(lp));
+      RETURN_ON_ERR(SaveListPackAsZiplist(lp));
     }
     node = node->next;
   }
@@ -438,7 +437,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
 
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    RETURN_ON_ERR(SaveListPack(lp));
+    RETURN_ON_ERR(SaveListPackAsZiplist(lp));
   }
 
   return error_code{};
@@ -606,11 +605,6 @@ error_code RdbSerializer::SaveListPackAsZiplist(uint8_t* lp) {
   zfree(zl);
 
   return ec;
-}
-
-error_code RdbSerializer::SaveListPack(uint8_t* lp) {
-  const size_t len = lpBytes(lp);
-  return SaveString(lp, len);
 }
 
 error_code RdbSerializer::SaveStreamPEL(rax* pel, bool nacks) {
@@ -1157,7 +1151,9 @@ void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
 
 error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
   char magic[16];
-  size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
+  // We should use RDB_VERSION here from rdb.h when we ditch redis 6 support
+  // For now we serialize to an older version.
+  size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_SER_VERSION);
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
