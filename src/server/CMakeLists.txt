@@ -29,7 +29,7 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
 
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
-         http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4)
+         http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4 TRDP::croncpp)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
