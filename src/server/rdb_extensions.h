@@ -8,8 +8,9 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
-//  Custom types: Range 20-25 is used by DF RDB types.
-const uint8_t RDB_TYPE_JSON = 20;
+//  Custom types: Range 30-35 is used by DF RDB types.
+const uint8_t RDB_TYPE_JSON_OLD = 20;
+const uint8_t RDB_TYPE_JSON = 30;
 
 constexpr bool rdbIsObjectTypeDF(uint8_t type) {
   return __rdbIsObjectType(type) || (type == RDB_TYPE_JSON);

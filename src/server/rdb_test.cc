@@ -408,4 +408,36 @@ TEST_P(HllRdbTest, Hll) {
 
 INSTANTIATE_TEST_SUITE_P(HllRdbTest, HllRdbTest, Values("key-sparse", "key-dense"));
 
+TEST_F(RdbTest, LoadSmall7) {
+  // Contains 3 keys
+  // 1. A list called my-list encoded as RDB_TYPE_LIST_QUICKLIST_2
+  // 2. A hashtable called my-hset encoded as RDB_TYPE_HASH_LISTPACK
+  // 3. A set called my-set encoded as RDB_TYPE_SET_LISTPACK
+  io::FileSource fs = GetSource("redis7_small.rdb");
+  RdbLoader loader{service_.get()};
+
+  // must run in proactor thread in order to avoid polluting the serverstate
+  // in the main, testing thread.
+  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  auto resp = Run({"scan", "0"});
+
+  ASSERT_THAT(resp, ArrLen(2));
+
+  EXPECT_THAT(StrArray(resp.GetVec()[1]), UnorderedElementsAre("my-set", "my-hset", "my-list"));
+
+  resp = Run({"smembers", "my-set"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("redis", "acme"));
+
+  resp = Run({"hgetall", "my-hset"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("acme", "44", "field", "22"));
+
+  resp = Run({"lrange", "my-list", "0", "-1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("list1", "list2"));
+}
 }  // namespace dfly

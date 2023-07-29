@@ -37,12 +37,13 @@
 #include "object.h"
 #include "redis_aux.h"
 
-/* TBD: include only necessary headers. */
-
 /* The current RDB version. When the format changes in a way that is no longer
  * backward compatible this number gets incremented. */
-// TODO: should increment to 10 once we start storing RDB_TYPE_ZSET_LISTPACK.
-#define RDB_VERSION 9
+#define RDB_VERSION 11
+
+/* We would like to serialize to version 9 such that our rdb files
+ * can be loaded by redis version 6 (RDB_VERSION 9) */
+#define RDB_SER_VERSION 9
 
 /* Defines related to the dump file format. To store 32 bits lengths for short
  * keys requires a lot of space, so we check the most significant 2 bits of
@@ -83,6 +84,7 @@
 #define RDB_TYPE_HASH   4
 #define RDB_TYPE_ZSET_2 5 /* ZSET version 2 with doubles stored in binary. */
 #define RDB_TYPE_MODULE 6
+#define RDB_TYPE_MODULE_PRE_GA 6 /* Used in 4.0 release candidates */
 #define RDB_TYPE_MODULE_2 7 /* Module value with annotations for parsing without
                                the generating module being loaded. */
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType() BELOW */
@@ -98,15 +100,20 @@
 #define RDB_TYPE_HASH_LISTPACK 16
 #define RDB_TYPE_ZSET_LISTPACK 17
 #define RDB_TYPE_LIST_QUICKLIST_2   18
+#define RDB_TYPE_STREAM_LISTPACKS_2 19
+#define RDB_TYPE_SET_LISTPACK  20
+#define RDB_TYPE_STREAM_LISTPACKS_3 21
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType() BELOW */
 
 /* Test if a type is an object type. */
-#define __rdbIsObjectType(t) ((t >= 0 && t <= 7) || (t >= 9 && t <= 18))
+#define __rdbIsObjectType(t) (((t) >= 0 && (t) <= 7) || ((t) >= 9 && (t) <= 21))
 
 /* Range 200-240 is used by Dragonfly specific opcodes */
 
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType). */
 #define RDB_OPCODE_FUNCTION   246   /* engine data */
+#define RDB_OPCODE_FUNCTION2  245   /* function library data */
+#define RDB_OPCODE_FUNCTION_PRE_GA   246   /* old function library data for 7.0 rc1 and rc2 */
 #define RDB_OPCODE_MODULE_AUX 247   /* Module auxiliary data. */
 #define RDB_OPCODE_IDLE       248   /* LRU idle time. */
 #define RDB_OPCODE_FREQ       249   /* LFU frequency. */
@@ -137,6 +144,7 @@
 #define RDBFLAGS_REPLICATION (1<<1)     /* Load/save for SYNC. */
 #define RDBFLAGS_ALLOW_DUP (1<<2)       /* Allow duplicated keys when loading.*/
 #define RDBFLAGS_FEED_REPL (1<<3)       /* Feed replication stream when loading.*/
+#define RDBFLAGS_KEEP_CACHE (1<<4)      /* Don't reclaim cache after rdb file is generated */
 
 /* When rdbLoadObject() returns NULL, the err flag is
  * set to hold the type of error that occurred */
