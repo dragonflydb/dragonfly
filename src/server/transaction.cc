@@ -26,7 +26,7 @@ namespace {
 
 atomic_uint64_t op_seq{1};
 
-[[maybe_unused]] constexpr size_t kTransSize = sizeof(Transaction);
+constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
 
 }  // namespace
 
