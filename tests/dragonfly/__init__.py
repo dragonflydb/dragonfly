@@ -40,8 +40,8 @@ class DflyInstance:
         self.proc = None
         self._client: Optional[RedisClient] = None
 
-    def client(self) -> RedisClient:
-        return RedisClient(port=self.port)
+    def client(self, *args, **kwargs) -> RedisClient:
+        return RedisClient(port=self.port, *args, **kwargs)
 
     def start(self):
         self._start()
