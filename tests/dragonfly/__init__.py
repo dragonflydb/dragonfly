@@ -24,6 +24,10 @@ class DflyParams:
     env: any
 
 
+class DflyStartException(Exception):
+    pass
+
+
 class DflyInstance:
     """
     Represents a runnable and stoppable Dragonfly instance
@@ -36,8 +40,8 @@ class DflyInstance:
         self.proc = None
         self._client: Optional[RedisClient] = None
 
-    def client(self) -> RedisClient:
-        return RedisClient(port=self.port)
+    def client(self, *args, **kwargs) -> RedisClient:
+        return RedisClient(port=self.port, *args, **kwargs)
 
     def start(self):
         self._start()
@@ -81,7 +85,7 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
-                raise Exception(f"Failed to start instance, return code {return_code}")
+                raise DflyStartException(f"Failed to start instance, return code {return_code}")
 
     def __getitem__(self, k):
         return self.args.get(k)
