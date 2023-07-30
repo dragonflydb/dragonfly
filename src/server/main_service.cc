@@ -539,6 +539,49 @@ ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
   return ExecEvalState::SOME;
 }
 
+// Returns nullopt if the EXEC transaction is malformed i.e. has incompatible EVAL statements
+// Otherwise returns the mult mode for that transaction. Returns NOT_DETERMINED if no scheduling
+// is required.
+optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
+                                                const ConnectionState::ExecInfo& exec_info,
+                                                const ScriptMgr& script_mgr) {
+  // Check if script most LIKELY has global eval transactions
+  bool contains_global = false;
+  Transaction::MultiMode multi_mode =
+      static_cast<Transaction::MultiMode>(absl::GetFlag(FLAGS_multi_exec_mode));
+
+  if (state != ExecEvalState::NONE) {
+    contains_global = script_mgr.AreGlobalByDefault();
+
+    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
+    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
+    // lock ahead and we run global script in the transaction then multi mode will be global.
+    if (!contains_global || (multi_mode == Transaction::NON_ATOMIC)) {
+      return nullopt;
+    }
+  }
+
+  bool transactional = contains_global;
+  if (!transactional) {
+    for (const auto& scmd : exec_info.body) {
+      transactional |= scmd.Cid()->IsTransactional();
+      contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
+      if (contains_global)
+        break;
+    }
+  }
+
+  // multi/exec contains commands like ping that do not affect db state.
+  if (!transactional && exec_info.watched_keys.empty())
+    return Transaction::NOT_DETERMINED;
+
+  // Atomic modes fall back to GLOBAL if they contain global commands.
+  if (contains_global && multi_mode == Transaction::LOCK_AHEAD)
+    multi_mode = Transaction::GLOBAL;
+
+  return multi_mode;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1511,42 +1554,23 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
 }
 
 // Return true if transaction was scheduled, false if scheduling was not required.
-bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
-                    CmdArgVec* tmp_keys, bool global_scripts) {
-  bool global = global_scripts;
-  bool transactional = global_scripts;
-  for (const auto& scmd : exec_info->body) {
-    transactional |= scmd.Cid()->IsTransactional();
-    global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
-    if (global)
-      break;
-  }
-
-  if (!transactional && exec_info->watched_keys.empty())
-    return false;
-
-  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
-  DCHECK(multi_mode >= Transaction::GLOBAL && multi_mode <= Transaction::NON_ATOMIC);
-
-  // Atomic modes fall back to GLOBAL if they contain global commands.
-  if (global && multi_mode == Transaction::LOCK_AHEAD)
-    multi_mode = Transaction::GLOBAL;
-
+void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
+                    Transaction::MultiMode multi_mode) {
+  CmdArgVec tmp_keys;
   switch ((Transaction::MultiMode)multi_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       break;
     case Transaction::LOCK_AHEAD:
-      *tmp_keys = CollectAllKeys(exec_info);
-      trans->StartMultiLockedAhead(dbid, CmdArgList{*tmp_keys});
+      tmp_keys = CollectAllKeys(exec_info);
+      trans->StartMultiLockedAhead(dbid, CmdArgList{tmp_keys});
       break;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
       break;
     case Transaction::NOT_DETERMINED:
-      DCHECK(false);
+      LOG(FATAL) << "should not reach";
   };
-  return true;
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
@@ -1571,27 +1595,19 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendNull();
   }
 
-  ExecEvalState state = DetermineEvalPresense(exec_info.body);
   const CommandId* const exec_cid = cntx->cid;
+  CmdArgVec arg_vec;
+  ExecEvalState state = DetermineEvalPresense(exec_info.body);
+  optional<Transaction::MultiMode> multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
+  if (!multi_mode)
+    return rb->SendError(
+        "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
 
-  CmdArgVec arg_vec, tmp_keys;
-
-  // Check if script most LIKELY has global eval transactions
-  bool global_script = script_mgr()->AreGlobalByDefault();
-  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
-
-  if (state != ExecEvalState::NONE) {
-    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
-    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
-    // lock ahead and we run global script in the transaction then multi mode will be global.
-    if (!global_script || (multi_mode == Transaction::NON_ATOMIC)) {
-      return rb->SendError(
-          "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
-    }
+  bool scheduled = false;
+  if (*multi_mode != Transaction::NOT_DETERMINED) {
+    StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, *multi_mode);
+    scheduled = true;
   }
-
-  bool scheduled =
-      StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, &tmp_keys, global_script);
 
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
