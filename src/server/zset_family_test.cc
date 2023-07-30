@@ -714,4 +714,23 @@ TEST_F(ZSetFamilyTest, GeoPosWrongType) {
   EXPECT_THAT(Run({"geopos", "x", "Sicily", "Palermo"}), ErrArg("WRONGTYPE"));
 }
 
+TEST_F(ZSetFamilyTest, GeoDist) {
+  EXPECT_EQ(2, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo", "15.087269",
+                           "37.502669", "Catania"}));
+  auto resp = Run({"geodist", "Sicily", "Palermo", "Catania"});
+  EXPECT_EQ(resp, "166274.15156960033");
+
+  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "km"});
+  EXPECT_EQ(resp, "166.27415156960032");
+
+  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "MI"});
+  EXPECT_EQ(resp, "103.31822459492733");
+
+  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "FT"});
+  EXPECT_EQ(resp, "545518.8699790037");
+
+  resp = Run({"geodist", "Sicily", "Foo", "Bar"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly
