@@ -848,6 +848,7 @@ void Transaction::ExecuteAsync() {
   if (unique_shard_cnt_ == 1 && shard != nullptr && shard->shard_id() == unique_shard_id_) {
     DVLOG(1) << "Short-circuit ExecuteAsync " << DebugId();
     shard->PollExecution("exec_cb", this);
+    intrusive_ptr_release(this);  // against use_count_.fetch_add above.
     return;
   }
 
