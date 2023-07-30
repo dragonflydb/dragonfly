@@ -1026,6 +1026,7 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
 
     async def get_sync_mode(c_master):
         result = await c_master.execute_command("role")
+        # result[1]->replicas info [0]->first replica info [2]->replication state
         return result[1][0][2]
 
     async def is_full_sync_mode(c_master):
