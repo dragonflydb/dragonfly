@@ -131,7 +131,7 @@ class Transaction {
     // UNUSED = 1 << 1,
     OUT_OF_ORDER = 1 << 2,      // Whether it can run as out of order
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
-    SUSPENDED_Q = 1 << 4,       // Whether is suspened (by WatchInShard())
+    SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
     EXPIRED_Q = 1 << 6,         // Whether it timed out and should be dropped
     UNLOCK_MULTI = 1 << 7,      // Whether this shard executed UnlockMultiShardCb
@@ -333,7 +333,7 @@ class Transaction {
     // this is the only variable that is accessed by both shard and coordinator threads.
     std::atomic_bool is_armed{false};
 
-    // We pad with some memory so that atomic loads won't cause false sharing betweem threads.
+    // We pad with some memory so that atomic loads won't cause false sharing between threads.
     char pad[46];  // to make sure PerShardData is 64 bytes and takes full cacheline.
 
     uint32_t arg_start = 0;  // Indices into args_ array.
