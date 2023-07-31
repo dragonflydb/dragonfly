@@ -66,18 +66,17 @@ class DflyInstance:
         # Gdb starts slowly
         delay = START_DELAY if not self.params.gdb else START_GDB_DELAY
 
-        self._check_status()
-
         # Wait until the process is listening on the port.
         s = time.time()
         while time.time() - s < delay:
+            self._check_status()
             try:
                 self.get_port_from_lsof()
                 break
             except RuntimeError:
                 time.sleep(0.05)
         else:
-            raise RuntimeError("Process didn't start listening on port in time")
+            raise DflyStartException("Process didn't start listening on port in time")
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
