@@ -104,7 +104,7 @@ class BaseFamilyTest : public ::testing::Test {
 
   static unsigned NumLocked();
 
-  void SetTestFlag(std::string_view flag_name, std::string_view new_value);
+  static void SetTestFlag(std::string_view flag_name, std::string_view new_value);
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;

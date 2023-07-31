@@ -226,13 +226,13 @@ class DbSlice {
     return shard_id_;
   }
 
+  static std::string_view GetLockKey(std::string_view key);
+
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
-  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count) {
-    db_arr_[db_index]->Release(m, key, count);
-  }
+  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count);
 
   // Returns true if the key can be locked under m. Does not lock.
   bool CheckLock(IntentLock::Mode m, DbIndex dbid, std::string_view key) const;

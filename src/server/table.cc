@@ -62,15 +62,4 @@ void DbTable::Clear() {
   stats = DbTableStats{};
 }
 
-void DbTable::Release(IntentLock::Mode mode, std::string_view key, unsigned count) {
-  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
-
-  auto it = trans_locks.find(key);
-  CHECK(it != trans_locks.end()) << key;
-  it->second.Release(mode, count);
-  if (it->second.IsFree()) {
-    trans_locks.erase(it);
-  }
-}
-
 }  // namespace dfly

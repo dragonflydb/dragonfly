@@ -125,6 +125,15 @@ void BaseFamilyTest::SetUpTestSuite() {
 
   absl::SetFlag(&FLAGS_dbfilename, "");
   init_zmalloc_threadlocal(mi_heap_get_backing());
+
+  // TODO: go over all env variables starting with FLAGS_ and make sure they are in the below list.
+  static constexpr const char* kEnvFlags[] = {"cluster_mode", "lock_on_hashtags"};
+  for (string_view flag : kEnvFlags) {
+    const char* value = getenv(absl::StrCat("FLAGS_", flag).data());
+    if (value != nullptr) {
+      SetTestFlag(flag, value);
+    }
+  }
 }
 
 void BaseFamilyTest::SetUp() {

@@ -96,6 +96,13 @@ jobs:
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
+
+          echo "Running tests with --cluster_mode=emulated"
+          FLAGS_cluster_mode=emulated ctest -V -L DFLY
+
+          echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
+          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ctest -V -L DFLY
+
           ./dragonfly_test  --gtest_repeat=10
           ./multi_test --multi_exec_mode=1 --gtest_repeat=10
           ./multi_test --multi_exec_mode=3 --gtest_repeat=10
