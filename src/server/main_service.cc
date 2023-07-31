@@ -631,7 +631,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
-  server_family_.Init(acceptor, std::move(listeners), &cluster_family_);
+  server_family_.Init(acceptor, std::move(listeners));
 
   ChannelStore* cs = new ChannelStore{};
   pp_.Await(
@@ -849,7 +849,7 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
     }
   }
 
-  if (ClusterConfig::IsClusterEnabled() && !CheckKeysOwnership(cid, args.subspan(1), dfly_cntx)) {
+  if (ClusterConfig::IsEnabled() && !CheckKeysOwnership(cid, args.subspan(1), dfly_cntx)) {
     return false;
   }
 

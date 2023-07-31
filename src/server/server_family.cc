@@ -526,13 +526,11 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
-void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
-                        ClusterFamily* cluster_family) {
+void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
-  cluster_family_ = cluster_family;
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1863,7 +1861,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");
-    append("cluster_enabled", cluster_family_->IsEnabledOrEmulated());
+    append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
 
   (*cntx)->SendBulkString(info);

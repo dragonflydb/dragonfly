@@ -55,7 +55,7 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   if (pv.ObjType() == OBJ_STRING)
     stats.strval_memory_usage -= value_heap_size;
 
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabled()) {
     string tmp;
     string_view key = del_it->first.GetSlice(&tmp);
     SlotId sid = ClusterConfig::KeySlot(key);
@@ -340,7 +340,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
   events_.hits++;
   db.top_keys.Touch(key);
 
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabled()) {
     db.slots_stats[ClusterConfig::KeySlot(key)].total_reads += 1;
   }
 
@@ -438,7 +438,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
-    if (ClusterConfig::IsClusterEnabled()) {
+    if (ClusterConfig::IsEnabled()) {
       SlotId sid = ClusterConfig::KeySlot(key);
       db.slots_stats[sid].key_count += 1;
     }
@@ -877,7 +877,7 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
 
   ++events_.update;
 
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabled()) {
     db.slots_stats[ClusterConfig::KeySlot(key)].total_writes += 1;
   }
 }
