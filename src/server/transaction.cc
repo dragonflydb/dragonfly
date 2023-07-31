@@ -422,7 +422,7 @@ string Transaction::DebugId() const {
   return StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
 }
 
-// Runs in the dbslice thread. Returns true if transaction needs to be kept in the queue.
+// Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
 bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(run_count_.load(memory_order_relaxed), 0u);
   CHECK(cb_ptr_) << DebugId();
@@ -445,7 +445,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
 
   bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
-  bool concluding_not_multi = is_concluding && !IsAtomicMulti();
+  bool tx_stop_runnig = is_concluding && !IsAtomicMulti();
 
   IntentLock::Mode mode = Mode();
 
@@ -497,7 +497,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   // In case of multi transaction is_concluding represents only if the current running op is
   // concluding, therefore we remove from txq in unlock multi function which is when the transaction
   // is concluding.
-  bool remove_txq = concluding_not_multi || !txq_ooo;
+  bool remove_txq = tx_stop_runnig || !txq_ooo;
   if (remove_txq && sd.pq_pos != TxQueue::kEnd) {
     VLOG(2) << "Remove from txq" << this->DebugId();
     shard->txq()->Remove(sd.pq_pos);
@@ -506,7 +506,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // If it's a final hop we should release the locks.
-  if (concluding_not_multi) {
+  if (tx_stop_runnig) {
     bool became_suspended = sd.local_mask & SUSPENDED_Q;
     KeyLockArgs largs;
 
@@ -551,7 +551,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   CHECK_GE(DecreaseRunCnt(), 1u);
   // From this point on we can not access 'this'.
 
-  return !concluding_not_multi;  // keep
+  return !tx_stop_runnig;
 }
 
 void Transaction::ScheduleInternal() {
