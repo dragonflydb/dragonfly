@@ -726,7 +726,6 @@ TEST_F(MultiTest, TestSquashing) {
   f1.Join();
 }
 
-#if 0
 TEST_F(MultiTest, MultiLeavesTxQueue) {
   if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
     GTEST_SKIP() << "Skipped MultiLeavesTxQueue test because multi_exec_mode is non atomic";
@@ -806,7 +805,6 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
   fb2.Join();
   ASSERT_TRUE(success);
 }
-#endif
 
 class MultiEvalTest : public BaseFamilyTest {
  protected:

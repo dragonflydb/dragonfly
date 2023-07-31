@@ -170,7 +170,7 @@ class Transaction {
   // Called by engine shard to execute a transaction hop.
   // txq_ooo is set to true if the transaction is running out of order
   // not as the tx queue head.
-  // Returns true if transaction should be kept in the queue.
+  // Returns true if the transaction continues running in the thread
   bool RunInShard(EngineShard* shard, bool txq_ooo);
 
   // Registers transaction into watched queue and blocks until a) either notification is received.

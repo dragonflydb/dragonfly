@@ -422,7 +422,7 @@ string Transaction::DebugId() const {
   return StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
 }
 
-// Runs in the dbslice thread. Returns true if transaction needs to be kept in the queue.
+// Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
 bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(run_count_.load(memory_order_relaxed), 0u);
   CHECK(cb_ptr_) << DebugId();
@@ -444,13 +444,9 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
 
-  // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
-  // Therefore we differentiate between concluding, which says that this specific
-  // runnable concludes current operation, and should_release which tells
-  // whether we should unlock the keys. should_release is false for multi and
-  // equal to concluding otherwise.
   bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
-  bool should_release = is_concluding && !IsAtomicMulti();
+  bool tx_stop_runnig = is_concluding && !IsAtomicMulti();
+
   IntentLock::Mode mode = Mode();
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
@@ -498,14 +494,19 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
   // and successive hops are run by continuation_trans_ in engine shard.
   // Otherwise we can remove ourselves only when we're concluding (so no more hops will follow).
-  bool remove_txq = is_concluding || !txq_ooo;
+  // In case of multi transaction is_concluding represents only if the current running op is
+  // concluding, therefore we remove from txq in unlock multi function which is when the transaction
+  // is concluding.
+  bool remove_txq = tx_stop_runnig || !txq_ooo;
   if (remove_txq && sd.pq_pos != TxQueue::kEnd) {
+    VLOG(2) << "Remove from txq" << this->DebugId();
     shard->txq()->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
   }
 
+  // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // If it's a final hop we should release the locks.
-  if (should_release) {
+  if (tx_stop_runnig) {
     bool became_suspended = sd.local_mask & SUSPENDED_Q;
     KeyLockArgs largs;
 
@@ -550,7 +551,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   CHECK_GE(DecreaseRunCnt(), 1u);
   // From this point on we can not access 'this'.
 
-  return !should_release;  // keep
+  return !tx_stop_runnig;
 }
 
 void Transaction::ScheduleInternal() {
