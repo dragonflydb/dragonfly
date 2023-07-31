@@ -661,8 +661,6 @@ TEST_F(MultiTest, ContendedList) {
     return;
   }
 
-  GTEST_SKIP() << "Test fails, we need to check why";
-
   constexpr int listSize = 50;
   constexpr int stepSize = 5;
 
@@ -690,11 +688,12 @@ TEST_F(MultiTest, ContendedList) {
   f2.Join();
 
   for (int i = 0; i < listSize; i++) {
-    EXPECT_EQ(Run({"lpop", "l1"}), "a");
-    EXPECT_EQ(Run({"lpop", "l2"}), "b");
+    EXPECT_EQ(Run({"lpop", "l1-out"}), "a");
+    EXPECT_EQ(Run({"lpop", "l2-out"}), "b");
   }
-  EXPECT_EQ(Run({"llen", "chan-1"}), "0");
-  EXPECT_EQ(Run({"llen", "chan-2"}), "0");
+
+  EXPECT_THAT(Run({"llen", "chan-1"}), IntArg(0));
+  EXPECT_THAT(Run({"llen", "chan-2"}), IntArg(0));
 }
 
 // Test that squashing makes single-key ops atomic withing a non-atomic tx
