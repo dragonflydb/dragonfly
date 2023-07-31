@@ -1274,10 +1274,11 @@ async def test_no_tls_on_admin_port(
         admin_port=ADMIN_PORT,
         **with_tls_server_args,
         port=BASE_PORT,
+        requirepass="XXX",
         proactor_threads=t_master,
     )
     master.start()
-    c_master = aioredis.Redis(port=master.admin_port)
+    c_master = aioredis.Redis(port=master.admin_port, password="XXX")
     await c_master.execute_command("DEBUG POPULATE 100")
     db_size = await c_master.execute_command("DBSIZE")
     assert 100 == db_size
@@ -1289,9 +1290,11 @@ async def test_no_tls_on_admin_port(
         **with_tls_server_args,
         port=BASE_PORT + 1,
         proactor_threads=t_replica,
+        requirepass="XXX",
+        masterauth="XXX",
     )
     replica.start()
-    c_replica = aioredis.Redis(port=replica.admin_port)
+    c_replica = aioredis.Redis(port=replica.admin_port, password="XXX")
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
     assert b"OK" == res
     await check_all_replicas_finished([c_replica], c_master)
