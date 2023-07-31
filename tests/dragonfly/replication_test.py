@@ -1024,15 +1024,16 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     c_replica = aioredis.Redis(port=replica.port)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
-    async def get_sync_mode(c_replica):
-        result = await c_replica.execute_command("role")
-        return result[3]
+    async def get_sync_mode(c_master):
+        result = await c_master.execute_command("role")
+        # result[1]->replicas info [0]->first replica info [2]->replication state
+        return result[1][0][2]
 
-    async def is_full_sync_mode(c_replica):
-        return await get_sync_mode(c_replica) == b"full_sync"
+    async def is_full_sync_mode(c_master):
+        return await get_sync_mode(c_master) == b"full_sync"
 
     # Wait for full sync to start
-    while not await is_full_sync_mode(c_replica):
+    while not await is_full_sync_mode(c_master):
         await asyncio.sleep(0.0)
 
     syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
@@ -1040,7 +1041,7 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     # Issue FLUSHALL and push some more entries
     await c_master.execute_command("FLUSHALL")
 
-    if not await is_full_sync_mode(c_replica):
+    if not await is_full_sync_mode(c_master):
         logging.error("!!! Full sync finished too fast. Adjust test parameters !!!")
         return
 
@@ -1273,10 +1274,11 @@ async def test_no_tls_on_admin_port(
         admin_port=ADMIN_PORT,
         **with_tls_server_args,
         port=BASE_PORT,
+        requirepass="XXX",
         proactor_threads=t_master,
     )
     master.start()
-    c_master = aioredis.Redis(port=master.admin_port)
+    c_master = aioredis.Redis(port=master.admin_port, password="XXX")
     await c_master.execute_command("DEBUG POPULATE 100")
     db_size = await c_master.execute_command("DBSIZE")
     assert 100 == db_size
@@ -1288,9 +1290,11 @@ async def test_no_tls_on_admin_port(
         **with_tls_server_args,
         port=BASE_PORT + 1,
         proactor_threads=t_replica,
+        requirepass="XXX",
+        masterauth="XXX",
     )
     replica.start()
-    c_replica = aioredis.Redis(port=replica.admin_port)
+    c_replica = aioredis.Redis(port=replica.admin_port, password="XXX")
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
     assert b"OK" == res
     await check_all_replicas_finished([c_replica], c_master)

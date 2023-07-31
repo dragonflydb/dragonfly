@@ -92,8 +92,7 @@ class ServerFamily {
   explicit ServerFamily(Service* service);
   ~ServerFamily();
 
-  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
-            ClusterFamily* cluster_family);
+  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
   void Register(CommandRegistry* registry);
   void Shutdown();
 
@@ -214,7 +213,6 @@ class ServerFamily {
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
-  ClusterFamily* cluster_family_ = nullptr;  // Not owned
 
   std::string master_id_;
 

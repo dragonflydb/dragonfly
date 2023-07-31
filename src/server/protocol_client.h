@@ -32,6 +32,8 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 
+void ValidateClientTlsFlags();
+
 // A helper class for implementing a Redis client that talks to a redis server.
 // This class should be inherited from.
 class ProtocolClient {
@@ -130,12 +132,14 @@ class ProtocolClient {
   std::string last_resp_;
 
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
+
 #ifdef DFLY_USE_SSL
-  void ValidateTlsFlags() const;
 
   void MaybeInitSslCtx();
 
   SSL_CTX* ssl_ctx_{nullptr};
+#else
+  void* ssl_ctx_{nullptr};
 #endif
 };
 

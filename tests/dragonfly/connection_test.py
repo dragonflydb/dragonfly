@@ -439,17 +439,21 @@ async def test_large_cmd(async_client: aioredis.Redis):
 @pytest.mark.asyncio
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_factory):
     server = df_local_factory.create(
-        no_tls_on_admin_port="true", admin_port=1111, port=1211, **with_tls_server_args
+        no_tls_on_admin_port="true",
+        admin_port=1111,
+        port=1211,
+        requirepass="XXX",
+        **with_tls_server_args,
     )
     server.start()
 
-    client = aioredis.Redis(port=server.port)
+    client = aioredis.Redis(port=server.port, password="XXX")
     try:
         await client.execute_command("DBSIZE")
     except redis_conn_error:
         pass
 
-    client = aioredis.Redis(port=server.admin_port)
+    client = aioredis.Redis(port=server.admin_port, password="XXX")
     assert await client.dbsize() == 0
     await client.close()
 

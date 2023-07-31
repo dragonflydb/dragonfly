@@ -46,13 +46,10 @@ class ClusterConfig {
 
   static SlotId KeySlot(std::string_view key);
 
-  static void EnableCluster() {
-    cluster_enabled = true;
-  }
-
-  static bool IsClusterEnabled() {
-    return cluster_enabled;
-  }
+  static void Initialize();
+  static bool IsEnabled();
+  static bool IsEmulated();
+  static bool IsEnabledOrEmulated();
 
   // If the key contains the {...} pattern, return only the part between { and }
   static std::string_view KeyTag(std::string_view key);
@@ -81,8 +78,6 @@ class ClusterConfig {
     const ClusterShard* shard = nullptr;
     bool owned_by_me = false;
   };
-
-  static bool cluster_enabled;
 
   ClusterConfig() = default;
 

@@ -646,11 +646,59 @@ TEST_F(ZSetFamilyTest, ZDiff) {
 }
 
 TEST_F(ZSetFamilyTest, GeoAdd) {
-  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo"}));
-  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "15.087269", "37.502669", "Catania"}));
-  EXPECT_EQ(0, CheckedInt({"geoadd", "Sicily", "15.087269", "37.502669", "Catania"}));
+  EXPECT_EQ(2, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo", "15.087269",
+                           "37.502669", "Catania"}));
+  EXPECT_EQ(0, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo", "15.087269",
+                           "37.502669", "Catania"}));
   auto resp = Run({"geohash", "Sicily", "Palermo", "Catania"});
   EXPECT_THAT(resp, RespArray(ElementsAre("sqc8b49rny0", "sqdtr74hyu0")));
+}
+
+TEST_F(ZSetFamilyTest, GeoAddOptions) {
+  EXPECT_EQ(2, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo", "15.087269",
+                           "37.502669", "Catania"}));
+
+  // add 1 + update 1 + XX
+  EXPECT_EQ(0, CheckedInt({"geoadd", "Sicily", "XX", "15.361389", "38.115556", "Palermo",
+                           "15.554167", "38.193611", "Messina"}));
+  auto resp = Run({"geopos", "Sicily", "Palermo", "Messina"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre(RespArray(ElementsAre("15.361389219760895", "38.1155563954963")),
+                                  ArgType(RespExpr::NIL))));
+
+  // add 1 + update 1 + NX
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "NX", "18.361389", "38.115556", "Palermo", "15.2875",
+                           "37.069167", "Syracuse"}));
+  resp = Run({"geopos", "Sicily", "Palermo", "Syracuse"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        RespArray(ElementsAre("15.361389219760895", "38.1155563954963")),
+                        RespArray(ElementsAre("15.287499725818634", "37.06916773705567")))));
+
+  // add 1 + update 1 CH
+  EXPECT_EQ(2, CheckedInt({"geoadd", "Sicily", "CH", "18.361389", "38.115556", "Palermo",
+                           "12.434167", "37.798056", "Marsala"}));
+  resp = Run({"geopos", "Sicily", "Palermo", "Marsala"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        RespArray(ElementsAre("18.361386358737946", "38.1155563954963")),
+                        RespArray(ElementsAre("12.43416577577591", "37.7980572230775")))));
+
+  // update 1 + CH + XX
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "CH", "XX", "10.361389", "38.115556", "Palermo"}));
+  resp = Run({"geopos", "Sicily", "Palermo"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("10.361386835575104", "38.1155563954963")));
+
+  // add 1 + CH + NX
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "CH", "NX", "14.25", "37.066667", "Gela"}));
+  resp = Run({"geopos", "Sicily", "Gela"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("14.249999821186066", "37.06666596727141")));
+
+  // add 1 + XX + NX
+  resp = Run({"geoadd", "Sicily", "XX", "NX", "14.75", "36.933333", "Ragusa"});
+  EXPECT_THAT(resp, ErrArg("XX and NX options at the same time are not compatible"));
+
+  // incorrect number of args
+  resp = Run({"geoadd", "Sicily", "14.75", "36.933333", "Ragusa", "10.23"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(ZSetFamilyTest, GeoPos) {
@@ -664,6 +712,25 @@ TEST_F(ZSetFamilyTest, GeoPos) {
 TEST_F(ZSetFamilyTest, GeoPosWrongType) {
   Run({"set", "x", "value"});
   EXPECT_THAT(Run({"geopos", "x", "Sicily", "Palermo"}), ErrArg("WRONGTYPE"));
+}
+
+TEST_F(ZSetFamilyTest, GeoDist) {
+  EXPECT_EQ(2, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo", "15.087269",
+                           "37.502669", "Catania"}));
+  auto resp = Run({"geodist", "Sicily", "Palermo", "Catania"});
+  EXPECT_EQ(resp, "166274.15156960033");
+
+  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "km"});
+  EXPECT_EQ(resp, "166.27415156960032");
+
+  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "MI"});
+  EXPECT_EQ(resp, "103.31822459492733");
+
+  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "FT"});
+  EXPECT_EQ(resp, "545518.8699790037");
+
+  resp = Run({"geodist", "Sicily", "Foo", "Bar"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 }  // namespace dfly

@@ -15,6 +15,7 @@ extern "C" {
 #include "core/json_object.h"
 #include "core/mpsc_intrusive_queue.h"
 #include "io/io.h"
+#include "redis/rdb.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 
@@ -125,7 +126,7 @@ class RdbLoaderBase {
 
   ::io::Result<OpaqueObj> ReadSet();
   ::io::Result<OpaqueObj> ReadIntSet();
-  ::io::Result<OpaqueObj> ReadHZiplist();
+  ::io::Result<OpaqueObj> ReadGeneric(int rdbtype);
   ::io::Result<OpaqueObj> ReadHMap();
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSetZL();
@@ -155,6 +156,7 @@ class RdbLoaderBase {
   std::unique_ptr<DecompressImpl> decompress_impl_;
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
+  int rdb_version_ = RDB_VERSION;
 };
 
 class RdbLoader : protected RdbLoaderBase {
