@@ -517,10 +517,6 @@ SvArray ToSvArray(const absl::flat_hash_set<std::string_view>& set) {
   return result;
 }
 
-OpStatus NoOpCb(Transaction* t, EngineShard* shard) {
-  return OpStatus::OK;
-};
-
 // if overwrite is true then OpAdd writes vals into the key and discards its previous value.
 OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice vals, bool overwrite,
                          bool journal_update) {
@@ -775,7 +771,7 @@ OpResult<unsigned> Mover::Commit(Transaction* t) {
   }
 
   if (noop) {
-    t->Execute(&NoOpCb, true);
+    t->Conclude();
   } else {
     t->Execute([this](Transaction* t, EngineShard* es) { return this->OpMutate(t, es); }, true);
   }
@@ -1284,7 +1280,7 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(diff_cb), false);
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
-    cntx->transaction->Execute(NoOpCb, true);
+    cntx->transaction->Conclude();
     (*cntx)->SendError(rsv.status());
     return;
   }
@@ -1364,7 +1360,7 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
   if (!result) {
-    cntx->transaction->Execute(NoOpCb, true);
+    cntx->transaction->Conclude();
     (*cntx)->SendError(result.status());
     return;
   }
@@ -1426,7 +1422,7 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
 
   ResultSetView unionset = UnionResultVec(result_set);
   if (!unionset) {
-    cntx->transaction->Execute(NoOpCb, true);
+    cntx->transaction->Conclude();
     (*cntx)->SendError(unionset.status());
     return;
   }
