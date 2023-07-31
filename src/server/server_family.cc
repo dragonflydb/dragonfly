@@ -2052,11 +2052,14 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   if (replica_ == new_replica) {
     if (ec) {
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      replica_->Stop();
       replica_.reset();
     }
     bool is_master = !replica_;
     pool.AwaitFiberOnAll(
         [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+  } else {
+    new_replica->Stop();
   }
 }
 

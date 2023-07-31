@@ -195,8 +195,11 @@ ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::mov
 }
 
 ProtocolClient::~ProtocolClient() {
+  // FIXME: We should close the socket explictly outside of the destructor. This currently
+  // breaks test_cancel_replication_immediately.
   if (sock_) {
-    auto ec = sock_->Close();
+    std::error_code ec;
+    sock_->proactor()->Await([this, &ec]() { ec = sock_->Close(); });
     LOG_IF(ERROR, ec) << "Error closing socket " << ec;
   }
 #ifdef DFLY_USE_SSL
@@ -229,14 +232,19 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
     if (!cntx->IsCancelled()) {
+      if (sock_) {
+        LOG_IF(WARNING, sock_->Close()) << "Error closing socket";
+        sock_.reset(nullptr);
+      }
+
       if (ssl_ctx_) {
         auto tls_sock = std::make_unique<tls::TlsSocket>(mythread->CreateSocket());
         tls_sock->InitSSL(ssl_ctx_);
-        sock_.reset(tls_sock.release());
+        sock_ = std::move(tls_sock);
       } else {
         sock_.reset(mythread->CreateSocket());
       }
-      serializer_.reset(new ReqSerializer(sock_.get()));
+      serializer_ = std::make_unique<ReqSerializer>(sock_.get());
     } else {
       return cntx->GetError();
     }
