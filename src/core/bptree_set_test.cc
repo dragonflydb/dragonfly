@@ -26,19 +26,33 @@ class BPTreeSetTest : public ::testing::Test {
 
   bool Validate();
 
-  static bool Validate(Node* node, uint64_t ubound);
+  static bool Validate(const Node* node, uint64_t ubound);
 
   MiMemoryResource mi_alloc_;
   BPTree<uint64_t> bptree_;
 };
 
-bool BPTreeSetTest::Validate(Node* node, uint64_t ubound) {
-  if (node->NumItems() <= 1)
-    return false;
-
+bool BPTreeSetTest::Validate(const Node* node, uint64_t ubound) {
   for (unsigned i = 1; i < node->NumItems(); ++i) {
     if (node->Key(i - 1) >= node->Key(i))
       return false;
+  }
+
+  if (!node->IsLeaf()) {
+    unsigned mask = 0;
+    uint32_t subtree_cnt = node->NumItems();
+    for (unsigned i = 0; i <= node->NumItems(); ++i) {
+      mask |= (1 << node->Child(i)->IsLeaf());
+      DCHECK_EQ(node->Child(i)->DEBUG_TreeCount(), node->Child(i)->TreeCount());
+      subtree_cnt += node->Child(i)->TreeCount();
+    }
+    if (mask == 3)
+      return false;
+
+    if (subtree_cnt != node->TreeCount()) {
+      LOG(ERROR) << "Expected " << subtree_cnt << " got " << node->TreeCount();
+      return false;
+    }
   }
 
   return node->Key(node->NumItems() - 1) < ubound;
@@ -49,6 +63,7 @@ bool BPTreeSetTest::Validate() {
   if (!root)
     return true;
 
+  // node, upper bound
   std::vector<pair<Node*, uint64_t>> stack;
 
   stack.emplace_back(root, UINT64_MAX);
@@ -75,7 +90,10 @@ TEST_F(BPTreeSetTest, BPtreeInsert) {
   mt19937 generator(1);
 
   for (unsigned i = 1; i < 7000; ++i) {
-    bptree_.Insert(i);
+    ASSERT_TRUE(bptree_.Insert(i));
+    ASSERT_EQ(i, bptree_.Size());
+    ASSERT_EQ(i - 1, bptree_.GetRank(i));
+    // ASSERT_TRUE(Validate()) << i;
   }
   ASSERT_TRUE(Validate());
 
@@ -92,11 +110,12 @@ TEST_F(BPTreeSetTest, BPtreeInsert) {
   uniform_int_distribution<uint64_t> dist(0, 100000);
   for (unsigned i = 0; i < 20000; ++i) {
     bptree_.Insert(dist(generator));
+    // ASSERT_TRUE(Validate()) << i;
   }
-  LOG(INFO) << bptree_.Height() << " " << bptree_.Size();
-
   ASSERT_TRUE(Validate());
   ASSERT_GT(mi_alloc_.used(), 10000u);
+  LOG(INFO) << bptree_.Height() << " " << bptree_.Size();
+
   bptree_.Clear();
   ASSERT_EQ(mi_alloc_.used(), 0u);
 
@@ -104,6 +123,9 @@ TEST_F(BPTreeSetTest, BPtreeInsert) {
     bptree_.Insert(i);
   }
   ASSERT_TRUE(Validate());
+  for (unsigned i = 2; i <= 20000; ++i) {
+    ASSERT_EQ(i - 2, bptree_.GetRank(i));
+  }
 
   LOG(INFO) << bptree_.Height() << " " << bptree_.Size();
   ASSERT_GT(mi_alloc_.used(), 20000 * 8);

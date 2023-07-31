@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "base/pmr/memory_resource.h"
 #include "core/detail/bptree_internal.h"
 
@@ -45,6 +47,8 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
 
   bool Delete(KeyT item);
 
+  std::optional<uint32_t> GetRank(KeyT item) const;
+
   size_t Height() const {
     return height_;
   }
@@ -69,9 +73,13 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
 
   void DestroyNode(BPTreeNode* node);
 
-  // Unloads the full leaf to allow insertion of additional item.
-  // The leaf should be the last one in the path.
-  std::pair<BPTreeNode*, KeyT> InsertFullLeaf(KeyT item, const BPTreePath& path);
+  void InsertToFullLeaf(KeyT item, const BPTreePath& path);
+
+  // Returns true if insertion was handled by rebalancing.
+  bool RebalanceLeafAndInsert(const BPTreePath& path, unsigned parent_depth, KeyT item,
+                              unsigned insert_pos);
+
+  void IncreaseSubtreeCounts(const BPTreePath& path, unsigned depth, int32_t delta);
 
   // Charts the path towards key. Returns true if key is found.
   // In that case path->Last().first->Key(path->Last().second) == key.
@@ -148,20 +156,12 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Insert(KeyT item)
   assert(leaf->IsLeaf());
 
   if (leaf->NumItems() == detail::BPNodeLayout<T>::kMaxLeafKeys) {
-    unsigned root_free [[maybe_unused]] = root_->AvailableSlotCount();
-    std::pair<BPTreeNode*, KeyT> res = InsertFullLeaf(item, path);
-    if (res.first) {  // we propagated the new node all the way to the root.
-      assert(root_free == 0u);
-      BPTreeNode* new_root = CreateNode(false);
-      new_root->InitSingle(res.second);
-      new_root->SetChild(0, root_);
-      new_root->SetChild(1, res.first);
-      root_ = new_root;
-      height_++;
-    }
+    InsertToFullLeaf(item, path);
   } else {
     unsigned pos = path.Last().second;
     leaf->LeafInsert(pos, item);
+    if (path.Depth() > 1)
+      IncreaseSubtreeCounts(path, path.Depth() - 2, 1);
   }
   count_++;
   return true;
@@ -234,6 +234,33 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Delete(KeyT item)
 }
 
 template <typename T, typename Policy>
+std::optional<uint32_t> BPTree<T, Policy>::GetRank(KeyT item) const {
+  if (!root_)
+    return std::nullopt;
+
+  BPTreePath path;
+  bool found = Locate(item, &path);
+  if (!found)
+    return std::nullopt;
+
+  uint32_t rank = 0;
+  unsigned bound = path.Depth();
+
+  for (unsigned i = 0; i < bound; ++i) {
+    BPTreeNode* node = path.Node(i);
+    unsigned pos = path.Position(i);
+    if (!node->IsLeaf()) {
+      unsigned delta = (i == bound - 1) ? 1 : 0;
+      for (unsigned j = 0; j < pos + delta; ++j) {
+        rank += node->Child(j)->TreeCount();
+      }
+    }
+    rank += pos;
+  }
+  return rank;
+}
+
+template <typename T, typename Policy>
 bool BPTree<T, Policy>::Locate(KeyT key, BPTreePath* path) const {
   assert(root_);
   BPTreeNode* node = root_;
@@ -255,8 +282,7 @@ bool BPTree<T, Policy>::Locate(KeyT key, BPTreePath* path) const {
 }
 
 template <typename T, typename Policy>
-auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
-    -> std::pair<BPTreeNode*, KeyT> {
+void BPTree<T, Policy>::InsertToFullLeaf(KeyT item, const BPTreePath& path) {
   using Layout = detail::BPNodeLayout<T>;
   assert(path.Depth() > 0u);
 
@@ -265,20 +291,14 @@ auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
 
   unsigned insert_pos = path.Last().second;
   unsigned level = path.Depth() - 1;
-  if (level > 0) {
-    BPTreeNode* parent = path.Node(level - 1);
-    unsigned pos = path.Position(level - 1);
-    assert(parent->Child(pos) == node);
-
-    std::pair<BPTreeNode*, unsigned> rebalance_res = parent->RebalanceChild(pos, insert_pos);
-    if (rebalance_res.first) {
-      rebalance_res.first->LeafInsert(rebalance_res.second, item);
-      return {nullptr, 0};
-    }
+  if (level > 0 && RebalanceLeafAndInsert(path, level - 1, item, insert_pos)) {
+    // Update the tree count of the ascendants.
+    IncreaseSubtreeCounts(path, level - 1, 1);
+    return;
   }
 
   KeyT median;
-  BPTreeNode* right = CreateNode(node->IsLeaf());
+  BPTreeNode* right = CreateNode(true);
   node->Split(right, &median);
 
   assert(node->NumItems() < Layout::kMaxLeafKeys);
@@ -291,47 +311,112 @@ auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
     right->LeafInsert(insert_pos - node->NumItems() - 1, item);
   }
 
-  // we now must add right to the paren if it exists.
-  while (level-- > 0) {
-    node = path.Node(level);            // level up, now node is parent.
-    insert_pos = path.Position(level);  // insert_pos is position of node in parent.
+  // we must add the newly created `right` to the parent and update its tree count.
+  while (level > 0) {
+    --level;
+    // level up, now node is parent.
+    node = path.Node(level);
+    unsigned pos = path.Position(level);  // position of the child node in parent.
 
-    assert(!node->IsLeaf() && insert_pos <= node->NumItems());
+    assert(!node->IsLeaf() && pos <= node->NumItems());
+    assert(right);
 
-    if (node->NumItems() == Layout::kMaxInnerKeys) {
-      if (level > 0) {
-        BPTreeNode* parent = path.Node(level - 1);
-        unsigned node_pos = path.Position(level - 1);
-        assert(parent->Child(node_pos) == node);
-        std::pair<BPTreeNode*, unsigned> rebalance_res =
-            parent->RebalanceChild(node_pos, insert_pos);
-        if (rebalance_res.first) {
-          rebalance_res.first->InnerInsert(rebalance_res.second, median, right);
-          return {nullptr, 0};
-        }
-      }
-
-      KeyT parent_median;
-      BPTreeNode* parent_right = CreateNode(false);
-      node->Split(parent_right, &parent_median);
-      assert(node->NumItems() < Layout::kMaxInnerKeys);
-
-      if (insert_pos <= node->NumItems()) {
-        assert(median < parent_median);
-        node->InnerInsert(insert_pos, median, right);
-      } else {
-        assert(median > parent_median);
-        parent_right->InnerInsert(insert_pos - node->NumItems() - 1, median, right);
-      }
-      right = parent_right;
-      median = parent_median;
-    } else {
-      node->InnerInsert(insert_pos, median, right);
-      return {nullptr, 0};
+    // Terminal case: Node is not full so we can just add `right` to it.
+    if (node->NumItems() < Layout::kMaxInnerKeys) {
+      // We do not update the subtree count of the node here because the surpus of another item
+      // resulted with the additional key in this node.
+      node->InnerInsert(pos, median, right);
+      node->IncreaseTreeCount(1);
+      right = nullptr;
+      break;
     }
+
+    // We need to insert right into a node as position pos. Node is full so we must handle it
+    // either via rebalancing "node" or via its splitting. Rebalancing is a better case, we try
+    // it first.
+    if (level > 0) {
+      // see if we can rebalance node (right's parent) via node's parent.
+      BPTreeNode* parent = path.Node(level - 1);
+      unsigned parent_pos = path.Position(level - 1);
+      assert(parent->Child(parent_pos) == node);
+
+      auto [new_node, inner_pos] = parent->RebalanceChild(parent_pos, pos);
+      if (new_node) {
+        // we rebalanced inner_full so we can insert (median, right) and stop propagating.
+        new_node->InnerInsert(inner_pos, median, right);
+
+        if (new_node != node) {
+          // Fix subtree counts if right was migrated to the sibling.
+          node->IncreaseTreeCount(-right->TreeCount());
+          new_node->IncreaseTreeCount(right->TreeCount() + 1);
+        } else {
+          node->IncreaseTreeCount(1);
+        }
+        right = nullptr;
+        break;
+      }
+    }
+
+    // node is not rebalanced, so we need to split it.
+    BPTreeNode* next_right = CreateNode(false);
+    KeyT next_median;
+    node->Split(next_right, &next_median);
+    assert(node->NumItems() < Layout::kMaxInnerKeys);
+
+    if (pos <= node->NumItems()) {
+      assert(median < next_median);
+      node->InnerInsert(pos, median, right);
+      node->IncreaseTreeCount(1);
+    } else {
+      assert(median > next_median);
+
+      next_right->InnerInsert(pos - node->NumItems() - 1, median, right);
+
+      // Fix tree counts.
+      node->IncreaseTreeCount(-right->TreeCount());
+      next_right->IncreaseTreeCount(right->TreeCount() + 1);
+    }
+    right = next_right;
+    median = next_median;
   }
 
-  return {right, median};
+  if (right) {
+    assert(level == 0);
+    BPTreeNode* new_root = CreateNode(false);
+    new_root->InitSingle(median);
+    new_root->SetChild(0, root_);
+    new_root->SetChild(1, right);
+    new_root->SetTreeCount(root_->TreeCount() + right->TreeCount() + 1);
+    root_ = new_root;
+    height_++;
+  } else {
+    if (level > 0) {
+      IncreaseSubtreeCounts(path, level - 1, 1);
+    }
+  }
+}
+
+template <typename T, typename Policy>
+bool BPTree<T, Policy>::RebalanceLeafAndInsert(const BPTreePath& path, unsigned parent_depth,
+                                               KeyT item, unsigned insert_pos) {
+  BPTreeNode* parent = path.Node(parent_depth);
+  unsigned pos = path.Position(parent_depth);
+
+  std::pair<BPTreeNode*, unsigned> rebalance_res = parent->RebalanceChild(pos, insert_pos);
+  if (rebalance_res.first) {
+    rebalance_res.first->LeafInsert(rebalance_res.second, item);
+    return true;
+  }
+  return false;
+}
+
+template <typename T, typename Policy>
+void BPTree<T, Policy>::IncreaseSubtreeCounts(const BPTreePath& path, unsigned depth,
+                                              int32_t delta) {
+  for (int i = depth; i >= 0; --i) {
+    BPTreeNode* node = path.Node(i);
+    node->IncreaseTreeCount(delta);
+  }
 }
 
 template <typename T, typename Policy>
