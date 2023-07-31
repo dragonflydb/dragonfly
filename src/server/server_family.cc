@@ -596,6 +596,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     service_.proactor_pool().GetNextProactor()->Await(
         [this, &flag]() { this->Replicate(flag.host, flag.port, nullptr); });
+    return;  // DONT load any snapshots
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
