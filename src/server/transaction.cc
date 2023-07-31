@@ -844,6 +844,8 @@ void Transaction::ExecuteAsync() {
   // IsArmedInShard in other threads.
   run_count_.store(unique_shard_cnt_, memory_order_release);
 
+  // Execute inline when we can. We can't use coordinator_index_ because we may offload this
+  // function to run in a different thread.
   EngineShard* shard = EngineShard::tlocal();
   if (unique_shard_cnt_ == 1 && shard != nullptr && shard->shard_id() == unique_shard_id_) {
     DVLOG(1) << "Short-circuit ExecuteAsync " << DebugId();
