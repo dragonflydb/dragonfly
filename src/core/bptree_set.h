@@ -43,6 +43,8 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
 
   bool Contains(KeyT item) const;
 
+  bool Delete(KeyT item);
+
   size_t Height() const {
     return height_;
   }
@@ -162,6 +164,72 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Insert(KeyT item)
     leaf->LeafInsert(pos, item);
   }
   count_++;
+  return true;
+}
+
+template <typename T, typename Policy> bool BPTree<T, Policy>::Delete(KeyT item) {
+  if (!root_)
+    return false;
+
+  BPTreePath path;
+  bool found = Locate(item, &path);
+  if (!found)
+    return false;
+
+  BPTreeNode* node = path.Last().first;
+  unsigned key_pos = path.Last().second;
+
+  // Remove the key from the node.
+  if (node->IsLeaf()) {
+    node->ShiftLeft(key_pos);  // shift left everything after key_pos.
+  } else {
+    // We can not remove the item from the inner node because it also serves as a separator.
+    // Therefore, we swap it the rightmost key in the left subtree and pop from there instead.
+    path.DigRight();
+
+    BPTreeNode* leaf = path.Last().first;
+    // set a new separator.
+    node->SetKey(key_pos, leaf->Key(leaf->NumItems() - 1));
+    leaf->LeafEraseRight();  // pop the rightmost key from the leaf.
+    node = leaf;
+  }
+  count_--;
+
+  // go up the tree and rebalance if number of items in the node is less
+  // than low limit. We either merge or rebalance nodes.
+  while (node->NumItems() < node->MinItems()) {
+    if (node == root_) {
+      if (node->NumItems() == 0) {
+        // terminal case, we reached the root - and it has either a single child (0 delimiters)
+        // or no children at all (leaf). The former is more common case: the tree can only shrink
+        // through the root.
+        if (node->IsLeaf()) {
+          assert(count_ == 0u);
+          root_ = nullptr;
+        } else {
+          root_ = root_->Child(0);
+        }
+        --height_;
+        DestroyNode(node);
+      }
+      return true;
+    }
+
+    // The node has a parent. Pop the node from the path and try rebalance it via its parent.
+    assert(path.Depth() > 0u);
+    path.Pop();
+
+    BPTreeNode* parent = path.Last().first;
+    unsigned pos = path.Last().second;
+    assert(parent->Child(pos) == node);
+    node = parent->MergeOrRebalanceChild(pos);
+    if (node == nullptr)  // succeeded to merge/rebalance without the need to propagate.
+      break;
+
+    DestroyNode(node);
+    node = parent;
+  }
+
   return true;
 }
 
