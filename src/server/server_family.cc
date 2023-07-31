@@ -125,7 +125,7 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
     VLOG(1) << "received IP of type IPv4 (or a host): " << flag->host;
   }
 
-  LOG(INFO) << flag->host << " :  " << flag->port;
+  VLOG(1) << "--replicaof: Received " << flag->host << " :  " << flag->port;
 
   return true;
 #undef RETURN_ERROR

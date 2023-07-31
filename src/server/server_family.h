@@ -197,21 +197,18 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  // REPLICAOF implementation
-  // If flush_db == true, flushes the database before replicating
-  // If return_on_connection_fail == true, returns (and does not replicate) on failure to connect to
-  // master.
-
   enum ShouldFlushDb {
-    kFlush,
+    kFlush,  // flush database before replicating master
     kDontFlush,
   };
 
   enum ActionOnConnectionFail {
-    kReturnOnError,
-    kContinueReplication,
+    kReturnOnError,        // if we fail to connect to master, return to err
+    kContinueReplication,  // continue attempting to connect to master, regardless of initial
+                           // failure
   };
 
+  // REPLICAOF implementation. See arguments above
   void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ShouldFlushDb flush_db,
                          ActionOnConnectionFail on_error);
 

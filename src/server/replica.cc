@@ -118,7 +118,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
 }  // namespace dfly
 
 error_code Replica::EnableReplication(ConnectionContext* cntx) {
-  VLOG(1) << "Starting replication";
+  VLOG(1) << "Enabling replication";
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
