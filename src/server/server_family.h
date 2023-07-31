@@ -201,8 +201,19 @@ class ServerFamily {
   // If flush_db == true, flushes the database before replicating
   // If return_on_connection_fail == true, returns (and does not replicate) on failure to connect to
   // master.
-  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db,
-                         bool return_on_connection_fail);
+
+  enum ShouldFlushDb {
+    kFlush,
+    kDontFlush,
+  };
+
+  enum ActionOnConnectionFail {
+    kReturnOnError,
+    kContinueReplication,
+  };
+
+  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ShouldFlushDb flush_db,
+                         ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);

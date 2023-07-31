@@ -1960,8 +1960,8 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db,
-                                     bool return_on_connection_fail) {
+void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
+                                     ShouldFlushDb flush_db, ActionOnConnectionFail on_err) {
   std::string_view host = ArgS(args, 0);
   std::string_view port_s = ArgS(args, 1);
   auto& pool = service_.proactor_pool();
@@ -2019,7 +2019,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, b
     return;
   }
 
-  if (flush_db) {
+  if (flush_db == ShouldFlushDb::kFlush) {
     // Flushing all the data after we marked this instance as replica.
     Transaction* transaction = cntx->transaction;
     transaction->Schedule();
@@ -2036,10 +2036,16 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, b
   lk.unlock();
   error_code ec{};
 
-  if (return_on_connection_fail)  // try to connect, exit on error
-    ec = new_replica->Start(cntx);
-  else  // set DF to replicate, and forget about it
-    ec = new_replica->EnableReplication(cntx);
+  switch (on_err) {
+    case ActionOnConnectionFail::kReturnOnError:
+      ec = new_replica->Start(cntx);
+      break;
+    case ActionOnConnectionFail::kContinueReplication:  // set DF to replicate, and forget about it
+      ec = new_replica->EnableReplication(cntx);
+      break;
+    default:
+      CHECK(false) << "Uncovered case of ActionOnConnectionFail: " << on_err;
+  };
 
   VLOG(1) << "Acquire replica lock";
   lk.lock();
@@ -2058,7 +2064,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, b
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  ReplicaOfInternal(args, cntx, true, true);
+  ReplicaOfInternal(args, cntx, ShouldFlushDb::kFlush, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string& host, string& port, bool* success) {
@@ -2074,7 +2080,8 @@ void ServerFamily::Replicate(string& host, string& port, bool* success) {
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)
-  ReplicaOfInternal(args, &ctxt, false, false);
+  ReplicaOfInternal(args, &ctxt, ShouldFlushDb::kDontFlush,
+                    ActionOnConnectionFail::kContinueReplication);
 
   // Check whether replication succeeded
 
