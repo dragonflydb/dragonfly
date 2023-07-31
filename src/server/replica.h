@@ -77,6 +77,11 @@ class Replica : ProtocolClient {
   // false if it has failed.
   std::error_code Start(ConnectionContext* cntx);
 
+  // Sets the server state to have replication enabled.
+  // It is like Start(), but does not attempt to establish
+  // a connection right-away, but instead lets MainReplicationFb do the work.
+  std::error_code EnableReplication(ConnectionContext* cntx);
+
   void Stop();  // thread-safe
 
   void Pause(bool pause);

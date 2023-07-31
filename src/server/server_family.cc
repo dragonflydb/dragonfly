@@ -81,9 +81,6 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "Specifies a host and port which point to a target master "
           "to replicate. "
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
-ABSL_FLAG(bool, continue_on_replication_fail, false,
-          "When true, Dragonfly will continue operation "
-          "even if replication via '--replicaof' fails.");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -597,12 +594,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
-    bool success = false;
     service_.proactor_pool().GetNextProactor()->Await(
-        [this, &flag, &success]() { this->Replicate(flag.host, flag.port, &success); });
-
-    if (!success && !GetFlag(FLAGS_continue_on_replication_fail))
-      exit(EXIT_FAILURE);
+        [this, &flag]() { this->Replicate(flag.host, flag.port, nullptr); });
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
@@ -1967,7 +1960,8 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db) {
+void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db,
+                                     bool return_on_connection_fail) {
   std::string_view host = ArgS(args, 0);
   std::string_view port_s = ArgS(args, 1);
   auto& pool = service_.proactor_pool();
@@ -2040,7 +2034,13 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, b
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
   lk.unlock();
-  error_code ec = new_replica->Start(cntx);
+  error_code ec{};
+
+  if (return_on_connection_fail)  // try to connect, exit on error
+    ec = new_replica->Start(cntx);
+  else  // set DF to replicate, and forget about it
+    ec = new_replica->EnableReplication(cntx);
+
   VLOG(1) << "Acquire replica lock";
   lk.lock();
 
@@ -2058,7 +2058,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, b
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  ReplicaOfInternal(args, cntx, true);
+  ReplicaOfInternal(args, cntx, true, true);
 }
 
 void ServerFamily::Replicate(string& host, string& port, bool* success) {
@@ -2074,18 +2074,21 @@ void ServerFamily::Replicate(string& host, string& port, bool* success) {
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)
-  ReplicaOfInternal(args, &ctxt, false);
+  ReplicaOfInternal(args, &ctxt, false, false);
 
   // Check whether replication succeeded
-  using namespace facade::constants;
-  string_view sv = sink.str();
-  if (absl::StartsWith(sv, kSimplePref)) {
-    LOG(INFO) << "Replication success!";
-    *success = true;
-  } else {
-    LOG(ERROR) << "Replication failure!";
-    LOG(ERROR) << "Error: " << sv.substr(kErrPref.length(), sv.size() - kErrPref.length());
-    *success = false;
+
+  if (success != nullptr) {
+    using namespace facade::constants;
+    string_view sv = sink.str();
+    if (absl::StartsWith(sv, kSimplePref)) {
+      LOG(INFO) << "Replication success!";
+      *success = true;
+    } else {
+      LOG(ERROR) << "Replication failure!";
+      LOG(ERROR) << "Error: " << sv.substr(kErrPref.length(), sv.size() - kErrPref.length());
+      *success = false;
+    }
   }
 }
 

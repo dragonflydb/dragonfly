@@ -164,7 +164,8 @@ class ServerFamily {
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   // Sets 'success' to true/false depending on whether the replication connected successfully or
-  // not. Note: the method does not  modify host, port but requires them to be references.
+  // not. If 'success' is null, it is ignored.
+  // ! Note: the method does not modify 'host', 'port' but requires them to be references.
   void Replicate(std::string& port, std::string& host, bool* success);
 
  private:
@@ -195,7 +196,13 @@ class ServerFamily {
   void Sync(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
-  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db);
+
+  // REPLICAOF implementation
+  // If flush_db == true, flushes the database before replicating
+  // If return_on_connection_fail == true, returns (and does not replicate) on failure to connect to
+  // master.
+  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, bool flush_db,
+                         bool return_on_connection_fail);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
