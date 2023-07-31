@@ -25,8 +25,8 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   BPTree(const BPTree&) = delete;
   BPTree& operator=(const BPTree&) = delete;
 
-  using BPTreeNode = detail::BPTreeNode<Policy>;
-  using BPTreePath = detail::BPTreePath<Policy>;
+  using BPTreeNode = detail::BPTreeNode<T>;
+  using BPTreePath = detail::BPTreePath<T>;
 
  public:
   using KeyT = typename Policy::KeyT;
@@ -145,7 +145,7 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Insert(KeyT item)
   BPTreeNode* leaf = path.Last().first;
   assert(leaf->IsLeaf());
 
-  if (leaf->NumItems() == BPTreeNode::kMaxLeafKeys) {
+  if (leaf->NumItems() == detail::BPNodeLayout<T>::kMaxLeafKeys) {
     unsigned root_free [[maybe_unused]] = root_->AvailableSlotCount();
     std::pair<BPTreeNode*, KeyT> res = InsertFullLeaf(item, path);
     if (res.first) {  // we propagated the new node all the way to the root.
@@ -169,8 +169,9 @@ template <typename T, typename Policy>
 bool BPTree<T, Policy>::Locate(KeyT key, BPTreePath* path) const {
   assert(root_);
   BPTreeNode* node = root_;
+  typename Policy::KeyCompareTo cmp;
   while (true) {
-    typename BPTreeNode::SearchResult res = node->BSearch(key);
+    typename BPTreeNode::SearchResult res = node->BSearch(key, cmp);
     path->Push(node, res.index);
     if (res.found) {
       return true;
@@ -188,6 +189,7 @@ bool BPTree<T, Policy>::Locate(KeyT key, BPTreePath* path) const {
 template <typename T, typename Policy>
 auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
     -> std::pair<BPTreeNode*, KeyT> {
+  using Layout = detail::BPNodeLayout<T>;
   assert(path.Depth() > 0u);
 
   BPTreeNode* node = path.Last().first;
@@ -211,7 +213,7 @@ auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
   BPTreeNode* right = CreateNode(node->IsLeaf());
   node->Split(right, &median);
 
-  assert(node->NumItems() < BPTreeNode::kMaxLeafKeys);
+  assert(node->NumItems() < Layout::kMaxLeafKeys);
 
   if (insert_pos <= node->NumItems()) {
     assert(item < median);
@@ -228,7 +230,7 @@ auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
 
     assert(!node->IsLeaf() && insert_pos <= node->NumItems());
 
-    if (node->NumItems() == BPTreeNode::kMaxInnerKeys) {
+    if (node->NumItems() == Layout::kMaxInnerKeys) {
       if (level > 0) {
         BPTreeNode* parent = path.Node(level - 1);
         unsigned node_pos = path.Position(level - 1);
@@ -244,7 +246,7 @@ auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
       KeyT parent_median;
       BPTreeNode* parent_right = CreateNode(false);
       node->Split(parent_right, &parent_median);
-      assert(node->NumItems() < BPTreeNode::kMaxInnerKeys);
+      assert(node->NumItems() < Layout::kMaxInnerKeys);
 
       if (insert_pos <= node->NumItems()) {
         assert(median < parent_median);
@@ -265,9 +267,9 @@ auto BPTree<T, Policy>::InsertFullLeaf(KeyT item, const BPTreePath& path)
 }
 
 template <typename T, typename Policy>
-detail::BPTreeNode<Policy>* BPTree<T, Policy>::CreateNode(bool leaf) {
+detail::BPTreeNode<T>* BPTree<T, Policy>::CreateNode(bool leaf) {
   num_nodes_++;
-  void* ptr = mr_->allocate(BPTreeNode::kTargetNodeSize, 8);
+  void* ptr = mr_->allocate(detail::kBPNodeSize, 8);
   BPTreeNode* node = new (ptr) BPTreeNode(leaf);
 
   return node;
@@ -275,7 +277,7 @@ detail::BPTreeNode<Policy>* BPTree<T, Policy>::CreateNode(bool leaf) {
 
 template <typename T, typename Policy> void BPTree<T, Policy>::DestroyNode(BPTreeNode* node) {
   void* ptr = node;
-  mr_->deallocate(ptr, BPTreeNode::kTargetNodeSize, 8);
+  mr_->deallocate(ptr, detail::kBPNodeSize, 8);
   num_nodes_--;
 }
 

@@ -44,12 +44,46 @@ namespace detail {
 //          allocate less then 256 bytes (special case) to avoid relative blowups in memory for
 //          small trees.
 
-template <typename Policy> class BPTreeNode {
-  using _Key = typename Policy::KeyT;
+constexpr uint16_t kBPNodeSize = 256;
 
-  static_assert(std::is_trivially_copyable<_Key>::value, "KeyT must be triviall copyable");
+template <typename T> class BPNodeLayout {
+  static_assert(std::is_trivially_copyable<T>::value, "KeyT must be triviall copyable");
 
-  friend class ::dfly::BPTree<_Key, Policy>;
+  static constexpr uint16_t kKeyOffset = sizeof(uint64_t);  // 8 bytes for metadata
+
+ public:
+  static constexpr uint16_t kKeySize = sizeof(T);
+  static constexpr uint16_t kMaxLeafKeys = (kBPNodeSize - kKeyOffset) / kKeySize;
+  static constexpr uint16_t kMinLeafKeys = kMaxLeafKeys / 2;
+
+  // internal node:
+  // x slots, (x+1) children: x * kKeySize + (x+1) * sizeof(BPTreeNode*) = x * (kKeySize + 8) + 8
+  // x = (kBPNodeSize - 8 - kKeyOffset) / (kKeySize + 8)
+  static constexpr uint16_t kMaxInnerKeys =
+      (kBPNodeSize - sizeof(void*) - kKeyOffset) / (kKeySize + sizeof(void*));
+  static constexpr uint16_t kMinInnerKeys = kMaxInnerKeys / 2;
+
+  using KeyT = T;
+
+  // The class is constructed inside a block of memory of size kBPNodeSize.
+  // Only BPTree can create it, hence it can access the memory outside its fields.
+  static uint8_t* KeyPtr(unsigned index, void* node) {
+    return reinterpret_cast<uint8_t*>(node) + kKeyOffset + kKeySize * index;
+  }
+
+  static const uint8_t* KeyPtr(unsigned index, const void* node) {
+    return reinterpret_cast<const uint8_t*>(node) + kKeyOffset + kKeySize * index;
+  }
+
+  static uint8_t* InnerKeysEnd(void* node) {
+    return reinterpret_cast<uint8_t*>(node) + kKeyOffset + kKeySize * kMaxInnerKeys;
+  }
+
+  static_assert(kMaxLeafKeys < 128);
+};
+
+template <typename T> class BPTreeNode {
+  template <typename K, typename Policy> friend class ::dfly::BPTree;
 
   BPTreeNode(const BPTreeNode&) = delete;
   BPTreeNode& operator=(const BPTreeNode&) = delete;
@@ -57,45 +91,29 @@ template <typename Policy> class BPTreeNode {
   BPTreeNode(bool leaf) : num_items_(0), leaf_(leaf) {
   }
 
-  static constexpr uint16_t kKeySize = sizeof(_Key);
-  static constexpr uint16_t kTargetNodeSize = 256;
-  static constexpr uint16_t kKeyOffset = sizeof(uint64_t);  // 8 bytes for metadata
+  using Layout = BPNodeLayout<T>;
 
  public:
-  static constexpr uint16_t kMaxLeafKeys = (kTargetNodeSize - kKeyOffset) / kKeySize;
-  static constexpr uint16_t kMinLeafKeys = kMaxLeafKeys / 2;
+  using KeyT = T;
 
-  // internal node:
-  // x slots, (x+1) children: x * kKeySize + (x+1) * sizeof(BPTreeNode*) = x * (kKeySize + 8) + 8
-  // x = (kTargetNodeSize - 8 - kKeyOffset) / (kKeySize + 8)
-
-  static constexpr uint16_t kMaxInnerKeys =
-      (kTargetNodeSize - sizeof(void*) - kKeyOffset) / (kKeySize + sizeof(void*));
-  static constexpr uint16_t kMinInnerKeys = kMaxInnerKeys / 2;
-
-  using KeyT = _Key;
-
-  void InitSingle(KeyT key) {
+  void InitSingle(T key) {
     SetKey(0, key);
     num_items_ = 1;
   }
 
   KeyT Key(unsigned index) const {
     KeyT res;
-    memcpy(&res, KeyPtr(index), kKeySize);
+    memcpy(&res, Layout::KeyPtr(index, this), sizeof(KeyT));
     return res;
   }
 
   void SetKey(size_t index, KeyT item) {
-    uint8_t* slot = KeyPtr(index);
-    memcpy(slot, &item, kKeySize);
+    uint8_t* slot = Layout::KeyPtr(index, this);
+    memcpy(slot, &item, sizeof(KeyT));
   }
 
   BPTreeNode** Children() {
-    // aligned to 8 bytes.
-    constexpr uint16_t kChildOffset = kMaxInnerKeys * kKeySize + kKeyOffset;
-
-    uint8_t* ptr = reinterpret_cast<uint8_t*>(this) + kChildOffset;
+    uint8_t* ptr = Layout::InnerKeysEnd(this);
     return reinterpret_cast<BPTreeNode**>(ptr);
   }
 
@@ -114,7 +132,7 @@ template <typename Policy> class BPTreeNode {
 
   // Searches for key in the node using binary search.
   // Returns SearchResult with index of the key if found.
-  SearchResult BSearch(KeyT key) const;
+  template <typename Comp> SearchResult BSearch(KeyT key, Comp&& comp) const;
 
   void Split(BPTreeNode* right, KeyT* median);
 
@@ -131,11 +149,11 @@ template <typename Policy> class BPTreeNode {
   }
 
   unsigned MaxItems() const {
-    return IsLeaf() ? kMaxLeafKeys : kMaxInnerKeys;
+    return IsLeaf() ? Layout::kMaxLeafKeys : Layout::kMaxInnerKeys;
   }
 
   unsigned MinItems() const {
-    return IsLeaf() ? kMinLeafKeys : kMinInnerKeys;
+    return IsLeaf() ? Layout::kMinLeafKeys : Layout::kMinInnerKeys;
   }
 
   void ShiftRight(unsigned index);
@@ -180,31 +198,19 @@ template <typename Policy> class BPTreeNode {
     SetKey(index, item);
   }
 
-  // The class is constructed inside a block of memory of size kTargetNodeSize.
-  // Only BPTree can create it, hence it can access the memory outside its fields.
-  uint8_t* KeyPtr(unsigned index) {
-    return reinterpret_cast<uint8_t*>(this) + kKeyOffset + kKeySize * index;
-  }
-
-  const uint8_t* KeyPtr(unsigned index) const {
-    return reinterpret_cast<const uint8_t*>(this) + kKeyOffset + kKeySize * index;
-  }
-
   struct {
     uint64_t num_items_ : 7;
     uint64_t leaf_ : 1;
     uint64_t : 56;
   };
-
-  static_assert(kMaxLeafKeys < 128, "num_items_ is 7 bits");
 };
 
 // Contains parent/index pairs. Meaning that node0->Child(index0) == node1.
-template <typename Policy> class BPTreePath {
+template <typename T> class BPTreePath {
   static constexpr unsigned kMaxDepth = 16;
 
  public:
-  void Push(BPTreeNode<Policy>* node, unsigned pos) {
+  void Push(BPTreeNode<T>* node, unsigned pos) {
     assert(depth_ < kMaxDepth);
     record_[depth_].node = node;
     record_[depth_].pos = pos;
@@ -215,12 +221,12 @@ template <typename Policy> class BPTreePath {
     return depth_;
   }
 
-  std::pair<BPTreeNode<Policy>*, unsigned> Last() const {
+  std::pair<BPTreeNode<T>*, unsigned> Last() const {
     assert(depth_ > 0u);
     return {record_[depth_ - 1].node, record_[depth_ - 1].pos};
   }
 
-  BPTreeNode<Policy>* Node(unsigned i) const {
+  BPTreeNode<T>* Node(unsigned i) const {
     assert(i < depth_);
     return record_[i].node;
   }
@@ -237,7 +243,7 @@ template <typename Policy> class BPTreePath {
 
  private:
   struct Record {
-    BPTreeNode<Policy>* node;
+    BPTreeNode<T>* node;
     unsigned pos;
   };
 
@@ -247,10 +253,11 @@ template <typename Policy> class BPTreePath {
 
 // Returns the position of the first item whose key is greater or equal than key.
 // if all items are smaller than key, returns num_items_.
-template <typename Policy> auto BPTreeNode<Policy>::BSearch(KeyT key) const -> SearchResult {
+template <typename T>
+template <typename Comp>
+auto BPTreeNode<T>::BSearch(KeyT key, Comp&& cmp_op) const -> SearchResult {
   uint16_t lo = 0;
   uint16_t hi = num_items_;
-  typename Policy::KeyCompareTo cmp_op;
   while (lo < hi) {
     uint16_t mid = (lo + hi) >> 1;
     assert(mid < hi);
@@ -273,11 +280,12 @@ template <typename Policy> auto BPTreeNode<Policy>::BSearch(KeyT key) const -> S
   return {.index = hi, .found = 0};
 }
 
-template <typename Policy> void BPTreeNode<Policy>::ShiftRight(unsigned index) {
+template <typename T> void BPTreeNode<T>::ShiftRight(unsigned index) {
   unsigned num_items_to_shift = num_items_ - index;
   if (num_items_to_shift > 0) {
-    uint8_t* ptr = KeyPtr(index);
-    memmove(ptr + kKeySize, ptr, num_items_to_shift * kKeySize);
+    uint8_t* ptr = Layout::KeyPtr(index, this);
+    memmove(ptr + Layout::kKeySize, ptr, num_items_to_shift * Layout::kKeySize);
+
     BPTreeNode** children = Children();
     if (!IsLeaf()) {
       memmove(children + index + 1, children + index,
@@ -295,9 +303,9 @@ template <typename Policy> void BPTreeNode<Policy>::ShiftRight(unsigned index) {
  *  rebalance succeeds the function returns the new node and the position to insert into. Otherwise,
  *  it returns result.first == nullptr.
  */
-template <typename Policy>
-std::pair<BPTreeNode<Policy>*, unsigned> BPTreeNode<Policy>::RebalanceChild(unsigned pos,
-                                                                            unsigned insert_pos) {
+template <typename T>
+std::pair<BPTreeNode<T>*, unsigned> BPTreeNode<T>::RebalanceChild(unsigned pos,
+                                                                  unsigned insert_pos) {
   unsigned to_move = 0;
   BPTreeNode* node = Child(pos);
 
@@ -357,8 +365,7 @@ std::pair<BPTreeNode<Policy>*, unsigned> BPTreeNode<Policy>::RebalanceChild(unsi
   return {nullptr, 0};
 }
 
-template <typename Policy>
-void BPTreeNode<Policy>::RebalanceChildToLeft(unsigned child_pos, unsigned count) {
+template <typename T> void BPTreeNode<T>::RebalanceChildToLeft(unsigned child_pos, unsigned count) {
   assert(child_pos > 0u);
   BPTreeNode* src = Child(child_pos);
   BPTreeNode* dest = Child(child_pos - 1);
@@ -399,8 +406,8 @@ void BPTreeNode<Policy>::RebalanceChildToLeft(unsigned child_pos, unsigned count
   src->num_items_ -= count;
 }
 
-template <typename Policy>
-void BPTreeNode<Policy>::RebalanceChildToRight(unsigned child_pos, unsigned count) {
+template <typename T>
+void BPTreeNode<T>::RebalanceChildToRight(unsigned child_pos, unsigned count) {
   assert(child_pos < NumItems());
   BPTreeNode* src = Child(child_pos);
   BPTreeNode* dest = Child(child_pos + 1);
@@ -450,12 +457,13 @@ void BPTreeNode<Policy>::RebalanceChildToRight(unsigned child_pos, unsigned coun
 
 // splits the node into two nodes. The left node is the current node and the right node is
 // is filled with the right half of the items. The median key is returned in *median.
-template <typename Policy> void BPTreeNode<Policy>::Split(BPTreeNode<Policy>* right, KeyT* median) {
+template <typename T> void BPTreeNode<T>::Split(BPTreeNode<T>* right, T* median) {
   unsigned mid = num_items_ / 2;
   *median = Key(mid);
   right->leaf_ = leaf_;
   right->num_items_ = num_items_ - (mid + 1);
-  memmove(right->KeyPtr(0), KeyPtr(mid + 1), right->num_items_ * kKeySize);
+  memmove(Layout::KeyPtr(0, right), Layout::KeyPtr(mid + 1, this),
+          right->num_items_ * Layout::kKeySize);
   if (!IsLeaf()) {
     BPTreeNode** rchild = right->Children();
     for (size_t i = 0; i <= right->num_items_; i++) {

@@ -16,7 +16,7 @@ using namespace std;
 namespace dfly {
 
 class BPTreeSetTest : public ::testing::Test {
-  using Node = detail::BPTreeNode<BPTreePolicy<uint64_t>>;
+  using Node = detail::BPTreeNode<uint64_t>;
 
  protected:
   BPTreeSetTest() : mi_alloc_(mi_heap_get_backing()), bPtree_(&mi_alloc_) {
