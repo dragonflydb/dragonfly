@@ -157,6 +157,12 @@ template <typename T> class BPTreeNode {
   }
 
   void ShiftRight(unsigned index);
+  void ShiftLeft(unsigned index, bool child_step_right = false);
+
+  void LeafEraseRight() {
+    assert(IsLeaf() && num_items_ > 0);
+    --num_items_;
+  }
 
   // Rebalance a full child at position pos, at which we tried to insert at insert_pos.
   // Returns the node and the position to insert into if rebalancing succeeded.
@@ -241,6 +247,18 @@ template <typename T> class BPTreePath {
     depth_--;
   }
 
+  // Extend the path to the leaf by always taking the leftmost child.
+  void DigRight() {
+    assert(depth_ > 0u && !Last().first->IsLeaf());
+    BPTreeNode<T>* last = Last().first;
+    do {
+      unsigned pos = last->NumItems();
+      BPTreeNode<T>* child = last->Child(last->NumItems());
+      Push(child, pos);
+      last = child;
+    } while (!last->IsLeaf());
+  }
+
  private:
   struct Record {
     BPTreeNode<T>* node;
@@ -293,6 +311,25 @@ template <typename T> void BPTreeNode<T>::ShiftRight(unsigned index) {
     }
   }
   num_items_++;
+}
+
+template <typename T> void BPTreeNode<T>::ShiftLeft(unsigned index, bool child_step_right) {
+  assert(index < num_items_);
+
+  unsigned num_items_to_shift = num_items_ - index - 1;
+  if (num_items_to_shift > 0) {
+    memmove(Layout::KeyPtr(index, this), Layout::KeyPtr(index + 1, this),
+            num_items_to_shift * Layout::kKeySize);
+    if (!leaf_) {
+      index += unsigned(child_step_right);
+      num_items_to_shift = num_items_ - index;
+      if (num_items_to_shift > 0) {
+        BPTreeNode** children = Children();
+        memmove(children + index, children + index + 1, num_items_to_shift * sizeof(BPTreeNode*));
+      }
+    }
+  }
+  num_items_--;
 }
 
 /***
@@ -455,6 +492,61 @@ void BPTreeNode<T>::RebalanceChildToRight(unsigned child_pos, unsigned count) {
   src->num_items_ -= count;
 }
 
+template <typename T> BPTreeNode<T>* BPTreeNode<T>::MergeOrRebalanceChild(unsigned pos) {
+  BPTreeNode* node = Child(pos);
+  BPTreeNode* left = nullptr;
+
+  assert(NumItems() >= 1u);
+  assert(node->NumItems() < node->MinItems());
+
+  if (pos > 0) {
+    left = Child(pos - 1);
+    if (left->NumItems() + 1 + node->NumItems() <= left->MaxItems()) {
+      left->MergeFromRight(Key(pos - 1), node);
+      ShiftLeft(pos - 1, true);
+      return node;
+    }
+  }
+
+  if (pos < NumItems()) {
+    BPTreeNode* right = Child(pos + 1);
+    if (node->NumItems() + 1 + right->NumItems() <= right->MaxItems()) {
+      node->MergeFromRight(Key(pos), right);
+      ShiftLeft(pos, true);
+      return right;
+    }
+
+    // Try rebalancing with our right sibling.
+    // TODO: don't perform rebalancing if
+    // we deleted the first element from node and the node is not
+    // empty. This is a small optimization for the common pattern of deleting
+    // from the front of the tree.
+    if (true) {
+      unsigned to_move = (right->NumItems() - node->NumItems()) / 2;
+      assert(to_move < right->NumItems());
+
+      RebalanceChildToLeft(pos + 1, to_move);
+      return nullptr;
+    }
+  }
+
+  assert(left);
+
+  if (left) {
+    // Try rebalancing with our left sibling.
+    // TODO: don't perform rebalancing if we deleted the last element from node and the
+    // node is not empty. This is a small optimization for the common pattern of deleting
+    // from the back of the tree.
+    if (true) {
+      unsigned to_move = (left->NumItems() - node->NumItems()) / 2;
+      assert(to_move < left->NumItems());
+      RebalanceChildToRight(pos - 1, to_move);
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
 // splits the node into two nodes. The left node is the current node and the right node is
 // is filled with the right half of the items. The median key is returned in *median.
 template <typename T> void BPTreeNode<T>::Split(BPTreeNode<T>* right, T* median) {
@@ -471,6 +563,24 @@ template <typename T> void BPTreeNode<T>::Split(BPTreeNode<T>* right, T* median)
     }
   }
   num_items_ = mid;
+}
+
+template <typename T> void BPTreeNode<T>::MergeFromRight(KeyT key, BPTreeNode<T>* right) {
+  assert(NumItems() + 1 + right->NumItems() <= MaxItems());
+
+  unsigned dest_items = NumItems();
+  SetKey(dest_items, key);
+  for (unsigned i = 0; i < right->NumItems(); ++i) {
+    SetKey(dest_items + 1 + i, right->Key(i));
+  }
+
+  if (!IsLeaf()) {
+    for (unsigned i = 0; i <= right->NumItems(); ++i) {
+      SetChild(dest_items + 1 + i, right->Child(i));
+    }
+  }
+  num_items_ += 1 + right->NumItems();
+  right->num_items_ = 0;
 }
 
 }  // namespace detail
