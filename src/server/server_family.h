@@ -195,7 +195,7 @@ class ServerFamily {
   // Returns the number of loaded keys if successfull.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
 
-  void SnapshotScheduling(const SnapshotSpec& time);
+  void SnapshotScheduling();
 
   Fiber snapshot_schedule_fb_;
   Future<std::error_code> load_result_;

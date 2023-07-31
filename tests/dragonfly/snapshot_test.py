@@ -160,6 +160,27 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         assert super().get_main_file("test-periodic-summary.dfs")
 
 
+# save every 2 seconds
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "snapshot_cron": "*/2 * * * * *"})
+class TestCronPeriodicSnapshot(SnapshotTestBase):
+    """Test periodic snapshotting"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        super().setup(tmp_dir)
+
+    @pytest.mark.asyncio
+    async def test_snapshot(self, df_seeder_factory, df_server):
+        seeder = df_seeder_factory.create(
+            port=df_server.port, keys=10, multi_transaction_probability=0
+        )
+        await seeder.run(target_deviation=0.5)
+
+        time.sleep(60)
+
+        assert super().get_main_file("test-periodic-summary.dfs")
+
+
 @dfly_args({**BASIC_ARGS})
 class TestPathEscapes(SnapshotTestBase):
     """Test that we don't allow path escapes. We just check that df_server.start()

@@ -23,6 +23,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "croncpp.h"  // cron::cronexpr
 #include "facade/dragonfly_connection.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
@@ -60,6 +61,7 @@ ABSL_FLAG(string, requirepass, "",
           "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
+ABSL_FLAG(string, snapshot_cron, "", "cron expression for the time to save a snapshot");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
 ABSL_FLAG(int, epoll_file_threads, 0,
@@ -500,6 +502,39 @@ bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
          DoesTimeNibbleMatchSpecifier(spec.minute_spec, min);
 }
 
+std::optional<cron::cronexpr> InferSnapshotCronExpr() {
+  string save_time = GetFlag(FLAGS_save_schedule);
+  string snapshot_cron_exp = GetFlag(FLAGS_snapshot_cron);
+
+  if (!snapshot_cron_exp.empty() && !save_time.empty()) {
+    LOG(ERROR) << "save_time and cron_exp flags should not be set simultaneously";
+    quick_exit(1);
+  }
+
+  string raw_cron_expr;
+  if (!save_time.empty()) {
+    std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
+
+    if (spec) {
+      // Setting snapshot to HH:mm everyday, as specified by `save_schedule` flag
+      raw_cron_expr = "0 " + spec.value().minute_spec + " " + spec.value().hour_spec + " * * *";
+    } else {
+      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
+    }
+  } else if (!snapshot_cron_exp.empty()) {
+    raw_cron_expr = snapshot_cron_exp;
+  }
+
+  if (!raw_cron_expr.empty()) {
+    try {
+      return std::optional<cron::cronexpr>(cron::make_cron(raw_cron_expr));
+    } catch (const cron::bad_cronexpr& ex) {
+      LOG(WARNING) << "Invalid cron expression: " << ex.what();
+    }
+  }
+  return std::nullopt;
+}
+
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
   last_save_info_ = make_shared<LastSaveInfo>();
@@ -570,16 +605,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     load_result_ = Load(load_path);
   }
 
-  string save_time = GetFlag(FLAGS_save_schedule);
-  if (!save_time.empty()) {
-    std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
-    if (spec) {
-      snapshot_schedule_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
-          [save_spec = std::move(spec.value()), this] { SnapshotScheduling(save_spec); });
-    } else {
-      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
-    }
-  }
+  snapshot_schedule_fb_ =
+      service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
 }
 
 void ServerFamily::Shutdown() {
@@ -720,30 +747,22 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   return ec_future;
 }
 
-void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
-  const auto loop_sleep_time = std::chrono::seconds(20);
+void ServerFamily::SnapshotScheduling() {
+  const std::optional<cron::cronexpr> cron_expr = InferSnapshotCronExpr();
+  if (!cron_expr) {
+    return;
+  }
+
+  const auto loading_check_interval = std::chrono::seconds(10);
+  while (service_.GetGlobalState() == GlobalState::LOADING) {
+    schedule_done_.WaitFor(loading_check_interval);
+  }
+
   while (true) {
-    if (schedule_done_.WaitFor(loop_sleep_time)) {
-      break;
-    }
+    const std::chrono::time_point now = std::chrono::system_clock::now();
+    const std::chrono::time_point next = cron::cron_next(cron_expr.value(), now);
 
-    time_t now = std::time(NULL);
-
-    if (!DoesTimeMatchSpecifier(spec, now)) {
-      continue;
-    }
-
-    // if it matches check the last save time, if it is the same minute don't save another
-    // snapshot
-    time_t last_save;
-    {
-      lock_guard lk(save_mu_);
-      last_save = last_save_info_->save_time;
-    }
-
-    if ((last_save / 60) == (now / 60)) {
-      continue;
-    }
+    schedule_done_.WaitFor(next - now);
 
     GenericError ec = DoSave();
     if (ec) {
