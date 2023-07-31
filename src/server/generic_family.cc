@@ -328,19 +328,15 @@ void Renamer::Find(Transaction* t) {
 };
 
 void Renamer::Finalize(Transaction* t, bool skip_exist_dest) {
-  auto cleanup = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-
   if (!src_res_.found) {
     status_ = OpStatus::KEY_NOTFOUND;
-
-    t->Execute(move(cleanup), true);
+    t->Conclude();
     return;
   }
 
   if (dest_res_.found && skip_exist_dest) {
     status_ = OpStatus::KEY_EXISTS;
-
-    t->Execute(move(cleanup), true);
+    t->Conclude();
     return;
   }
 

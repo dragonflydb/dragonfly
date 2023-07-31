@@ -887,6 +887,11 @@ void Transaction::ExecuteAsync() {
   IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
 }
 
+void Transaction::Conclude() {
+  auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+  Execute(std::move(cb), true);
+}
+
 void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK(!IsAtomicMulti());
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
