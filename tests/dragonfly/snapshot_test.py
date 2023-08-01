@@ -2,6 +2,7 @@ import time
 import pytest
 import os
 import glob
+import asyncio
 from redis import asyncio as aioredis
 from pathlib import Path
 
@@ -25,6 +26,13 @@ class SnapshotTestBase:
         possible_mains = list(filter(is_main, files))
         assert len(possible_mains) == 1, possible_mains
         return possible_mains[0]
+
+    async def wait_for_save(self, pattern):
+        while True:
+            files = glob.glob(str(self.tmp_dir.absolute()) + "/" + pattern)
+            if not len(files) == 0:
+                break
+            await asyncio.sleep(1)
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-rdb-{{timestamp}}"})
@@ -155,13 +163,13 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         )
         await seeder.run(target_deviation=0.5)
 
-        time.sleep(60)
+        await super().wait_for_save("test-periodic-summary.dfs")
 
         assert super().get_main_file("test-periodic-summary.dfs")
 
 
 # save every 2 seconds
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "snapshot_cron": "*/2 * * * * *"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "*/2 * * * * *"})
 class TestCronPeriodicSnapshot(SnapshotTestBase):
     """Test periodic snapshotting"""
 
@@ -176,9 +184,9 @@ class TestCronPeriodicSnapshot(SnapshotTestBase):
         )
         await seeder.run(target_deviation=0.5)
 
-        time.sleep(60)
+        await super().wait_for_save("test-cron-summary.dfs")
 
-        assert super().get_main_file("test-periodic-summary.dfs")
+        assert super().get_main_file("test-cron-summary.dfs")
 
 
 @dfly_args({**BASIC_ARGS})
