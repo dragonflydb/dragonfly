@@ -226,8 +226,6 @@ class DbSlice {
     return shard_id_;
   }
 
-  static std::string_view GetLockKey(std::string_view key);
-
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);

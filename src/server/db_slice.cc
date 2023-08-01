@@ -8,16 +8,11 @@ extern "C" {
 #include "redis/object.h"
 }
 
-#include "base/flags.h"
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
-
-ABSL_FLAG(bool, lock_on_hashtags, false,
-          "When true, locks are done in the {hashtag} level instead of key level. "
-          "Only use this with --cluster_mode=emulated|yes.");
 
 namespace dfly {
 
@@ -750,23 +745,6 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
   return 0;
 }
 
-string_view DbSlice::GetLockKey(string_view key) {
-  thread_local bool is_enabled_flag_cache = []() {
-    bool value = absl::GetFlag(FLAGS_lock_on_hashtags);
-    if (value && !ClusterConfig::IsEnabledOrEmulated()) {
-      LOG(ERROR) << "Setting --lock_on_hashtags without --cluster_mode is unsupported";
-      quick_exit(1);
-    }
-    return value;
-  }();
-
-  if (is_enabled_flag_cache) {
-    return ClusterConfig::KeyTag(key);
-  } else {
-    return key;
-  }
-}
-
 bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.empty()) {
     return true;
@@ -777,12 +755,12 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   bool lock_acquired = true;
 
   if (lock_args.args.size() == 1) {
-    lock_acquired = lt[GetLockKey(lock_args.args.front())].Acquire(mode);
+    lock_acquired = lt[KeyLockArgs::GetLockKey(lock_args.args.front())].Acquire(mode);
   } else {
     uniq_keys_.clear();
 
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      auto s = GetLockKey(lock_args.args[i]);
+      auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
         bool res = lt[s].Acquire(mode);
         lock_acquired &= res;
@@ -801,7 +779,7 @@ void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, std::string_view 
   DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
 
   auto& lt = db_arr_[db_index]->trans_locks;
-  auto it = lt.find(GetLockKey(key));
+  auto it = lt.find(KeyLockArgs::GetLockKey(key));
   CHECK(it != lt.end()) << key;
   it->second.Release(mode, count);
   if (it->second.IsFree()) {
@@ -820,7 +798,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      auto s = GetLockKey(lock_args.args[i]);
+      auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
         auto it = lt.find(s);
         CHECK(it != lt.end());
@@ -844,7 +822,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) co
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    auto s = GetLockKey(lock_args.args[i]);
+    auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
     auto it = lt.find(s);
     if (it != lt.end() && !it->second.Check(mode)) {
       return false;

@@ -170,7 +170,7 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   tmp_uniques.clear();
 
   auto lock_key = [this, mode, &tmp_uniques](string_view key) {
-    if (auto [_, inserted] = tmp_uniques.insert(DbSlice::GetLockKey(key)); !inserted)
+    if (auto [_, inserted] = tmp_uniques.insert(KeyLockArgs::GetLockKey(key)); !inserted)
       return;
 
     multi_->lock_counts[key][mode]++;

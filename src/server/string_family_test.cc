@@ -691,4 +691,10 @@ TEST_F(StringFamilyTest, SetWithGetParam) {
   EXPECT_EQ(Run({"get", "key2"}), "val3");
 }
 
+TEST_F(StringFamilyTest, SetWithHashtags) {
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+}
+
 }  // namespace dfly

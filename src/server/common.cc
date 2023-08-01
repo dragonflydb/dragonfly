@@ -16,6 +16,7 @@ extern "C" {
 #include "redis/util.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "server/engine_shard_set.h"
@@ -24,10 +25,30 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/transaction.h"
 
+ABSL_FLAG(bool, lock_on_hashtags, false,
+          "When true, locks are done in the {hashtag} level instead of key level. "
+          "Only use this with --cluster_mode=emulated|yes.");
+
 namespace dfly {
 
 using namespace std;
 using namespace util;
+
+bool KeyLockArgs::IsLockHashTagEnabled() {
+  thread_local bool is_enabled_flag_cache = []() {
+    return absl::GetFlag(FLAGS_lock_on_hashtags);
+  }();
+
+  return is_enabled_flag_cache;
+}
+
+string_view KeyLockArgs::GetLockKey(string_view key) {
+  if (IsLockHashTagEnabled()) {
+    return ClusterConfig::KeyTag(key);
+  } else {
+    return key;
+  }
+}
 
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);
