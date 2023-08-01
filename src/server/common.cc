@@ -35,19 +35,16 @@ using namespace std;
 using namespace util;
 
 bool KeyLockArgs::IsLockHashTagEnabled() {
-  thread_local bool is_enabled_flag_cache = []() {
-    return absl::GetFlag(FLAGS_lock_on_hashtags);
-  }();
-
+  thread_local bool is_enabled_flag_cache = absl::GetFlag(FLAGS_lock_on_hashtags);
   return is_enabled_flag_cache;
 }
 
 string_view KeyLockArgs::GetLockKey(string_view key) {
   if (IsLockHashTagEnabled()) {
     return ClusterConfig::KeyTag(key);
-  } else {
-    return key;
   }
+
+  return key;
 }
 
 atomic_uint64_t used_mem_peak(0);
