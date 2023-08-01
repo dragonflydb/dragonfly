@@ -13,7 +13,14 @@ namespace dfly {
 
 // MultiCommandSquasher allows executing a series of commands under a multi transaction
 // and squashing multiple consecutive single-shard commands into one hop whenever it's possible,
-// thus greatly decreasing the dispatch overhead for them.
+// thus parallelizing command execution and greatly decreasing the dispatch overhead for them.
+//
+// Single shard commands are executed in small batches over multiple shards.
+// For atomic multi transactions (global & locking ahead), the batch is executed with a regular hop
+// of the multi transaction. Each shard contains a "stub" transaction to mimic the regular
+// transactional api for commands. Non atomic multi transactions use regular shard_set dispatches
+// instead of hops for executing batches. This allows avoiding locking many keys at once. Each shard
+// contains a non-atomic multi transaction to execute squashed commands.
 class MultiCommandSquasher {
  public:
   static void Execute(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
@@ -61,17 +68,14 @@ class MultiCommandSquasher {
  private:
   absl::Span<StoredCmd> cmds_;  // Input range of stored commands
   ConnectionContext* cntx_;     // Underlying context
-  const CommandId* base_cid_;   // either EVAL or EXEC, used for squashed hops
+
+  // underlying cid (exec or eval) for executing batch hops, nullptr for non-atomic
+  const CommandId* base_cid_;
 
   bool error_abort_ = false;  // Abort upon receiving error
 
   std::vector<ShardExecInfo> sharded_;
   std::vector<ShardId> order_;  // reply order for squashed cmds
-
-  // multi modes that lock on hops (non-atomic, incremental) need keys for squashed hops.
-  // track_keys_ stores whether to populate collected_keys_
-  bool track_keys_;
-  absl::flat_hash_set<MutableSlice> collected_keys_;
 
   std::vector<MutableSlice> tmp_keylist_;
 };
