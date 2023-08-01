@@ -195,9 +195,6 @@ class Transaction {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
   }
 
-  // Prepare a squashed hop on given keys.
-  void PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys);
-
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);

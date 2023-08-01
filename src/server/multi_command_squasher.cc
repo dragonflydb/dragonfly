@@ -35,9 +35,10 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
+  // See header top for atomic/non-atomic difference
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
-    if (base_cid_) {
+    if (IsAtomic()) {
       sinfo.local_tx = new Transaction{cntx_->transaction};
     } else {
       sinfo.local_tx = new Transaction{cntx_->transaction->GetCId(), sid};
@@ -148,7 +149,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
 
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
-  if (base_cid_) {
+  if (IsAtomic()) {
     cntx_->cid = base_cid_;
     auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
@@ -210,12 +211,16 @@ void MultiCommandSquasher::Run() {
 
   // UnlockMulti is a no-op for non-atomic multi transactions,
   // still called for correctness and future changes
-  if (base_cid_ == nullptr) {
+  if (!IsAtomic()) {
     for (auto& sd : sharded_) {
       if (sd.local_tx)
         sd.local_tx->UnlockMulti();
     }
   }
+}
+
+bool MultiCommandSquasher::IsAtomic() const {
+  return base_cid_ != nullptr;
 }
 
 }  // namespace dfly

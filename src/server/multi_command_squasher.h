@@ -65,6 +65,8 @@ class MultiCommandSquasher {
   // Run all commands until completion.
   void Run();
 
+  bool IsAtomic() const;
+
  private:
   absl::Span<StoredCmd> cmds_;  // Input range of stored commands
   ConnectionContext* cntx_;     // Underlying context
