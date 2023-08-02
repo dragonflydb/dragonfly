@@ -622,6 +622,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("dir", [](const absl::CommandLineFlag& flag) { return true; });
   config_registry.Register("requirepass", [](const absl::CommandLineFlag& flag) { return true; });
   config_registry.Register("masterauth", [](const absl::CommandLineFlag& flag) { return true; });
+  config_registry.Register("tcp_keepalive", [](const absl::CommandLineFlag& flag) { return true; });
 
   pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 

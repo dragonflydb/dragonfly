@@ -27,6 +27,7 @@ ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
 ABSL_FLAG(string, tls_ca_cert_file, "", "ca signed certificate to validate tls connections");
 ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
+ABSL_FLAG(uint32_t, tcp_keepalive, 300, "the period in seconds used to send ACKs to client");
 
 #if 0
 enum TlsClientAuth {
@@ -153,12 +154,12 @@ util::Connection* Listener::NewConnection(ProactorBase* proactor) {
 
 error_code Listener::ConfigureServerSocket(int fd) {
   int val = 1;
-  constexpr int kInterval = 300;  // 300 seconds is ok to start checking for liveness.
 
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
-  bool success = ConfigureKeepAlive(fd, kInterval);
+  uint32_t interval = absl::GetFlag(FLAGS_tcp_keepalive);
+  bool success = ConfigureKeepAlive(fd, interval);
 
   if (!success) {
     int myerr = errno;
