@@ -595,7 +595,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     service_.proactor_pool().GetNextProactor()->Await(
-        [this, &flag]() { this->Replicate(flag.host, flag.port, nullptr); });
+        [this, &flag]() { this->Replicate(flag.host, flag.port); });
     return;  // DONT load any snapshots
   }
 
@@ -2068,7 +2068,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   ReplicaOfInternal(args, cntx, ShouldFlushDb::kFlush, ActionOnConnectionFail::kReturnOnError);
 }
 
-void ServerFamily::Replicate(string& host, string& port, bool* success) {
+bool ServerFamily::Replicate(string& host, string& port) {
   io::StringSink sink;
   ConnectionContext ctxt{&sink, nullptr};
 
@@ -2086,17 +2086,16 @@ void ServerFamily::Replicate(string& host, string& port, bool* success) {
 
   // Check whether replication succeeded
 
-  if (success != nullptr) {
-    using namespace facade::constants;
-    string_view sv = sink.str();
-    if (absl::StartsWith(sv, kSimplePref)) {
-      LOG(INFO) << "Replication success!";
-      *success = true;
-    } else {
-      LOG(ERROR) << "Replication failure!";
-      LOG(ERROR) << "Error: " << sv.substr(kErrPref.length(), sv.size() - kErrPref.length());
-      *success = false;
-    }
+  using namespace facade::constants;
+  string_view sv = sink.str();
+  if (absl::StartsWith(sv, kSimplePref)) {
+    VLOG(1) << "Replication success!";  // if ReplicaOfInternal recieves kContinueReplication then
+                                        // theoretically we should never fail
+    return true;
+  } else {
+    VLOG(1) << "Replication failure!";
+    VLOG(1) << "Error: " << sv.substr(kErrPref.length(), sv.size() - kErrPref.length());
+    return false;
   }
 }
 
