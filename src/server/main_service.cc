@@ -619,6 +619,10 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
+  config_registry.Register("dir", [](const absl::CommandLineFlag& flag) { return true; });
+  config_registry.Register("requirepass", [](const absl::CommandLineFlag& flag) { return true; });
+  config_registry.Register("masterauth", [](const absl::CommandLineFlag& flag) { return true; });
+
   pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);

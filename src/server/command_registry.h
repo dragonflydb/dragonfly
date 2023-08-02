@@ -98,7 +98,7 @@ class CommandId : public facade::CommandId {
 };
 
 class CommandRegistry {
-  absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
+  absl::flat_hash_map<std::string, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
 
  public:
@@ -123,6 +123,9 @@ class CommandRegistry {
       cb(k_v.first, k_v.second);
     }
   }
+
+ private:
+  bool RenameCommands(const std::vector<std::string>& rename_commands);
 };
 
 }  // namespace dfly

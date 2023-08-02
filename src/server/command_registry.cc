@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/error.h"
+#include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
 
@@ -77,9 +78,9 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList args) const {
 
 CommandRegistry::CommandRegistry() {
   vector<string> rename_command = GetFlag(FLAGS_rename_command);
-
   for (string command_data : rename_command) {
     pair<string_view, string_view> kv = StrSplit(command_data, '=');
+
     auto [_, inserted] =
         cmd_rename_map_.emplace(AsciiStrToUpper(kv.first), AsciiStrToUpper(kv.second));
     if (!inserted) {
@@ -87,6 +88,55 @@ CommandRegistry::CommandRegistry() {
       exit(1);
     }
   }
+
+  config_registry.Register("rename_command", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<vector<string>>();
+    if (!res)
+      return false;
+    return RenameCommands(*res);
+  });
+}
+
+bool CommandRegistry::RenameCommands(const std::vector<std::string>& rename_commands) {
+  auto apply_cb_on_all_commands = [](const std::vector<std::string>& commands,
+                                     std::function<bool(string_view, string_view)> cb) {
+    for (string command_data : commands) {
+      pair<string_view, string_view> kv = StrSplit(command_data, '=');
+      string_view origin_name = AsciiStrToUpper(kv.first);
+      string_view new_name = AsciiStrToUpper(kv.second);
+      if (!cb(origin_name, new_name)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  auto verify_command = [this](string_view origin_name, string_view new_name) {
+    if (cmd_map_.find(origin_name) == cmd_map_.end()) {
+      LOG(WARNING) << "rename command failed, no command name:" << origin_name;
+      return false;
+    }
+    if (cmd_map_.find(new_name) != cmd_map_.end()) {
+      LOG(WARNING) << "rename command failed, can not rename to existing command:" << new_name;
+      return false;
+    }
+    return true;
+  };
+
+  auto update_command_map = [this](string_view origin_name, string_view new_name) {
+    auto it = cmd_map_.find(origin_name);
+    CHECK(it != cmd_map_.end());
+    CommandId id = std::move(it->second);
+    cmd_map_.emplace(new_name, std::move(id));
+    cmd_map_.erase(origin_name);
+    VLOG(1) << "rename command " << origin_name << "to: " << new_name;
+    return true;
+  };
+
+  if (!apply_cb_on_all_commands(rename_commands, verify_command)) {
+    return false;
+  }
+  return apply_cb_on_all_commands(rename_commands, update_command_map);
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
@@ -104,7 +154,6 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 }
 
 namespace CO {
-
 const char* OptName(CO::CommandOpt fl) {
   using namespace CO;
 
