@@ -778,7 +778,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
 void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
                       unsigned count) {
-  return Release(mode, db_index, KeyLockArgs::GetLockKey(key), count);
+  return ReleaseNormalized(mode, db_index, KeyLockArgs::GetLockKey(key), count);
 }
 
 void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
@@ -799,6 +799,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.empty()) {
     return;
   }
+
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
