@@ -61,7 +61,8 @@ ABSL_FLAG(string, requirepass, "",
           "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
-ABSL_FLAG(string, snapshot_cron, "", "cron expression for the time to save a snapshot");
+ABSL_FLAG(string, snapshot_cron, "",
+          "cron expression for the time to save a snapshot, crontab style");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
 ABSL_FLAG(int, epoll_file_threads, 0,
@@ -507,7 +508,7 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   string snapshot_cron_exp = GetFlag(FLAGS_snapshot_cron);
 
   if (!snapshot_cron_exp.empty() && !save_time.empty()) {
-    LOG(ERROR) << "save_time and cron_exp flags should not be set simultaneously";
+    LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
     quick_exit(1);
   }
 
@@ -522,7 +523,7 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
       LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
     }
   } else if (!snapshot_cron_exp.empty()) {
-    raw_cron_expr = snapshot_cron_exp;
+    raw_cron_expr = "0 " + snapshot_cron_exp;
   }
 
   if (!raw_cron_expr.empty()) {
