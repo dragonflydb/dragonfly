@@ -332,14 +332,6 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   return OpStatus::OK;
 }
 
-void Transaction::PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys) {
-  MultiSwitchCmd(cid);
-
-  multi_->role = SQUASHER;
-  InitBase(db_index_, keys);
-  InitByKeys(KeyIndex::Range(0, keys.size()));
-}
-
 void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
                                           absl::FunctionRef<bool(ShardId)> enabled) {
   CHECK(multi_->mode == GLOBAL || multi_->mode == LOCK_AHEAD);
