@@ -465,6 +465,26 @@ vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   return res;
 }
 
+absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
+  Mutex mu;
+  absl::flat_hash_set<string> result;
+
+  auto add_keys = [&](ProactorBase* proactor) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr) {
+      return;
+    }
+
+    lock_guard lk(mu);
+    for (string_view key : shard->db_slice().TEST_GetLastLockedKeys()) {
+      result.insert(string(key));
+    }
+  };
+  shard_set->pool()->AwaitFiberOnAll(add_keys);
+
+  return result;
+}
+
 void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
   auto* flag = absl::FindCommandLineFlag(flag_name);
   CHECK_NE(flag, nullptr);

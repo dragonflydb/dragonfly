@@ -693,8 +693,31 @@ TEST_F(StringFamilyTest, SetWithGetParam) {
 
 TEST_F(StringFamilyTest, SetWithHashtags) {
   EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  if (KeyLockArgs::IsLockHashTagEnabled()) {
+    EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("key"), Not(Contains("{key}1"))));
+  } else {
+    EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("{key}1"), Not(Contains("key"))));
+  }
+
   EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  if (KeyLockArgs::IsLockHashTagEnabled()) {
+    EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("key"), Not(Contains("{key}2"))));
+  } else {
+    EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("{key}2"), Not(Contains("key"))));
+  }
+
   EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+  if (ClusterConfig::IsEmulated()) {
+    EXPECT_EQ(1, GetDebugInfo().shards_count);
+  } else {
+    EXPECT_NE(1, GetDebugInfo().shards_count);
+  }
+
+  if (KeyLockArgs::IsLockHashTagEnabled()) {
+    EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("key"));
+  } else {
+    EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("{key}1", "{key}2"));
+  }
 }
 
 }  // namespace dfly

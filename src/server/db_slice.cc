@@ -755,7 +755,9 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   bool lock_acquired = true;
 
   if (lock_args.args.size() == 1) {
-    lock_acquired = lt[KeyLockArgs::GetLockKey(lock_args.args.front())].Acquire(mode);
+    string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
+    lock_acquired = lt[key].Acquire(mode);
+    uniq_keys_ = {key};
   } else {
     uniq_keys_.clear();
 
@@ -776,6 +778,12 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
 void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
                       unsigned count) {
+  return Release(mode, db_index, KeyLockArgs::GetLockKey(key), count);
+}
+
+void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
+                                unsigned count) {
+  DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));
   DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
 
   auto& lt = db_arr_[db_index]->trans_locks;
@@ -793,7 +801,9 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   }
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
-    Release(mode, lock_args.db_index, lock_args.args.front(), 1);
+    string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
+    ReleaseNormalized(mode, lock_args.db_index, key, 1);
+    uniq_keys_ = {key};
   } else {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
@@ -820,9 +830,11 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) co
 }
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
+  uniq_keys_.clear();
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
     auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+    uniq_keys_.insert(s);
     auto it = lt.find(s);
     if (it != lt.end() && !it->second.Check(mode)) {
       return false;
