@@ -168,8 +168,8 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         assert super().get_main_file("test-periodic-summary.dfs")
 
 
-# save every 2 seconds
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "*/2 * * * * *"})
+# save every 1 minute
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
 class TestCronPeriodicSnapshot(SnapshotTestBase):
     """Test periodic snapshotting"""
 
