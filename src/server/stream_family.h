@@ -17,6 +17,7 @@ class StreamFamily {
 
  private:
   static void XAdd(CmdArgList args, ConnectionContext* cntx);
+  static void XClaim(CmdArgList args, ConnectionContext* cntx);
   static void XDel(CmdArgList args, ConnectionContext* cntx);
   static void XGroup(CmdArgList args, ConnectionContext* cntx);
   static void XInfo(CmdArgList args, ConnectionContext* cntx);
