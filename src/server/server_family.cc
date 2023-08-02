@@ -369,14 +369,15 @@ string FormatTs(absl::Time now) {
   return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
 }
 
-void ExtendDfsFilename(absl::AlphaNum postfix, fs::path* filename) {
+// modifies 'filename' to be "filename-postfix.extension"
+void SetExtension(absl::AlphaNum postfix, fs::path* filename, string_view extension) {
   filename->replace_extension();  // clear if exists
-  *filename += StrCat("-", postfix, ".dfs");
+  *filename += StrCat("-", postfix, extension);
 }
 
-void ExtendDfsFilenameWithShard(int shard, fs::path* filename) {
+void ExtendDfsFilenameWithShard(int shard, fs::path* filename, string_view extension) {
   // dragonfly snapshot.
-  ExtendDfsFilename(absl::Dec(shard, absl::kZeroPad4), filename);
+  SetExtension(absl::Dec(shard, absl::kZeroPad4), filename, extension);
 }
 
 GenericError ValidateFilename(const fs::path& filename, bool new_version) {
@@ -1069,11 +1070,11 @@ static void RunStage(
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
 GenericError DoPartialSave(fs::path full_filename, const dfly::StringVec& scripts,
-                           RdbSnapshot* snapshot, EngineShard* shard) {
+                           RdbSnapshot* snapshot, EngineShard* shard, string_view extension) {
   if (shard == nullptr) {
-    ExtendDfsFilename("summary", &full_filename);
+    SetExtension("summary", &full_filename, extension);
   } else {
-    ExtendDfsFilenameWithShard(shard->shard_id(), &full_filename);
+    ExtendDfsFilenameWithShard(shard->shard_id(), &full_filename, extension);
   }
 
   // Start rdb saving.
@@ -1151,10 +1152,31 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     if (snapshot) {
       ec = snapshot->Close();
 
-      lock_guard lk(mu);
-      for (const auto& k_v : snapshot->freq_map()) {
-        rdb_name_map[RdbTypeName(k_v.first)] += k_v.second;
+      {
+        lock_guard lk(mu);
+        for (const auto& k_v : snapshot->freq_map()) {
+          rdb_name_map[RdbTypeName(k_v.first)] += k_v.second;
+        }
       }
+
+      // rename files: remove .tmp extension
+      // it is safest to do this now, as we've finished snapshotting
+      fs::path before = fpath, after = fpath;
+
+      if (new_version) {                      // .dfs
+        if (index == snapshots.size() - 1) {  // summary file
+          SetExtension("summary", &before, ".dfs.tmp");
+          SetExtension("summary", &after, ".dfs");
+        } else {
+          ExtendDfsFilenameWithShard(index, &before, ".dfs.tmp");
+          ExtendDfsFilenameWithShard(index, &after, ".dfs");
+        }
+      } else  // .rdb
+        after.replace_extension();
+
+      VLOG(1) << "close_cb: [" << index << "] rename " << before.string() << " -> "
+              << after.string();
+      std::filesystem::rename(before, after);
     }
   };
 
@@ -1193,7 +1215,8 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
 
       snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(fpath, scripts, snapshot.get(), nullptr); local_ec) {
+      if (auto local_ec = DoPartialSave(fpath, scripts, snapshot.get(), nullptr, ".dfs.tmp");
+          local_ec) {
         ec = local_ec;
         snapshot.reset();
       }
@@ -1204,7 +1227,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       auto& snapshot = snapshots[shard->shard_id()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
       snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(fpath, {}, snapshot.get(), shard); local_ec) {
+      if (auto local_ec = DoPartialSave(fpath, {}, snapshot.get(), shard, ".dfs.tmp"); local_ec) {
         ec = local_ec;
         snapshot.reset();
       }
@@ -1218,6 +1241,9 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     if (!fpath.has_extension()) {
       fpath += ".rdb";
     }
+
+    // begin by saving as temp, and later rename to the actual target in close_cb
+    fpath += ".tmp";
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
     auto lua_scripts = get_scripts();
@@ -1250,8 +1276,9 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   RunStage(new_version, close_cb, reset_event_cb);
 
   if (new_version) {
-    ExtendDfsFilename("summary", &fpath);
-  }
+    SetExtension("summary", &fpath, ".dfs");
+  } else
+    fpath.replace_extension();  // remove .tmp
 
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
