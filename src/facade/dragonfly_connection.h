@@ -224,6 +224,7 @@ class Connection : public util::Connection {
 
   std::atomic_uint64_t dispatch_q_bytes_ = 0;  // memory usage of all entries
   dfly::EventCount evc_bp_;                    // backpressure for memory limit
+  size_t dispatch_q_cmds_count_;               // how many queued async commands
 
   base::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;

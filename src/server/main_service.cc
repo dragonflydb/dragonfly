@@ -1010,6 +1010,59 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   return true;
 }
 
+void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                   facade::ConnectionContext* cntx) {
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
+
+  auto* exec_cid = registry_.Find("EXEC");
+  vector<StoredCmd> stored_cmds;
+  intrusive_ptr<Transaction> dist_trans;
+
+  auto perform_squash = [&] {
+    if (stored_cmds.empty())
+      return;
+
+    if (!dist_trans) {
+      dist_trans.reset(new Transaction{exec_cid});
+      dist_trans->StartMultiNonAtomic();
+    }
+
+    dfly_cntx->transaction = dist_trans.get();
+    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds), dfly_cntx, this, true, false);
+    dfly_cntx->transaction = nullptr;
+    stored_cmds.clear();
+  };
+
+  for (auto args : args_list) {
+    ToUpper(&args[0]);
+    const CommandId* cid = FindCmd(args);
+
+    // MULTI...EXEC commands need to be collected into a single context, so squashing is not
+    // possible
+    bool is_multi =
+        dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
+
+    if (!is_multi && cid != nullptr) {
+      stored_cmds.reserve(args_list.size());
+      stored_cmds.emplace_back(cid, args.subspan(1));
+      continue;
+    }
+
+    perform_squash();
+
+    DispatchCommand(args, cntx);
+
+    if (cid == nullptr)
+      (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
+  }
+
+  perform_squash();
+
+  if (dist_trans)
+    dist_trans->UnlockMulti();
+}
+
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                          facade::ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;

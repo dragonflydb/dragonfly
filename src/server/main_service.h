@@ -42,6 +42,10 @@ class Service : public facade::ServiceInterface {
   // Prepare command execution, verify and execute, reply to context
   void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
 
+  // Execute multiple consecutive commands, possibly in parallel by squashing
+  void DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                            facade::ConnectionContext* cntx) final;
+
   // Check VerifyCommandExecution and invoke command with args
   bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* reply_cntx,
                  bool record_stats = false);

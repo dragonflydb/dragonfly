@@ -39,6 +39,9 @@ ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
+ABSL_FLAG(std::uint64_t, pipeline_squash, 0,
+          "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
+
 using namespace util;
 using namespace std;
 using nonstd::make_unexpected;
@@ -562,6 +565,7 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
       evc_.notify();
 
   } else {
+    dispatch_q_cmds_count_++;
     SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), heap)});
     if (dispatch_q_.size() > 10)
       ThisFiber::Yield();
@@ -745,33 +749,65 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   DispatchOperations dispatch_op{builder, this};
   uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
 
+  size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
+
   while (!builder->GetError()) {
     evc_.await(
         [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)
       break;
 
-    MessageHandle msg = move(dispatch_q_.front());
-    dispatch_q_.pop_front();
+    auto recycle = [this, request_cache_limit](MessageHandle msg) {
+      dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
 
-    builder->SetBatchMode(dispatch_q_.size() > 0);
+      // Retain pipeline message in pool.
+      if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
+        dispatch_q_cmds_count_--;
+        if (stats_->pipeline_cache_capacity < request_cache_limit) {
+          stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
+          pipeline_req_pool_.push_back(move(*pipe));
+        }
+      }
+    };
 
-    {
+    builder->SetBatchMode(dispatch_q_.size() > 1);
+
+    // Special case: if the dispatch queue accumulated a big number of commands,
+    // we can try to squash them
+    if (dispatch_q_cmds_count_ > squashing_threshold &&
+        dispatch_q_cmds_count_ == dispatch_q_.size()) {
+      vector<CmdArgList> args;
+      args.reserve(dispatch_q_.size());
+      for (auto& msg : dispatch_q_) {
+        CHECK(holds_alternative<PipelineMessagePtr>(msg.handle));
+        auto& pipe_msg = get<PipelineMessagePtr>(msg.handle);
+        args.push_back(absl::MakeSpan(pipe_msg->args));
+      }
+
+      cc_->async_dispatch = true;
+      service_->DispatchManyCommands(absl::MakeSpan(args), cc_.get());
+      cc_->async_dispatch = false;
+
+      // Dispatch queue could have grown, so handle strictly as many as we executed
+      for (size_t i = 0; i < args.size(); i++) {
+        recycle(move(dispatch_q_.front()));
+        dispatch_q_.pop_front();
+      }
+
+      if (dispatch_q_.empty())
+        builder->FlushBatch();
+    } else {
+      MessageHandle msg = move(dispatch_q_.front());
+      dispatch_q_.pop_front();
+
       cc_->async_dispatch = true;
       std::visit(dispatch_op, msg.handle);
       cc_->async_dispatch = false;
+
+      recycle(move(msg));
     }
 
-    dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
     evc_bp_.notify();
-
-    // Retain pipeline message in pool.
-    if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
-      if (stats_->pipeline_cache_capacity < request_cache_limit) {
-        stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
-        pipeline_req_pool_.push_back(move(*pipe));
-      }
-    }
   }
 
   cc_->conn_closing = true;
