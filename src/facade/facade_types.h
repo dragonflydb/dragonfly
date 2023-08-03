@@ -72,11 +72,6 @@ struct ErrorReply {
   explicit ErrorReply(OpStatus status) : message{}, kind{}, status{status} {
   }
 
-  std::pair<std::string_view, std::string_view> Borrow() const {
-    auto to_sv = [](auto&& str) -> std::string_view { return str; };
-    return {visit(to_sv, message), kind};
-  }
-
   std::variant<std::string, std::string_view> message;
   std::string_view kind;
   std::optional<OpStatus> status{std::nullopt};

@@ -224,8 +224,8 @@ void RedisReplyBuilder::SendError(ErrorReply error) {
   if (error.status)
     return SendError(*error.status);
 
-  auto [msg, kind] = error.Borrow();
-  SendError(msg, kind);
+  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
+  SendError(message_sv, error.kind);
 }
 
 void RedisReplyBuilder::SendProtocolError(std::string_view str) {
