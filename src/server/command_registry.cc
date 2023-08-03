@@ -71,7 +71,7 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList args) const {
   }
 
   if (validator_)
-    return validator_(std::move(args));
+    return validator_(args.subspan(1));
   return nullopt;
 }
 

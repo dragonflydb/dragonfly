@@ -670,8 +670,8 @@ void Service::Shutdown() {
 }
 
 optional<facade::ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                                         const ConnectionContext* dfly_cntx) {
-  if (dfly_cntx->is_replicating) {
+                                                         const ConnectionContext& dfly_cntx) {
+  if (dfly_cntx.is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
     return nullopt;
   }
@@ -751,7 +751,8 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgList args) {
+optional<facade::ErrorReply> Service::VerifyCommandArguments(const CommandId* cid,
+                                                             CmdArgList args) {
   string_view cmd_str = ArgS(args, 0);
 
   if (cid == nullptr) {
@@ -762,25 +763,25 @@ optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArg
     return facade::ErrorReply{StrCat("unknown command `", cmd_str, "`"), "unknown_cmd"};
   }
 
-  return cid->Validate(args.subspan(1));
+  return cid->Validate(args);
 }
 
 std::optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgList args,
-                                                         const ConnectionContext* dfly_cntx) {
+                                                         const ConnectionContext& dfly_cntx) {
   ServerState& etl = *ServerState::tlocal();
 
-  if (auto err = VerifyCommand(cid, args); err)
+  if (auto err = VerifyCommandArguments(cid, args); err)
     return err;
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   bool under_script = dfly_cntx->conn_state.script_info != nullptr;
   bool is_write_cmd = cid->opt_mask() & CO::WRITE;
-  bool under_multi = dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd;
+  bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   bool allowed_by_state = true;
   switch (etl.gstate()) {
     case GlobalState::LOADING:
-      allowed_by_state = dfly_cntx->journal_emulated || (cid->opt_mask() & CO::LOADING);
+      allowed_by_state = dfly_cntx.journal_emulated || (cid->opt_mask() & CO::LOADING);
       break;
     case GlobalState::SHUTTING_DOWN:
       allowed_by_state = false;
@@ -800,20 +801,20 @@ std::optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, C
 
   string_view cmd_name{cid->name()};
 
-  if (dfly_cntx->req_auth && !dfly_cntx->authenticated) {
+  if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
       return facade::ErrorReply{"-NOAUTH Authentication required."};
     }
   }
 
   // only reset and quit are allow if this connection is used for monitoring
-  if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT"))
+  if (dfly_cntx.monitor && (cmd_name != "RESET" && cmd_name != "QUIT"))
     return facade::ErrorReply{"Replica can't interact with the keyspace"};
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT))
     return facade::ErrorReply{"This Redis command is not allowed from script"};
 
-  if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating)
+  if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
     return facade::ErrorReply{"-READONLY You can't write against a read only replica."};
 
   if (under_multi) {
@@ -830,8 +831,8 @@ std::optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, C
   }
 
   if (under_script && cid->IsTransactional()) {
-    OpStatus status = CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args.subspan(1),
-                                        dfly_cntx->transaction);
+    OpStatus status = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, args.subspan(1),
+                                        dfly_cntx.transaction);
 
     if (status == OpStatus::KEY_NOTFOUND)
       return facade::ErrorReply{"script tried accessing undeclared key"};
@@ -865,11 +866,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  if (auto err = VerifyCommand(cid, args, dfly_cntx); err) {
+  if (auto err = VerifyCommand(cid, args, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
-    (*dfly_cntx)->SendError(*err);
+    (*dfly_cntx)->SendError(move(*err));
     return;
   }
 
@@ -1221,8 +1222,10 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     ToUpper(&ca.args[0]);
     auto* cid = registry_.Find(facade::ToSV(ca.args[0]));
 
-    if (!VerifyCommand(cid, ca.args, cntx))
+    if (auto err = VerifyCommand(cid, ca.args, *cntx); err) {
+      (*cntx)->SendError(move(*err));
       return;
+    }
 
     auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
     info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1), replies);

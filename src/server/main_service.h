@@ -120,15 +120,15 @@ class Service : public facade::ServiceInterface {
   };
 
   // Verify command exists and has no obvious formatting errors
-  std::optional<facade::ErrorReply> VerifyCommand(const CommandId* cid, CmdArgList args);
+  std::optional<facade::ErrorReply> VerifyCommandArguments(const CommandId* cid, CmdArgList args);
 
   // Verify command can be executed
   std::optional<facade::ErrorReply> VerifyCommand(const CommandId* cid, CmdArgList args,
-                                                  const ConnectionContext* cntx);
+                                                  const ConnectionContext& cntx);
 
   // Return error if not all keys are owned by the server when running in cluster mode
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                                       const ConnectionContext* dfly_cntx);
+                                                       const ConnectionContext& dfly_cntx);
 
   const CommandId* FindCmd(CmdArgList args) const;
 

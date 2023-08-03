@@ -61,12 +61,13 @@ struct ConnectionStats {
 };
 
 struct ErrorReply {
-  explicit ErrorReply(std::string msg, std::string_view kind = {})
+  explicit ErrorReply(std::string&& msg, std::string_view kind = {})
       : message{move(msg)}, kind{kind} {
   }
   explicit ErrorReply(std::string_view msg, std::string_view kind = {}) : message{msg}, kind{kind} {
   }
-  explicit ErrorReply(const char* msg, std::string_view kind = {})
+  explicit ErrorReply(const char* msg,
+                      std::string_view kind = {})  // to resolve ambiguity of constructors above
       : message{std::string_view{msg}}, kind{kind} {
   }
   explicit ErrorReply(OpStatus status) : message{}, kind{}, status{status} {
