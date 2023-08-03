@@ -46,6 +46,7 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+using facade::ErrorReply;
 using dfly::operator""_KB;
 
 struct MaxMemoryFlag {
@@ -429,16 +430,15 @@ bool IsSHA(string_view str) {
   return true;
 }
 
-optional<facade::ErrorReply> EvalValidator(CmdArgList args) {
+optional<ErrorReply> EvalValidator(CmdArgList args) {
   string_view num_keys_str = ArgS(args, 1);
   int32_t num_keys;
 
   if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0)
-    return facade::ErrorReply{facade::kInvalidIntErr};
+    return ErrorReply{facade::kInvalidIntErr};
 
   if (unsigned(num_keys) > args.size() - 2)
-    return facade::ErrorReply{"Number of keys can't be greater than number of args",
-                              kSyntaxErrType};
+    return ErrorReply{"Number of keys can't be greater than number of args", kSyntaxErrType};
 
   return nullopt;
 }
@@ -669,8 +669,8 @@ void Service::Shutdown() {
   ThisFiber::SleepFor(10ms);
 }
 
-optional<facade::ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                                         const ConnectionContext& dfly_cntx) {
+optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+                                                 const ConnectionContext& dfly_cntx) {
   if (dfly_cntx.is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
     return nullopt;
@@ -682,7 +682,7 @@ optional<facade::ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, C
 
   OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
   if (!key_index_res) {
-    return facade::ErrorReply{key_index_res.status()};
+    return ErrorReply{key_index_res.status()};
   }
 
   const auto& key_index = *key_index_res;
@@ -701,20 +701,19 @@ optional<facade::ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, C
   }
 
   if (cross_slot) {
-    return facade::ErrorReply{"-CROSSSLOT Keys in request don't hash to the same slot"};
+    return ErrorReply{"-CROSSSLOT Keys in request don't hash to the same slot"};
   }
 
   // Check keys slot is in my ownership
   const ClusterConfig* cluster_config = cluster_family_.cluster_config();
   if (cluster_config == nullptr) {
-    return facade::ErrorReply{kClusterNotConfigured};
+    return ErrorReply{kClusterNotConfigured};
   }
 
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
     ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);
-    return facade::ErrorReply{
-        absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
+    return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
   }
 
   return nullopt;
@@ -751,8 +750,7 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-optional<facade::ErrorReply> Service::VerifyCommandArguments(const CommandId* cid,
-                                                             CmdArgList args) {
+optional<ErrorReply> Service::VerifyCommandArguments(const CommandId* cid, CmdArgList args) {
   string_view cmd_str = ArgS(args, 0);
 
   if (cid == nullptr) {
@@ -760,14 +758,14 @@ optional<facade::ErrorReply> Service::VerifyCommandArguments(const CommandId* ci
     if (unknown_cmds_.size() < 1024)
       unknown_cmds_[cmd_str]++;
 
-    return facade::ErrorReply{StrCat("unknown command `", cmd_str, "`"), "unknown_cmd"};
+    return ErrorReply{StrCat("unknown command `", cmd_str, "`"), "unknown_cmd"};
   }
 
   return cid->Validate(args);
 }
 
-std::optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgList args,
-                                                         const ConnectionContext& dfly_cntx) {
+std::optional<ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgList args,
+                                                 const ConnectionContext& dfly_cntx) {
   ServerState& etl = *ServerState::tlocal();
 
   if (auto err = VerifyCommandArguments(cid, args); err)
@@ -796,33 +794,33 @@ std::optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, C
   if (!allowed_by_state) {
     VLOG(1) << "Command " << cid->name() << " not executed because global state is "
             << GlobalStateName(etl.gstate());
-    return facade::ErrorReply{StrCat("Can not execute during ", GlobalStateName(etl.gstate()))};
+    return ErrorReply{StrCat("Can not execute during ", GlobalStateName(etl.gstate()))};
   }
 
   string_view cmd_name{cid->name()};
 
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
-      return facade::ErrorReply{"-NOAUTH Authentication required."};
+      return ErrorReply{"-NOAUTH Authentication required."};
     }
   }
 
   // only reset and quit are allow if this connection is used for monitoring
   if (dfly_cntx.monitor && (cmd_name != "RESET" && cmd_name != "QUIT"))
-    return facade::ErrorReply{"Replica can't interact with the keyspace"};
+    return ErrorReply{"Replica can't interact with the keyspace"};
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT))
-    return facade::ErrorReply{"This Redis command is not allowed from script"};
+    return ErrorReply{"This Redis command is not allowed from script"};
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
-    return facade::ErrorReply{"-READONLY You can't write against a read only replica."};
+    return ErrorReply{"-READONLY You can't write against a read only replica."};
 
   if (under_multi) {
     if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE"))
-      return facade::ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
+      return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
 
     if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB")
-      return facade::ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
+      return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
   if (ClusterConfig::IsEnabled()) {
@@ -835,10 +833,10 @@ std::optional<facade::ErrorReply> Service::VerifyCommand(const CommandId* cid, C
                                         dfly_cntx.transaction);
 
     if (status == OpStatus::KEY_NOTFOUND)
-      return facade::ErrorReply{"script tried accessing undeclared key"};
+      return ErrorReply{"script tried accessing undeclared key"};
 
     if (status != OpStatus::OK)
-      return facade::ErrorReply{status};
+      return ErrorReply{status};
   }
 
   return nullopt;
