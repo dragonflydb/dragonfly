@@ -137,13 +137,25 @@ void BaseFamilyTest::SetUpTestSuite() {
 }
 
 void BaseFamilyTest::SetUp() {
+  ResetService();
+}
+
+void BaseFamilyTest::ResetService() {
+  if (service_ != nullptr) {
+    service_->Shutdown();
+    service_ = nullptr;
+
+    delete shard_set;
+    shard_set = nullptr;
+  }
+
   if (absl::GetFlag(FLAGS_force_epoll)) {
     pp_.reset(fb2::Pool::Epoll(num_threads_));
   } else {
     pp_.reset(fb2::Pool::IOUring(16, num_threads_));
   }
   pp_->Run();
-  service_.reset(new Service{pp_.get()});
+  service_ = std::make_unique<Service>(pp_.get());
 
   Service::InitOpts opts;
   opts.disable_time_update = true;

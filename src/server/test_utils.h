@@ -75,6 +75,8 @@ class BaseFamilyTest : public ::testing::Test {
   int64_t CheckedInt(ArgSlice list);
   std::string CheckedString(ArgSlice list);
 
+  void ResetService();
+
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
 
