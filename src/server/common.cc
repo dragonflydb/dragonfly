@@ -34,9 +34,24 @@ namespace dfly {
 using namespace std;
 using namespace util;
 
+namespace {
+// Thread-local cache with static linkage.
+thread_local std::optional<bool> is_enabled_flag_cache;
+}  // namespace
+
+void TEST_InvalidateLockHashTag() {
+  is_enabled_flag_cache = nullopt;
+  CHECK(shard_set != nullptr);
+  shard_set->pool()->Await(
+      [](ShardId shard, ProactorBase* proactor) { is_enabled_flag_cache = nullopt; });
+}
+
 bool KeyLockArgs::IsLockHashTagEnabled() {
-  thread_local bool is_enabled_flag_cache = absl::GetFlag(FLAGS_lock_on_hashtags);
-  return is_enabled_flag_cache;
+  if (!is_enabled_flag_cache.has_value()) {
+    is_enabled_flag_cache = absl::GetFlag(FLAGS_lock_on_hashtags);
+  }
+
+  return *is_enabled_flag_cache;
 }
 
 string_view KeyLockArgs::GetLockKey(string_view key) {

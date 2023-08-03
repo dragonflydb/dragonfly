@@ -140,13 +140,20 @@ void BaseFamilyTest::SetUp() {
   ResetService();
 }
 
+// Test hook defined in common.cc.
+void TEST_InvalidateLockHashTag();
+
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
+    TEST_InvalidateLockHashTag();
+
     service_->Shutdown();
     service_ = nullptr;
 
     delete shard_set;
     shard_set = nullptr;
+
+    pp_->Stop();
   }
 
   if (absl::GetFlag(FLAGS_force_epoll)) {
@@ -500,6 +507,8 @@ absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
 void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
   auto* flag = absl::FindCommandLineFlag(flag_name);
   CHECK_NE(flag, nullptr);
+  VLOG(1) << "Changing flag " << flag_name << " from " << flag->CurrentValue() << " to "
+          << new_value;
   string error;
   CHECK(flag->ParseFrom(new_value, &error)) << "Error: " << error;
 }
