@@ -1110,8 +1110,7 @@ GenericError DoPartialSave(fs::path full_filename, const dfly::StringVec& script
 GenericError ServerFamily::DoSave() {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
-  boost::intrusive_ptr<Transaction> trans(
-      new Transaction{cid, ServerState::tlocal()->thread_index()});
+  boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(0, {});
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get());
 }

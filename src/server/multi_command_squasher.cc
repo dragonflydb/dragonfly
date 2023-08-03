@@ -41,7 +41,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
     if (IsAtomic()) {
       sinfo.local_tx = new Transaction{cntx_->transaction};
     } else {
-      sinfo.local_tx = new Transaction{cntx_->transaction->GetCId(), sid};
+      sinfo.local_tx = new Transaction{cntx_->transaction->GetCId()};
       sinfo.local_tx->StartMultiNonAtomic();
     }
   }

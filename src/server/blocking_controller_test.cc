@@ -45,7 +45,7 @@ void BlockingControllerTest::SetUp() {
   shard_set = new EngineShardSet(pp_.get());
   shard_set->Init(kNumThreads, false);
 
-  trans_.reset(new Transaction{&cid_, 0});
+  trans_.reset(new Transaction{&cid_});
 
   str_vec_.assign({"blpop", "x", "z", "0"});
   for (auto& s : str_vec_) {
