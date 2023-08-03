@@ -2,6 +2,7 @@ import pytest
 import time
 import subprocess
 import aiohttp
+import logging
 import os
 from typing import Optional
 from prometheus_client.parser import text_string_to_metric_families
@@ -83,7 +84,7 @@ class DflyInstance:
         if proc is None:
             return
 
-        print(f"Stopping instance on {self._port}")
+        logging.debug(f"Stopping instance on {self._port}")
         try:
             if kill:
                 proc.kill()
@@ -104,7 +105,7 @@ class DflyInstance:
 
         base_args = ["--use_zset_tree"] + [f"--{v}" for v in self.params.args]
         all_args = self.format_args(self.args) + base_args
-        print(f"Starting instance with arguments {all_args} from {self.params.path}")
+        logging.debug(f"Starting instance with arguments {all_args} from {self.params.path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
