@@ -1407,6 +1407,21 @@ const CommandId* Service::FindCmd(CmdArgList args) const {
   return res;
 }
 
+optional<ShardId> GetSingleShardIdForKeys(const ConnectionState::ScriptInfo& sinfo) {
+  optional<ShardId> result;
+
+  for (string_view key : sinfo.keys) {
+    ShardId shard_id = Shard(KeyLockArgs::GetLockKey(key), shard_set->size());
+    if (!result.has_value()) {
+      result = shard_id;
+    } else if (result.value() != shard_id) {
+      return nullopt;
+    }
+  }
+
+  return result;
+}
+
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
@@ -1441,7 +1456,13 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   interpreter->SetGlobalArray("ARGV", eval_args.args);
   interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
 
-  Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
+  Interpreter::RunResult result;
+  optional<ShardId> sid = GetSingleShardIdForKeys(*sinfo);
+  if (sid.has_value()) {
+    pp_.at(*sid)->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+  } else {
+    result = interpreter->RunFunction(eval_args.sha, &error);
+  }
   absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
 
   if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
