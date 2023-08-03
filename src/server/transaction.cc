@@ -41,8 +41,7 @@ IntentLock::Mode Transaction::Mode() const {
  * @param ess
  * @param cs
  */
-Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
-    : cid_{cid}, coordinator_index_(thread_index) {
+Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
@@ -695,7 +694,8 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
       }
     };
 
-    if (coordinator_index_ == unique_shard_id_ && ServerState::tlocal()->AllowInlineScheduling()) {
+    if (auto* ss = ServerState::tlocal();
+        ss->thread_index() == unique_shard_id_ && ss->AllowInlineScheduling()) {
       DVLOG(2) << "Inline scheduling a transaction";
       schedule_cb();
     } else {
@@ -837,9 +837,9 @@ void Transaction::ExecuteAsync() {
   // IsArmedInShard in other threads.
   run_count_.store(unique_shard_cnt_, memory_order_release);
 
-  // Execute inline when we can. We can't use coordinator_index_ because we may offload this
-  // function to run in a different thread.
-  if (unique_shard_cnt_ == 1 && ServerState::tlocal()->thread_index() == unique_shard_id_) {
+  auto* ss = ServerState::tlocal();
+  if (unique_shard_cnt_ == 1 && ss->thread_index() == unique_shard_id_ &&
+      ss->AllowInlineScheduling()) {
     DVLOG(1) << "Short-circuit ExecuteAsync " << DebugId();
     EngineShard::tlocal()->PollExecution("exec_cb", this);
     intrusive_ptr_release(this);  // against use_count_.fetch_add above.
