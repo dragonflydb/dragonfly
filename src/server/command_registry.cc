@@ -60,6 +60,21 @@ void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
   ent.second += (after - before) / 1000;
 }
 
+optional<facade::ErrorReply> CommandId::Validate(CmdArgList args) const {
+  if ((arity() > 0 && args.size() != size_t(arity())) ||
+      (arity() < 0 && args.size() < size_t(-arity()))) {
+    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  }
+
+  if (key_arg_step() == 2 && (args.size() % 2) == 0) {
+    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  }
+
+  if (validator_)
+    return validator_(std::move(args));
+  return nullopt;
+}
+
 CommandRegistry::CommandRegistry() {
   vector<string> rename_command = GetFlag(FLAGS_rename_command);
 
