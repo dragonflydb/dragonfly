@@ -80,7 +80,6 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   mutable DbTableStats stats;
   std::vector<SlotStats> slots_stats;
   ExpireTable::Cursor expire_cursor;
-  PrimeTable::Cursor prime_cursor;
 
   TopKeys top_keys;
 

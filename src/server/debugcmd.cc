@@ -11,7 +11,9 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/string_map.h"
 #include "server/blocking_controller.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -36,6 +38,7 @@ using absl::GetFlag;
 using absl::StrAppend;
 using absl::StrCat;
 
+namespace {
 struct PopulateBatch {
   DbIndex dbid;
   uint64_t index[32];
@@ -87,6 +90,128 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value
   }
 }
 
+struct ObjHist {
+  base::Histogram key_len;
+  base::Histogram val_len;    // overall size for the value.
+  base::Histogram card;       // for sets, hashmaps etc - it's number of entries.
+  base::Histogram entry_len;  // for sets, hashmaps etc - it's the length of each entry.
+};
+
+// Returns number of O(1) steps executed.
+unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
+  using namespace container_utils;
+  const PrimeValue& pv = it->second;
+  size_t val_len = 0;
+  unsigned steps = 1;
+
+  auto per_entry_cb = [&](ContainerEntry entry) {
+    if (entry.value) {
+      val_len += entry.length;
+      hist->entry_len.Add(entry.length);
+    } else {
+      val_len += 8;  // size of long
+    }
+    ++steps;
+    return true;
+  };
+
+  hist->key_len.Add(it->first.Size());
+
+  if (pv.ObjType() == OBJ_LIST) {
+    IterateList(pv, per_entry_cb, 0, -1);
+  } else if (pv.ObjType() == OBJ_ZSET) {
+    IterateSortedSet(pv.GetRobjWrapper(),
+                     [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
+  } else if (pv.ObjType() == OBJ_SET) {
+    IterateSet(pv, per_entry_cb);
+  } else if (pv.ObjType() == OBJ_HASH) {
+    if (pv.Encoding() == kEncodingListPack) {
+      uint8_t intbuf[LP_INTBUF_SIZE];
+      uint8_t* lp = (uint8_t*)pv.RObjPtr();
+      uint8_t* fptr = lpFirst(lp);
+      while (fptr) {
+        size_t entry_len = 0;
+        // field
+        string_view sv = LpGetView(fptr, intbuf);
+        entry_len += sv.size();
+
+        // value
+        fptr = lpNext(lp, fptr);
+        entry_len += sv.size();
+        fptr = lpNext(lp, fptr);
+        hist->entry_len.Add(entry_len);
+        steps += 2;
+      }
+      val_len = lpBytes(lp);
+    } else {
+      StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
+      for (const auto& k_v : *sm) {
+        hist->entry_len.Add(sdslen(k_v.first) + sdslen(k_v.second) + 2);
+        ++steps;
+      }
+      val_len = sm->ObjMallocUsed() + sm->SetMallocUsed();
+    }
+  }
+  // TODO: streams
+
+  if (val_len == 0) {
+    // Fallback
+    val_len = pv.MallocUsed();
+  }
+
+  hist->val_len.Add(val_len);
+
+  if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON)
+    hist->card.Add(pv.Size());
+
+  return steps;
+}
+
+using ObjHistMap = absl::flat_hash_map<unsigned, unique_ptr<ObjHist>>;
+
+void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
+  for (auto& [obj_type, src_hist] : src) {
+    auto& dest_hist = (*dest)[obj_type];
+    if (!dest_hist) {
+      dest_hist = std::move(src_hist);
+    } else {
+      dest_hist->key_len.Merge(src_hist->key_len);
+      dest_hist->val_len.Merge(src_hist->val_len);
+      dest_hist->card.Merge(src_hist->card);
+      dest_hist->entry_len.Merge(src_hist->entry_len);
+    }
+  }
+}
+
+void DoBuildObjHist(EngineShard* shard, ObjHistMap* obj_hist_map) {
+  auto& db_slice = shard->db_slice();
+  unsigned steps = 0;
+
+  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+    DbTable* dbt = db_slice.GetDBTable(i);
+    if (dbt == nullptr)
+      continue;
+    PrimeTable::Cursor cursor;
+    do {
+      cursor = dbt->prime.Traverse(cursor, [&](PrimeIterator it) {
+        unsigned obj_type = it->second.ObjType();
+        auto& hist_ptr = (*obj_hist_map)[obj_type];
+        if (!hist_ptr) {
+          hist_ptr.reset(new ObjHist);
+        }
+        steps += AddObjHist(it, hist_ptr.get());
+      });
+
+      if (steps >= 20000) {
+        steps = 0;
+        ThisFiber::Yield();
+      }
+    } while (cursor);
+  }
+}
+
+}  // namespace
+
 DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
 }
 
@@ -117,6 +242,8 @@ void DebugCmd::Run(CmdArgList args) {
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
         "    If SLOTS is specified then create keys only in given slots range."
+        "OBJHIST",
+        "    Prints histogram of object sizes.",
         "HELP",
         "    Prints this help.",
     };
@@ -153,7 +280,9 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "TRANSACTION") {
     return TxAnalysis();
   }
-
+  if (subcmd == "OBJHIST") {
+    return ObjHist();
+  }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return (*cntx_)->SendError(reply, kSyntaxErrType);
 }
@@ -568,6 +697,32 @@ void DebugCmd::TxAnalysis() {
 
   (*cntx_)->SendSimpleString(absl::StrCat("queue_len:", queue_len.load(),
                                           "armed: ", armed_cnt.load(), " free:", free_cnt.load()));
+}
+
+void DebugCmd::ObjHist() {
+  vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
+
+  shard_set->RunBlockingInParallel(
+      [&](EngineShard* shard) { DoBuildObjHist(shard, &obj_hist_map_arr[shard->shard_id()]); });
+
+  for (size_t i = shard_set->size() - 1; i > 0; --i) {
+    MergeObjHistMap(std::move(obj_hist_map_arr[i]), &obj_hist_map_arr[0]);
+  }
+
+  string result;
+  absl::StrAppend(&result, "___begin object histogram___\n\n");
+
+  for (auto& [obj_type, hist_ptr] : obj_hist_map_arr[0]) {
+    StrAppend(&result, "OBJECT:", ObjTypeName(obj_type), "\n");
+    StrAppend(&result, "________________________________________________________________\n");
+    StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
+    StrAppend(&result, "Value length histogram:\n", hist_ptr->val_len.ToString(), "\n");
+    StrAppend(&result, "Cardinality histogram:\n", hist_ptr->card.ToString(), "\n");
+    StrAppend(&result, "Entry length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+  }
+
+  absl::StrAppend(&result, "___end object histogram___\n");
+  (*cntx_)->SendBulkString(result);
 }
 
 }  // namespace dfly
