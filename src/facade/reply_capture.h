@@ -24,6 +24,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
  public:
   void SendError(std::string_view str, std::string_view type = {}) override;
+  void SendError(ErrorReply error) override;
   void SendMGetResponse(absl::Span<const OptResp>) override;
 
   // SendStored -> SendSimpleString("OK")

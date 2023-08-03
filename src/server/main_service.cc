@@ -772,7 +772,7 @@ std::optional<ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgLis
     return err;
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
-  bool under_script = dfly_cntx->conn_state.script_info != nullptr;
+  bool under_script = dfly_cntx.conn_state.script_info != nullptr;
   bool is_write_cmd = cid->opt_mask() & CO::WRITE;
   bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
