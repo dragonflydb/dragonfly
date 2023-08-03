@@ -7,11 +7,11 @@
 #ifdef DFLY_USE_SSL
 #include <openssl/ssl.h>
 #endif
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/service_interface.h"
+#include "server/config_registry.h"
 #include "util/proactor_pool.h"
 
 using namespace std;
@@ -27,7 +27,8 @@ ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
 ABSL_FLAG(string, tls_ca_cert_file, "", "ca signed certificate to validate tls connections");
 ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
-ABSL_FLAG(uint32_t, tcp_keepalive, 300, "the period in seconds used to send ACKs to client");
+ABSL_FLAG(uint32_t, tcp_keepalive, 300,
+          "the period in seconds used to send ACKs to client, expected to be greated than 3");
 
 #if 0
 enum TlsClientAuth {
@@ -102,7 +103,6 @@ SSL_CTX* CreateSslServerCntx() {
 
 bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
   DCHECK_GT(interval_sec, 3u);
-
   int val = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) < 0)
     return false;
@@ -140,6 +140,22 @@ Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), prot
   http_base_.reset(new HttpListener<>);
   http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
   si->ConfigureHttpHandlers(http_base_.get());
+
+  constexpr string_view kTcpFlagError = "tcp_keepalive expected to be greated than 3 seconds";
+  tcp_keepalive_ = absl::GetFlag(FLAGS_tcp_keepalive);
+  CHECK_GT(tcp_keepalive_, 3u) << kTcpFlagError;
+  dfly::config_registry.Register("tcp_keepalive", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<uint32_t>();
+    if (!res)
+      return false;
+
+    if (*res <= 3) {
+      LOG(ERROR) << kTcpFlagError;
+      return false;
+    }
+    tcp_keepalive_ = *res;
+    return true;
+  });
 }
 
 Listener::~Listener() {
@@ -158,8 +174,8 @@ error_code Listener::ConfigureServerSocket(int fd) {
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
-  uint32_t interval = absl::GetFlag(FLAGS_tcp_keepalive);
-  bool success = ConfigureKeepAlive(fd, interval);
+
+  bool success = ConfigureKeepAlive(fd, tcp_keepalive_);
 
   if (!success) {
     int myerr = errno;

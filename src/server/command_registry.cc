@@ -101,9 +101,9 @@ bool CommandRegistry::RenameCommands(const std::vector<std::string>& rename_comm
   auto apply_cb_on_all_commands = [](const std::vector<std::string>& commands,
                                      std::function<bool(string_view, string_view)> cb) {
     for (string command_data : commands) {
-      pair<string_view, string_view> kv = StrSplit(command_data, '=');
-      string_view origin_name = AsciiStrToUpper(kv.first);
-      string_view new_name = AsciiStrToUpper(kv.second);
+      pair<string_view, string_view> kv = StrSplit(command_data, absl::MaxSplits('=', 1));
+      string origin_name = AsciiStrToUpper(kv.first);
+      string new_name = AsciiStrToUpper(kv.second);
       if (!cb(origin_name, new_name)) {
         return false;
       }

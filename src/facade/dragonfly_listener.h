@@ -65,6 +65,7 @@ class Listener : public util::ListenerInterface {
 
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
+  uint32_t tcp_keepalive_;
 };
 
 }  // namespace facade
