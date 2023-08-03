@@ -88,7 +88,6 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   ~DbTable();
 
   void Clear();
-  void Release(IntentLock::Mode mode, std::string_view key, unsigned count);
 };
 
 // We use reference counting semantics of DbTable when doing snapshotting.

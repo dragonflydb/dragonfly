@@ -175,7 +175,7 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
-  void CancelBlocking(); // Cancel an ongoing blocking transaction if there is one.
+  void CancelBlocking();           // Cancel an ongoing blocking transaction if there is one.
 
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext

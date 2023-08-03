@@ -75,6 +75,8 @@ class BaseFamilyTest : public ::testing::Test {
   int64_t CheckedInt(ArgSlice list);
   std::string CheckedString(ArgSlice list);
 
+  void ResetService();
+
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
 
@@ -102,9 +104,11 @@ class BaseFamilyTest : public ::testing::Test {
   const facade::Connection::PubMessage& GetPublishedMessage(std::string_view conn_id,
                                                             size_t index) const;
 
+  static absl::flat_hash_set<std::string> GetLastUsedKeys();
+
   static unsigned NumLocked();
 
-  void SetTestFlag(std::string_view flag_name, std::string_view new_value);
+  static void SetTestFlag(std::string_view flag_name, std::string_view new_value);
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;

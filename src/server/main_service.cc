@@ -589,6 +589,11 @@ Service::Service(ProactorPool* pp)
   CHECK(pp);
   CHECK(shard_set == NULL);
 
+  if (KeyLockArgs::IsLockHashTagEnabled() && !ClusterConfig::IsEnabledOrEmulated()) {
+    LOG(ERROR) << "Setting --lock_on_hashtags without --cluster_mode is unsupported";
+    exit(1);
+  }
+
   shard_set = new EngineShardSet(pp);
 
   // We support less than 1024 threads and we support less than 1024 shards.
@@ -736,14 +741,15 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(args, i);
+    string_view key = KeyLockArgs::GetLockKey(ArgS(args, i));
     if (!eval_info.keys.contains(key)) {
       VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
-  if (key_index.bonus && !eval_info.keys.contains(ArgS(args, *key_index.bonus)))
+  if (key_index.bonus &&
+      !eval_info.keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
     return OpStatus::KEY_NOTFOUND;
 
   return OpStatus::OK;
@@ -770,7 +776,7 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
   }
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
-  bool under_script = bool(dfly_cntx->conn_state.script_info);
+  bool under_script = dfly_cntx->conn_state.script_info != nullptr;
   bool allowed_by_state = true;
   switch (etl.gstate()) {
     case GlobalState::LOADING:
@@ -1356,7 +1362,7 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 }
 
 // Start multi transaction for eval. Returns true if transaction was scheduled.
-// Skips scheduling if multi mode requies declaring keys, but no keys were declared.
+// Skips scheduling if multi mode requires declaring keys, but no keys were declared.
 bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams params,
                     Transaction* trans) {
   Transaction::MultiMode multi_mode = DetermineMultiMode(params);
@@ -1422,9 +1428,9 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
-  sinfo.reset(new ConnectionState::ScriptInfo{});
+  sinfo = make_unique<ConnectionState::ScriptInfo>();
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
-    sinfo->keys.insert(ArgS(eval_args.keys, i));
+    sinfo->keys.insert(KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i)));
   }
   sinfo->async_cmds_heap_limit = absl::GetFlag(FLAGS_multi_eval_squash_buffer);
   DCHECK(cntx->transaction);
