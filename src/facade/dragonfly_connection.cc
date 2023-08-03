@@ -46,12 +46,13 @@ namespace facade {
 namespace {
 
 void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
-  string res("-ERR Protocol error: ");
+  constexpr string_view res = "-ERR Protocol error: "sv;
   if (pres == RedisParser::BAD_BULKLEN) {
-    builder->SendProtocolError("invalid bulk length");
+    builder->SendProtocolError(absl::StrCat(res, "invalid bulk length"));
+  } else if (pres == RedisParser::BAD_ARRAYLEN) {
+    builder->SendProtocolError(absl::StrCat(res, "invalid multibulk length"));
   } else {
-    CHECK_EQ(RedisParser::BAD_ARRAYLEN, pres);
-    builder->SendProtocolError("invalid multibulk length");
+    builder->SendProtocolError(absl::StrCat(res, "parse error"));
   }
 }
 
