@@ -1004,6 +1004,17 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     }
     pv_->InitRobj(OBJ_ZSET, encoding, inner);
     return;
+  } else if (rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
+    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+      LOG(ERROR) << "ListPack integrity check failed.";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
+    }
+    unsigned char* src_lp = (unsigned char*)blob.data();
+    unsigned long long bytes = lpBytes(src_lp);
+    unsigned char* lp = (uint8_t*)zmalloc(bytes);
+    ::memcpy(lp, src_lp, bytes);
+    pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
@@ -1301,6 +1312,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       break;
     case RDB_TYPE_HASH_ZIPLIST:
     case RDB_TYPE_HASH_LISTPACK:
+    case RDB_TYPE_ZSET_LISTPACK:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:

@@ -413,6 +413,7 @@ TEST_F(RdbTest, LoadSmall7) {
   // 1. A list called my-list encoded as RDB_TYPE_LIST_QUICKLIST_2
   // 2. A hashtable called my-hset encoded as RDB_TYPE_HASH_LISTPACK
   // 3. A set called my-set encoded as RDB_TYPE_SET_LISTPACK
+  // 4. A zset called my-zset encoded as RDB_TYPE_ZSET_LISTPACK
   io::FileSource fs = GetSource("redis7_small.rdb");
   RdbLoader loader{service_.get()};
 
@@ -426,7 +427,8 @@ TEST_F(RdbTest, LoadSmall7) {
 
   ASSERT_THAT(resp, ArrLen(2));
 
-  EXPECT_THAT(StrArray(resp.GetVec()[1]), UnorderedElementsAre("my-set", "my-hset", "my-list"));
+  EXPECT_THAT(StrArray(resp.GetVec()[1]),
+              UnorderedElementsAre("my-set", "my-hset", "my-list", "zset"));
 
   resp = Run({"smembers", "my-set"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
@@ -439,5 +441,9 @@ TEST_F(RdbTest, LoadSmall7) {
   resp = Run({"lrange", "my-list", "0", "-1"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("list1", "list2"));
+
+  resp = Run({"zrange", "zset", "0", "-1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("einstein", "schrodinger"));
 }
 }  // namespace dfly
