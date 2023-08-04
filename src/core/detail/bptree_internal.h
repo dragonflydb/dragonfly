@@ -46,11 +46,20 @@ namespace detail {
 
 constexpr uint16_t kBPNodeSize = 256;
 
+/**
+ * @brief The BPNodeLayout class is a helper class that defines the layout of the B+tree node.
+ *        The inner node looks like this:
+ *        | 4 bytes metadata | keys ... | 4 bytes tree-count | children nodes |
+ *        The leaf node looks like this:
+ *        | 4 bytes metadata | keys ... |
+ *
+ * @tparam T
+ */
 template <typename T> class BPNodeLayout {
   static_assert(std::is_trivially_copyable<T>::value, "KeyT must be triviall copyable");
 
-  static constexpr uint16_t kKeyOffset = sizeof(uint64_t);  // 8 bytes for metadata
-
+  static constexpr uint16_t kKeyOffset = 4;                  // 4 bytes for metadata
+  static constexpr uint16_t kSubTreeLen = sizeof(uint32_t);  // 4 bytes for count.
  public:
   static constexpr uint16_t kKeySize = sizeof(T);
   static constexpr uint16_t kMaxLeafKeys = (kBPNodeSize - kKeyOffset) / kKeySize;
@@ -58,9 +67,9 @@ template <typename T> class BPNodeLayout {
 
   // internal node:
   // x slots, (x+1) children: x * kKeySize + (x+1) * sizeof(BPTreeNode*) = x * (kKeySize + 8) + 8
-  // x = (kBPNodeSize - 8 - kKeyOffset) / (kKeySize + 8)
+  // x = (kBPNodeSize - kInnerKeyOffset - 8) / (kKeySize + 8)
   static constexpr uint16_t kMaxInnerKeys =
-      (kBPNodeSize - sizeof(void*) - kKeyOffset) / (kKeySize + sizeof(void*));
+      (kBPNodeSize - sizeof(void*) - kKeyOffset - kSubTreeLen) / (kKeySize + sizeof(void*));
   static constexpr uint16_t kMinInnerKeys = kMaxInnerKeys / 2;
 
   using KeyT = T;
@@ -75,8 +84,20 @@ template <typename T> class BPNodeLayout {
     return reinterpret_cast<const uint8_t*>(node) + kKeyOffset + kKeySize * index;
   }
 
-  static uint8_t* InnerKeysEnd(void* node) {
+  static uint8_t* TreeCountPtr(void* node) {
     return reinterpret_cast<uint8_t*>(node) + kKeyOffset + kKeySize * kMaxInnerKeys;
+  }
+
+  static const uint8_t* TreeCountPtr(const void* node) {
+    return reinterpret_cast<const uint8_t*>(node) + kKeyOffset + kKeySize * kMaxInnerKeys;
+  }
+
+  static uint8_t* ChildrenStart(void* node) {
+    return TreeCountPtr(node) + kSubTreeLen;
+  }
+
+  static const uint8_t* ChildrenStart(const void* node) {
+    return TreeCountPtr(node) + kSubTreeLen;
   }
 
   static_assert(kMaxLeafKeys < 128);
@@ -112,17 +133,8 @@ template <typename T> class BPTreeNode {
     memcpy(slot, &item, sizeof(KeyT));
   }
 
-  BPTreeNode** Children() {
-    uint8_t* ptr = Layout::InnerKeysEnd(this);
-    return reinterpret_cast<BPTreeNode**>(ptr);
-  }
-
-  BPTreeNode* Child(unsigned i) {
-    return Children()[i];
-  }
-
-  void SetChild(unsigned i, BPTreeNode* child) {
-    Children()[i] = child;
+  bool IsLeaf() const {
+    return leaf_;
   }
 
   struct SearchResult {
@@ -135,10 +147,6 @@ template <typename T> class BPTreeNode {
   template <typename Comp> SearchResult BSearch(KeyT key, Comp&& comp) const;
 
   void Split(BPTreeNode* right, KeyT* median);
-
-  bool IsLeaf() const {
-    return leaf_;
-  }
 
   unsigned NumItems() const {
     return num_items_;
@@ -156,6 +164,12 @@ template <typename T> class BPTreeNode {
     return IsLeaf() ? Layout::kMinLeafKeys : Layout::kMinInnerKeys;
   }
 
+  // Returns the overall number of iterms for a subtree rooted at this node.
+  // Equals to NumItems() for leaf nodes and GetInnerTreeCount() for inner nodes.
+  uint32_t TreeCount() const {
+    return IsLeaf() ? NumItems() : GetInnerTreeCount();
+  }
+
   void ShiftRight(unsigned index);
   void ShiftLeft(unsigned index, bool child_step_right = false);
 
@@ -164,11 +178,6 @@ template <typename T> class BPTreeNode {
     --num_items_;
   }
 
-  // Rebalance a full child at position pos, at which we tried to insert at insert_pos.
-  // Returns the node and the position to insert into if rebalancing succeeded.
-  // Returns nullptr if rebalancing did not succeed.
-  std::pair<BPTreeNode*, unsigned> RebalanceChild(unsigned pos, unsigned insert_pos);
-
   // Inserts item into a leaf node.
   // Assumes: the node is IsLeaf() and has some space.
   void LeafInsert(unsigned index, KeyT item) {
@@ -176,6 +185,52 @@ template <typename T> class BPTreeNode {
     InsertItem(index, item);
   }
 
+  void Validate(KeyT upper_bound) const;
+
+  //
+  // Below is the inner node API
+  //
+
+  BPTreeNode* Child(unsigned i) {
+    BPTreeNode* res;
+    memcpy(&res, Layout::ChildrenStart(this) + sizeof(BPTreeNode*) * i, sizeof(BPTreeNode*));
+    return res;
+  }
+
+  const BPTreeNode* Child(unsigned i) const {
+    BPTreeNode* res;
+    memcpy(&res, Layout::ChildrenStart(this) + sizeof(BPTreeNode*) * i, sizeof(BPTreeNode*));
+    return res;
+  }
+
+  void SetChild(unsigned i, BPTreeNode* child) {
+    memcpy(Layout::ChildrenStart(this) + sizeof(BPTreeNode*) * i, &child, sizeof(BPTreeNode*));
+  }
+
+  // TODO: instead of storing counts at nodes we could keep at parent level
+  //       along the children array. Unfortunately, this complicates implementation of the tree,
+  //       so we will do it after the whole functionality is completed.
+  uint32_t GetChildTreeCount(unsigned i) {
+    return Child(i)->TreeCount();
+  }
+
+  void SetChildTreeCount(unsigned i, uint32_t cnt) {
+    Child(i)->SetTreeCount(cnt);
+  }
+
+  void IncreaseTreeCount(int32_t delta) {
+    uint32_t cnt = GetInnerTreeCount();
+    cnt += delta;
+    memcpy(Layout::TreeCountPtr(this), &cnt, sizeof(uint32_t));
+  }
+
+  // Rebalance a full child at position pos, at which we tried to insert at insert_pos.
+  // Returns the node and the position to insert into if rebalancing succeeded.
+  // Returns nullptr if rebalancing did not succeed.
+  std::pair<BPTreeNode*, unsigned> RebalanceChild(unsigned pos, unsigned insert_pos);
+
+  // We do not update tree count and it is done on the caller side.
+  // Inserts item into a inner node at position pos and adds `child` at position pos+1.
   void InnerInsert(unsigned index, KeyT item, BPTreeNode* child) {
     InsertItem(index, item);
     SetChild(index + 1, child);
@@ -187,9 +242,22 @@ template <typename T> class BPTreeNode {
   // count decreased, otherwise, we return nullptr (rebalanced).
   BPTreeNode* MergeOrRebalanceChild(unsigned pos);
 
-  void Validate(KeyT upper_bound) const;
+  uint32_t DEBUG_TreeCount() const {
+    uint32_t res = NumItems();
+    if (!IsLeaf()) {
+      for (unsigned i = 0; i <= NumItems(); ++i) {
+        res += Child(i)->DEBUG_TreeCount();
+      }
+    }
+    return res;
+  }
 
  private:
+  void SetTreeCount(uint32_t cnt) {
+    assert(!IsLeaf());
+    memcpy(Layout::TreeCountPtr(this), &cnt, sizeof(uint32_t));
+  }
+
   void RebalanceChildToLeft(unsigned child_pos, unsigned count);
   void RebalanceChildToRight(unsigned child_pos, unsigned count);
 
@@ -204,10 +272,17 @@ template <typename T> class BPTreeNode {
     SetKey(index, item);
   }
 
+  uint32_t GetInnerTreeCount() const {
+    assert(!IsLeaf());
+    uint32_t res;
+    memcpy(&res, Layout::TreeCountPtr(this), sizeof(uint32_t));
+    return res;
+  }
+
   struct {
-    uint64_t num_items_ : 7;
-    uint64_t leaf_ : 1;
-    uint64_t : 56;
+    uint32_t num_items_ : 7;
+    uint32_t leaf_ : 1;
+    uint32_t : 24;
   };
 };
 
@@ -304,10 +379,10 @@ template <typename T> void BPTreeNode<T>::ShiftRight(unsigned index) {
     uint8_t* ptr = Layout::KeyPtr(index, this);
     memmove(ptr + Layout::kKeySize, ptr, num_items_to_shift * Layout::kKeySize);
 
-    BPTreeNode** children = Children();
     if (!IsLeaf()) {
-      memmove(children + index + 1, children + index,
-              (num_items_to_shift + 1) * sizeof(BPTreeNode*));
+      uint8_t* src = Layout::ChildrenStart(this) + index * sizeof(BPTreeNode*);
+      uint8_t* dest = src + sizeof(BPTreeNode*);
+      memmove(dest, src, (num_items_to_shift + 1) * sizeof(BPTreeNode*));
     }
   }
   num_items_++;
@@ -324,8 +399,9 @@ template <typename T> void BPTreeNode<T>::ShiftLeft(unsigned index, bool child_s
       index += unsigned(child_step_right);
       num_items_to_shift = num_items_ - index;
       if (num_items_to_shift > 0) {
-        BPTreeNode** children = Children();
-        memmove(children + index, children + index + 1, num_items_to_shift * sizeof(BPTreeNode*));
+        uint8_t* dest = Layout::ChildrenStart(this) + index * sizeof(BPTreeNode*);
+        uint8_t* src = dest + sizeof(BPTreeNode*);
+        memmove(dest, src, num_items_to_shift * sizeof(BPTreeNode*));
       }
     }
   }
@@ -429,9 +505,17 @@ template <typename T> void BPTreeNode<T>::RebalanceChildToLeft(unsigned child_po
 
   if (!src->IsLeaf()) {
     // Move the child pointers from the right to the left node.
+    uint32_t src_move_count = 0;
     for (unsigned i = 0; i < count; ++i) {
+      src_move_count += src->GetChildTreeCount(i);
       dest->SetChild(1 + dest->NumItems() + i, src->Child(i));
     }
+
+    uint32_t dest_tree_count = GetChildTreeCount(child_pos - 1);
+    uint32_t src_tree_count = GetChildTreeCount(child_pos);
+    SetChildTreeCount(child_pos - 1, dest_tree_count + src_move_count + count);
+    SetChildTreeCount(child_pos, src_tree_count - src_move_count - count);
+
     for (unsigned i = count; i <= src->NumItems(); ++i) {
       src->SetChild(i - count, src->Child(i));
       src->SetChild(i, NULL);
@@ -480,11 +564,18 @@ void BPTreeNode<T>::RebalanceChildToRight(unsigned child_pos, unsigned count) {
     }
 
     // Move child pointers from the left node to the right.
+    uint32_t src_move_count = 0;
     for (unsigned i = 0; i < count; ++i) {
       unsigned src_id = src->NumItems() - (count - 1) + i;
+      src_move_count += src->Child(src_id)->TreeCount();
       dest->SetChild(i, src->Child(src_id));
       src->SetChild(src_id, NULL);
     }
+
+    uint32_t dest_tree_count = GetChildTreeCount(child_pos + 1);
+    uint32_t src_tree_count = GetChildTreeCount(child_pos);
+    SetChildTreeCount(child_pos + 1, dest_tree_count + src_move_count + count);
+    SetChildTreeCount(child_pos, src_tree_count - src_move_count - count);
   }
 
   // Fixup the counts on the src and dest nodes.
@@ -557,10 +648,14 @@ template <typename T> void BPTreeNode<T>::Split(BPTreeNode<T>* right, T* median)
   memmove(Layout::KeyPtr(0, right), Layout::KeyPtr(mid + 1, this),
           right->num_items_ * Layout::kKeySize);
   if (!IsLeaf()) {
-    BPTreeNode** rchild = right->Children();
+    uint32_t right_subtree_count = right->num_items_;
     for (size_t i = 0; i <= right->num_items_; i++) {
-      rchild[i] = Child(mid + 1 + i);
+      BPTreeNode* child = Child(mid + 1 + i);
+      right_subtree_count += child->TreeCount();
+      right->SetChild(i, child);
     }
+    right->SetTreeCount(right_subtree_count);
+    IncreaseTreeCount(-(right_subtree_count + 1));
   }
   num_items_ = mid;
 }
@@ -578,6 +673,7 @@ template <typename T> void BPTreeNode<T>::MergeFromRight(KeyT key, BPTreeNode<T>
     for (unsigned i = 0; i <= right->NumItems(); ++i) {
       SetChild(dest_items + 1 + i, right->Child(i));
     }
+    IncreaseTreeCount(right->TreeCount() + 1);
   }
   num_items_ += 1 + right->NumItems();
   right->num_items_ = 0;
