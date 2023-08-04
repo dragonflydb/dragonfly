@@ -7,7 +7,13 @@
 
 #include <random>
 
+extern "C" {
+#include "redis/zmalloc.h"
+#include "redis/zset.h"
+}
+
 #include "base/gtest.h"
+#include "base/init.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
 
@@ -157,8 +163,12 @@ TEST_F(BPTreeSetTest, Delete) {
   ASSERT_GT(bptree_.NodeCount(), 2u);
   unsigned sz = bptree_.Size();
   for (unsigned i = 0; i < kNumElems; ++i) {
+    --sz;
+    ASSERT_EQ(bptree_.GetRank(kNumElems - 1), sz);
+
     ASSERT_TRUE(bptree_.Delete(i));
-    ASSERT_EQ(bptree_.Size(), --sz);
+    ASSERT_EQ(bptree_.Size(), sz);
+    // ASSERT_TRUE(Validate()) << i;
   }
 
   ASSERT_EQ(mi_alloc_.used(), 0u);
@@ -166,5 +176,95 @@ TEST_F(BPTreeSetTest, Delete) {
   ASSERT_EQ(bptree_.Height(), 0u);
   ASSERT_EQ(bptree_.NodeCount(), 0u);
 }
+
+struct ZsetPolicy {
+  struct KeyT {
+    double d;
+    sds s;
+  };
+
+  struct KeyCompareTo {
+    int operator()(const KeyT& left, const KeyT& right) {
+      if (left.d < right.d)
+        return -1;
+      if (left.d > right.d)
+        return 1;
+
+      return sdscmp(left.s, right.s);
+    }
+  };
+};
+
+using SDSTree = BPTree<ZsetPolicy::KeyT, ZsetPolicy>;
+
+static string RandomString(mt19937& rand, unsigned len) {
+  const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
+  string ret;
+  ret.reserve(len);
+
+  for (size_t i = 0; i < len; ++i) {
+    ret += alpanum[rand() % alpanum.size()];
+  }
+
+  return ret;
+}
+
+std::vector<ZsetPolicy::KeyT> GenerateRandomPairs(unsigned len) {
+  mt19937 dre(10);
+  std::vector<ZsetPolicy::KeyT> vals(len, ZsetPolicy::KeyT{});
+  for (unsigned i = 0; i < len; ++i) {
+    vals[i].d = dre();
+    vals[i].s = sdsnew(RandomString(dre, 10).c_str());
+  }
+  return vals;
+}
+
+static void BM_FindRandomBPTree(benchmark::State& state) {
+  unsigned iters = state.range(0);
+  std::vector<ZsetPolicy::KeyT> vals = GenerateRandomPairs(iters);
+  SDSTree bptree;
+  for (unsigned i = 0; i < iters; ++i) {
+    bptree.Insert(vals[i]);
+  }
+
+  while (state.KeepRunning()) {
+    for (unsigned i = 0; i < iters; ++i) {
+      benchmark::DoNotOptimize(bptree.Contains(vals[i]));
+    }
+  }
+  for (const auto v : vals) {
+    sdsfree(v.s);
+  }
+}
+BENCHMARK(BM_FindRandomBPTree)->Arg(1024)->Arg(1 << 16)->Arg(1 << 20);
+
+static void BM_FindRandomZSL(benchmark::State& state) {
+  zskiplist* zsl = zslCreate();
+  unsigned iters = state.range(0);
+  std::vector<ZsetPolicy::KeyT> vals = GenerateRandomPairs(iters);
+  for (unsigned i = 0; i < iters; ++i) {
+    zslInsert(zsl, vals[i].d, sdsdup(vals[i].s));
+  }
+
+  while (state.KeepRunning()) {
+    for (unsigned i = 0; i < iters; ++i) {
+      benchmark::DoNotOptimize(zslGetRank(zsl, vals[i].d, vals[i].s));
+    }
+  }
+
+  zslFree(zsl);
+
+  for (const auto v : vals) {
+    sdsfree(v.s);
+  }
+}
+BENCHMARK(BM_FindRandomZSL)->Arg(1024)->Arg(1 << 16)->Arg(1 << 20);
+
+void RegisterBPTreeBench() {
+  auto* tlh = mi_heap_get_backing();
+  init_zmalloc_threadlocal(tlh);
+};
+
+REGISTER_MODULE_INITIALIZER(Bptree, RegisterBPTreeBench());
 
 }  // namespace dfly
