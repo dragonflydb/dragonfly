@@ -36,6 +36,7 @@ class BPTreeSetTest : public ::testing::Test {
 
   MiMemoryResource mi_alloc_;
   BPTree<uint64_t> bptree_;
+  mt19937 generator_{1};
 };
 
 bool BPTreeSetTest::Validate(const Node* node, uint64_t ubound) {
@@ -93,8 +94,6 @@ bool BPTreeSetTest::Validate() {
 }
 
 TEST_F(BPTreeSetTest, BPtreeInsert) {
-  mt19937 generator(1);
-
   for (unsigned i = 1; i < 7000; ++i) {
     ASSERT_TRUE(bptree_.Insert(i));
     ASSERT_EQ(i, bptree_.Size());
@@ -115,7 +114,7 @@ TEST_F(BPTreeSetTest, BPtreeInsert) {
 
   uniform_int_distribution<uint64_t> dist(0, 100000);
   for (unsigned i = 0; i < 20000; ++i) {
-    bptree_.Insert(dist(generator));
+    bptree_.Insert(dist(generator_));
     // ASSERT_TRUE(Validate()) << i;
   }
   ASSERT_TRUE(Validate());
@@ -175,6 +174,50 @@ TEST_F(BPTreeSetTest, Delete) {
   ASSERT_EQ(bptree_.Size(), 0u);
   ASSERT_EQ(bptree_.Height(), 0u);
   ASSERT_EQ(bptree_.NodeCount(), 0u);
+}
+
+TEST_F(BPTreeSetTest, Iterate) {
+  constexpr size_t kNumElems = 7000;
+  for (unsigned i = 0; i < kNumElems; ++i) {
+    bptree_.Insert(i * 2);
+  }
+
+  unsigned cnt = 0;
+  bptree_.Iterate(31, 543, [&](uint64_t val) {
+    ASSERT_EQ((31 + cnt) * 2, val);
+    ++cnt;
+  });
+  ASSERT_EQ(543 - 31 + 1, cnt);
+
+  for (unsigned j = 0; j < 10; ++j) {
+    cnt = 0;
+    unsigned from = generator_() % kNumElems;
+    unsigned to = from + generator_() % (kNumElems - from);
+    bptree_.Iterate(from, to, [&](uint64_t val) {
+      ASSERT_EQ((from + cnt) * 2, val) << from << " " << to << " " << cnt;
+      ++cnt;
+    });
+    ASSERT_EQ(to - from + 1, cnt);
+  }
+
+  // Reverse iteration
+  cnt = 0;
+  bptree_.IterateReverse(5845, 6849, [&](uint64_t val) {
+    ASSERT_EQ((6849 - cnt) * 2, val);
+    ++cnt;
+  });
+  ASSERT_EQ(6849 - 5845 + 1, cnt);
+
+  for (unsigned j = 0; j < 10; ++j) {
+    cnt = 0;
+    unsigned from = generator_() % kNumElems;
+    unsigned to = from + generator_() % (kNumElems - from);
+    bptree_.IterateReverse(from, to, [&](uint64_t val) {
+      ASSERT_EQ((to - cnt) * 2, val) << from << " " << to << " " << cnt;
+      ++cnt;
+    });
+    ASSERT_EQ(to - from + 1, cnt);
+  }
 }
 
 struct ZsetPolicy {
