@@ -265,8 +265,6 @@ template <typename T> class BPTreeNode {
 
   void InsertItem(unsigned index, KeyT item) {
     assert(index <= num_items_);
-    assert(index == 0 || Key(index - 1) < item);
-    assert(index == num_items_ || Key(index) > item);
 
     ShiftRight(index);
     SetKey(index, item);

@@ -195,6 +195,8 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Delete(KeyT item)
   }
   count_--;
 
+  assert(node->IsLeaf());
+
   // go up the tree and rebalance if number of items in the node is less
   // than low limit. We either merge or rebalance nodes.
   while (node->NumItems() < node->MinItems()) {
@@ -223,13 +225,21 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Delete(KeyT item)
     unsigned pos = path.Last().second;
     assert(parent->Child(pos) == node);
     node = parent->MergeOrRebalanceChild(pos);
+
+    parent->IncreaseTreeCount(-1);
+
     if (node == nullptr)  // succeeded to merge/rebalance without the need to propagate.
       break;
 
     DestroyNode(node);
+
+    // assert(parent->TreeCount() == parent->DEBUG_TreeCount());
     node = parent;
   }
 
+  if (path.Depth() >= 2) {
+    IncreaseSubtreeCounts(path, path.Depth() - 2, -1);
+  }
   return true;
 }
 
@@ -284,6 +294,8 @@ bool BPTree<T, Policy>::Locate(KeyT key, BPTreePath* path) const {
 template <typename T, typename Policy>
 void BPTree<T, Policy>::InsertToFullLeaf(KeyT item, const BPTreePath& path) {
   using Layout = detail::BPNodeLayout<T>;
+  using Comp [[maybe_unused]] = typename Policy::KeyCompareTo;
+
   assert(path.Depth() > 0u);
 
   BPTreeNode* node = path.Last().first;
@@ -304,10 +316,10 @@ void BPTree<T, Policy>::InsertToFullLeaf(KeyT item, const BPTreePath& path) {
   assert(node->NumItems() < Layout::kMaxLeafKeys);
 
   if (insert_pos <= node->NumItems()) {
-    assert(item < median);
+    assert(Comp()(item, median) == -1);
     node->LeafInsert(insert_pos, item);
   } else {
-    assert(item > median);
+    assert(Comp()(item, median) == 1);
     right->LeafInsert(insert_pos - node->NumItems() - 1, item);
   }
 
@@ -364,11 +376,12 @@ void BPTree<T, Policy>::InsertToFullLeaf(KeyT item, const BPTreePath& path) {
     assert(node->NumItems() < Layout::kMaxInnerKeys);
 
     if (pos <= node->NumItems()) {
-      assert(median < next_median);
+      assert(Comp()(median, next_median) == -1);
+
       node->InnerInsert(pos, median, right);
       node->IncreaseTreeCount(1);
     } else {
-      assert(median > next_median);
+      assert(Comp()(median, next_median) == 1);
 
       next_right->InnerInsert(pos - node->NumItems() - 1, median, right);
 
