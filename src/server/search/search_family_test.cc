@@ -63,8 +63,37 @@ template <typename... Args> auto AreDocIds(Args... args) {
   return DocIds(vector<string>{args...});
 }
 
-TEST_F(SearchFamilyTest, CreateIndex) {
-  EXPECT_EQ(Run({"ft.create", "idx", "ON", "HASH", "PREFIX", "1", "prefix"}), "OK");
+TEST_F(SearchFamilyTest, CreateDropListIndex) {
+  EXPECT_EQ(Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "idx-3", "ON", "JSON", "PREFIX", "1", "prefix-3"}), "OK");
+
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::UnorderedElementsAre("idx-1", "idx-2", "idx-3"));
+
+  EXPECT_EQ(Run({"ft.dropindex", "idx-2"}), "OK");
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::UnorderedElementsAre("idx-1", "idx-3"));
+
+  EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Unknown Index name"));
+
+  EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
+  EXPECT_EQ(Run({"ft._list"}), "idx-3");
+}
+
+TEST_F(SearchFamilyTest, InfoIndex) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"}),
+      "OK");
+
+  for (size_t i = 0; i < 15; i++) {
+    Run({"hset", absl::StrCat("doc-", i), "name", absl::StrCat("Name of", i)});
+  }
+
+  auto info = Run({"ft.info", "idx-1"});
+  EXPECT_EQ(info.GetVec()[2], "fields");
+  EXPECT_EQ(info.GetVec()[3].GetVec().size(), 1);
+  EXPECT_THAT(info.GetVec()[3].GetVec()[0].GetVec(), testing::ElementsAre("name", "type", "TEXT"));
+  EXPECT_EQ(info.GetVec()[4], "num_docs");
+  EXPECT_THAT(info.GetVec()[5], IntArg(15));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
