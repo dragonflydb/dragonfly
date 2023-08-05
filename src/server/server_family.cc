@@ -763,7 +763,9 @@ void ServerFamily::SnapshotScheduling() {
     const std::chrono::time_point now = std::chrono::system_clock::now();
     const std::chrono::time_point next = cron::cron_next(cron_expr.value(), now);
 
-    schedule_done_.WaitFor(next - now);
+    if (schedule_done_.WaitFor(next - now)) {
+      break;
+    };
 
     GenericError ec = DoSave();
     if (ec) {
