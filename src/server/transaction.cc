@@ -947,7 +947,7 @@ string_view Transaction::Name() const {
 }
 
 ShardId Transaction::GetUniqueShard() const {
-  DCHECK_EQ(GetUniqueShardCnt(), 1);
+  DCHECK_EQ(GetUniqueShardCnt(), 1U);
   return unique_shard_id_;
 }
 
