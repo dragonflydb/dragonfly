@@ -47,32 +47,7 @@ class CompressedSortedSet {
     absl::Span<const uint8_t> diffs_{};
   };
 
-  // Output iterator to build compressed list from sorted range
-  struct SortedBackInserter {
-    using iterator_category = std::forward_iterator_tag;
-    using difference_type = std::ptrdiff_t;
-    using value_type = IntType;
-    using pointer = IntType*;
-    using reference = IntType&;
-
-    explicit SortedBackInserter(CompressedSortedSet* list);
-
-    SortedBackInserter& operator*() {
-      return *this;
-    }
-    SortedBackInserter& operator++() {
-      return *this;
-    }
-
-    SortedBackInserter& operator=(IntType value);
-
-   private:
-    IntType last_;
-    CompressedSortedSet* list_;
-  };
-
   friend struct Iterator;
-  friend struct SortedBackInserter;
 
  public:
   ConstIterator begin() const;
@@ -106,7 +81,8 @@ class CompressedSortedSet {
   static std::pair<IntType /*value*/, size_t /*read*/> ReadVarLen(absl::Span<const uint8_t> source);
 
  private:
-  IntType size_{0};
+  uint32_t size_{0};
+  std::optional<IntType> tail_value_{};
   std::vector<uint8_t> diffs_{};
 };
 
