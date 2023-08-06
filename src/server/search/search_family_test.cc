@@ -89,11 +89,10 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_EQ(info.GetVec()[2], "fields");
-  EXPECT_EQ(info.GetVec()[3].GetVec().size(), 1);
-  EXPECT_THAT(info.GetVec()[3].GetVec()[0].GetVec(), testing::ElementsAre("name", "type", "TEXT"));
-  EXPECT_EQ(info.GetVec()[4], "num_docs");
-  EXPECT_THAT(info.GetVec()[5], IntArg(15));
+  EXPECT_THAT(info, RespArray(ElementsAre(
+                        _, _, "fields",
+                        RespArray(ElementsAre(RespArray(ElementsAre("name", "type", "TEXT")))),
+                        "num_docs", IntArg(15))));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
