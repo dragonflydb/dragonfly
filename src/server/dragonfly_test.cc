@@ -344,7 +344,7 @@ TEST_F(DflyEngineTest, OOM) {
   max_memory_limit = 300000;
   size_t i = 0;
   RespExpr resp;
-  for (; i < 5000; i += 3) {
+  for (; i < 10000; i += 3) {
     resp = Run({"mset", StrCat("key", i), "bar", StrCat("key", i + 1), "bar", StrCat("key", i + 2),
                 "bar"});
     if (resp != "OK")
@@ -407,6 +407,7 @@ TEST_F(DflyEngineTest, Bug207) {
 
   for (; i > 0; --i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
+    ASSERT_EQ(resp, "OK");
   }
 }
 
