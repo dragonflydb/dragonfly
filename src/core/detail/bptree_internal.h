@@ -689,17 +689,24 @@ template <typename T> void BPTreePath<T>::Next() {
   assert(depth_ > 0);
   BPTreeNode<T>* node = Last().first;
 
+  // The data in BPTree is stored in both the leaf nodes and the inner nodes.
   if (node->IsLeaf()) {
-    if (++record_[depth_ - 1].pos < node->NumItems()) {
+    ++record_[depth_ - 1].pos;
+    if (record_[depth_ - 1].pos < node->NumItems()) {
       return;
     }
 
+    // Advance to the next item, which is Key(i) in some ascendent of the subtree with
+    // root Child(i). i in that case must be less than NumItems().
+    // Note, that subtree Child(i) in a inner node is located before Key(i).
     do {
       Pop();
     } while (depth_ > 0 && Position(depth_ - 1) == Node(depth_ - 1)->NumItems());
-    return;  // we either point now on separator in the parent node or we finished the tree.
+    return;  // we either point now on separator Key(i) in the parent node or we finished the tree.
   }
 
+  // We are in the inner node after the ascent from the leaf node. We need to advance to the next
+  // Child and dig left.
   assert(!node->IsLeaf());
   assert(record_[depth_ - 1].pos < node->NumItems());
 
