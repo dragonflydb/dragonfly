@@ -750,25 +750,18 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-optional<ErrorReply> Service::VerifyCommandArguments(const CommandId* cid, CmdArgList args) {
-  string_view cmd_str = ArgS(args, 0);
-
-  if (cid == nullptr) {
-    lock_guard lk(mu_);
-    if (unknown_cmds_.size() < 1024)
-      unknown_cmds_[cmd_str]++;
-
-    return ErrorReply{StrCat("unknown command `", cmd_str, "`"), "unknown_cmd"};
-  }
-
-  return cid->Validate(args);
+optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid) {
+  // TODO: Move OOM check here
+  return nullopt;
 }
 
-std::optional<ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgList args,
-                                                 const ConnectionContext& dfly_cntx) {
+std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
+                                                      const ConnectionContext& dfly_cntx) {
+  DCHECK_NOTNULL(cid);
+
   ServerState& etl = *ServerState::tlocal();
 
-  if (auto err = VerifyCommandArguments(cid, args); err)
+  if (auto err = cid->Validate(tail_args); err)
     return err;
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
@@ -824,13 +817,13 @@ std::optional<ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgLis
   }
 
   if (ClusterConfig::IsEnabled()) {
-    if (auto err = CheckKeysOwnership(cid, args.subspan(1), dfly_cntx); err)
+    if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
   }
 
   if (under_script && cid->IsTransactional()) {
-    OpStatus status = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, args.subspan(1),
-                                        dfly_cntx.transaction);
+    OpStatus status =
+        CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
 
     if (status == OpStatus::KEY_NOTFOUND)
       return ErrorReply{"script tried accessing undeclared key"};
@@ -846,7 +839,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
+  ServerState& etl = *ServerState::tlocal();
+
   ToUpper(&args[0]);
+  const CommandId* cid = FindCmd(args);
+
+  if (cid == nullptr) {
+    return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
+  }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool under_script = bool(dfly_cntx->conn_state.script_info);
@@ -859,20 +859,17 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
-  const CommandId* cid = FindCmd(args);
-  ServerState& etl = *ServerState::tlocal();
-
   etl.RecordCmd();
 
-  if (auto err = VerifyCommand(cid, args, *dfly_cntx); err) {
+  auto args_no_cmd = args.subspan(1);
+
+  if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
     (*dfly_cntx)->SendError(move(*err));
     return;
   }
-
-  auto args_no_cmd = args.subspan(1);
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
@@ -933,7 +930,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // itself. EXEC does not use DispatchCommand for dispatching.
   bool collect_stats =
       dfly_cntx->transaction && (!dfly_cntx->transaction->IsMulti() || dispatching_in_multi);
-  if (!InvokeCmd(args.subspan(1), cid, dfly_cntx, collect_stats)) {
+  if (!InvokeCmd(cid, args_no_cmd, dfly_cntx, collect_stats)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
@@ -946,10 +943,18 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 }
 
-bool Service::InvokeCmd(CmdArgList args, const CommandId* cid, ConnectionContext* cntx,
+bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx,
                         bool record_stats) {
+  DCHECK_NOTNULL(cid);
+  DCHECK(!cid->Validate(tail_args));
+
+  if (auto err = VerifyCommandExecution(cid); err) {
+    (*cntx)->SendError(move(*err));
+    return true;  // return false only for internal error aborts
+  }
+
   try {
-    cid->Invoke(args, cntx);
+    cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -1066,6 +1071,14 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 
   // Reset back.
   dfly_cntx->conn_state.memcache_flag = 0;
+}
+
+ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
+  lock_guard lk(mu_);
+  if (unknown_cmds_.size() < 1024)
+    unknown_cmds_[cmd_name]++;
+
+  return ErrorReply{StrCat("unknown command `", cmd_name, "`"), "unknown_cmd"};
 }
 
 bool RequireAdminAuth() {
@@ -1196,8 +1209,9 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   cntx->transaction->MultiSwitchCmd(eval_cid);
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
-  WithReplies(&crb, cntx,
-              [&] { MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx, true); });
+  WithReplies(&crb, cntx, [&] {
+    MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx, this, true, true);
+  });
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -1214,26 +1228,30 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
   absl::Cleanup clean = [orig, cntx] { cntx->Inject(orig); };
 
+  optional<ErrorReply> findcmd_err;
+
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
-
     ToUpper(&ca.args[0]);
-    auto* cid = registry_.Find(facade::ToSV(ca.args[0]));
-
-    if (auto err = VerifyCommand(cid, ca.args, *cntx); err) {
-      (*cntx)->SendError(move(*err));
-      return;
+    // Full command verification happens during squashed execution
+    if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
+      auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+      info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1), replies);
+      info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
+    } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
+      findcmd_err = ReportUnknownCmd(ArgS(ca.args, 0));
     }
-
-    auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-    info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1), replies);
-    info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
   }
 
-  if (auto err = FlushEvalAsyncCmds(cntx, !ca.async); err) {
+  if (auto err = FlushEvalAsyncCmds(cntx, !ca.async || findcmd_err.has_value()); err) {
     CapturingReplyBuilder::Apply(move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
     return;
+  }
+
+  if (findcmd_err.has_value()) {
+    replier.RedisReplyBuilder::SendError(move(*findcmd_err));
+    *ca.requested_abort |= ca.error_abort;
   }
 
   if (ca.async)
@@ -1600,7 +1618,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   if (!exec_info.body.empty()) {
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {
       for (auto& scmd : exec_info.body) {
         VLOG(2) << "TX CMD " << scmd.Cid()->name() << " " << scmd.NumArgs();
@@ -1621,7 +1639,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
           }
         }
 
-        bool ok = InvokeCmd(args, scmd.Cid(), cntx, true);
+        bool ok = InvokeCmd(scmd.Cid(), args, cntx, true);
         if (!ok || rb->GetError())  // checks for i/o error, not logical error.
           break;
       }

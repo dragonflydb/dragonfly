@@ -18,6 +18,7 @@
 
 ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(std::string, default_lua_flags);
 
 namespace dfly {
@@ -859,6 +860,23 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   EXPECT_THAT(exec_resp.GetVec(), ElementsAre(IntArg(1), "y"));
 
   EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
+}
+
+TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_lua_auto_async, true);
+
+  // The script should abort only at the second error, no further commands should be executed
+  string_view s = R"(
+    redis.pcall('INCR', 'A')
+    redis.pcall('FIRST WRONG')
+    redis.pcall('INCR', 'A')
+    redis.call('SECOND WRONG')
+    redis.pcall('INCR', 'A')
+  )";
+
+  EXPECT_THAT(Run({"EVAL", s, "1", "A"}), ErrArg("unknown command `SECOND WRONG`"));
+  EXPECT_EQ(Run({"get", "A"}), "2");
 }
 
 }  // namespace dfly

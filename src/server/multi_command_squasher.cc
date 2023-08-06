@@ -25,8 +25,9 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
 }  // namespace
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
-                                           bool error_abort)
-    : cmds_{cmds}, cntx_{cntx}, base_cid_{nullptr}, error_abort_{error_abort} {
+                                           Service* service, bool verify_commands, bool error_abort)
+    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr},
+      verify_commands_{verify_commands}, error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = mode == Transaction::NON_ATOMIC ? nullptr : cntx->transaction->GetCId();
 }
@@ -50,6 +51,8 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
 }
 
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
+  DCHECK_NOTNULL(cmd->Cid());
+
   if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
       (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
@@ -90,19 +93,28 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
+
+  cmd->Fill(&tmp_keylist_);
+  auto args = absl::MakeSpan(tmp_keylist_);
+
+  if (verify_commands_) {
+    if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
+      (*cntx_)->SendError(move(*err));
+      return error_abort_;
+    }
+  }
 
   auto* tx = cntx_->transaction;
   tx->MultiSwitchCmd(cmd->Cid());
   cntx_->cid = cmd->Cid();
 
-  cmd->Fill(&tmp_keylist_);
-  auto args = absl::MakeSpan(tmp_keylist_);
-
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->conn_state.db_index, args);
-  cmd->Cid()->Invoke(args, cntx_);
+  service_->InvokeCmd(cmd->Cid(), args, cntx_);
+
+  return false;
 }
 
 OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
@@ -116,16 +128,25 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
   for (auto* cmd : sinfo.cmds) {
-    local_tx->MultiSwitchCmd(cmd->Cid());
-    local_cntx.cid = cmd->Cid();
-    crb.SetReplyMode(cmd->ReplyMode());
-
     arg_vec.resize(cmd->NumArgs());
     auto args = absl::MakeSpan(arg_vec);
     cmd->Fill(args);
 
+    if (verify_commands_) {
+      // The shared context is used for state verification, the local one is only for replies
+      if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
+        crb.SendError(*move(err));
+        sinfo.replies.emplace_back(crb.Take());
+        continue;
+      }
+    }
+
+    local_tx->MultiSwitchCmd(cmd->Cid());
+    local_cntx.cid = cmd->Cid();
+    crb.SetReplyMode(cmd->ReplyMode());
+
     local_tx->InitByArgs(parent_tx->GetDbIndex(), args);
-    cmd->Cid()->Invoke(args, &local_cntx);
+    service_->InvokeCmd(cmd->Cid(), args, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
   }
@@ -194,8 +215,10 @@ void MultiCommandSquasher::Run() {
         break;
     }
 
-    if (res == SquashResult::NOT_SQUASHED)
-      ExecuteStandalone(&cmd);
+    if (res == SquashResult::NOT_SQUASHED) {
+      if (ExecuteStandalone(&cmd))
+        break;
+    }
   }
 
   ExecuteSquashed();  // Flush leftover

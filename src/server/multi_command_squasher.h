@@ -8,6 +8,7 @@
 #include "core/fibers.h"
 #include "facade/reply_capture.h"
 #include "server/conn_context.h"
+#include "server/main_service.h"
 
 namespace dfly {
 
@@ -23,9 +24,9 @@ namespace dfly {
 // contains a non-atomic multi transaction to execute squashed commands.
 class MultiCommandSquasher {
  public:
-  static void Execute(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
-                      bool error_abort = false) {
-    MultiCommandSquasher{cmds, cntx, error_abort}.Run();
+  static void Execute(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* service,
+                      bool verify_commands = false, bool error_abort = false) {
+    MultiCommandSquasher{cmds, cntx, service, verify_commands, error_abort}.Run();
   }
 
  private:
@@ -45,7 +46,8 @@ class MultiCommandSquasher {
   static constexpr int kMaxSquashing = 32;
 
  private:
-  MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, bool error_abort);
+  MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* Service,
+                       bool verify_commands, bool error_abort);
 
   // Lazy initialize shard info.
   ShardExecInfo& PrepareShardInfo(ShardId sid);
@@ -53,8 +55,8 @@ class MultiCommandSquasher {
   // Retrun squash flags
   SquashResult TrySquash(StoredCmd* cmd);
 
-  // Execute separate non-squashed cmd.
-  void ExecuteStandalone(StoredCmd* cmd);
+  // Execute separate non-squashed cmd. Return true if aborting on error.
+  bool ExecuteStandalone(StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
   facade::OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es);
@@ -70,11 +72,13 @@ class MultiCommandSquasher {
  private:
   absl::Span<StoredCmd> cmds_;  // Input range of stored commands
   ConnectionContext* cntx_;     // Underlying context
+  Service* service_;
 
   // underlying cid (exec or eval) for executing batch hops, nullptr for non-atomic
   const CommandId* base_cid_;
 
-  bool error_abort_ = false;  // Abort upon receiving error
+  bool verify_commands_ = false;  // Whether commands need to be verified before execution
+  bool error_abort_ = false;      // Abort upon receiving error
 
   std::vector<ShardExecInfo> sharded_;
   std::vector<ShardId> order_;  // reply order for squashed cmds
