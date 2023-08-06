@@ -8,6 +8,7 @@
 #include <absl/types/span.h>
 
 #include <functional>
+#include <optional>
 
 #include "base/function2.hpp"
 #include "facade/command_id.h"
@@ -66,11 +67,16 @@ class CommandId : public facade::CommandId {
                          void(CmdArgList, ConnectionContext*) const>;
 
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
-                                          bool(CmdArgList, ConnectionContext*) const>;
+                                          std::optional<facade::ErrorReply>(CmdArgList) const>;
 
-  bool is_multi_key() const {
-    return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
-  }
+  void Invoke(CmdArgList args, ConnectionContext* cntx) const;
+
+  // Returns error if validation failed, otherwise nullopt
+  std::optional<facade::ErrorReply> Validate(CmdArgList args) const;
+
+  bool IsTransactional() const;
+
+  static const char* OptName(CO::CommandOpt fl);
 
   CommandId& SetHandler(Handler f) {
     handler_ = std::move(f);
@@ -79,20 +85,12 @@ class CommandId : public facade::CommandId {
 
   CommandId& SetValidator(ArgValidator f) {
     validator_ = std::move(f);
-
     return *this;
   }
 
-  void Invoke(CmdArgList args, ConnectionContext* cntx) const;
-
-  // Returns true if validation succeeded.
-  bool Validate(CmdArgList args, ConnectionContext* cntx) const {
-    return !validator_ || validator_(std::move(args), cntx);
+  bool is_multi_key() const {
+    return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
   }
-
-  bool IsTransactional() const;
-
-  static const char* OptName(CO::CommandOpt fl);
 
  private:
   Handler handler_;

@@ -20,6 +20,13 @@ void CapturingReplyBuilder::SendError(std::string_view str, std::string_view typ
   Capture(Error{str, type});
 }
 
+void CapturingReplyBuilder::SendError(ErrorReply error) {
+  SKIP_LESS(ReplyMode::ONLY_ERR);
+
+  string message = visit([](auto&& str) -> string { return string{move(str)}; }, error.message);
+  Capture(Error{move(message), error.kind});
+}
+
 void CapturingReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
   SKIP_LESS(ReplyMode::FULL);
   Capture(vector<OptResp>{arr.begin(), arr.end()});
