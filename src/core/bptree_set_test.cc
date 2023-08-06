@@ -25,9 +25,17 @@ class BPTreeSetTest : public ::testing::Test {
   using Node = detail::BPTreeNode<uint64_t>;
 
  protected:
+  static constexpr size_t kNumElems = 7000;
+
   BPTreeSetTest() : mi_alloc_(mi_heap_get_backing()), bptree_(&mi_alloc_) {
   }
   static void SetUpTestSuite() {
+  }
+
+  void FillTree(unsigned factor = 1) {
+    for (unsigned i = 0; i < kNumElems; ++i) {
+      bptree_.Insert(i * factor);
+    }
   }
 
   bool Validate();
@@ -154,10 +162,7 @@ TEST_F(BPTreeSetTest, Delete) {
   ASSERT_EQ(mi_alloc_.used(), 0u);
   ASSERT_EQ(bptree_.Size(), 0u);
 
-  constexpr size_t kNumElems = 7000;
-  for (unsigned i = 0; i < kNumElems; ++i) {
-    bptree_.Insert(i);
-  }
+  FillTree();
 
   ASSERT_GT(bptree_.NodeCount(), 2u);
   unsigned sz = bptree_.Size();
@@ -174,13 +179,23 @@ TEST_F(BPTreeSetTest, Delete) {
   ASSERT_EQ(bptree_.Size(), 0u);
   ASSERT_EQ(bptree_.Height(), 0u);
   ASSERT_EQ(bptree_.NodeCount(), 0u);
+
+  FillTree(2);
+  for (unsigned i = 0; i < 20000; ++i) {
+    unsigned val = generator_() % 15000;
+    bool res = bptree_.Delete(val);
+
+    if (val % 2 == 1) {
+      ASSERT_FALSE(res);
+    }
+    if (res) {
+      ASSERT_TRUE(Validate());
+    }
+  }
 }
 
 TEST_F(BPTreeSetTest, Iterate) {
-  constexpr size_t kNumElems = 7000;
-  for (unsigned i = 0; i < kNumElems; ++i) {
-    bptree_.Insert(i * 2);
-  }
+  FillTree(2);
 
   unsigned cnt = 0;
   bptree_.Iterate(31, 543, [&](uint64_t val) {
@@ -214,6 +229,56 @@ TEST_F(BPTreeSetTest, Iterate) {
     unsigned to = from + generator_() % (kNumElems - from);
     bptree_.IterateReverse(from, to, [&](uint64_t val) {
       ASSERT_EQ((to - cnt) * 2, val) << from << " " << to << " " << cnt;
+      ++cnt;
+    });
+    ASSERT_EQ(to - from + 1, cnt);
+  }
+}
+
+TEST_F(BPTreeSetTest, LowerBound) {
+  FillTree(2);
+
+  auto path = bptree_.LowerBound(31);
+  EXPECT_EQ(32, path.Terminal());
+
+  path = bptree_.LowerBound(32);
+  EXPECT_EQ(32, path.Terminal());
+
+  path = bptree_.LowerBound(13998);
+  EXPECT_EQ(13998, path.Terminal());
+
+  path = bptree_.LowerBound(14000);
+  EXPECT_EQ(0, path.Depth());
+
+  ASSERT_TRUE(bptree_.Delete(0));
+  path = bptree_.LowerBound(0);
+  EXPECT_EQ(2, path.Terminal());
+}
+
+TEST_F(BPTreeSetTest, DeleteRange) {
+  FillTree(2);
+
+  unsigned cnt = 0;
+  unsigned from = 5950;  //
+  unsigned to = 6513;
+  bptree_.DeleteRangeByRank(from, to, [&](uint64_t val) {
+    ASSERT_TRUE(Validate()) << val;
+    ASSERT_EQ((from + cnt) * 2, val) << from << " " << to << " " << cnt;
+    ++cnt;
+  });
+  ASSERT_EQ(to - from + 1, cnt);
+
+  return;
+
+  for (unsigned j = 0; j < 1; ++j) {
+    if (bptree_.Size() == 0)
+      break;
+
+    cnt = 0;
+    from = generator_() % bptree_.Size();
+    to = from + generator_() % (bptree_.Size() - from);
+    bptree_.DeleteRangeByRank(from, to, [&](uint64_t val) {
+      ASSERT_EQ((from + cnt) * 2, val) << from << " " << to << " " << cnt;
       ++cnt;
     });
     ASSERT_EQ(to - from + 1, cnt);
