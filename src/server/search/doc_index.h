@@ -56,6 +56,11 @@ struct DocIndex {
   DataType type{HASH};
 };
 
+struct DocIndexInfo {
+  search::Schema schema;
+  size_t num_docs;
+};
+
 // Stores internal search indices for documents of a document index on a specific shard.
 class ShardDocIndex {
   using DocId = search::DocId;
@@ -65,6 +70,7 @@ class ShardDocIndex {
     DocId Add(std::string_view key);
     DocId Remove(std::string_view key);
     std::string_view Get(DocId id) const;
+    size_t Size() const;
 
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
@@ -89,6 +95,8 @@ class ShardDocIndex {
   void AddDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
 
+  DocIndexInfo GetInfo() const;
+
  private:
   std::shared_ptr<const DocIndex> base_;
   search::FieldIndices indices_;
@@ -98,10 +106,14 @@ class ShardDocIndex {
 // Stores shard doc indices by name on a specific shard.
 class ShardDocIndices {
  public:
-  // Get sharded document index by its name
+  // Get sharded document index by its name or nullptr if not found
   ShardDocIndex* GetIndex(std::string_view name);
   // Init index: create shard local state for given index with given name
   void InitIndex(const OpArgs& op_args, std::string_view name, std::shared_ptr<DocIndex> index);
+  // Drop index, return true if it existed and was dropped
+  bool DropIndex(std::string_view name);
+
+  std::vector<std::string> GetIndexNames() const;
 
   void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);

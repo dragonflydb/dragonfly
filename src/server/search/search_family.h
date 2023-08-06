@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-
 #include <string>
 
 #include "base/mutex.h"
@@ -17,6 +15,9 @@ class ConnectionContext;
 
 class SearchFamily {
   static void FtCreate(CmdArgList args, ConnectionContext* cntx);
+  static void FtDropIndex(CmdArgList args, ConnectionContext* cntx);
+  static void FtInfo(CmdArgList args, ConnectionContext* cntx);
+  static void FtList(CmdArgList args, ConnectionContext* cntx);
   static void FtSearch(CmdArgList args, ConnectionContext* cntx);
 
  public:
