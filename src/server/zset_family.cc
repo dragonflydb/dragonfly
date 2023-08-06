@@ -2549,7 +2549,7 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 void ZSetFamily::Register(CommandRegistry* registry) {
-  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING;
+  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
 
   *registry
       << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(ZAdd)
@@ -2560,7 +2560,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
       << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
       << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, 1}.HFUNC(ZDiff)
-      << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
+      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, 1}.HFUNC(ZIncrBy)
       << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
       << CI{"ZINTERCARD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}
              .HFUNC(ZInterCard)

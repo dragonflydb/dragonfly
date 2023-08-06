@@ -837,7 +837,7 @@ void BitOpsFamily::Register(CommandRegistry* registry) {
             << CI{"BITFIELD_RO", CO::READONLY, -5, 1, 1, 1}.SetHandler(&BitFieldRo)
             << CI{"BITOP", CO::WRITE | CO::NO_AUTOJOURNAL, -4, 2, -1, 1}.SetHandler(&BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1, 1}.SetHandler(&GetBit)
-            << CI{"SETBIT", CO::WRITE, 4, 1, 1, 1}.SetHandler(&SetBit);
+            << CI{"SETBIT", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.SetHandler(&SetBit);
 }
 
 }  // namespace dfly

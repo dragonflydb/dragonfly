@@ -1300,12 +1300,12 @@ void ListFamily::Register(CommandRegistry* registry) {
   *registry
       << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(LPush)
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(LPushX)
-      << CI{"LPOP", CO::WRITE | CO::FAST | CO::DENYOOM, -2, 1, 1, 1}.HFUNC(LPop)
+      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1}.HFUNC(LPop)
       << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPush)
       << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPushX)
-      << CI{"RPOP", CO::WRITE | CO::FAST | CO::DENYOOM, -2, 1, 1, 1}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}
-             .SetHandler(RPopLPush)
+      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}.SetHandler(
+             RPopLPush)
       << CI{"BRPOPLPUSH", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2, 1}
              .SetHandler(BRPopLPush)
       << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1}
@@ -1315,14 +1315,13 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)
       << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(LPos)
       << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex)
-      << CI{"LINSERT", CO::WRITE, 5, 1, 1, 1}.HFUNC(LInsert)
+      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1, 1}.HFUNC(LInsert)
       << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(LRange)
       << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(LSet)
       << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LTrim)
       << CI{"LREM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LRem)
-      << CI{"LMOVE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 5, 1, 2, 1}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1}
-             .SetHandler(BLMove);
+      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, 1}.HFUNC(LMove)
+      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1}.SetHandler(BLMove);
 }
 
 }  // namespace dfly
