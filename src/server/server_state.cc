@@ -71,13 +71,13 @@ void ServerState::Destroy() {
   state_ = nullptr;
 }
 
-uint64_t ServerState::GetCachedUsedMemory(uint64_t now_ns) {
-  uint64_t kCacheEveryNs = 1000;
-  if (now_ns > last_chached_used_current_ + kCacheEveryNs) {
-    last_chached_used_current_ = now_ns;
-    used_mem_ = used_mem_current;
+uint64_t ServerState::GetUsedMemory(uint64_t now_ns) {
+  static constexpr uint64_t kCacheEveryNs = 1000;
+  if (now_ns > used_mem_last_update_ + kCacheEveryNs) {
+    used_mem_last_update_ = now_ns;
+    used_mem_cached_ = used_mem_current.load(memory_order_relaxed);
   }
-  return used_mem_;
+  return used_mem_cached_;
 }
 
 bool ServerState::AllowInlineScheduling() const {

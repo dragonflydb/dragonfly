@@ -130,7 +130,7 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
-  uint64_t GetCachedUsedMemory(uint64_t now_ns);
+  uint64_t GetUsedMemory(uint64_t now_ns);
 
   bool AllowInlineScheduling() const;
 
@@ -228,8 +228,8 @@ class ServerState {  // public struct - to allow initialization.
 
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
-  uint64_t used_mem_ = 0;
-  uint64_t last_chached_used_current_ = 0;
+  uint64_t used_mem_cached_ = 0;  // thread local cache of used_mem_current
+  uint64_t used_mem_last_update_ = 0;
 
   static __thread ServerState* state_;
 };

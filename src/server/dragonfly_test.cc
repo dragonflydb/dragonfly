@@ -22,7 +22,7 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
-ABSL_DECLARE_FLAG(double, maxmemory_ratio);
+ABSL_DECLARE_FLAG(double, oom_deny_ratio);
 
 namespace dfly {
 
@@ -383,7 +383,7 @@ TEST_F(DflyEngineTest, Bug207) {
   shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_maxmemory_ratio, 4);
+  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
 
   max_memory_limit = 300000;
 
@@ -414,7 +414,7 @@ TEST_F(DflyEngineTest, StickyEviction) {
   shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_maxmemory_ratio, 4);
+  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
 
   max_memory_limit = 300000;
 
