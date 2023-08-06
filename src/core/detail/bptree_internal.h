@@ -291,6 +291,7 @@ template <typename T> class BPTreePath {
  public:
   void Push(BPTreeNode<T>* node, unsigned pos) {
     assert(depth_ < kMaxDepth);
+    assert(depth_ == 0 || !record_[depth_ - 1].node->IsLeaf());
     record_[depth_].node = node;
     record_[depth_].pos = pos;
     depth_++;
@@ -331,6 +332,13 @@ template <typename T> class BPTreePath {
       last = child;
     } while (!last->IsLeaf());
   }
+
+  T Terminal() const {
+    return Last().first->Key(Last().second);
+  }
+
+  void Next();
+  void Prev();
 
  private:
   struct Record {
@@ -675,6 +683,80 @@ template <typename T> void BPTreeNode<T>::MergeFromRight(KeyT key, BPTreeNode<T>
   }
   num_items_ += 1 + right->NumItems();
   right->num_items_ = 0;
+}
+
+template <typename T> void BPTreePath<T>::Next() {
+  assert(depth_ > 0);
+  BPTreeNode<T>* node = Last().first;
+
+  // The data in BPTree is stored in both the leaf nodes and the inner nodes.
+  if (node->IsLeaf()) {
+    ++record_[depth_ - 1].pos;
+    if (record_[depth_ - 1].pos < node->NumItems()) {
+      return;
+    }
+
+    // Advance to the next item, which is Key(i) in some ascendent of the subtree with
+    // root Child(i). i in that case must be less than NumItems().
+    // Note, that subtree Child(i) in a inner node is located before Key(i).
+    do {
+      Pop();
+    } while (depth_ > 0 && Position(depth_ - 1) == Node(depth_ - 1)->NumItems());
+    return;  // we either point now on separator Key(i) in the parent node or we finished the tree.
+  }
+
+  // We are in the inner node after the ascent from the leaf node. We need to advance to the next
+  // Child and dig left.
+  assert(!node->IsLeaf());
+  assert(record_[depth_ - 1].pos < node->NumItems());
+
+  // we are in the inner node pointing to the separator.
+  // now we need to advance to the next child and dig to the leftmost leaf.
+  record_[depth_ - 1].pos++;
+  do {
+    node = node->Child(record_[depth_ - 1].pos);
+    Push(node, 0);
+  } while (!node->IsLeaf());
+}
+
+template <typename T> void BPTreePath<T>::Prev() {
+  assert(depth_ > 0);
+
+  auto* node = record_[depth_ - 1].node;
+  if (node->IsLeaf()) {
+    /*
+        node
+        / \
+       l   r
+
+       We must go left (decrement pos), and if there is no left, we must go up until we can
+       go left.
+    */
+    while (record_[depth_ - 1].pos == 0) {
+      Pop();
+      if (depth_ == 0) {
+        return;
+      }
+    }
+    assert(depth_ > 0 && record_[depth_ - 1].pos > 0);
+
+    // we finished backtracking from child(i+1) or stayed in the leaf.
+    // either way stop at the next key on the left.
+    --record_[depth_ - 1].pos;
+    return;
+  }
+
+  // we are in the inner node pointing to the separator.
+  // we now must explore the left subtree which is located under the same index as the separator.
+  // we go far-right in the left subtree.
+  do {
+    node = node->Child(record_[depth_ - 1].pos);
+    Push(node, node->NumItems());
+  } while (!node->IsLeaf());
+
+  // we reached the leaf node, fix the position to point to the last key.
+  assert(record_[depth_ - 1].node->IsLeaf());
+  --record_[depth_ - 1].pos;
 }
 
 }  // namespace detail

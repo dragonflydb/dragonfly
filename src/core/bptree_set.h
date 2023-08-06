@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 
 #include "base/pmr/memory_resource.h"
@@ -68,6 +69,30 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
     return root_;
   }
 
+  KeyT FromRank(uint32_t rank) const {
+    BPTreePath path;
+    ToRank(rank, &path);
+    return path.Terminal();
+  }
+
+  /// @brief Iterates over all items in the range [rank_start, rank_end] by rank.
+  /// @param rank_start
+  /// @param rank_end - inclusive.
+  /// @param cb - callback to be called for each item in the range.
+  void Iterate(uint32_t rank_start, uint32_t rank_end, std::function<void(KeyT)> cb) const;
+
+  /// @brief Iterates over all items in the range [rank_start, rank_end] by rank in reverse order.
+  /// @param rank_start
+  /// @param rank_end
+  /// @param cb
+  void IterateReverse(uint32_t rank_start, uint32_t rank_end, std::function<void(KeyT)> cb) const;
+
+  /// @brief  Deletes all items in the range [start, end] by rank.
+  /// @param start
+  /// @param end - inclusive. must be >= start.
+  /// @return number of deleted items.
+  size_t DeleteRangeByRank(uint32_t start, uint32_t end);
+
  private:
   BPTreeNode* CreateNode(bool leaf);
 
@@ -85,6 +110,10 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   // In that case path->Last().first->Key(path->Last().second) == key.
   // Fills the tree path not including the key itself.
   bool Locate(KeyT key, BPTreePath* path) const;
+
+  // Sets the tree path to item at specified rank. Rank is 0-based and must be less than Size().
+  // returns the index of the key in the last node of the path.
+  void ToRank(uint32_t rank, BPTreePath* path) const;
 
   BPTreeNode* root_ = nullptr;  // root node or NULL if empty tree
   uint32_t count_ = 0;          // number of items in tree
@@ -430,6 +459,60 @@ void BPTree<T, Policy>::IncreaseSubtreeCounts(const BPTreePath& path, unsigned d
     BPTreeNode* node = path.Node(i);
     node->IncreaseTreeCount(delta);
   }
+}
+
+template <typename T, typename Policy>
+void BPTree<T, Policy>::Iterate(uint32_t rank_start, uint32_t rank_end,
+                                std::function<void(KeyT)> cb) const {
+  assert(rank_start <= rank_end && rank_end < count_);
+
+  BPTreePath path;
+  ToRank(rank_start, &path);
+  for (uint32_t i = rank_start; i <= rank_end; ++i) {
+    cb(path.Terminal());
+    path.Next();
+  }
+}
+
+template <typename T, typename Policy>
+void BPTree<T, Policy>::IterateReverse(uint32_t rank_start, uint32_t rank_end,
+                                       std::function<void(KeyT)> cb) const {
+  assert(rank_start <= rank_end && rank_end < count_);
+
+  BPTreePath path;
+  ToRank(rank_end, &path);
+  for (uint32_t i = rank_start; i <= rank_end; ++i) {
+    cb(path.Terminal());
+    path.Prev();
+  }
+}
+
+template <typename T, typename Policy>
+void BPTree<T, Policy>::ToRank(uint32_t rank, BPTreePath* path) const {
+  assert(root_ && rank < count_);
+  BPTreeNode* node = root_;
+
+  while (!node->IsLeaf()) {
+    for (unsigned i = 0; i <= node->NumItems(); ++i) {
+      uint32_t subtree_cnt = node->GetChildTreeCount(i);
+      if (subtree_cnt > rank) {
+        path->Push(node, i);
+        node = node->Child(i);
+        break;
+      }
+      assert(i < node->NumItems());
+      rank -= subtree_cnt;
+      if (rank == 0) {
+        path->Push(node, i);
+        return;
+      }
+      --rank;
+    }
+  }
+
+  assert(node->IsLeaf());
+  assert(rank < node->NumItems());
+  path->Push(node, rank);
 }
 
 template <typename T, typename Policy>
