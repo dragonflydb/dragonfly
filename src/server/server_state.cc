@@ -71,6 +71,15 @@ void ServerState::Destroy() {
   state_ = nullptr;
 }
 
+uint64_t ServerState::GetCachedUsedMemory(uint64_t now_ns) {
+  uint64_t kCacheEveryNs = 1000;
+  if (now_ns > last_chached_used_current_ + kCacheEveryNs) {
+    last_chached_used_current_ = now_ns;
+    used_mem_ = used_mem_current;
+  }
+  return used_mem_;
+}
+
 bool ServerState::AllowInlineScheduling() const {
   // We can't allow inline scheduling during a full sync, because then journaling transactions
   // will be scheduled before RdbLoader::LoadItemsBuffer is finished. We can't use the regular

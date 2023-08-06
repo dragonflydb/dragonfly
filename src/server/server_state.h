@@ -130,6 +130,8 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
+  uint64_t GetCachedUsedMemory(uint64_t now_ns);
+
   bool AllowInlineScheduling() const;
 
   // Borrow interpreter from internal manager. Return int with ReturnInterpreter.
@@ -226,6 +228,8 @@ class ServerState {  // public struct - to allow initialization.
 
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
+  uint64_t used_mem_ = 0;
+  uint64_t last_chached_used_current_ = 0;
 
   static __thread ServerState* state_;
 };
