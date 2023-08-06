@@ -75,7 +75,7 @@ uint64_t ServerState::GetUsedMemory(uint64_t now_ns) {
   static constexpr uint64_t kCacheEveryNs = 1000;
   if (now_ns > used_mem_last_update_ + kCacheEveryNs) {
     used_mem_last_update_ = now_ns;
-    used_mem_cached_ = used_mem_current.load(memory_order_relaxed);
+    used_mem_cached_ = used_mem_current.load(std::memory_order_relaxed);
   }
   return used_mem_cached_;
 }
