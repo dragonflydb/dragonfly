@@ -101,20 +101,22 @@ SSL_CTX* CreateSslServerCntx() {
 }
 #endif
 
-bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
-  DCHECK_GT(interval_sec, 3u);
+uint32_t tcp_keepalive;
+
+bool ConfigureKeepAlive(int fd) {
+  DCHECK_GT(tcp_keepalive, 3u);
   int val = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) < 0)
     return false;
 
-  val = interval_sec;
+  val = tcp_keepalive;
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0)
     return false;
 
   /* Send next probes after the specified interval. Note that we set the
    * delay as interval / 3, as we send three probes before detecting
    * an error (see the next setsockopt call). */
-  val = interval_sec / 3;
+  val = tcp_keepalive / 3;
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0)
     return false;
 
@@ -141,21 +143,17 @@ Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), prot
   http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
   si->ConfigureHttpHandlers(http_base_.get());
 
-  constexpr string_view kTcpFlagError = "tcp_keepalive expected to be greated than 3 seconds";
-  tcp_keepalive_ = absl::GetFlag(FLAGS_tcp_keepalive);
-  CHECK_GT(tcp_keepalive_, 3u) << kTcpFlagError;
-  dfly::config_registry.Register("tcp_keepalive", [this](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<uint32_t>();
-    if (!res)
-      return false;
+  tcp_keepalive = absl::GetFlag(FLAGS_tcp_keepalive);
+  CHECK_GT(tcp_keepalive, 3u) << FLAGS_tcp_keepalive.Name() << " " << FLAGS_tcp_keepalive.Help();
+}
 
-    if (*res <= 3) {
-      LOG(ERROR) << kTcpFlagError;
-      return false;
-    }
-    tcp_keepalive_ = *res;
-    return true;
-  });
+bool Listener::SetTcpKeepalive(uint32_t val) {
+  if (val <= 3) {
+    LOG(ERROR) << FLAGS_tcp_keepalive.Name() << " " << FLAGS_tcp_keepalive.Help();
+    return false;
+  }
+  tcp_keepalive = val;
+  return true;
 }
 
 Listener::~Listener() {
@@ -175,7 +173,7 @@ error_code Listener::ConfigureServerSocket(int fd) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
 
-  bool success = ConfigureKeepAlive(fd, tcp_keepalive_);
+  bool success = ConfigureKeepAlive(fd);
 
   if (!success) {
     int myerr = errno;

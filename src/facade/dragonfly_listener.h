@@ -34,6 +34,7 @@ class Listener : public util::ListenerInterface {
   // run out. Returns true if the all connections have stopped dispatching.
   bool AwaitDispatches(absl::Duration timeout,
                        const std::function<bool(util::Connection*)>& filter);
+  static bool SetTcpKeepalive(uint32_t val);
 
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
@@ -65,7 +66,6 @@ class Listener : public util::ListenerInterface {
 
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
-  uint32_t tcp_keepalive_;
 };
 
 }  // namespace facade
