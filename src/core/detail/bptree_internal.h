@@ -301,6 +301,10 @@ template <typename T> class BPTreePath {
     return depth_;
   }
 
+  void Clear() {
+    depth_ = 0;
+  }
+
   std::pair<BPTreeNode<T>*, unsigned> Last() const {
     assert(depth_ > 0u);
     return {record_[depth_ - 1].node, record_[depth_ - 1].pos};
@@ -321,24 +325,15 @@ template <typename T> class BPTreePath {
     depth_--;
   }
 
-  // Extend the path to the leaf by always taking the leftmost child.
-  void DigRight() {
-    assert(depth_ > 0u && !Last().first->IsLeaf());
-    BPTreeNode<T>* last = Last().first;
-    do {
-      unsigned pos = last->NumItems();
-      BPTreeNode<T>* child = last->Child(last->NumItems());
-      Push(child, pos);
-      last = child;
-    } while (!last->IsLeaf());
-  }
-
   T Terminal() const {
     return Last().first->Key(Last().second);
   }
 
   void Next();
   void Prev();
+
+  // Extend the path to the leaf by always taking the rightmost child.
+  void DigRight();
 
  private:
   struct Record {
@@ -745,6 +740,15 @@ template <typename T> void BPTreePath<T>::Prev() {
     --record_[depth_ - 1].pos;
     return;
   }
+
+  DigRight();
+}
+
+template <typename T> void BPTreePath<T>::DigRight() {
+  assert(depth_ > 0);
+  BPTreeNode<T>* node = Last().first;
+
+  assert(!node->IsLeaf());
 
   // we are in the inner node pointing to the separator.
   // we now must explore the left subtree which is located under the same index as the separator.
