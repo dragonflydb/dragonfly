@@ -9,6 +9,8 @@ permissions:
   contents: write
 
 jobs:
+  build-and-run-regression-tests:
+    uses: ./.github/workflows/reusable-regression-tests.yml
   create-release:
     runs-on: ubuntu-latest
     steps:
