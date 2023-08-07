@@ -19,7 +19,9 @@ namespace facade {
 
 namespace {
 
-using namespace constants;
+constexpr std::string_view kCRLF = "\r\n";
+constexpr std::string_view kErrPref = "-ERR ";
+constexpr std::string_view kSimplePref = "+";
 
 inline iovec constexpr IoVec(std::string_view s) {
   iovec r{const_cast<char*>(s.data()), s.size()};

@@ -87,36 +87,37 @@ ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
-#define RETURN_ERROR(m) \
-  do {                  \
-    *err = m;           \
-    return false;       \
+#define RETURN_ON_ERROR(m)                                               \
+  do {                                                                   \
+    *err = m;                                                            \
+    LOG(WARNING) << "Error in parsing arguments for --replicaof: " << m; \
+    return false;                                                        \
   } while (0)
 
-  if (in.empty()) {
+  if (in.empty()) {  // on empty flag "parse" nothing. If we return false then DF exists.
     *flag = ReplicaOfFlag{};
     return true;
   }
 
   auto pos = in.find_last_of(':');
   if (pos == string::npos)
-    RETURN_ERROR("missing ':'.");
+    RETURN_ON_ERROR("missing ':'.");
 
   string_view ip = in.substr(0, pos);
   flag->port = in.substr(pos + 1);
 
   if (ip.empty() || flag->port.empty())
-    RETURN_ERROR("IP/host or port are empty.");
+    RETURN_ON_ERROR("IP/host or port are empty.");
 
   // For IPv6: ip1.front == '[' AND ip1.back == ']'
   // For IPv4: ip1.front != '[' AND ip1.back != ']'
   // Together, this ip1.front == '[' iff ip1.back == ']', which can be implemented as XNOR (NOT XOR)
   if ((ip.front() == '[') ^ (ip.back() == ']'))
-    RETURN_ERROR("unclosed brackets.");
+    RETURN_ON_ERROR("unclosed brackets.");
 
   if (ip.front() == '[') {
     if (ip.length() <= 2)
-      RETURN_ERROR("IPv6 host name is too short.");
+      RETURN_ON_ERROR("IPv6 host name is too short.");
 
     flag->host = ip.substr(1, ip.length() - 2);
     VLOG(1) << "received IP of type IPv6: " << flag->host;
@@ -126,9 +127,8 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
   }
 
   VLOG(1) << "--replicaof: Received " << flag->host << " :  " << flag->port;
-
   return true;
-#undef RETURN_ERROR
+#undef RETURN_ON_ERROR
 }
 
 std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
@@ -483,6 +483,17 @@ void SlowLog(CmdArgList args, ConnectionContext* cntx) {
   }
 
   (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
+}
+
+void FlushEntireDb(Transaction* transaction) {
+  transaction->Schedule();
+
+  auto cb = [](Transaction* t, EngineShard* shard) {
+    shard->db_slice().FlushDb(DbSlice::kDbAll);
+    return OpStatus::OK;
+  };
+
+  transaction->Execute(std::move(cb), true);
 }
 
 }  // namespace
@@ -1961,13 +1972,10 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
-                                     ShouldFlushDb flush_db, ActionOnConnectionFail on_err) {
-  std::string_view host = ArgS(args, 0);
-  std::string_view port_s = ArgS(args, 1);
+void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
+                                     ShouldFlushDb should_flush_db, ActionOnConnectionFail on_err) {
   auto& pool = service_.proactor_pool();
-
-  LOG(INFO) << "Replicating " << host << ":" << port_s;
+  LOG(INFO) << "Replicating " << host << ":" << port_sv;
 
   // We lock to protect global state changes that we perform during the replication setup:
   // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
@@ -1982,7 +1990,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
   VLOG(1) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
 
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
+  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_sv, "one")) {
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -1998,7 +2006,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
 
   uint32_t port;
 
-  if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
+  if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
     (*cntx)->SendError(kInvalidIntErr);
     return;
   }
@@ -2020,17 +2028,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
     return;
   }
 
-  if (flush_db == ShouldFlushDb::kFlush) {
-    // Flushing all the data after we marked this instance as replica.
-    Transaction* transaction = cntx->transaction;
-    transaction->Schedule();
-
-    auto cb = [](Transaction* t, EngineShard* shard) {
-      shard->db_slice().FlushDb(DbSlice::kDbAll);
-      return OpStatus::OK;
-    };
-    transaction->Execute(std::move(cb), true);
-  }
+  if (should_flush_db == ShouldFlushDb::kFlush)
+    FlushEntireDb(cntx->transaction);
 
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
@@ -2042,10 +2041,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
       ec = new_replica->Start(cntx);
       break;
     case ActionOnConnectionFail::kContinueReplication:  // set DF to replicate, and forget about it
-      ec = new_replica->EnableReplication(cntx);
+      new_replica->EnableReplication(cntx);
       break;
-    default:
-      CHECK(false) << "Uncovered case of ActionOnConnectionFail: " << on_err;
   };
 
   VLOG(1) << "Acquire replica lock";
@@ -2065,38 +2062,22 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  ReplicaOfInternal(args, cntx, ShouldFlushDb::kFlush, ActionOnConnectionFail::kReturnOnError);
+  string_view host = ArgS(args, 0);
+  string_view port = ArgS(args, 1);
+
+  ReplicaOfInternal(host, port, cntx, ShouldFlushDb::kFlush,
+                    ActionOnConnectionFail::kReturnOnError);
 }
 
-bool ServerFamily::Replicate(string& host, string& port) {
-  io::StringSink sink;
+void ServerFamily::Replicate(string_view host, string_view port) {
+  io::NullSink sink;
   ConnectionContext ctxt{&sink, nullptr};
-
-  vector<MutableSlice> vargs{
-      {host.data(), host.size()},
-      {port.data(), port.size()},
-  };
-
-  CmdArgList args{vargs.data(), vargs.size()};
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)
-  ReplicaOfInternal(args, &ctxt, ShouldFlushDb::kDontFlush,
+
+  ReplicaOfInternal(host, port, &ctxt, ShouldFlushDb::kDontFlush,
                     ActionOnConnectionFail::kContinueReplication);
-
-  // Check whether replication succeeded
-
-  using namespace facade::constants;
-  string_view sv = sink.str();
-  if (absl::StartsWith(sv, kSimplePref)) {
-    VLOG(1) << "Replication success!";  // if ReplicaOfInternal recieves kContinueReplication then
-                                        // theoretically we should never fail
-    return true;
-  } else {
-    VLOG(1) << "Replication failure!";
-    VLOG(1) << "Error: " << sv.substr(kErrPref.length(), sv.size() - kErrPref.length());
-    return false;
-  }
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {

@@ -117,16 +117,13 @@ error_code Replica::Start(ConnectionContext* cntx) {
   return {};
 }  // namespace dfly
 
-error_code Replica::EnableReplication(ConnectionContext* cntx) {
+void Replica::EnableReplication(ConnectionContext* cntx) {
   VLOG(1) << "Enabling replication";
-  ProactorBase* mythread = ProactorBase::me();
-  CHECK(mythread);
 
   state_mask_.store(R_ENABLED);                             // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);  // call replication fiber
 
   (*cntx)->SendOk();
-  return {};
 }
 
 void Replica::Stop() {

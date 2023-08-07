@@ -163,10 +163,7 @@ class ServerFamily {
                        const std::function<bool(util::Connection*)>& filter);
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
-  // Returns true/false depending on whether the replication connected successfully or
-  // not.
-  // ! Note: the method does not modify 'host', 'port' but requires them to be references.
-  bool Replicate(std::string& port, std::string& host);
+  void Replicate(std::string_view host, std::string_view port);
 
  private:
   uint32_t shard_count() const {
@@ -209,8 +206,8 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ShouldFlushDb flush_db,
-                         ActionOnConnectionFail on_error);
+  void ReplicaOfInternal(std::string_view host, std::string_view port, ConnectionContext* cntx,
+                         ShouldFlushDb should_flush_db, ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
