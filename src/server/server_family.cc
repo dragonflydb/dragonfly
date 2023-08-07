@@ -501,6 +501,7 @@ void FlushEntireDb(Transaction* transaction) {
   };
 
   transaction->Execute(std::move(cb), true);
+}
 
 // Check that if TLS is used at least one form of client authentication is
 // enabled. That means either using a password or giving a root
@@ -526,7 +527,6 @@ void ValidateServerTlsFlags() {
     LOG(ERROR) << "TLS configured but no authentication method is used!";
     exit(1);
   }
-
 }
 
 }  // namespace
