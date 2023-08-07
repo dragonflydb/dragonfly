@@ -198,7 +198,6 @@ size_t RobjWrapper::MallocUsed() const {
 
   switch (type_) {
     case OBJ_STRING:
-      DVLOG(2) << "Freeing string object";
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
@@ -256,6 +255,18 @@ size_t RobjWrapper::Size() const {
         default:
           LOG(FATAL) << "Unexpected encoding " << encoding_;
       };
+    case OBJ_HASH:
+      switch (encoding_) {
+        case kEncodingListPack: {
+          uint8_t* lp = (uint8_t*)inner_obj_;
+          return lpLength(lp) / 2;
+        } break;
+
+        case kEncodingStrMap2: {
+          StringMap* sm = (StringMap*)inner_obj_;
+          return sm->Size();
+        }
+      }
     default:;
   }
   return 0;

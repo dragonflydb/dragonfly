@@ -155,10 +155,8 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
   } else {
-    shard_set->RunBlockingInParallel([this, tx](auto* es) {
-      if (!sharded_[es->shard_id()].cmds.empty())
-        SquashedHopCb(tx, es);
-    });
+    shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
+                                     [this](auto sid) { return !sharded_[sid].cmds.empty(); });
   }
 
   bool aborted = false;

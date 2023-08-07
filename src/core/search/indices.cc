@@ -21,7 +21,7 @@ using namespace std;
 namespace {
 
 // Get all words from text as matched by regex word boundaries
-absl::flat_hash_set<string> Tokenize(string_view text) {
+absl::flat_hash_set<string> TokenizeWords(string_view text) {
   std::regex rx{"\\b.*?\\b", std::regex_constants::icase};
   std::cregex_iterator begin{text.data(), text.data() + text.size(), rx}, end{};
 
@@ -72,41 +72,27 @@ vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
   return out;
 }
 
-const vector<DocId>* BaseStringIndex::Matching(string_view str) const {
+const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
   auto it = entries_.find(absl::StripAsciiWhitespace(str));
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
-void TextIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  for (const auto& word : Tokenize(doc->GetString(field))) {
-    auto& list = entries_[word];
-    list.insert(upper_bound(list.begin(), list.end(), id), id);
-  }
+void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+  for (const auto& word : Tokenize(doc->GetString(field)))
+    entries_[word].Insert(id);
 }
 
-void TextIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  for (const auto& word : Tokenize(doc->GetString(field))) {
-    auto& list = entries_[word];
-    auto it = lower_bound(list.begin(), list.end(), id);
-    if (it != list.end() && *it == id)
-      list.erase(it);
-  }
+void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+  for (const auto& word : Tokenize(doc->GetString(field)))
+    entries_[word].Remove(id);
 }
 
-void TagIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  for (auto& tag : NormalizeTags(doc->GetString(field))) {
-    auto& list = entries_[tag];
-    list.insert(upper_bound(list.begin(), list.end(), id), id);
-  }
+absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
+  return TokenizeWords(value);
 }
 
-void TagIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  for (auto& tag : NormalizeTags(doc->GetString(field))) {
-    auto& list = entries_[tag];
-    auto it = lower_bound(list.begin(), list.end(), id);
-    if (it != list.end() && *it == id)
-      list.erase(it);
-  }
+absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) const {
+  return NormalizeTags(value);
 }
 
 void VectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {

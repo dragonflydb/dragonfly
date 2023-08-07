@@ -81,6 +81,39 @@ def contains_test_data(res, td_indices):
 
 
 @dfly_args({"proactor_threads": 4})
+async def test_management(async_client: aioredis.Redis):
+    SCHEMA_1 = [TextField("f1"), NumericField("f2")]
+    SCHEMA_2 = [NumericField("f3"), TagField("f4")]
+
+    i1 = async_client.ft("i1")
+    i2 = async_client.ft("i2")
+
+    await i1.create_index(SCHEMA_1, definition=IndexDefinition(prefix=["p1"]))
+    await i2.create_index(SCHEMA_2, definition=IndexDefinition(prefix=["p2"]))
+
+    # Fill indices with 10 and 15 docs respectively
+    for i in range(10):
+        await async_client.hset(f"p1-{i}", mapping={"f1": "ok", "f2": 11})
+    for i in range(15):
+        await async_client.hset(f"p2-{i}", mapping={"f3": 12, "f4": "hmm"})
+
+    assert sorted(await async_client.execute_command("FT._LIST")) == ["i1", "i2"]
+
+    i1info = await i1.info()
+    assert i1info["num_docs"] == 10
+    assert sorted(i1info["fields"]) == [["f1", "type", "TEXT"], ["f2", "type", "NUMERIC"]]
+
+    i2info = await i2.info()
+    assert i2info["num_docs"] == 15
+    assert sorted(i2info["fields"]) == [["f3", "type", "NUMERIC"], ["f4", "type", "TAG"]]
+
+    await i1.dropindex()
+    await i2.dropindex()
+
+    assert await async_client.execute_command("FT._LIST") == []
+
+
+@dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
 async def test_basic(async_client: aioredis.Redis, index_type):
     i1 = async_client.ft("i1-" + str(index_type))
@@ -117,6 +150,8 @@ async def test_basic(async_client: aioredis.Redis, index_type):
 
     res = await i1.search("@topic:{science | health}")
     assert contains_test_data(res, [0, 2])
+
+    await i1.dropindex()
 
 
 async def knn_query(idx, query, vector):
@@ -167,6 +202,8 @@ async def test_knn(async_client: aioredis.Redis, index_type):
 
     assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [10.0] == {"k8", "k10", "k12"})
 
+    await i2.dropindex()
+
 
 NUM_DIMS = 10
 NUM_POINTS = 100
@@ -216,3 +253,5 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type):
         got_ids = await knn_query(i3, f"* => [KNN {limit} @pos VEC]", center)
 
         assert set(expected_ids) == set(got_ids)
+
+    await i3.dropindex()

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 
 #include "base/pmr/memory_resource.h"
@@ -68,9 +69,41 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
     return root_;
   }
 
+  KeyT FromRank(uint32_t rank) const {
+    BPTreePath path;
+    ToRank(rank, &path);
+    return path.Terminal();
+  }
+
+  /// @brief Iterates over all items in the range [rank_start, rank_end] by rank.
+  /// @param rank_start
+  /// @param rank_end - inclusive.
+  /// @param cb - callback to be called for each item in the range.
+  void Iterate(uint32_t rank_start, uint32_t rank_end, std::function<void(KeyT)> cb) const;
+
+  /// @brief Iterates over all items in the range [rank_start, rank_end] by rank in reverse order.
+  /// @param rank_start
+  /// @param rank_end
+  /// @param cb
+  void IterateReverse(uint32_t rank_start, uint32_t rank_end, std::function<void(KeyT)> cb) const;
+
+  /// @brief  Deletes all items in the range [start, end] by rank.
+  /// @param start
+  /// @param end - inclusive. must be >= start.
+  /// @param cb - callback to be called for each deleted item.
+  /// @return number of deleted items.
+  size_t DeleteRangeByRank(uint32_t start, uint32_t end, std::function<void(KeyT)> cb);
+
+  /// @brief Returns the path to the first item in the tree that is greater or equal to key.
+  /// @param item
+  /// @return the path if such item exists, empty path otherwise.
+  /// @todo: to wrap the result into iterator to avoid the leakage of internal data structures.
+  detail::BPTreePath<T> LowerBound(KeyT key) const;
+
  private:
   BPTreeNode* CreateNode(bool leaf);
 
+  void Delete(BPTreePath path);
   void DestroyNode(BPTreeNode* node);
 
   void InsertToFullLeaf(KeyT item, const BPTreePath& path);
@@ -83,8 +116,13 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
 
   // Charts the path towards key. Returns true if key is found.
   // In that case path->Last().first->Key(path->Last().second) == key.
-  // Fills the tree path not including the key itself.
+  // Fills the tree path not including the key itself. In case key was not found,
+  // returns the path to the item that is greater than key.
   bool Locate(KeyT key, BPTreePath* path) const;
+
+  // Sets the tree path to item at specified rank. Rank is 0-based and must be less than Size().
+  // returns the index of the key in the last node of the path.
+  void ToRank(uint32_t rank, BPTreePath* path) const;
 
   BPTreeNode* root_ = nullptr;  // root node or NULL if empty tree
   uint32_t count_ = 0;          // number of items in tree
@@ -176,70 +214,7 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Delete(KeyT item)
   if (!found)
     return false;
 
-  BPTreeNode* node = path.Last().first;
-  unsigned key_pos = path.Last().second;
-
-  // Remove the key from the node.
-  if (node->IsLeaf()) {
-    node->ShiftLeft(key_pos);  // shift left everything after key_pos.
-  } else {
-    // We can not remove the item from the inner node because it also serves as a separator.
-    // Therefore, we swap it the rightmost key in the left subtree and pop from there instead.
-    path.DigRight();
-
-    BPTreeNode* leaf = path.Last().first;
-    // set a new separator.
-    node->SetKey(key_pos, leaf->Key(leaf->NumItems() - 1));
-    leaf->LeafEraseRight();  // pop the rightmost key from the leaf.
-    node = leaf;
-  }
-  count_--;
-
-  assert(node->IsLeaf());
-
-  // go up the tree and rebalance if number of items in the node is less
-  // than low limit. We either merge or rebalance nodes.
-  while (node->NumItems() < node->MinItems()) {
-    if (node == root_) {
-      if (node->NumItems() == 0) {
-        // terminal case, we reached the root - and it has either a single child (0 delimiters)
-        // or no children at all (leaf). The former is more common case: the tree can only shrink
-        // through the root.
-        if (node->IsLeaf()) {
-          assert(count_ == 0u);
-          root_ = nullptr;
-        } else {
-          root_ = root_->Child(0);
-        }
-        --height_;
-        DestroyNode(node);
-      }
-      return true;
-    }
-
-    // The node has a parent. Pop the node from the path and try rebalance it via its parent.
-    assert(path.Depth() > 0u);
-    path.Pop();
-
-    BPTreeNode* parent = path.Last().first;
-    unsigned pos = path.Last().second;
-    assert(parent->Child(pos) == node);
-    node = parent->MergeOrRebalanceChild(pos);
-
-    parent->IncreaseTreeCount(-1);
-
-    if (node == nullptr)  // succeeded to merge/rebalance without the need to propagate.
-      break;
-
-    DestroyNode(node);
-
-    // assert(parent->TreeCount() == parent->DEBUG_TreeCount());
-    node = parent;
-  }
-
-  if (path.Depth() >= 2) {
-    IncreaseSubtreeCounts(path, path.Depth() - 2, -1);
-  }
+  Delete(path);
   return true;
 }
 
@@ -433,12 +408,170 @@ void BPTree<T, Policy>::IncreaseSubtreeCounts(const BPTreePath& path, unsigned d
 }
 
 template <typename T, typename Policy>
+void BPTree<T, Policy>::Iterate(uint32_t rank_start, uint32_t rank_end,
+                                std::function<void(KeyT)> cb) const {
+  assert(rank_start <= rank_end && rank_end < count_);
+
+  BPTreePath path;
+  ToRank(rank_start, &path);
+  for (uint32_t i = rank_start; i <= rank_end; ++i) {
+    cb(path.Terminal());
+    path.Next();
+  }
+}
+
+template <typename T, typename Policy>
+void BPTree<T, Policy>::IterateReverse(uint32_t rank_start, uint32_t rank_end,
+                                       std::function<void(KeyT)> cb) const {
+  assert(rank_start <= rank_end && rank_end < count_);
+
+  BPTreePath path;
+  ToRank(rank_end, &path);
+  for (uint32_t i = rank_start; i <= rank_end; ++i) {
+    cb(path.Terminal());
+    path.Prev();
+  }
+}
+
+template <typename T, typename Policy>
+void BPTree<T, Policy>::ToRank(uint32_t rank, BPTreePath* path) const {
+  assert(root_ && rank < count_);
+  BPTreeNode* node = root_;
+
+  while (!node->IsLeaf()) {
+    for (unsigned i = 0; i <= node->NumItems(); ++i) {
+      uint32_t subtree_cnt = node->GetChildTreeCount(i);
+      if (subtree_cnt > rank) {
+        path->Push(node, i);
+        node = node->Child(i);
+        break;
+      }
+      assert(i < node->NumItems());
+      rank -= subtree_cnt;
+      if (rank == 0) {
+        path->Push(node, i);
+        return;
+      }
+      --rank;
+    }
+  }
+
+  assert(node->IsLeaf());
+  assert(rank < node->NumItems());
+  path->Push(node, rank);
+}
+
+template <typename T, typename Policy>
+size_t BPTree<T, Policy>::DeleteRangeByRank(uint32_t start, uint32_t end,
+                                            std::function<void(KeyT)> cb) {
+  assert(start <= end && end < count_);
+
+  BPTreePath path;
+  size_t deleted = 0;
+  for (uint32_t i = start; i <= end; ++i) {
+    /* Ideally, we would want to advance path to the next item and delete the previous one.
+     * However, we can not do that because the path is invalidated after the
+     * deletion. So we have to recreate the path for each item using the same rank.
+     * Note, it is probably could be improved, but it's much more complicated.
+     */
+
+    ToRank(start, &path);
+    cb(path.Terminal());
+    Delete(path);
+    path.Clear();
+    ++deleted;
+  }
+  return deleted;
+}
+
+template <typename T, typename Policy>
+detail::BPTreePath<T> BPTree<T, Policy>::LowerBound(KeyT item) const {
+  BPTreePath path;
+  Locate(item, &path);
+  if (path.Last().second >= path.Last().first->NumItems())
+    path.Clear();
+
+  return path;
+}
+
+template <typename T, typename Policy>
 detail::BPTreeNode<T>* BPTree<T, Policy>::CreateNode(bool leaf) {
   num_nodes_++;
   void* ptr = mr_->allocate(detail::kBPNodeSize, 8);
   BPTreeNode* node = new (ptr) BPTreeNode(leaf);
 
   return node;
+}
+
+template <typename T, typename Policy> void BPTree<T, Policy>::Delete(BPTreePath path) {
+  using Comp [[maybe_unused]] = typename Policy::KeyCompareTo;
+
+  BPTreeNode* node = path.Last().first;
+  unsigned key_pos = path.Last().second;
+
+  // Remove the key from the node.
+  if (node->IsLeaf()) {
+    node->ShiftLeft(key_pos);  // shift left everything after key_pos.
+  } else {
+    // We can not remove the item from the inner node because it also serves as a separator.
+    // Therefore, we swap it the rightmost key in the left subtree and pop from there instead.
+    path.DigRight();
+
+    BPTreeNode* leaf = path.Last().first;
+    assert(Comp()(leaf->Key(leaf->NumItems() - 1), node->Key(key_pos)) == -1);
+
+    // set a new separator.
+    node->SetKey(key_pos, leaf->Key(leaf->NumItems() - 1));
+    leaf->LeafEraseRight();  // pop the rightmost key from the leaf.
+    node = leaf;
+  }
+  count_--;
+
+  assert(node->IsLeaf());
+
+  // go up the tree and rebalance if number of items in the node is less
+  // than low limit. We either merge or rebalance nodes.
+  while (node->NumItems() < node->MinItems()) {
+    if (node == root_) {
+      if (node->NumItems() == 0) {
+        // terminal case, we reached the root - and it has either a single child (0 delimiters)
+        // or no children at all (leaf). The former is more common case: the tree can only shrink
+        // through the root.
+        if (node->IsLeaf()) {
+          assert(count_ == 0u);
+          root_ = nullptr;
+        } else {
+          root_ = root_->Child(0);
+        }
+        --height_;
+        DestroyNode(node);
+      }
+      return;
+    }
+
+    // The node has a parent. Pop the node from the path and try rebalance it via its parent.
+    assert(path.Depth() > 0u);
+    path.Pop();
+
+    BPTreeNode* parent = path.Last().first;
+    unsigned pos = path.Last().second;
+    assert(parent->Child(pos) == node);
+    node = parent->MergeOrRebalanceChild(pos);
+
+    parent->IncreaseTreeCount(-1);
+
+    if (node == nullptr)  // succeeded to merge/rebalance without the need to propagate.
+      break;
+
+    DestroyNode(node);
+
+    // assert(parent->TreeCount() == parent->DEBUG_TreeCount());
+    node = parent;
+  }
+
+  if (path.Depth() >= 2) {
+    IncreaseSubtreeCounts(path, path.Depth() - 2, -1);
+  }
 }
 
 template <typename T, typename Policy> void BPTree<T, Policy>::DestroyNode(BPTreeNode* node) {

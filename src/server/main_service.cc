@@ -46,6 +46,7 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+using facade::ErrorReply;
 using dfly::operator""_KB;
 
 struct MaxMemoryFlag {
@@ -429,21 +430,17 @@ bool IsSHA(string_view str) {
   return true;
 }
 
-bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
+optional<ErrorReply> EvalValidator(CmdArgList args) {
   string_view num_keys_str = ArgS(args, 1);
   int32_t num_keys;
 
-  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
-    (*cntx)->SendError(facade::kInvalidIntErr);
-    return false;
-  }
+  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0)
+    return ErrorReply{facade::kInvalidIntErr};
 
-  if (unsigned(num_keys) > args.size() - 2) {
-    (*cntx)->SendError("Number of keys can't be greater than number of args", kSyntaxErrType);
-    return false;
-  }
+  if (unsigned(num_keys) > args.size() - 2)
+    return ErrorReply{"Number of keys can't be greater than number of args", kSyntaxErrType};
 
-  return true;
+  return nullopt;
 }
 
 void Topkeys(const http::QueryArgs& args, HttpContext* send) {
@@ -672,20 +669,20 @@ void Service::Shutdown() {
   ThisFiber::SleepFor(10ms);
 }
 
-bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
-                                 ConnectionContext* dfly_cntx) {
-  if (dfly_cntx->is_replicating) {
+optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+                                                 const ConnectionContext& dfly_cntx) {
+  if (dfly_cntx.is_replicating) {
     // Always allow commands on the replication port, as it might be for future-owned keys.
-    return true;
+    return nullopt;
   }
 
   if (cid->first_key_pos() == 0) {
-    return true;  // No key command.
+    return nullopt;  // No key command.
   }
+
   OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
   if (!key_index_res) {
-    (*dfly_cntx)->SendError(key_index_res.status());
-    return false;
+    return ErrorReply{key_index_res.status()};
   }
 
   const auto& key_index = *key_index_res;
@@ -704,24 +701,22 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
   }
 
   if (cross_slot) {
-    (*dfly_cntx)->SendError("-CROSSSLOT Keys in request don't hash to the same slot");
-    return false;
+    return ErrorReply{"-CROSSSLOT Keys in request don't hash to the same slot"};
   }
 
   // Check keys slot is in my ownership
   const ClusterConfig* cluster_config = cluster_family_.cluster_config();
   if (cluster_config == nullptr) {
-    (*dfly_cntx)->SendError(kClusterNotConfigured);
-    return false;
+    return ErrorReply{kClusterNotConfigured};
   }
+
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
     ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);
-    (*dfly_cntx)->SendError(absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port));
-    return false;
+    return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
   }
 
-  return true;
+  return nullopt;
 }
 
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
@@ -755,32 +750,36 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionContext* dfly_cntx) {
-  ServerState& etl = *ServerState::tlocal();
-
+optional<ErrorReply> Service::VerifyCommandArguments(const CommandId* cid, CmdArgList args) {
   string_view cmd_str = ArgS(args, 0);
 
-  absl::Cleanup multi_error([exec_info = &dfly_cntx->conn_state.exec_info] {
-    if (exec_info->IsCollecting()) {
-      exec_info->state = ConnectionState::ExecInfo::EXEC_ERROR;
-    }
-  });
-
   if (cid == nullptr) {
-    (*dfly_cntx)->SendError(StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
-
     lock_guard lk(mu_);
     if (unknown_cmds_.size() < 1024)
       unknown_cmds_[cmd_str]++;
-    return false;
+
+    return ErrorReply{StrCat("unknown command `", cmd_str, "`"), "unknown_cmd"};
   }
 
+  return cid->Validate(args);
+}
+
+std::optional<ErrorReply> Service::VerifyCommand(const CommandId* cid, CmdArgList args,
+                                                 const ConnectionContext& dfly_cntx) {
+  ServerState& etl = *ServerState::tlocal();
+
+  if (auto err = VerifyCommandArguments(cid, args); err)
+    return err;
+
   bool is_trans_cmd = CO::IsTransKind(cid->name());
-  bool under_script = dfly_cntx->conn_state.script_info != nullptr;
+  bool under_script = dfly_cntx.conn_state.script_info != nullptr;
+  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
+  bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
+
   bool allowed_by_state = true;
   switch (etl.gstate()) {
     case GlobalState::LOADING:
-      allowed_by_state = dfly_cntx->journal_emulated || (cid->opt_mask() & CO::LOADING);
+      allowed_by_state = dfly_cntx.journal_emulated || (cid->opt_mask() & CO::LOADING);
       break;
     case GlobalState::SHUTTING_DOWN:
       allowed_by_state = false;
@@ -791,91 +790,56 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
     default:
       break;
   }
+
   if (!allowed_by_state) {
     VLOG(1) << "Command " << cid->name() << " not executed because global state is "
             << GlobalStateName(etl.gstate());
-    string err = StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
-    (*dfly_cntx)->SendError(err);
-    return false;
+    return ErrorReply{StrCat("Can not execute during ", GlobalStateName(etl.gstate()))};
   }
 
   string_view cmd_name{cid->name()};
 
-  if (dfly_cntx->req_auth && !dfly_cntx->authenticated) {
+  if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
-      (*dfly_cntx)->SendError("-NOAUTH Authentication required.");
-      return false;
+      return ErrorReply{"-NOAUTH Authentication required."};
     }
   }
 
   // only reset and quit are allow if this connection is used for monitoring
-  if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
-    (*dfly_cntx)->SendError("Replica can't interact with the keyspace");
-    return false;
-  }
+  if (dfly_cntx.monitor && (cmd_name != "RESET" && cmd_name != "QUIT"))
+    return ErrorReply{"Replica can't interact with the keyspace"};
 
-  if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
-    (*dfly_cntx)->SendError("This Redis command is not allowed from script");
-    return false;
-  }
+  if (under_script && (cid->opt_mask() & CO::NOSCRIPT))
+    return ErrorReply{"This Redis command is not allowed from script"};
 
-  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
-  bool under_multi = dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd;
-
-  if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
-    (*dfly_cntx)->SendError("-READONLY You can't write against a read only replica.");
-    return false;
-  }
-
-  if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
-      (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
-    (*dfly_cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
-    return false;
-  }
-
-  if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
-    (*dfly_cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
-    return false;
-  }
-
-  // Validate more complicated cases with custom validators.
-  if (!cid->Validate(args.subspan(1), dfly_cntx)) {
-    return false;
-  }
+  if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
+    return ErrorReply{"-READONLY You can't write against a read only replica."};
 
   if (under_multi) {
-    if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE")) {
-      (*dfly_cntx)->SendError(absl::StrCat("Can not call ", cmd_name, " within a transaction"));
-      return false;
-    }
+    if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE"))
+      return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
 
-    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB") {
-      (*dfly_cntx)->SendError(absl::StrCat("'", cmd_name, "' inside MULTI is not allowed"));
-      return false;
-    }
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB")
+      return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
-  if (ClusterConfig::IsEnabled() && !CheckKeysOwnership(cid, args.subspan(1), dfly_cntx)) {
-    return false;
+  if (ClusterConfig::IsEnabled()) {
+    if (auto err = CheckKeysOwnership(cid, args.subspan(1), dfly_cntx); err)
+      return err;
   }
 
   if (under_script && cid->IsTransactional()) {
-    OpStatus status = CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args.subspan(1),
-                                        dfly_cntx->transaction);
+    OpStatus status = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, args.subspan(1),
+                                        dfly_cntx.transaction);
 
-    if (status == OpStatus::KEY_NOTFOUND) {
-      (*dfly_cntx)->SendError("script tried accessing undeclared key");
-      return false;
-    }
+    if (status == OpStatus::KEY_NOTFOUND)
+      return ErrorReply{"script tried accessing undeclared key"};
 
-    if (status != OpStatus::OK) {
-      (*dfly_cntx)->SendError(status);
-      return false;
-    }
+    if (status != OpStatus::OK)
+      return ErrorReply{status};
   }
 
-  std::move(multi_error).Cancel();
-  return true;
+  return nullopt;
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
@@ -900,8 +864,13 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  if (!VerifyCommand(cid, args, dfly_cntx))
+  if (auto err = VerifyCommand(cid, args, *dfly_cntx); err) {
+    if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
+      exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
+
+    (*dfly_cntx)->SendError(move(*err));
     return;
+  }
 
   auto args_no_cmd = args.subspan(1);
 
@@ -1251,8 +1220,10 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     ToUpper(&ca.args[0]);
     auto* cid = registry_.Find(facade::ToSV(ca.args[0]));
 
-    if (!VerifyCommand(cid, ca.args, cntx))
+    if (auto err = VerifyCommand(cid, ca.args, *cntx); err) {
+      (*cntx)->SendError(move(*err));
       return;
+    }
 
     auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
     info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1), replies);
