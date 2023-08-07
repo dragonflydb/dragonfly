@@ -556,7 +556,7 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
     // Allow multi eval only when scripts run global and multi runs in global or lock ahead
     // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
     // lock ahead and we run global script in the transaction then multi mode will be global.
-    if (!contains_global || (multi_mode == Transaction::NON_ATOMIC)) {
+    if ((multi_mode == Transaction::NON_ATOMIC)) {
       return nullopt;
     }
   }
@@ -1368,20 +1368,28 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 
 // Start multi transaction for eval. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams params,
-                    Transaction* trans) {
-  Transaction::MultiMode multi_mode = DetermineMultiMode(params);
-
+// Return nullopt if eval runs inside multi and conflicts with multi mode
+optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams params,
+                              ConnectionContext* cntx) {
+  Transaction* trans = cntx->transaction;
+  Transaction::MultiMode script_mode = DetermineMultiMode(params);
+  Transaction::MultiMode multi_mode = trans->GetMultiMode();
   // Check if eval is already part of a running multi transaction
-  if (trans->GetMultiMode() != Transaction::NOT_DETERMINED) {
-    DCHECK_LE(trans->GetMultiMode(), multi_mode);  // Check the transaction covers our requirements
+  if (multi_mode != Transaction::NOT_DETERMINED) {
+    if (multi_mode > script_mode) {
+      string err = StrCat(
+          "Multi mode conflict when running eval in multi transaction. Multi mode is: ", multi_mode,
+          " eval mode is: ", script_mode);
+      (*cntx)->SendError(err);
+      return nullopt;
+    }
     return false;
   }
 
-  if (keys.empty() && multi_mode == Transaction::LOCK_AHEAD)
+  if (keys.empty() && script_mode == Transaction::LOCK_AHEAD)
     return false;
 
-  switch (multi_mode) {
+  switch (script_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       return true;
@@ -1441,7 +1449,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   Transaction* tx = cntx->transaction;
   CHECK(tx != nullptr);
 
-  bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, tx);
+  optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, tx);
+  if (!scheduled) {
+    return;
+  }
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
@@ -1465,7 +1476,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   cntx->conn_state.script_info.reset();  // reset script_info
 
   // Conclude the transaction.
-  if (scheduled)
+  if (*scheduled)
     cntx->transaction->UnlockMulti();
 
   if (result == Interpreter::RUN_ERR) {

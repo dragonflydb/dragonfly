@@ -654,6 +654,21 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
+TEST_F(MultiTest, MultiEvalModeConflict) {
+  const char* s1 = R"(
+  #!lua flags=allow-undeclared-keys
+  return redis.call('GET', 'random-key');
+)";
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  // Check eval finds script flags.
+  EXPECT_EQ(Run({"set", "random-key", "works"}), "QUEUED");
+  EXPECT_EQ(Run({"eval", s1, "0"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}),
+              RespArray(ElementsAre(
+                  "OK", ErrArg("Multi mode conflict when running eval in multi transaction"))));
+}
+
 // Run multi-exec transactions that move values from a source list
 // to destination list through two contended channels.
 TEST_F(MultiTest, ContendedList) {

@@ -747,8 +747,9 @@ TEST_F(StringFamilyTest, MultiSetWithHashtagsDontLockHashtags) {
   EXPECT_EQ(Run({"multi"}), "OK");
   EXPECT_EQ(Run({"set", "{key}1", "val1"}), "QUEUED");
   EXPECT_EQ(Run({"set", "{key}2", "val2"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
-  EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("{key}1", "{key}2"));
+  EXPECT_EQ(Run({"eval", "return redis.call('set', KEYS[1], 'val3')", "1", "{key}3"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK", "OK")));
+  EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("{key}1", "{key}2", "{key}3"));
 }
 
 TEST_F(StringFamilyTest, MultiSetWithHashtagsLockHashtags) {
@@ -759,7 +760,8 @@ TEST_F(StringFamilyTest, MultiSetWithHashtagsLockHashtags) {
   EXPECT_EQ(Run({"multi"}), "OK");
   EXPECT_EQ(Run({"set", "{key}1", "val1"}), "QUEUED");
   EXPECT_EQ(Run({"set", "{key}2", "val2"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
+  EXPECT_EQ(Run({"eval", "return redis.call('set', KEYS[1], 'val3')", "1", "{key}3"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK", "OK")));
   EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("key"));
 }
 

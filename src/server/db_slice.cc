@@ -757,13 +757,13 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
     lock_acquired = lt[key].Acquire(mode);
-    uniq_keys_ = {key};
+    uniq_keys_ = {string{key}};
   } else {
     uniq_keys_.clear();
 
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
       auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      if (uniq_keys_.insert(s).second) {
+      if (uniq_keys_.insert(string{s}).second) {
         bool res = lt[s].Acquire(mode);
         lock_acquired &= res;
       }
@@ -804,13 +804,13 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
     ReleaseNormalized(mode, lock_args.db_index, key, 1);
-    uniq_keys_ = {key};
+    uniq_keys_ = {string{key}};
   } else {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
       auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      if (uniq_keys_.insert(s).second) {
+      if (uniq_keys_.insert(string{s}).second) {
         auto it = lt.find(s);
         CHECK(it != lt.end());
         it->second.Release(mode);
@@ -835,7 +835,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
     auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-    uniq_keys_.insert(s);
+    uniq_keys_.insert(string{s});
     auto it = lt.find(s);
     if (it != lt.end() && !it->second.Check(mode)) {
       return false;
