@@ -548,6 +548,18 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"sismember", "listpack-set", "acme"});
   EXPECT_EQ(true, resp.GetInt().has_value());
   EXPECT_EQ(1, resp.GetInt());
+
+  // The following zset was created in Redis 7 with rdb version 11 and it's listpack encoded.
+  // zadd my-zset 1 "elon"
+  // dump my-zset
+  uint8_t ZSET_LISTPACK_DUMP[] = {0x11, 0x0f, 0x0f, 0x00, 0x00, 0x00, 0x02, 0x00, 0x84,
+                                  0x65, 0x6c, 0x6f, 0x6e, 0x05, 0x01, 0x01, 0xff, 0x0b,
+                                  0x00, 0xc8, 0x01, 0x2c, 0xad, 0xd9, 0xa3, 0x99, 0x5e};
+
+  resp = Run({"restore", "my-zset", "0", ToSV(ZSET_LISTPACK_DUMP)});
+  EXPECT_EQ(resp.GetString(), "OK");
+  resp = Run({"zrange", "my-zset", "0", "-1"});
+  EXPECT_EQ("elon", resp.GetString());
 }
 
 TEST_F(GenericFamilyTest, Info) {
