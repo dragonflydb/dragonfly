@@ -7,8 +7,12 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/types/span.h>
 
+#include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
+
+#include "facade/op_status.h"
 
 namespace facade {
 
@@ -34,7 +38,6 @@ struct CmdArgListFormatter {
 
 struct ConnectionStats {
   absl::flat_hash_map<std::string, uint64_t> err_count_map;
-  absl::flat_hash_map<std::string, uint64_t> cmd_count_map;
 
   size_t read_buf_capacity = 0;
   size_t pipeline_cache_capacity = 0;
@@ -55,6 +58,24 @@ struct ConnectionStats {
   uint32_t num_blocked_clients = 0;
 
   ConnectionStats& operator+=(const ConnectionStats& o);
+};
+
+struct ErrorReply {
+  explicit ErrorReply(std::string&& msg, std::string_view kind = {})
+      : message{move(msg)}, kind{kind} {
+  }
+  explicit ErrorReply(std::string_view msg, std::string_view kind = {}) : message{msg}, kind{kind} {
+  }
+  explicit ErrorReply(const char* msg,
+                      std::string_view kind = {})  // to resolve ambiguity of constructors above
+      : message{std::string_view{msg}}, kind{kind} {
+  }
+  explicit ErrorReply(OpStatus status) : message{}, kind{}, status{status} {
+  }
+
+  std::variant<std::string, std::string_view> message;
+  std::string_view kind;
+  std::optional<OpStatus> status{std::nullopt};
 };
 
 inline MutableSlice ToMSS(absl::Span<uint8_t> span) {

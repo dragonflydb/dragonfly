@@ -38,6 +38,7 @@ class DebugCmd {
   void Inspect(std::string_view key);
   void Watched();
   void TxAnalysis();
+  void ObjHist();
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;

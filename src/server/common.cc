@@ -16,6 +16,7 @@ extern "C" {
 #include "redis/util.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "server/engine_shard_set.h"
@@ -24,10 +25,42 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/transaction.h"
 
+ABSL_FLAG(bool, lock_on_hashtags, false,
+          "When true, locks are done in the {hashtag} level instead of key level. "
+          "Only use this with --cluster_mode=emulated|yes.");
+
 namespace dfly {
 
 using namespace std;
 using namespace util;
+
+namespace {
+// Thread-local cache with static linkage.
+thread_local std::optional<bool> is_enabled_flag_cache;
+}  // namespace
+
+void TEST_InvalidateLockHashTag() {
+  is_enabled_flag_cache = nullopt;
+  CHECK(shard_set != nullptr);
+  shard_set->pool()->Await(
+      [](ShardId shard, ProactorBase* proactor) { is_enabled_flag_cache = nullopt; });
+}
+
+bool KeyLockArgs::IsLockHashTagEnabled() {
+  if (!is_enabled_flag_cache.has_value()) {
+    is_enabled_flag_cache = absl::GetFlag(FLAGS_lock_on_hashtags);
+  }
+
+  return *is_enabled_flag_cache;
+}
+
+string_view KeyLockArgs::GetLockKey(string_view key) {
+  if (IsLockHashTagEnabled()) {
+    return ClusterConfig::KeyTag(key);
+  }
+
+  return key;
+}
 
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);

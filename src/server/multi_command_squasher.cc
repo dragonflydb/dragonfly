@@ -26,18 +26,25 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            bool error_abort)
-    : cmds_{cmds}, cntx_{cntx}, base_cid_{cntx->transaction->GetCId()}, error_abort_{error_abort} {
+    : cmds_{cmds}, cntx_{cntx}, base_cid_{nullptr}, error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
-  track_keys_ = mode == Transaction::NON_ATOMIC;
+  base_cid_ = mode == Transaction::NON_ATOMIC ? nullptr : cntx->transaction->GetCId();
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
+  // See header top for atomic/non-atomic difference
   auto& sinfo = sharded_[sid];
-  if (!sinfo.local_tx)
-    sinfo.local_tx = new Transaction{cntx_->transaction};
+  if (!sinfo.local_tx) {
+    if (IsAtomic()) {
+      sinfo.local_tx = new Transaction{cntx_->transaction};
+    } else {
+      sinfo.local_tx = new Transaction{cntx_->transaction->GetCId()};
+      sinfo.local_tx->StartMultiNonAtomic();
+    }
+  }
 
   return sinfo;
 }
@@ -70,9 +77,6 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   if (found_more || last_sid == kInvalidSid)
     return SquashResult::NOT_SQUASHED;
-
-  if (track_keys_)
-    IterateKeys(args, *keys, [this](MutableSlice key) { collected_keys_.insert(key); });
 
   auto& sinfo = PrepareShardInfo(last_sid);
 
@@ -138,21 +142,22 @@ bool MultiCommandSquasher::ExecuteSquashed() {
   if (order_.empty())
     return false;
 
-  Transaction* tx = cntx_->transaction;
-
-  if (track_keys_) {
-    tmp_keylist_.assign(collected_keys_.begin(), collected_keys_.end());
-    tx->PrepareSquashedMultiHop(base_cid_, CmdArgList{tmp_keylist_});
-  } else {
-    auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
-    tx->PrepareSquashedMultiHop(base_cid_, cb);
-  }
-
   for (auto& sd : sharded_)
     sd.replies.reserve(sd.cmds.size());
 
-  cntx_->cid = base_cid_;
-  tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
+  Transaction* tx = cntx_->transaction;
+
+  // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
+  // stubs, non-atomic ones just run the commands in parallel.
+  if (IsAtomic()) {
+    cntx_->cid = base_cid_;
+    auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
+    tx->PrepareSquashedMultiHop(base_cid_, cb);
+    tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
+  } else {
+    shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
+                                     [this](auto sid) { return !sharded_[sid].cmds.empty(); });
+  }
 
   bool aborted = false;
 
@@ -174,7 +179,6 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     sinfo.cmds.clear();
 
   order_.clear();
-  collected_keys_.clear();
   return aborted;
 }
 
@@ -202,6 +206,19 @@ void MultiCommandSquasher::Run() {
   if (!sharded_.empty())
     cntx_->transaction->ReportWritesSquashedMulti(
         [this](ShardId sid) { return sharded_[sid].had_writes; });
+
+  // UnlockMulti is a no-op for non-atomic multi transactions,
+  // still called for correctness and future changes
+  if (!IsAtomic()) {
+    for (auto& sd : sharded_) {
+      if (sd.local_tx)
+        sd.local_tx->UnlockMulti();
+    }
+  }
+}
+
+bool MultiCommandSquasher::IsAtomic() const {
+  return base_cid_ != nullptr;
 }
 
 }  // namespace dfly

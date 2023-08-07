@@ -5,6 +5,7 @@
 #include "server/command_registry.h"
 
 #include <absl/strings/str_split.h>
+#include <absl/time/clock.h>
 
 #include "absl/strings/str_cat.h"
 #include "base/bits.h"
@@ -12,6 +13,7 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "server/conn_context.h"
+#include "server/server_state.h"
 
 using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
@@ -46,6 +48,31 @@ bool CommandId::IsTransactional() const {
     return true;
 
   return false;
+}
+
+void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
+  uint64_t before = absl::GetCurrentTimeNanos();
+  handler_(std::move(args), cntx);
+  uint64_t after = absl::GetCurrentTimeNanos();
+
+  auto& ent = ServerState::tlocal()->cmd_stats_map[cntx->cid->name().data()];
+  ++ent.first;
+  ent.second += (after - before) / 1000;
+}
+
+optional<facade::ErrorReply> CommandId::Validate(CmdArgList args) const {
+  if ((arity() > 0 && args.size() != size_t(arity())) ||
+      (arity() < 0 && args.size() < size_t(-arity()))) {
+    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  }
+
+  if (key_arg_step() == 2 && (args.size() % 2) == 0) {
+    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  }
+
+  if (validator_)
+    return validator_(args.subspan(1));
+  return nullopt;
 }
 
 CommandRegistry::CommandRegistry() {

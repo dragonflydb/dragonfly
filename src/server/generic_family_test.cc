@@ -428,15 +428,13 @@ TEST_F(GenericFamilyTest, Persist) {
 }
 
 TEST_F(GenericFamilyTest, Dump) {
-  // The following would only work for RDB version 9
-  // The format was changed at version 10
-  // The expected results were taken from running the same with Redis branch 6.2
-  ASSERT_THAT(RDB_VERSION, 9);
+  ASSERT_THAT(RDB_SER_VERSION, 9);
   uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
                                       0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
   uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
                                   0x02, 0x00, 0x00, 0xfe, 0x13, 0x03, 0xc0, 0xd2, 0x04, 0xff,
                                   0x09, 0x00, 0xb1, 0x0b, 0xae, 0x6c, 0x23, 0x5d, 0x17, 0xaa};
+
   uint8_t EXPECTED_LIST_DUMP[] = {0x0e, 0x01, 0x0e, 0x0e, 0x00, 0x00, 0x00, 0x0a, 0x00,
                                   0x00, 0x00, 0x01, 0x00, 0x00, 0xfe, 0x14, 0xff, 0x09,
                                   0x00, 0xba, 0x1e, 0xa9, 0x6b, 0xba, 0xfe, 0x2d, 0x3f};
@@ -471,9 +469,9 @@ TEST_F(GenericFamilyTest, Restore) {
   using std::chrono::seconds;
   using std::chrono::system_clock;
 
+  // redis 6 with RDB_VERSION 9
   uint8_t STRING_DUMP_REDIS[] = {0x00, 0xc1, 0xd2, 0x04, 0x09, 0x00, 0xd0,
                                  0x75, 0x59, 0x6d, 0x10, 0x04, 0x3f, 0x5c};
-
   auto resp = Run({"set", "exiting-key", "1234"});
   EXPECT_EQ(resp, "OK");
   // try to restore into existing key - this should failed
@@ -538,6 +536,18 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"get", "string-key"});
   EXPECT_EQ("1234", resp);
   EXPECT_EQ(CheckedInt({"ttl", "string-key"}), -1);
+
+  // The following set was created in Redis 7 with rdb version 11 and it's listpack encoded.
+  // We should be able to read it and convert it to our own format DenseSet or HT
+  // sadd myset "acme"
+  // dump myset
+  uint8_t SET_LISTPACK_DUMP[] = {0x14, 0x0D, 0x0D, 0x00, 0x00, 0x00, 0x01, 0x00, 0x84,
+                                 0x61, 0x63, 0x6D, 0x65, 0x05, 0xff, 0x0b, 0x00, 0xc1,
+                                 0x37, 0x5c, 0xe5, 0xe2, 0xc0, 0xdd, 0x27};
+  resp = Run({"restore", "listpack-set", "0", ToSV(SET_LISTPACK_DUMP)});
+  resp = Run({"sismember", "listpack-set", "acme"});
+  EXPECT_EQ(true, resp.GetInt().has_value());
+  EXPECT_EQ(1, resp.GetInt());
 }
 
 TEST_F(GenericFamilyTest, Info) {

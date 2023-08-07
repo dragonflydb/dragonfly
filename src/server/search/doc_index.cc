@@ -97,6 +97,10 @@ string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   return keys_[id];
 }
 
+size_t ShardDocIndex::DocKeyIndex::Size() const {
+  return ids_.size();
+}
+
 uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
@@ -151,6 +155,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   return SearchResult{std::move(out), search_results.ids.size()};
 }
 
+DocIndexInfo ShardDocIndex::GetInfo() const {
+  return {base_->schema, key_index_.Size()};
+}
+
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
@@ -166,6 +174,18 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
       [this](string_view key, const DbContext& cntx, const PrimeValue& pv) {
         RemoveDoc(key, cntx, pv);
       });
+}
+
+bool ShardDocIndices::DropIndex(string_view name) {
+  return indices_.erase(name) > 0;
+}
+
+vector<string> ShardDocIndices::GetIndexNames() const {
+  vector<string> names{};
+  names.reserve(indices_.size());
+  for (const auto& [name, ptr] : indices_)
+    names.push_back(name);
+  return names;
 }
 
 void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {

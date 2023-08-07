@@ -29,7 +29,7 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
 
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
-         http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4)
+         http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4 TRDP::croncpp)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
@@ -49,7 +49,7 @@ cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
-         testdata/redis6_stream.rdb testdata/hll.rdb LABELS DFLY)
+         testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
 cxx_test(snapshot_test dragonfly_lib LABELS DFLY)

@@ -34,7 +34,7 @@ class ClusterFamilyTest : public BaseFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
-                                    absl::Duration timeout = absl::Seconds(5)) {
+                                    absl::Duration timeout = absl::Seconds(10)) {
     absl::Time deadline = absl::Now() + timeout;
 
     while (deadline > absl::Now()) {

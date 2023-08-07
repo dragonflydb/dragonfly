@@ -691,4 +691,76 @@ TEST_F(StringFamilyTest, SetWithGetParam) {
   EXPECT_EQ(Run({"get", "key2"}), "val3");
 }
 
+TEST_F(StringFamilyTest, SetWithHashtagsNoCluster) {
+  SetTestFlag("cluster_mode", "");
+  SetTestFlag("lock_on_hashtags", "false");
+  ResetService();
+
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("{key}1"), Not(Contains("key"))));
+
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("{key}2"), Not(Contains("key"))));
+
+  EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+  EXPECT_NE(1, GetDebugInfo().shards_count);
+  EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("{key}1", "{key}2"));
+}
+
+TEST_F(StringFamilyTest, SetWithHashtagsWithEmulatedCluster) {
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("lock_on_hashtags", "false");
+  ResetService();
+
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("{key}1"), Not(Contains("key"))));
+
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("{key}2"), Not(Contains("key"))));
+
+  EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+  EXPECT_EQ(1, GetDebugInfo().shards_count);
+  EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("{key}1", "{key}2"));
+}
+
+TEST_F(StringFamilyTest, SetWithHashtagsWithHashtagLock) {
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("lock_on_hashtags", "true");
+  ResetService();
+
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("key"), Not(Contains("{key}1"))));
+
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  EXPECT_THAT(GetLastUsedKeys(), AllOf(Contains("key"), Not(Contains("{key}2"))));
+
+  EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+  EXPECT_EQ(1, GetDebugInfo().shards_count);
+  EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("key"));
+}
+
+TEST_F(StringFamilyTest, MultiSetWithHashtagsDontLockHashtags) {
+  SetTestFlag("cluster_mode", "");
+  SetTestFlag("lock_on_hashtags", "false");
+  ResetService();
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "QUEUED");
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
+  EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("{key}1", "{key}2"));
+}
+
+TEST_F(StringFamilyTest, MultiSetWithHashtagsLockHashtags) {
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("lock_on_hashtags", "true");
+  ResetService();
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "QUEUED");
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
+  EXPECT_THAT(GetLastUsedKeys(), UnorderedElementsAre("key"));
+}
+
 }  // namespace dfly

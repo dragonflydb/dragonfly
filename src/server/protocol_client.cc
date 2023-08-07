@@ -56,17 +56,26 @@ static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
   unsigned mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
 
-  CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
-  const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
+  // Load client certificate if given.
+  if (!tls_key_file.empty()) {
+    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+    // We checked that the flag is non empty in ValidateClientTlsFlags.
+    const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
 
-  CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+    CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+  }
 
+  // Load custom certificate validation if given.
   const auto& tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
   const auto& tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
 
   const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
   const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
-  CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+  if (file || dir) {
+    CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+  } else {
+    CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
+  }
 
   CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
@@ -142,22 +151,32 @@ std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
-void ProtocolClient::ValidateTlsFlags() const {
-  if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
-    LOG(ERROR) << "tls_cert_file flag should be set";
-    exit(1);
+void ValidateClientTlsFlags() {
+  if (!absl::GetFlag(FLAGS_tls_replication)) {
+    return;
   }
 
-  if (absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
-      absl::GetFlag(FLAGS_tls_ca_cert_dir).empty()) {
-    LOG(ERROR) << "Either or both tls_ca_cert_file or tls_ca_cert_dir flags must be set";
+  bool has_auth = false;
+
+  if (!absl::GetFlag(FLAGS_tls_key_file).empty()) {
+    if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
+      LOG(ERROR) << "tls_cert_file flag should be set";
+      exit(1);
+    }
+    has_auth = true;
+  }
+
+  if (!absl::GetFlag(FLAGS_masterauth).empty())
+    has_auth = true;
+
+  if (!has_auth) {
+    LOG(ERROR) << "No authentication method configured!";
     exit(1);
   }
 }
 
 void ProtocolClient::MaybeInitSslCtx() {
   if (absl::GetFlag(FLAGS_tls_replication)) {
-    ValidateTlsFlags();
     ssl_ctx_ = CreateSslClientCntx();
   }
 }
@@ -176,8 +195,11 @@ ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::mov
 }
 
 ProtocolClient::~ProtocolClient() {
+  // FIXME: We should close the socket explictly outside of the destructor. This currently
+  // breaks test_cancel_replication_immediately.
   if (sock_) {
-    auto ec = sock_->Close();
+    std::error_code ec;
+    sock_->proactor()->Await([this, &ec]() { ec = sock_->Close(); });
     LOG_IF(ERROR, ec) << "Error closing socket " << ec;
   }
 #ifdef DFLY_USE_SSL
@@ -210,14 +232,19 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
     if (!cntx->IsCancelled()) {
+      if (sock_) {
+        LOG_IF(WARNING, sock_->Close()) << "Error closing socket";
+        sock_.reset(nullptr);
+      }
+
       if (ssl_ctx_) {
         auto tls_sock = std::make_unique<tls::TlsSocket>(mythread->CreateSocket());
         tls_sock->InitSSL(ssl_ctx_);
-        sock_.reset(tls_sock.release());
+        sock_ = std::move(tls_sock);
       } else {
         sock_.reset(mythread->CreateSocket());
       }
-      serializer_.reset(new ReqSerializer(sock_.get()));
+      serializer_ = std::make_unique<ReqSerializer>(sock_.get());
     } else {
       return cntx->GetError();
     }

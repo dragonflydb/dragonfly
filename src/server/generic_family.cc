@@ -48,8 +48,8 @@ int64_t CalculateExpirationTime(bool seconds, bool absolute, int64_t ts, int64_t
 
 VersionBuffer MakeRdbVersion() {
   VersionBuffer buf;
-  buf[0] = RDB_VERSION & 0xff;
-  buf[1] = (RDB_VERSION >> 8) & 0xff;
+  buf[0] = RDB_SER_VERSION & 0xff;
+  buf[1] = (RDB_SER_VERSION >> 8) & 0xff;
   return buf;
 }
 
@@ -73,7 +73,7 @@ void AppendFooter(std::string* dump_res) {
   dump_res->append(crc.data(), crc.size());
 }
 
-bool VerifyFooter(std::string_view msg) {
+bool VerifyFooter(std::string_view msg, int* rdb_version) {
   if (msg.size() <= DUMP_FOOTER_SIZE) {
     LOG(WARNING) << "got restore payload that is too short - " << msg.size();
     return false;
@@ -81,6 +81,7 @@ bool VerifyFooter(std::string_view msg) {
   const uint8_t* footer =
       reinterpret_cast<const uint8_t*>(msg.data()) + (msg.size() - DUMP_FOOTER_SIZE);
   uint16_t version = (*(footer + 1) << 8 | (*footer));
+  *rdb_version = version;
   if (version > RDB_VERSION) {
     LOG(WARNING) << "got restore payload with illegal version - supporting version up to "
                  << RDB_VERSION << " got version " << version;
@@ -126,6 +127,10 @@ class InMemSource : public ::io::Source {
 
 class RdbRestoreValue : protected RdbLoaderBase {
  public:
+  RdbRestoreValue(int rdb_version) {
+    rdb_version_ = rdb_version;
+  }
+
   bool Add(std::string_view payload, std::string_view key, DbSlice& db_slice, DbIndex index,
            uint64_t expire_ms);
 
@@ -328,19 +333,15 @@ void Renamer::Find(Transaction* t) {
 };
 
 void Renamer::Finalize(Transaction* t, bool skip_exist_dest) {
-  auto cleanup = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-
   if (!src_res_.found) {
     status_ = OpStatus::KEY_NOTFOUND;
-
-    t->Execute(move(cleanup), true);
+    t->Conclude();
     return;
   }
 
   if (dest_res_.found && skip_exist_dest) {
     status_ = OpStatus::KEY_EXISTS;
-
-    t->Execute(move(cleanup), true);
+    t->Conclude();
     return;
   }
 
@@ -481,7 +482,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
 }
 
 OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
-                         RestoreArgs restore_args) {
+                         RestoreArgs restore_args, int rdb_version) {
   if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
   }
@@ -508,7 +509,7 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
     return true;
   }
 
-  RdbRestoreValue loader{};
+  RdbRestoreValue loader(rdb_version);
 
   return loader.Add(payload, key, db_slice, op_args.db_cntx.db_index,
                     restore_args.ExpirationTime());
@@ -1028,8 +1029,8 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
 void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view serialized_value = ArgS(args, 2);
-
-  if (!VerifyFooter(serialized_value)) {
+  int rdb_version = 0;
+  if (!VerifyFooter(serialized_value, &rdb_version)) {
     return (*cntx)->SendError("ERR DUMP payload version or checksum are wrong");
   }
 
@@ -1043,7 +1044,7 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OnRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value());
+    return OnRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value(), rdb_version);
   };
 
   OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1160,7 +1161,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(key, &index)) {
     return (*cntx)->SendError(kInvalidDbIndErr);
   }
-  if (ClusterConfig::IsClusterEnabled() && index != 0) {
+  if (ClusterConfig::IsEnabled() && index != 0) {
     return (*cntx)->SendError("SELECT is not allowed in cluster mode");
   }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {

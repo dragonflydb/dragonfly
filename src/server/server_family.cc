@@ -23,6 +23,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "croncpp.h"  // cron::cronexpr
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -37,6 +38,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
+#include "server/protocol_client.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
@@ -72,6 +74,8 @@ ABSL_FLAG(string, requirepass, "",
           "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
+ABSL_FLAG(string, snapshot_cron, "",
+          "cron expression for the time to save a snapshot, crontab style");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
 ABSL_FLAG(int, epoll_file_threads, 0,
@@ -85,6 +89,9 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
+ABSL_DECLARE_FLAG(bool, tls);
+ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
+ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(m)                                               \
@@ -494,6 +501,32 @@ void FlushEntireDb(Transaction* transaction) {
   };
 
   transaction->Execute(std::move(cb), true);
+
+// Check that if TLS is used at least one form of client authentication is
+// enabled. That means either using a password or giving a root
+// certificate for authenticating client certificates which will
+// be required.
+void ValidateServerTlsFlags() {
+  if (!absl::GetFlag(FLAGS_tls)) {
+    return;
+  }
+
+  bool has_auth = false;
+
+  if (!dfly::GetPassword().empty()) {
+    has_auth = true;
+  }
+
+  if (!(absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
+        absl::GetFlag(FLAGS_tls_ca_cert_dir).empty())) {
+    has_auth = true;
+  }
+
+  if (!has_auth) {
+    LOG(ERROR) << "TLS configured but no authentication method is used!";
+    exit(1);
+  }
+
 }
 
 }  // namespace
@@ -547,6 +580,39 @@ bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
          DoesTimeNibbleMatchSpecifier(spec.minute_spec, min);
 }
 
+std::optional<cron::cronexpr> InferSnapshotCronExpr() {
+  string save_time = GetFlag(FLAGS_save_schedule);
+  string snapshot_cron_exp = GetFlag(FLAGS_snapshot_cron);
+
+  if (!snapshot_cron_exp.empty() && !save_time.empty()) {
+    LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
+    quick_exit(1);
+  }
+
+  string raw_cron_expr;
+  if (!save_time.empty()) {
+    std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
+
+    if (spec) {
+      // Setting snapshot to HH:mm everyday, as specified by `save_schedule` flag
+      raw_cron_expr = "0 " + spec.value().minute_spec + " " + spec.value().hour_spec + " * * *";
+    } else {
+      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
+    }
+  } else if (!snapshot_cron_exp.empty()) {
+    raw_cron_expr = "0 " + snapshot_cron_exp;
+  }
+
+  if (!raw_cron_expr.empty()) {
+    try {
+      return std::optional<cron::cronexpr>(cron::make_cron(raw_cron_expr));
+    } catch (const cron::bad_cronexpr& ex) {
+      LOG(WARNING) << "Invalid cron expression: " << ex.what();
+    }
+  }
+  return std::nullopt;
+}
+
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
   last_save_info_ = make_shared<LastSaveInfo>();
@@ -565,18 +631,19 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     LOG(ERROR) << ec.Format();
     exit(1);
   }
+
+  ValidateServerTlsFlags();
+  ValidateClientTlsFlags();
 }
 
 ServerFamily::~ServerFamily() {
 }
 
-void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
-                        ClusterFamily* cluster_family) {
+void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
-  cluster_family_ = cluster_family;
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -623,16 +690,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     load_result_ = Load(load_path);
   }
 
-  string save_time = GetFlag(FLAGS_save_schedule);
-  if (!save_time.empty()) {
-    std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
-    if (spec) {
-      snapshot_schedule_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
-          [save_spec = std::move(spec.value()), this] { SnapshotScheduling(save_spec); });
-    } else {
-      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
-    }
-  }
+  snapshot_schedule_fb_ =
+      service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
 }
 
 void ServerFamily::Shutdown() {
@@ -773,30 +832,24 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   return ec_future;
 }
 
-void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
-  const auto loop_sleep_time = std::chrono::seconds(20);
+void ServerFamily::SnapshotScheduling() {
+  const std::optional<cron::cronexpr> cron_expr = InferSnapshotCronExpr();
+  if (!cron_expr) {
+    return;
+  }
+
+  const auto loading_check_interval = std::chrono::seconds(10);
+  while (service_.GetGlobalState() == GlobalState::LOADING) {
+    schedule_done_.WaitFor(loading_check_interval);
+  }
+
   while (true) {
-    if (schedule_done_.WaitFor(loop_sleep_time)) {
+    const std::chrono::time_point now = std::chrono::system_clock::now();
+    const std::chrono::time_point next = cron::cron_next(cron_expr.value(), now);
+
+    if (schedule_done_.WaitFor(next - now)) {
       break;
-    }
-
-    time_t now = std::time(NULL);
-
-    if (!DoesTimeMatchSpecifier(spec, now)) {
-      continue;
-    }
-
-    // if it matches check the last save time, if it is the same minute don't save another
-    // snapshot
-    time_t last_save;
-    {
-      lock_guard lk(save_mu_);
-      last_save = last_save_info_->save_time;
-    }
-
-    if ((last_save / 60) == (now / 60)) {
-      continue;
-    }
+    };
 
     GenericError ec = DoSave();
     if (ec) {
@@ -956,6 +1009,28 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     AppendMetricValue("db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)}, &db_key_metrics);
     AppendMetricValue("db_keys_expiring", m.db[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
+  }
+
+  // Command stats
+  {
+    vector<pair<const char*, pair<uint64_t, uint64_t>>> commands(m.cmd_stats_map.cbegin(),
+                                                                 m.cmd_stats_map.cend());
+
+    sort(commands.begin(), commands.end(),
+         [](const auto& s1, const auto& s2) { return std::strcmp(s1.first, s2.first) < 0; });
+
+    string command_metrics;
+
+    AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
+                       &command_metrics);
+    for (const auto& [name, stat] : commands) {
+      const auto calls = stat.first;
+      const auto duration_seconds = stat.second * 0.001;
+      AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
+      AppendMetricValue("commands_duration_seconds_total", duration_seconds, {"cmd"}, {name},
+                        &command_metrics);
+    }
+    absl::StrAppend(&resp->body(), command_metrics);
   }
 
   if (!m.replication_metrics.empty()) {
@@ -1121,8 +1196,7 @@ GenericError DoPartialSave(fs::path full_filename, const dfly::StringVec& script
 GenericError ServerFamily::DoSave() {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
-  boost::intrusive_ptr<Transaction> trans(
-      new Transaction{cid, ServerState::tlocal()->thread_index()});
+  boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(0, {});
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get());
 }
@@ -1505,11 +1579,13 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
-      auto* stats = ServerState::tl_connection_stats();
-      stats->cmd_count_map.clear();
-      stats->err_count_map.clear();
-      stats->command_cnt = 0;
-      stats->async_writes_cnt = 0;
+      auto& sstate = *ServerState::tlocal();
+      sstate.cmd_stats_map.clear();
+
+      auto& stats = sstate.connection_stats;
+      stats.err_count_map.clear();
+      stats.command_cnt = 0;
+      stats.async_writes_cnt = 0;
     });
     return (*cntx)->SendOk();
   } else {
@@ -1591,6 +1667,11 @@ Metrics ServerFamily::GetMetrics() const {
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
+    for (const auto& [k, v] : ss->cmd_stats_map) {
+      auto& ent = result.cmd_stats_map[k];
+      ent.first += v.first;
+      ent.second += v.second;
+    }
 
     if (shard) {
       MergeInto(shard->db_slice().GetStats(), &result);
@@ -1826,14 +1907,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     auto unknown_cmd = service_.UknownCmdMap();
 
-    auto append_sorted = [&append](string_view prefix, const auto& map) {
-      vector<pair<string_view, uint64_t>> display;
-      display.reserve(map.size());
-
-      for (const auto& k_v : map) {
-        display.push_back(k_v);
-      };
-
+    auto append_sorted = [&append](string_view prefix, auto display) {
       sort(display.begin(), display.end());
 
       for (const auto& k_v : display) {
@@ -1841,8 +1915,19 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       }
     };
 
-    append_sorted("unknown_", unknown_cmd);
-    append_sorted("cmd_", m.conn_stats.cmd_count_map);
+    vector<pair<string_view, string>> commands;
+
+    for (const auto& [name, stats] : m.cmd_stats_map) {
+      const auto calls = stats.first, sum = stats.second;
+      commands.push_back(
+          {name, absl::StrJoin({absl::StrCat("calls=", calls), absl::StrCat("usec=", sum),
+                                absl::StrCat("usec_per_call=", static_cast<double>(sum) / calls)},
+                               ",")});
+    }
+
+    append_sorted("cmdstat_", move(commands));
+    append_sorted("unknown_",
+                  vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
   }
 
   if (should_enter("ERRORSTATS", true)) {
@@ -1881,7 +1966,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");
-    append("cluster_enabled", cluster_family_->IsEnabledOrEmulated());
+    append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
 
   (*cntx)->SendBulkString(info);
@@ -2053,11 +2138,14 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   if (replica_ == new_replica) {
     if (ec) {
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      replica_->Stop();
       replica_.reset();
     }
     bool is_master = !replica_;
     pool.AwaitFiberOnAll(
         [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+  } else {
+    new_replica->Stop();
   }
 }
 

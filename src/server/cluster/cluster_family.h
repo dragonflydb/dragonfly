@@ -22,8 +22,6 @@ class ClusterFamily {
 
   void Register(CommandRegistry* registry);
 
-  bool IsEnabledOrEmulated() const;
-
   // Returns a thread-local pointer.
   ClusterConfig* cluster_config();
 
@@ -50,7 +48,6 @@ class ClusterFamily {
 
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
-  bool is_emulated_cluster_ = false;
   ServerFamily* server_family_ = nullptr;
 };
 

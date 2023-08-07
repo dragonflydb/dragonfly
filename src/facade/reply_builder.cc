@@ -220,6 +220,14 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   }
 }
 
+void RedisReplyBuilder::SendError(ErrorReply error) {
+  if (error.status)
+    return SendError(*error.status);
+
+  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
+  SendError(message_sv, error.kind);
+}
+
 void RedisReplyBuilder::SendProtocolError(std::string_view str) {
   SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
 }

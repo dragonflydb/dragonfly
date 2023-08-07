@@ -242,7 +242,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
   trans->Execute(std::move(cb), false);
 
   if (!success) {
-    trans->Execute([](Transaction*, EngineShard*) { return OpStatus::OK; }, true);
+    trans->Conclude();
     return OpStatus::INVALID_VALUE;
   }
 

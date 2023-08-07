@@ -64,6 +64,8 @@ struct Metrics {
   bool is_master = true;
 
   facade::ConnectionStats conn_stats;
+  absl::flat_hash_map<const char*, std::pair<uint64_t, uint64_t>>
+      cmd_stats_map;  // command statistics; see ServerState
 
   std::vector<ReplicaRoleInfo> replication_metrics;
 };
@@ -90,8 +92,7 @@ class ServerFamily {
   explicit ServerFamily(Service* service);
   ~ServerFamily();
 
-  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
-            ClusterFamily* cluster_family);
+  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
   void Register(CommandRegistry* registry);
   void Shutdown();
 
@@ -212,7 +213,7 @@ class ServerFamily {
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
 
-  void SnapshotScheduling(const SnapshotSpec& time);
+  void SnapshotScheduling();
 
   Fiber snapshot_schedule_fb_;
   Future<std::error_code> load_result_;
@@ -230,7 +231,6 @@ class ServerFamily {
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
-  ClusterFamily* cluster_family_ = nullptr;  // Not owned
 
   std::string master_id_;
 

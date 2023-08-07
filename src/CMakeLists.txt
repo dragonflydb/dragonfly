@@ -76,10 +76,21 @@ add_third_party(
   INSTALL_COMMAND ${DFLY_TOOLS_MAKE} install BUILD_SHARED=no PREFIX=${THIRD_PARTY_LIB_DIR}/lz4
 )
 
+add_third_party(
+  croncpp
+  URL https://github.com/mariusbancila/croncpp/archive/refs/tags/v2023.03.30.tar.gz
+  LIB "none"
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${JSONCONS_INCLUDE_DIR}")
+
+add_library(TRDP::croncpp INTERFACE IMPORTED)
+add_dependencies(TRDP::croncpp croncpp_project)
+set_target_properties(TRDP::croncpp PROPERTIES
+                      INTERFACE_INCLUDE_DIRECTORIES "${CRONCPP_INCLUDE_DIR}")
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 

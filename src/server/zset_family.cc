@@ -189,15 +189,26 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
   return it;
 }
 
+bool ScoreToLongLat(const std::optional<double>& val, double* xy) {
+  if (!val.has_value())
+    return false;
+
+  double score = *val;
+
+  GeoHashBits hash = {.bits = (uint64_t)score, .step = GEO_STEP_MAX};
+
+  return geohashDecodeToLongLatType(hash, xy) == 1;
+}
+
 bool ToAsciiGeoHash(const std::optional<double>& val, array<char, 12>* buf) {
   if (!val.has_value())
     return false;
 
   double score = *val;
 
-  double xy[2];
   GeoHashBits hash = {.bits = (uint64_t)score, .step = GEO_STEP_MAX};
 
+  double xy[2];
   if (!geohashDecodeToLongLatType(hash, xy)) {
     return false;
   }
@@ -1617,6 +1628,20 @@ void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_
   }
 }
 
+double ExtractUnit(std::string_view arg) {
+  if (arg == "M") {
+    return 1;
+  } else if (arg == "KM") {
+    return 1000;
+  } else if (arg == "FT") {
+    return 0.3048;
+  } else if (arg == "MI") {
+    return 1609.34;
+  } else {
+    return -1;
+  }
+}
+
 }  // namespace
 
 void ZSetFamily::BZPopMin(CmdArgList args, ConnectionContext* cntx) {
@@ -2173,18 +2198,7 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZMScore(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-
-  absl::InlinedVector<string_view, 8> members(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    members[i - 1] = ArgS(args, i);
-  }
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpMScore(t->GetOpArgs(shard), key, members);
-  };
-
-  OpResult<MScoreResponse> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return (*cntx)->SendError(kWrongTypeErr);
@@ -2378,43 +2392,7 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
   OutputScoredArrayResult(result, range_params, cntx);
 }
 
-void ZSetFamily::GeoAdd(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-
-  // TODO: to handle options and multiple elements
-  ZParams zparams;
-
-  string_view longitude = ArgS(args, 1);
-  string_view latitude = ArgS(args, 2);
-  string_view member = ArgS(args, 3);
-
-  // TODO: to remove this check once the TODO above is handled.
-  if (args.size() != 4) {
-    return (*cntx)->SendError(kSyntaxErr);
-  }
-
-  // TODO: the code handles only a single tripple of long,lat,member.
-  //       it has to be extended to handle multiple elements.
-  pair<double, double> longlat;
-  for (int i = 0; i < 1; i++) {
-    if (!ParseLongLat(longitude, latitude, &longlat)) {
-      string err = absl::StrCat("-ERR invalid longitude,latitude pair ", longitude, ",", latitude);
-
-      return (*cntx)->SendError(err, kSyntaxErrType);
-    }
-  }
-
-  /* Turn the coordinates into the score of the element. */
-  GeoHashBits hash;
-  geohashEncodeWGS84(longlat.first, longlat.second, GEO_STEP_MAX, &hash);
-  GeoHashFix52Bits bits = geohashAlign52Bits(hash);
-
-  absl::InlinedVector<ScoredMemberView, 4> members;
-  members.emplace_back(bits, member);
-  ZAddGeneric(key, zparams, absl::Span{members.data(), members.size()}, cntx);
-}
-
-void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
+OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   absl::InlinedVector<string_view, 8> members(args.size() - 1);
@@ -2426,7 +2404,71 @@ void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
     return OpMScore(t->GetOpArgs(shard), key, members);
   };
 
-  OpResult<MScoreResponse> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  return cntx->transaction->ScheduleSingleHopT(std::move(cb));
+}
+
+void ZSetFamily::GeoAdd(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+
+  ZParams zparams;
+  size_t i = 1;
+  for (; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+
+    string_view cur_arg = ArgS(args, i);
+
+    if (cur_arg == "XX") {
+      zparams.flags |= ZADD_IN_XX;  // update only
+    } else if (cur_arg == "NX") {
+      zparams.flags |= ZADD_IN_NX;  // add new only.
+    } else if (cur_arg == "CH") {
+      zparams.ch = true;
+    } else {
+      break;
+    }
+  }
+
+  args.remove_prefix(i);
+  if (args.empty() || args.size() % 3 != 0) {
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  if ((zparams.flags & ZADD_IN_NX) && (zparams.flags & ZADD_IN_XX)) {
+    (*cntx)->SendError(kNxXxErr);
+    return;
+  }
+
+  absl::InlinedVector<ScoredMemberView, 4> members;
+  for (i = 0; i < args.size(); i += 3) {
+    string_view longitude = ArgS(args, i);
+    string_view latitude = ArgS(args, i + 1);
+    string_view member = ArgS(args, i + 2);
+
+    pair<double, double> longlat;
+
+    if (!ParseLongLat(longitude, latitude, &longlat)) {
+      string err = absl::StrCat("-ERR invalid longitude,latitude pair ", longitude, ",", latitude,
+                                ",", member);
+
+      return (*cntx)->SendError(err, kSyntaxErrType);
+    }
+
+    /* Turn the coordinates into the score of the element. */
+    GeoHashBits hash;
+    geohashEncodeWGS84(longlat.first, longlat.second, GEO_STEP_MAX, &hash);
+    GeoHashFix52Bits bits = geohashAlign52Bits(hash);
+
+    members.emplace_back(bits, member);
+  }
+  DCHECK(cntx->transaction);
+
+  absl::Span memb_sp{members.data(), members.size()};
+  ZAddGeneric(key, zparams, memb_sp, cntx);
+}
+
+void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
 
   if (result.status() == OpStatus::WRONG_TYPE) {
     return (*cntx)->SendError(kWrongTypeErr);
@@ -2443,6 +2485,65 @@ void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
       (*cntx)->SendNull();
     }
   }
+}
+
+void ZSetFamily::GeoPos(CmdArgList args, ConnectionContext* cntx) {
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
+
+  if (result.status() != OpStatus::OK) {
+    return (*cntx)->SendError(result.status());
+  }
+
+  (*cntx)->StartArray(result->size());  // Array return type.
+  const MScoreResponse& arr = result.value();
+
+  double xy[2];
+  for (const auto& p : arr) {
+    if (ScoreToLongLat(p, xy)) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendDouble(xy[0]);
+      (*cntx)->SendDouble(xy[1]);
+    } else {
+      (*cntx)->SendNull();
+    }
+  }
+}
+
+void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
+  double distance_multiplier = 1;
+  if (args.size() == 4) {
+    ToUpper(&args[3]);
+    string_view unit = ArgS(args, 3);
+    distance_multiplier = ExtractUnit(unit);
+    args.remove_suffix(1);
+    if (distance_multiplier < 0) {
+      return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
+    }
+  } else if (args.size() != 3) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  OpResult<MScoreResponse> result = ZGetMembers(args, cntx);
+
+  if (result.status() != OpStatus::OK) {
+    return (*cntx)->SendError(result.status());
+  }
+
+  const MScoreResponse& arr = result.value();
+
+  if (arr.size() != 2) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  double xyxy[4];  // 2 pairs of score holding 2 locations
+  for (size_t i = 0; i < arr.size(); i++) {
+    if (!ScoreToLongLat(arr[i], xyxy + (i * 2))) {
+      return (*cntx)->SendNull();
+    }
+  }
+
+  return (*cntx)->SendDouble(geohashGetDistance(xyxy[0], xyxy[1], xyxy[2], xyxy[3]) /
+                             distance_multiplier);
 }
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
@@ -2487,7 +2588,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
 
       // GEO functions
       << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, 1}.HFUNC(GeoAdd)
-      << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoHash);
+      << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoHash)
+      << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1}.HFUNC(GeoPos)
+      << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1}.HFUNC(GeoDist);
 }
 
 }  // namespace dfly

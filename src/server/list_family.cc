@@ -441,10 +441,8 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 
   if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
     result = find_res[0] ? find_res[1] : find_res[0];
-    if (conclude_on_error) {
-      auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      trans->Execute(move(cb), true);
-    }
+    if (conclude_on_error)
+      trans->Conclude();
   } else {
     // Everything is ok, lets proceed with the mutations.
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -880,8 +878,7 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
       op_res = OpStatus::TIMED_OUT;
     }
-    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-    t->Execute(std::move(cb), true);
+    t->Conclude();
     return op_res;
   }
 

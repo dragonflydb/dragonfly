@@ -24,7 +24,6 @@ using facade::MemcacheParser;
 
 class Service : public facade::ServiceInterface {
  public:
-  using error_code = std::error_code;
   struct InitOpts {
     bool disable_time_update;
 
@@ -120,12 +119,16 @@ class Service : public facade::ServiceInterface {
     CmdArgList keys, args;
   };
 
-  // Return false if command is invalid and reply with error.
-  bool VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionContext* cntx);
+  // Verify command exists and has no obvious formatting errors
+  std::optional<facade::ErrorReply> VerifyCommandArguments(const CommandId* cid, CmdArgList args);
 
-  // Return false if not all keys are owned by the server when running in cluster mode.
-  // If false is returned error was sent to the client.
-  bool CheckKeysOwnership(const CommandId* cid, CmdArgList args, ConnectionContext* dfly_cntx);
+  // Verify command can be executed
+  std::optional<facade::ErrorReply> VerifyCommand(const CommandId* cid, CmdArgList args,
+                                                  const ConnectionContext& cntx);
+
+  // Return error if not all keys are owned by the server when running in cluster mode
+  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+                                                       const ConnectionContext& dfly_cntx);
 
   const CommandId* FindCmd(CmdArgList args) const;
 
@@ -141,6 +144,7 @@ class Service : public facade::ServiceInterface {
 
   base::VarzValue::Map GetVarzStats();
 
+ private:
   util::ProactorPool& pp_;
 
   ServerFamily server_family_;

@@ -19,6 +19,7 @@ class ZSetFamily {
   static void Register(CommandRegistry* registry);
 
   using IndexInterval = std::pair<int32_t, int32_t>;
+  using MScoreResponse = std::vector<std::optional<double>>;
 
   struct Bound {
     double val;
@@ -91,9 +92,12 @@ class ZSetFamily {
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
   static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
+  static OpResult<MScoreResponse> ZGetMembers(CmdArgList args, ConnectionContext* cntx);
 
   static void GeoAdd(CmdArgList args, ConnectionContext* cntx);
   static void GeoHash(CmdArgList args, ConnectionContext* cntx);
+  static void GeoPos(CmdArgList args, ConnectionContext* cntx);
+  static void GeoDist(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

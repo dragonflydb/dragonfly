@@ -138,7 +138,7 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
-      return RDB_TYPE_JSON;
+      return RDB_TYPE_JSON_OLD;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -348,6 +348,7 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   while (node) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
+
     if (QL_NODE_IS_PLAIN(node)) {
       if (quicklistNodeIsCompressed(node)) {
         void* data;
@@ -1150,7 +1151,9 @@ void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
 
 error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
   char magic[16];
-  size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
+  // We should use RDB_VERSION here from rdb.h when we ditch redis 6 support
+  // For now we serialize to an older version.
+  size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_SER_VERSION);
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));

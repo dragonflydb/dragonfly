@@ -46,7 +46,7 @@ DbTable::DbTable(PMR_NS::memory_resource* mr)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr),
       top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}) {
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabled()) {
     slots_stats.resize(ClusterConfig::kMaxSlotNum + 1);
   }
 }
@@ -60,17 +60,6 @@ void DbTable::Clear() {
   expire.Clear();
   mcflag.Clear();
   stats = DbTableStats{};
-}
-
-void DbTable::Release(IntentLock::Mode mode, std::string_view key, unsigned count) {
-  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
-
-  auto it = trans_locks.find(key);
-  CHECK(it != trans_locks.end()) << key;
-  it->second.Release(mode, count);
-  if (it->second.IsFree()) {
-    trans_locks.erase(it);
-  }
 }
 
 }  // namespace dfly

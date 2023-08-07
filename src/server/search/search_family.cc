@@ -4,6 +4,7 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
 
 #include <atomic>
@@ -30,7 +31,7 @@ using namespace facade;
 
 namespace {
 
-unordered_map<string_view, search::Schema::FieldType> kSchemaTypes = {
+const absl::flat_hash_map<string_view, search::Schema::FieldType> kSchemaTypes = {
     {"TAG"sv, search::Schema::TAG},
     {"TEXT"sv, search::Schema::TEXT},
     {"NUMERIC"sv, search::Schema::NUMERIC},
@@ -173,6 +174,14 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
   }
 }
 
+string_view GetSchemaTypeName(search::Schema::FieldType type) {
+  for (const auto& [iname, itype] : kSchemaTypes) {
+    if (itype == type)
+      return iname;
+  }
+  return ""sv;
+}
+
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
@@ -233,6 +242,79 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendOk();
 }
 
+void SearchFamily::FtDropIndex(CmdArgList args, ConnectionContext* cntx) {
+  string_view idx_name = ArgS(args, 0);
+  // TODO: Handle optional DD param
+
+  atomic_uint num_deleted{0};
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    if (es->search_indices()->DropIndex(idx_name))
+      num_deleted.fetch_add(1);
+    return OpStatus::OK;
+  });
+
+  DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
+  if (num_deleted == shard_set->size())
+    return (*cntx)->SendOk();
+  (*cntx)->SendError("Unknown Index name");
+}
+
+void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
+  string_view idx_name = ArgS(args, 0);
+
+  atomic_uint num_notfound{0};
+  vector<DocIndexInfo> infos(shard_set->size());
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(idx_name);
+    if (index == nullptr)
+      num_notfound.fetch_add(1);
+    else
+      infos[es->shard_id()] = index->GetInfo();
+    return OpStatus::OK;
+  });
+
+  DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
+
+  if (num_notfound > 0u)
+    return (*cntx)->SendError("Unknown index name");
+
+  DCHECK(infos.front().schema.fields == infos.back().schema.fields);
+
+  size_t total_num_docs = 0;
+  for (const auto& info : infos)
+    total_num_docs += info.num_docs;
+
+  (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
+
+  (*cntx)->SendSimpleString("index_name");
+  (*cntx)->SendSimpleString(idx_name);
+
+  (*cntx)->SendSimpleString("fields");
+  const auto& fields = infos.front().schema.fields;
+  (*cntx)->StartArray(fields.size());
+  for (auto [field, type] : fields) {
+    string_view reply[3] = {string_view{field}, "type"sv, GetSchemaTypeName(type)};
+    (*cntx)->SendSimpleStrArr(reply);
+  }
+
+  (*cntx)->SendSimpleString("num_docs");
+  (*cntx)->SendLong(total_num_docs);
+}
+
+void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
+  atomic_int first{0};
+  vector<string> names;
+
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    // Using `first` to assign `names` only once without a race
+    if (first.fetch_add(1) == 0)
+      names = es->search_indices()->GetIndexNames();
+    return OpStatus::OK;
+  });
+
+  (*cntx)->SendStringArr(names);
+}
+
 void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   string_view index_name = ArgS(args, 0);
   string_view query_str = ArgS(args, 1);
@@ -272,6 +354,10 @@ void SearchFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
   *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(FtCreate)
+            << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(FtDropIndex)
+            << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0}.HFUNC(FtInfo)
+            // Underscore same as in RediSearch because it's "temporary" (long time already)
+            << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(FtList)
             << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0}.HFUNC(FtSearch);
 }
 

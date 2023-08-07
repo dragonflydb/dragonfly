@@ -4,12 +4,14 @@
 
 #include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <map>
 #include <optional>
 #include <vector>
 
 #include "core/search/base.h"
+#include "core/search/compressed_sorted_set.h"
 
 namespace dfly::search {
 
@@ -27,25 +29,29 @@ struct NumericIndex : public BaseIndex {
 
 // Base index for string based indices.
 struct BaseStringIndex : public BaseIndex {
+  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+
+  // Used by Add & Remove to tokenize text value
+  virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
+
   // Pointer is valid as long as index is not mutated. Nullptr if not found
-  const std::vector<DocId>* Matching(std::string_view str) const;
+  const CompressedSortedSet* Matching(std::string_view str) const;
 
  protected:
-  absl::flat_hash_map<std::string, std::vector<DocId>> entries_;
+  absl::flat_hash_map<std::string, CompressedSortedSet> entries_;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TextIndex : public BaseStringIndex {
-  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
-  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex {
-  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
-  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
 };
 
 // Index for vector fields.

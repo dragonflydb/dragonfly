@@ -8,14 +8,52 @@ extern "C" {
 #include <shared_mutex>
 #include <string_view>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_config.h"
 
 using namespace std;
 
-namespace dfly {
+ABSL_FLAG(string, cluster_mode, "", "Cluster mode supported. Default: \"\"");
 
-bool ClusterConfig::cluster_enabled = false;
+namespace dfly {
+namespace {
+enum class ClusterMode {
+  kUninitialized,
+  kNoCluster,
+  kEmulatedCluster,
+  kRealCluster,
+};
+
+ClusterMode cluster_mode = ClusterMode::kUninitialized;
+}  // namespace
+
+void ClusterConfig::Initialize() {
+  string cluster_mode_str = absl::GetFlag(FLAGS_cluster_mode);
+
+  if (cluster_mode_str == "emulated") {
+    cluster_mode = ClusterMode::kEmulatedCluster;
+  } else if (cluster_mode_str == "yes") {
+    cluster_mode = ClusterMode::kRealCluster;
+  } else if (cluster_mode_str.empty()) {
+    cluster_mode = ClusterMode::kNoCluster;
+  } else {
+    LOG(ERROR) << "Invalid value for flag --cluster_mode. Exiting...";
+    exit(1);
+  }
+}
+
+bool ClusterConfig::IsEnabled() {
+  return cluster_mode == ClusterMode::kRealCluster;
+}
+
+bool ClusterConfig::IsEmulated() {
+  return cluster_mode == ClusterMode::kEmulatedCluster;
+}
+
+bool ClusterConfig::IsEnabledOrEmulated() {
+  return IsEnabled() || IsEmulated();
+}
 
 string_view ClusterConfig::KeyTag(string_view key) {
   size_t start = key.find('{');

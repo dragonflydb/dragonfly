@@ -131,14 +131,14 @@ class Transaction {
     // UNUSED = 1 << 1,
     OUT_OF_ORDER = 1 << 2,      // Whether it can run as out of order
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
-    SUSPENDED_Q = 1 << 4,       // Whether is suspened (by WatchInShard())
+    SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
     EXPIRED_Q = 1 << 6,         // Whether it timed out and should be dropped
     UNLOCK_MULTI = 1 << 7,      // Whether this shard executed UnlockMultiShardCb
   };
 
  public:
-  explicit Transaction(const CommandId* cid, uint32_t thread_index);
+  explicit Transaction(const CommandId* cid);
 
   explicit Transaction(const Transaction* parent);
 
@@ -167,10 +167,13 @@ class Transaction {
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
 
+  // Conclude transaction
+  void Conclude();
+
   // Called by engine shard to execute a transaction hop.
   // txq_ooo is set to true if the transaction is running out of order
   // not as the tx queue head.
-  // Returns true if transaction should be kept in the queue.
+  // Returns true if the transaction continues running in the thread
   bool RunInShard(EngineShard* shard, bool txq_ooo);
 
   // Registers transaction into watched queue and blocks until a) either notification is received.
@@ -191,9 +194,6 @@ class Transaction {
   void RenableAutoJournal() {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
   }
-
-  // Prepare a squashed hop on given keys.
-  void PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys);
 
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
@@ -333,7 +333,7 @@ class Transaction {
     // this is the only variable that is accessed by both shard and coordinator threads.
     std::atomic_bool is_armed{false};
 
-    // We pad with some memory so that atomic loads won't cause false sharing betweem threads.
+    // We pad with some memory so that atomic loads won't cause false sharing between threads.
     char pad[46];  // to make sure PerShardData is 64 bytes and takes full cacheline.
 
     uint32_t arg_start = 0;  // Indices into args_ array.
@@ -437,12 +437,13 @@ class Transaction {
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
 
-  void UnwatchBlocking(bool should_expire, WaitKeysProvider wcb);
+  // Expire blocking transaction, unlock keys and unregister it from the blocking controller
+  void ExpireBlocking(WaitKeysProvider wcb);
+
+  void ExpireShardCb(ArgSlice wkeys, EngineShard* shard);
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
-
-  void UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard);
 
   // Run callback inline as part of multi stub.
   OpStatus RunSquashedMultiCb(RunnableType cb);
@@ -559,7 +560,6 @@ class Transaction {
   // they read this variable the coordinator thread is stalled and can not cause data races.
   // If COORDINATOR_XXX has been set, it means we passed or crossed stage XXX.
   uint8_t coordinator_state_ = 0;
-  uint32_t coordinator_index_;  // thread_index of the coordinator thread.
 
   // Used for single-hop transactions with unique_shards_ == 1, hence no data-race.
   OpStatus local_result_ = OpStatus::OK;
