@@ -2078,6 +2078,9 @@ void ServerFamily::Replicate(string_view host, string_view port) {
 
   ReplicaOfInternal(host, port, &ctxt, ShouldFlushDb::kDontFlush,
                     ActionOnConnectionFail::kContinueReplication);
+
+  CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
+      << "error in switching state from LOADING to ACTIVE when replicating via --replicaof.";
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
