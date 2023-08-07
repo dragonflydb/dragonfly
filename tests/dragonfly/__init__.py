@@ -65,9 +65,9 @@ class DflyInstance:
                 proc.terminate()
             proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
-            print("Unable to terminate DragonflyDB gracefully, it was killed")
             proc.kill()
             proc.communicate()
+            raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")
 
     def _start(self):
         if self.params.existing_port:
