@@ -757,7 +757,7 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid) {
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
                                                       const ConnectionContext& dfly_cntx) {
-  DCHECK_NOTNULL(cid);
+  DCHECK(cid);
 
   ServerState& etl = *ServerState::tlocal();
 
@@ -945,7 +945,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx,
                         bool record_stats) {
-  DCHECK_NOTNULL(cid);
+  DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
   if (auto err = VerifyCommandExecution(cid); err) {

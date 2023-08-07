@@ -51,7 +51,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
 }
 
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
-  DCHECK_NOTNULL(cmd->Cid());
+  DCHECK(cmd->Cid());
 
   if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
       (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
