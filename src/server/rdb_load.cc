@@ -1013,7 +1013,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned char* src_lp = (unsigned char*)blob.data();
     unsigned long long bytes = lpBytes(src_lp);
     unsigned char* lp = (uint8_t*)zmalloc(bytes);
-    ::memcpy(lp, src_lp, bytes);
+    std::memcpy(lp, src_lp, bytes);
     pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
