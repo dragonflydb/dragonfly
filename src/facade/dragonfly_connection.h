@@ -150,6 +150,7 @@ class Connection : public util::Connection {
   std::string RemoteEndpointStr() const;
   std::string RemoteEndpointAddress() const;
   std::string LocalBindAddress() const;
+
   uint32_t GetClientId() const;
   // Virtual because behavior is overridden in test_utils.
   virtual bool IsAdmin() const;

@@ -14,6 +14,7 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
@@ -839,6 +840,9 @@ void Connection::ShutdownSelf() {
 }
 
 void Connection::Migrate(util::fb2::ProactorBase* dest) {
+  DCHECK(!cc_->async_dispatch);
+  // we register monitors in thread local cache, moving will invalidate them
+  DCHECK_EQ(cc_->subscriptions, 0);
   owner()->Migrate(this, dest);
 }
 
@@ -872,6 +876,8 @@ void Connection::SendMonitorMessageAsync(string msg) {
 
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
+  DCHECK(owner());
+  DCHECK_EQ(ProactorBase::me(), owner()->socket()->proactor());
 
   if (cc_->conn_closing)
     return;

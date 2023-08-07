@@ -22,6 +22,14 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
     f(args[*keys.bonus]);
 }
 
+bool CheckConnStateClean(const ConnectionState& state) {
+  DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
+  DCHECK(state.exec_info.body.empty());
+  DCHECK(!state.script_info);
+  DCHECK(!state.subscribe_info);
+  return true;
+}
+
 }  // namespace
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
@@ -92,6 +100,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
 void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
+  DCHECK_NE(cmd->Cid()->name(), "MULTI");
 
   auto* tx = cntx_->transaction;
   tx->MultiSwitchCmd(cmd->Cid());
@@ -112,6 +121,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{local_tx, &crb};
+  local_cntx.conn_state.db_index = cntx_->conn_state.db_index;
 
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
@@ -124,10 +134,15 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     auto args = absl::MakeSpan(arg_vec);
     cmd->Fill(args);
 
-    local_tx->InitByArgs(parent_tx->GetDbIndex(), args);
+    local_tx->InitByArgs(local_cntx.conn_state.db_index, args);
     cmd->Cid()->Invoke(args, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
+
+    // Assert commands made no persistent state changes to stub context state
+    const auto& local_state = local_cntx.conn_state;
+    DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
+    DCHECK(CheckConnStateClean(local_state));
   }
 
   // ConnectionContext deletes the reply builder upon destruction, so
