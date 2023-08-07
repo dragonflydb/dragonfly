@@ -94,6 +94,14 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   /// @return number of deleted items.
   size_t DeleteRangeByRank(uint32_t start, uint32_t end, std::function<void(KeyT)> cb);
 
+  /// @brief Deletes items in [first, last] range.
+  /// @param first
+  /// @param last
+  /// @param cb
+  /// @return
+  size_t DeleteRange(KeyT first, KeyT last, std::function<void(KeyT)> cb, bool inclusive_first,
+                     bool inclusive_last);
+
   /// @brief Returns the path to the first item in the tree that is greater or equal to key.
   /// @param item
   /// @return the path if such item exists, empty path otherwise.
@@ -117,7 +125,7 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   // Charts the path towards key. Returns true if key is found.
   // In that case path->Last().first->Key(path->Last().second) == key.
   // Fills the tree path not including the key itself. In case key was not found,
-  // returns the path to the item that is greater than key.
+  // returns the path to the item that is greater than the key.
   bool Locate(KeyT key, BPTreePath* path) const;
 
   // Sets the tree path to item at specified rank. Rank is 0-based and must be less than Size().
@@ -480,6 +488,46 @@ size_t BPTree<T, Policy>::DeleteRangeByRank(uint32_t start, uint32_t end,
     Delete(path);
     path.Clear();
     ++deleted;
+  }
+  return deleted;
+}
+
+template <typename T, typename Policy>
+size_t BPTree<T, Policy>::DeleteRange(KeyT first, KeyT last, std::function<void(KeyT)> cb,
+                                      bool inclusive_first, bool inclusive_last) {
+  using Comp = typename Policy::KeyCompareTo;
+
+  if (!root_)
+    return 0;
+
+  BPTreePath path;
+  bool res = Locate(first, &path);
+  Comp comp;
+  if (res && !inclusive_first) {
+    if (!path.Next())
+      return 0;
+  }
+
+  if (!path.HasValidTerminal())
+    return 0;
+
+  // Set the low bound for deletion.
+  first = path.Terminal();
+
+  int last_bound = inclusive_last ? 0 : -1;
+  size_t deleted = 0;
+  while (comp(path.Terminal(), last) <= last_bound) {
+    cb(path.Terminal());
+    ++deleted;
+    Delete(path);
+
+    if (!root_)
+      break;
+
+    path.Clear();
+    Locate(first, &path);
+    if (!path.HasValidTerminal())
+      break;
   }
   return deleted;
 }
