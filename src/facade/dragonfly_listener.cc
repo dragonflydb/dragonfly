@@ -105,15 +105,14 @@ bool ConfigureKeepAlive(int fd) {
   if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) < 0)
     return false;
 
-  uint32_t tcp_keepalive = absl::GetFlag(FLAGS_tcp_keepalive);
-  val = tcp_keepalive;
+  val = absl::GetFlag(FLAGS_tcp_keepalive);
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0)
     return false;
 
   /* Send next probes after the specified interval. Note that we set the
    * delay as interval / 3, as we send three probes before detecting
    * an error (see the next setsockopt call). */
-  val = std::max(tcp_keepalive / 3, 1u);
+  val = std::max(val / 3, 1);
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0)
     return false;
 
