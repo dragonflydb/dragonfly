@@ -9,8 +9,6 @@ permissions:
   contents: write
 
 jobs:
-  build-and-run-regression-tests:
-    uses: ./.github/workflows/reusable-regression-tests.yml
   create-release:
     runs-on: ubuntu-latest
     steps:
@@ -126,9 +124,12 @@ jobs:
       with:
         name: dragonfly-amd64
         path: results-artifacts/*
+  run-regression-tests:
+    needs: build-native
+    uses: ./.github/workflows/reusable-regression-tests.yml
   publish_release:
     runs-on: ubuntu-latest
-    needs: [build-native, build-qemu]
+    needs: [build-native, build-qemu, run-regression-tests]
     steps:
       - uses: actions/download-artifact@v3
         name: Download files

@@ -6,5 +6,35 @@ on:
   workflow_dispatch:
 
 jobs:
-  regression-tests:
+  build:
+    strategy:
+      matrix:
+        # Test of these containers
+        container: ["ubuntu-dev:20"]
+        build-type: [Debug, Release]
+        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    container:
+      image: ghcr.io/romange/${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - name: Print cpu info
+        run:  cat /proc/cpuinfo
+
+      - name: Configure & Build
+        run: |
+          apt update && apt install -y pip jq
+          cmake -B ${GITHUB_WORKSPACE}/build-opt -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+          cd ${GITHUB_WORKSPACE}/build-opt  && ninja dragonfly
+          pwd
+          ls -l ..
+  run-tests:
+    needs: build
     uses: ./.github/workflows/reusable-regression-tests.yml

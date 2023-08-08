@@ -4,36 +4,7 @@ on:
   workflow_call:
 
 jobs:
-  build-n-test:
-    strategy:
-      matrix:
-        # Test of these containers
-        container: ["ubuntu-dev:20"]
-        build-type: [Debug, Release]
-        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-
-    container:
-      image: ghcr.io/romange/${{ matrix.container }}
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          submodules: true
-
-      - name: Print cpu info
-        run:  cat /proc/cpuinfo
-
-      - name: Configure & Build
-        run: |
-          apt update && apt install -y pip jq
-          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
-                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-
-          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
-          pwd
-          ls -l ..
-
+  regression-tests:
       - name: Run PyTests
         timeout-minutes: 20
         run: |
@@ -41,7 +12,7 @@ jobs:
           cd ${GITHUB_WORKSPACE}/tests
           echo "Current commit is ${{github.sha}}"
           pip install -r dragonfly/requirements.txt
-          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build-opt/dragonfly" # used by PyTests
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
           pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
@@ -53,7 +24,7 @@ jobs:
         timeout-minutes: 20
         run: |
           cd ${GITHUB_WORKSPACE}/tests
-          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build-opt/dragonfly" # used by PyTests
 
           pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
           pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
