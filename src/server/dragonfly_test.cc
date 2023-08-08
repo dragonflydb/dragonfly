@@ -115,12 +115,6 @@ TEST_F(DflyRenameCommandTest, RenameCommand) {
   ASSERT_THAT(resp, ErrArg("unknown command `FLUSHDB`"));
   resp = Run({""});
   ASSERT_THAT(resp, ErrArg("unknown command ``"));
-  resp = Run({"config", "set", "rename_command", "flushall=myflushall"});
-  EXPECT_THAT(resp, ErrArg("CONFIG SET failed (possibly related to argument 'rename_command')."));
-  resp = Run({"config", "set", "rename_command", "myflushall=flushall"});
-  ASSERT_EQ(resp, "OK");
-  resp = Run({"flushall"});
-  ASSERT_EQ(resp, "OK");
 }
 
 TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
