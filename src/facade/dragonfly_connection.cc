@@ -885,6 +885,7 @@ void Connection::SendAsync(MessageHandle msg) {
     return;
 
   if (!dispatch_fb_.IsJoinable()) {
+    DCHECK_EQ(dispatch_q_.size(), 0u);
     auto* peer = socket_.get();
     dispatch_fb_ = MakeFiber(dfly::Launch::post, [&] { DispatchFiber(peer); });
   }

@@ -22,12 +22,11 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
     f(args[*keys.bonus]);
 }
 
-bool CheckConnStateClean(const ConnectionState& state) {
+void CheckConnStateClean(const ConnectionState& state) {
   DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
   DCHECK(state.exec_info.body.empty());
   DCHECK(!state.script_info);
   DCHECK(!state.subscribe_info);
-  return true;
 }
 
 }  // namespace
@@ -141,7 +140,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     // Assert commands made no persistent state changes to stub context state
     const auto& local_state = local_cntx.conn_state;
     DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
-    DCHECK(CheckConnStateClean(local_state));
+    CheckConnStateClean(local_state);
   }
 
   // ConnectionContext deletes the reply builder upon destruction, so
