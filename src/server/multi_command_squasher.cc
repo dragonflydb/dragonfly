@@ -100,7 +100,6 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
 void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
-  DCHECK_NE(cmd->Cid()->name(), "MULTI");
 
   auto* tx = cntx_->transaction;
   tx->MultiSwitchCmd(cmd->Cid());
@@ -154,6 +153,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 }
 
 bool MultiCommandSquasher::ExecuteSquashed() {
+  DCHECK(!cntx_->conn_state.exec_info.IsCollecting());
+
   if (order_.empty())
     return false;
 

@@ -892,7 +892,7 @@ void Connection::SendAsync(MessageHandle msg) {
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   dispatch_q_.push_back(move(msg));
 
-  // Don't notify if a sync 1dispatch is in progress, it will wake after finishing.
+  // Don't notify if a sync dispatch is in progress, it will wake after finishing.
   // This might only happen if we started receving messages while `SUBSCRIBE`
   // is still updating thread local data (see channel_store). We need to make sure its
   // ack is sent before all other messages.
