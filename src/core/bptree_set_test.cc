@@ -3,6 +3,7 @@
 //
 #include "core/bptree_set.h"
 
+#include <absl/container/btree_set.h>
 #include <mimalloc.h>
 
 #include <random>
@@ -318,6 +319,38 @@ TEST_F(BPTreeSetTest, DeleteRange) {
         },
         false, false);
   }
+}
+
+TEST_F(BPTreeSetTest, MemoryUsage) {
+  zskiplist* zsl = zslCreate();
+  std::vector<sds> sds_vec;
+  for (size_t i = 0; i < 10'000; ++i) {
+    sds_vec.push_back(sdsnew("f"));
+  }
+  size_t sz_before = zmalloc_used_memory_tl;
+  LOG(INFO) << "zskiplist before: " << sz_before << " bytes";
+
+  for (size_t i = 0; i < sds_vec.size(); ++i) {
+    zslInsert(zsl, i, sds_vec[i]);
+  }
+  LOG(INFO) << "zskiplist took: " << zmalloc_used_memory_tl - sz_before << " bytes";
+  zslFree(zsl);
+
+  sds_vec.clear();
+  for (size_t i = 0; i < 10'000; ++i) {
+    sds_vec.push_back(sdsnew("f"));
+  }
+
+  MiMemoryResource mi_alloc(mi_heap_get_backing());
+  using AllocType = PMR_NS::polymorphic_allocator<std::pair<double, sds>>;
+  AllocType alloc(&mi_alloc);
+  absl::btree_set<pair<double, sds>, std::greater<pair<double, sds>>, AllocType> btree(alloc);
+
+  LOG(INFO) << "btree before: " << mi_alloc.used() << " bytes";
+  for (size_t i = 0; i < sds_vec.size(); ++i) {
+    btree.emplace(i, sds_vec[i]);
+  }
+  LOG(INFO) << "btree after: " << mi_alloc.used() << " bytes";
 }
 
 struct ZsetPolicy {
