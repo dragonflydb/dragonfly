@@ -544,7 +544,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
 
 void DbSlice::FlushSlots(SlotSet slot_ids) {
   InvalidateSlotWatches(slot_ids);
-  util::MakeFiber([this, slot_ids = std::move(slot_ids)]() mutable {
+  fb2::Fiber("flush_slots", [this, slot_ids = std::move(slot_ids)]() mutable {
     FlushSlotsFb(slot_ids);
   }).Detach();
 }
@@ -578,7 +578,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
       mi_heap_collect(ServerState::tlocal()->data_heap(), true);
     };
 
-    util::MakeFiber(std::move(cb)).Detach();
+    fb2::Fiber("flush_db", std::move(cb)).Detach();
 
     return;
   }
@@ -598,7 +598,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  MakeFiber([all_dbs = std::move(all_dbs)]() mutable {
+  fb2::Fiber("flush_all", [all_dbs = std::move(all_dbs)]() mutable {
     for (auto& db : all_dbs) {
       db.reset();
     }

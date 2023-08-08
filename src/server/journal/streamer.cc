@@ -9,7 +9,7 @@ using namespace util;
 
 void JournalStreamer::Start(io::Sink* dest) {
   using namespace journal;
-  write_fb_ = MakeFiber(&JournalStreamer::WriterFb, this, dest);
+  write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
   journal_cb_id_ = journal_->RegisterOnChange([this](const Entry& entry, bool allow_await) {
     if (entry.opcode == Op::NOOP) {
       // No recode to write, just await if data was written so consumer will read the data.
