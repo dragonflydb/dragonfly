@@ -539,8 +539,7 @@ ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
   return ExecEvalState::SOME;
 }
 
-// Returns nullopt if the EXEC transaction is malformed i.e. has incompatible EVAL statements
-// Otherwise returns the mult mode for that transaction. Returns NOT_DETERMINED if no scheduling
+// Returns the multi mode for that transaction. Returns NOT_DETERMINED if no scheduling
 // is required.
 optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
                                                 const ConnectionState::ExecInfo& exec_info,
@@ -552,13 +551,6 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
 
   if (state != ExecEvalState::NONE) {
     contains_global = script_mgr.AreGlobalByDefault();
-
-    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
-    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
-    // lock ahead and we run global script in the transaction then multi mode will be global.
-    if ((multi_mode == Transaction::NON_ATOMIC)) {
-      return nullopt;
-    }
   }
 
   bool transactional = contains_global;
@@ -1627,6 +1619,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   const CommandId* const exec_cid = cntx->cid;
   CmdArgVec arg_vec;
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
+
+  // We adjust the atomicity level of multi transaction inside StartMultiExec. i.e if multi mode is
+  // lock ahead and we run global script in the transaction then multi mode will be global.
   optional<Transaction::MultiMode> multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
   if (!multi_mode)
     return rb->SendError(

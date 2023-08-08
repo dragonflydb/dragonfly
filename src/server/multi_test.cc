@@ -655,6 +655,11 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
 }
 
 TEST_F(MultiTest, MultiEvalModeConflict) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::GLOBAL) {
+    GTEST_SKIP() << "Skipped MultiEvalModeConflict test because multi_exec_mode is global";
+    return;
+  }
+
   const char* s1 = R"(
   #!lua flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
