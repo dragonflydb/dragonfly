@@ -66,6 +66,22 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
   messages.push_back(move(pmsg));
 }
 
+void TransactionSuspension::Start() {
+  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0};
+  transaction_.reset(new dfly::Transaction{&cid});
+
+  auto st = transaction_->InitByArgs(0, {});
+  CHECK_EQ(st, OpStatus::OK);
+
+  transaction_->Schedule();
+  transaction_->Execute([](Transaction* t, EngineShard* shard) { return OpStatus::OK; }, false);
+}
+
+void TransactionSuspension::Terminate() {
+  transaction_->Conclude();
+  transaction_ = nullptr;
+}
+
 class BaseFamilyTest::TestConnWrapper {
  public:
   TestConnWrapper(Protocol proto);

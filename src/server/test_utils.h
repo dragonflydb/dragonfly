@@ -12,6 +12,7 @@
 #include "io/io.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/transaction.h"
 #include "util/proactor_pool.h"
 
 namespace dfly {
@@ -35,6 +36,15 @@ class TestConnection : public facade::Connection {
  private:
   io::StringSink* sink_;
   bool is_admin_ = false;
+};
+
+class TransactionSuspension {
+ public:
+  void Start();
+  void Terminate();
+
+ private:
+  boost::intrusive_ptr<dfly::Transaction> transaction_;
 };
 
 class BaseFamilyTest : public ::testing::Test {

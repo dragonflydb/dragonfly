@@ -806,6 +806,30 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
   ASSERT_TRUE(success);
 }
 
+TEST_F(MultiTest, TestLockedKeys) {
+  TransactionSuspension tx;
+  tx.Start();
+
+  auto fb0 = pp_->at(0)->LaunchFiber([&] {
+    EXPECT_EQ(Run({"multi"}), "OK");
+    EXPECT_EQ(Run({"set", "key1", "val1"}), "QUEUED");
+    EXPECT_EQ(Run({"set", "key2", "val2"}), "QUEUED");
+    EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
+  });
+
+  for (int i = 0; i < 1000; ++i) {
+    if (service_->IsLocked(0, "key1") && service_->IsLocked(0, "key2")) {
+      break;
+    }
+    ThisFiber::SleepFor(1ms);
+  }
+
+  tx.Terminate();
+  fb0.Join();
+  EXPECT_FALSE(service_->IsLocked(0, "key1"));
+  EXPECT_FALSE(service_->IsLocked(0, "key1"));
+}
+
 class MultiEvalTest : public BaseFamilyTest {
  protected:
   MultiEvalTest() : BaseFamilyTest() {
