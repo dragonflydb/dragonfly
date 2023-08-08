@@ -441,8 +441,6 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_ = service_->GetThreadLocalConnectionStats();
 
-  auto dispatch_fb = MakeFiber(dfly::Launch::dispatch, [&] { DispatchFiber(peer); });
-
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
@@ -479,7 +477,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   VLOG(1) << "Before dispatch_fb.join()";
-  dispatch_fb.Join();
+  if (dispatch_fb_.IsJoinable())
+    dispatch_fb_.Join();
   VLOG(1) << "After dispatch_fb.join()";
   service_->OnClose(cc_.get());
 
@@ -840,9 +839,12 @@ void Connection::ShutdownSelf() {
 }
 
 void Connection::Migrate(util::fb2::ProactorBase* dest) {
-  DCHECK(!cc_->async_dispatch);
-  // we register monitors in thread local cache, moving will invalidate them
-  DCHECK_EQ(cc_->subscriptions, 0);
+  // Migrate is used only by replication, so it doesn't have properties of full-fledged
+  // connections
+  CHECK(!cc_->async_dispatch);
+  CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
+  CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
+
   owner()->Migrate(this, dest);
 }
 
@@ -882,11 +884,15 @@ void Connection::SendAsync(MessageHandle msg) {
   if (cc_->conn_closing)
     return;
 
-  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+  if (!dispatch_fb_.IsJoinable()) {
+    auto* peer = socket_.get();
+    dispatch_fb_ = MakeFiber(dfly::Launch::post, [&] { DispatchFiber(peer); });
+  }
 
+  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   dispatch_q_.push_back(move(msg));
 
-  // Don't notify if a sync dispatch is in progress, it will wake after finishing.
+  // Don't notify if a sync 1dispatch is in progress, it will wake after finishing.
   // This might only happen if we started receving messages while `SUBSCRIBE`
   // is still updating thread local data (see channel_store). We need to make sure its
   // ack is sent before all other messages.

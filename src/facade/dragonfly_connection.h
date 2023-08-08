@@ -220,6 +220,7 @@ class Connection : public util::Connection {
  private:
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
+  util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
   std::atomic_uint64_t dispatch_q_bytes_ = 0;  // memory usage of all entries
   dfly::EventCount evc_bp_;                    // backpressure for memory limit
