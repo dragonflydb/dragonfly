@@ -545,8 +545,7 @@ BlockingController* EngineShard::EnsureBlockingController() {
 }
 
 void EngineShard::TEST_EnableHeartbeat() {
-  fiber_periodic_ = MakeFiber([this, period_ms = 1] {
-    ThisFiber::SetName("shard_periodic_TEST");
+  fiber_periodic_ = fb2::Fiber("shard_periodic_TEST", [this, period_ms = 1] {
     RunPeriodic(std::chrono::milliseconds(period_ms));
   });
 }

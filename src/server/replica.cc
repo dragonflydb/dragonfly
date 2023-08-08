@@ -111,7 +111,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
   // 4. Spawn main coordination fiber.
-  sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);
+  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
   return {};
@@ -511,7 +511,7 @@ error_code Replica::ConsumeRedisStream() {
   LOG(INFO) << "Transitioned into stable sync";
   facade::CmdArgVec args_vector;
 
-  acks_fb_ = MakeFiber(&Replica::RedisStreamAcksFb, this);
+  acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
   while (true) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
@@ -645,7 +645,8 @@ error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = MakeFiber(&DflyShardReplica::FullSyncDflyFb, this, std::move(eof_token), sb, cntx);
+  sync_fb_ = fb2::Fiber("shard_full_sync", &DflyShardReplica::FullSyncDflyFb, this,
+                        std::move(eof_token), sb, cntx);
 
   return error_code{};
 }
@@ -656,9 +657,11 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   CHECK(mythread);
 
   CHECK(Sock()->IsOpen());
-  sync_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyReadFb, this, cntx);
+  sync_fb_ =
+      fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
-    execution_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyExecFb, this, cntx);
+    execution_fb_ =
+        fb2::Fiber("shard_stable_sync_exec", &DflyShardReplica::StableSyncDflyExecFb, this, cntx);
   }
 
   return std::error_code{};
@@ -723,7 +726,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   TransactionReader tx_reader{};
 
   if (master_context_.version > DflyVersion::VER0) {
-    acks_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
+    acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
   }
 
   while (!cntx->IsCancelled()) {
