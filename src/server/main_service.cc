@@ -895,10 +895,13 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
-  double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
-  uint64_t used_memory = ServerState::tlocal()->GetUsedMemory(start_ns);
-  if (used_memory > (max_memory_limit * oom_deny_ratio) && (cid->opt_mask() & CO::DENYOOM)) {
-    return (*cntx)->SendError(kOutOfMemory);
+
+  if (cid->opt_mask() & CO::DENYOOM) {
+    int64_t used_memory = etl.GetUsedMemory(start_ns);
+    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
+    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
+      return (*cntx)->SendError(kOutOfMemory);
+    }
   }
 
   // Create command transaction
