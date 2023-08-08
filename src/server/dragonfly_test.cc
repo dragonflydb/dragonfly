@@ -22,6 +22,7 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
+ABSL_DECLARE_FLAG(double, oom_deny_ratio);
 
 namespace dfly {
 
@@ -98,6 +99,11 @@ class DflyRenameCommandTest : public DflyEngineTest {
     // rename flushall to myflushall, flushdb command will not be able to execute
     absl::SetFlag(&FLAGS_rename_command,
                   std::vector<std::string>({"flushall=myflushall", "flushdb="}));
+  }
+
+  void TearDown() {
+    absl::SetFlag(&FLAGS_rename_command, std::vector<std::string>({""}));
+    DflyEngineTest::TearDown();
   }
 };
 
@@ -335,10 +341,10 @@ TEST_F(DflyEngineTest, FlushAll) {
 
 TEST_F(DflyEngineTest, OOM) {
   shard_set->TEST_EnableHeartBeat();
-  max_memory_limit = 0;
+  max_memory_limit = 300000;
   size_t i = 0;
   RespExpr resp;
-  for (; i < 5000; i += 3) {
+  for (; i < 10000; i += 3) {
     resp = Run({"mset", StrCat("key", i), "bar", StrCat("key", i + 1), "bar", StrCat("key", i + 2),
                 "bar"});
     if (resp != "OK")
@@ -376,25 +382,41 @@ TEST_F(DflyEngineTest, OOM) {
 TEST_F(DflyEngineTest, Bug207) {
   shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
 
-  max_memory_limit = 0;
+  max_memory_limit = 300000;
 
   ssize_t i = 0;
   RespExpr resp;
   for (; i < 5000; ++i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
-    // we evict some items because 5000 is too much when max_memory_limit is zero.
+    // we evict some items because 5000 is too much when max_memory_limit is 300000.
     ASSERT_EQ(resp, "OK");
   }
 
+  auto evicted_count = [](const string& str) -> size_t {
+    const string matcher = "evicted_keys:";
+    const auto pos = str.find(matcher) + matcher.size();
+    const auto sub = str.substr(pos, 1);
+    return atoi(sub.c_str());
+  };
+
+  resp = Run({"info", "stats"});
+  EXPECT_GT(evicted_count(resp.GetString()), 0);
+
   for (; i > 0; --i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
+    ASSERT_EQ(resp, "OK");
   }
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {
   shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
+
   max_memory_limit = 300000;
 
   string tmp_val(100, '.');

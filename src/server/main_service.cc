@@ -77,6 +77,9 @@ ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
+ABSL_FLAG(double, oom_deny_ratio, 1.1,
+          "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
+          "memory is above this value");
 
 bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err) {
   int64_t val;
@@ -889,6 +892,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
+
+  if (cid->opt_mask() & CO::DENYOOM) {
+    int64_t used_memory = etl.GetUsedMemory(start_ns);
+    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
+    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
+      return (*cntx)->SendError(kOutOfMemory);
+    }
+  }
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
