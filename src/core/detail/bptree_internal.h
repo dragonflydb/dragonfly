@@ -325,12 +325,22 @@ template <typename T> class BPTreePath {
     depth_--;
   }
 
+  bool HasValidTerminal() const {
+    return depth_ > 0u && Last().second < Last().first->NumItems();
+  }
+
   T Terminal() const {
+    assert(Last().second < Last().first->NumItems());
     return Last().first->Key(Last().second);
   }
 
-  void Next();
-  void Prev();
+  /// @brief Advances the path to the next item.
+  /// @return true if succeeded, false if reached the end.
+  bool Next();
+
+  /// @brief Advances the path to the previous item.
+  /// @return true if succeeded, false if reached the end.
+  bool Prev();
 
   // Extend the path to the leaf by always taking the rightmost child.
   void DigRight();
@@ -680,7 +690,7 @@ template <typename T> void BPTreeNode<T>::MergeFromRight(KeyT key, BPTreeNode<T>
   right->num_items_ = 0;
 }
 
-template <typename T> void BPTreePath<T>::Next() {
+template <typename T> bool BPTreePath<T>::Next() {
   assert(depth_ > 0);
   BPTreeNode<T>* node = Last().first;
 
@@ -688,7 +698,7 @@ template <typename T> void BPTreePath<T>::Next() {
   if (node->IsLeaf()) {
     ++record_[depth_ - 1].pos;
     if (record_[depth_ - 1].pos < node->NumItems()) {
-      return;
+      return true;
     }
 
     // Advance to the next item, which is Key(i) in some ascendent of the subtree with
@@ -697,7 +707,9 @@ template <typename T> void BPTreePath<T>::Next() {
     do {
       Pop();
     } while (depth_ > 0 && Position(depth_ - 1) == Node(depth_ - 1)->NumItems());
-    return;  // we either point now on separator Key(i) in the parent node or we finished the tree.
+
+    // we either point now on separator Key(i) in the parent node or we finished the tree.
+    return depth_ > 0;
   }
 
   // We are in the inner node after the ascent from the leaf node. We need to advance to the next
@@ -712,9 +724,11 @@ template <typename T> void BPTreePath<T>::Next() {
     node = node->Child(record_[depth_ - 1].pos);
     Push(node, 0);
   } while (!node->IsLeaf());
+
+  return true;
 }
 
-template <typename T> void BPTreePath<T>::Prev() {
+template <typename T> bool BPTreePath<T>::Prev() {
   assert(depth_ > 0);
 
   auto* node = record_[depth_ - 1].node;
@@ -730,7 +744,7 @@ template <typename T> void BPTreePath<T>::Prev() {
     while (record_[depth_ - 1].pos == 0) {
       Pop();
       if (depth_ == 0) {
-        return;
+        return false;
       }
     }
     assert(depth_ > 0 && record_[depth_ - 1].pos > 0);
@@ -738,10 +752,11 @@ template <typename T> void BPTreePath<T>::Prev() {
     // we finished backtracking from child(i+1) or stayed in the leaf.
     // either way stop at the next key on the left.
     --record_[depth_ - 1].pos;
-    return;
+    return true;
   }
 
   DigRight();
+  return true;
 }
 
 template <typename T> void BPTreePath<T>::DigRight() {
