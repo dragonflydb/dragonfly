@@ -49,15 +49,11 @@ class SortedMap {
   static std::unique_ptr<SortedMap> FromListPack(const uint8_t* lp);
 
   size_t Size() const {
-    return std::visit(Overload{[](const RdImpl& impl) { return impl.Size(); },
-                               [](const DfImpl& impl) { return impl.Size(); }},
-                      impl_);
+    return std::visit(Overload{[](const auto& impl) { return impl.Size(); }}, impl_);
   }
 
   bool Reserve(size_t sz) {
-    return std::visit(Overload{[&](RdImpl& impl) { return impl.Reserve(sz); },
-                               [&](DfImpl& impl) { return impl.Reserve(sz); }},
-                      impl_);
+    return std::visit(Overload{[&](auto& impl) { return impl.Reserve(sz); }}, impl_);
   }
 
   // Interface equivalent to zsetAdd.
@@ -66,27 +62,20 @@ class SortedMap {
   // newscore is set to the new score of the element only if in_flags contains ZADD_IN_INCR.
   int Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
     return std::visit(
-        Overload{[&](RdImpl& impl) { return impl.Add(score, ele, in_flags, out_flags, newscore); },
-                 [&](DfImpl& impl) { return impl.Add(score, ele, in_flags, out_flags, newscore); }},
+        Overload{[&](auto& impl) { return impl.Add(score, ele, in_flags, out_flags, newscore); }},
         impl_);
   }
 
   bool Insert(double score, sds member) {
-    return std::visit(Overload{[&](RdImpl& impl) { return impl.Insert(score, member); },
-                               [&](DfImpl& impl) { return impl.Insert(score, member); }},
-                      impl_);
+    return std::visit(Overload{[&](auto& impl) { return impl.Insert(score, member); }}, impl_);
   }
 
   uint8_t* ToListPack() const {
-    return std::visit(Overload{[](const RdImpl& impl) { return impl.ToListPack(); },
-                               [](const DfImpl& impl) { return impl.ToListPack(); }},
-                      impl_);
+    return std::visit(Overload{[](const auto& impl) { return impl.ToListPack(); }}, impl_);
   }
 
   size_t MallocSize() const {
-    return std::visit(Overload{[](const RdImpl& impl) { return impl.MallocSize(); },
-                               [](const DfImpl& impl) { return impl.MallocSize(); }},
-                      impl_);
+    return std::visit(Overload{[](const auto& impl) { return impl.MallocSize(); }}, impl_);
   }
 
   // TODO: to get rid of this method.
@@ -95,75 +84,57 @@ class SortedMap {
   }
 
   size_t DeleteRangeByRank(unsigned start, unsigned end) {
-    return std::visit(Overload{[&](RdImpl& impl) { return impl.DeleteRangeByRank(start, end); },
-                               [&](DfImpl& impl) { return impl.DeleteRangeByRank(start, end); }},
+    return std::visit(Overload{[&](auto& impl) { return impl.DeleteRangeByRank(start, end); }},
                       impl_);
   }
 
   size_t DeleteRangeByScore(const zrangespec& range) {
-    return std::visit(Overload{[&](RdImpl& impl) { return impl.DeleteRangeByScore(range); },
-                               [&](DfImpl& impl) { return impl.DeleteRangeByScore(range); }},
-                      impl_);
+    return std::visit(Overload{[&](auto& impl) { return impl.DeleteRangeByScore(range); }}, impl_);
   }
 
   size_t DeleteRangeByLex(const zlexrangespec& range) {
-    return std::visit(Overload{[&](RdImpl& impl) { return impl.DeleteRangeByLex(range); },
-                               [&](DfImpl& impl) { return impl.DeleteRangeByLex(range); }},
-                      impl_);
+    return std::visit(Overload{[&](auto& impl) { return impl.DeleteRangeByLex(range); }}, impl_);
   }
 
   // returns true if the element was deleted.
   bool Delete(sds ele) {
-    return std::visit(Overload{[&](RdImpl& impl) { return impl.Delete(ele); },
-                               [&](DfImpl& impl) { return impl.Delete(ele); }},
-                      impl_);
+    return std::visit(Overload{[&](auto& impl) { return impl.Delete(ele); }}, impl_);
   }
 
   std::optional<double> GetScore(sds ele) const {
-    return std::visit(Overload{[&](const RdImpl& impl) { return impl.GetScore(ele); },
-                               [&](const DfImpl& impl) { return impl.GetScore(ele); }},
-                      impl_);
+    return std::visit(Overload{[&](const auto& impl) { return impl.GetScore(ele); }}, impl_);
   }
 
   std::optional<unsigned> GetRank(sds ele, bool reverse) const {
-    return std::visit(Overload{[&](const RdImpl& impl) { return impl.GetRank(ele, reverse); },
-                               [&](const DfImpl& impl) { return impl.GetRank(ele, reverse); }},
+    return std::visit(Overload{[&](const auto& impl) { return impl.GetRank(ele, reverse); }},
                       impl_);
   }
 
   ScoredArray GetRange(const zrangespec& range, unsigned offset, unsigned limit,
                        bool reverse) const {
     return std::visit(
-        Overload{[&](const RdImpl& impl) { return impl.GetRange(range, offset, limit, reverse); },
-                 [&](const DfImpl& impl) { return impl.GetRange(range, offset, limit, reverse); }},
+        Overload{[&](const auto& impl) { return impl.GetRange(range, offset, limit, reverse); }},
         impl_);
   }
 
   ScoredArray GetLexRange(const zlexrangespec& range, unsigned offset, unsigned limit,
                           bool reverse) const {
     return std::visit(
-        Overload{
-            [&](const RdImpl& impl) { return impl.GetLexRange(range, offset, limit, reverse); },
-            [&](const DfImpl& impl) { return impl.GetLexRange(range, offset, limit, reverse); }},
+        Overload{[&](const auto& impl) { return impl.GetLexRange(range, offset, limit, reverse); }},
         impl_);
   }
 
   ScoredArray PopTopScores(unsigned count, bool reverse) {
-    return std::visit(Overload{[&](RdImpl& impl) { return impl.PopTopScores(count, reverse); },
-                               [&](DfImpl& impl) { return impl.PopTopScores(count, reverse); }},
+    return std::visit(Overload{[&](auto& impl) { return impl.PopTopScores(count, reverse); }},
                       impl_);
   }
 
   size_t Count(const zrangespec& range) const {
-    return std::visit(Overload{[&](const RdImpl& impl) { return impl.Count(range); },
-                               [&](const DfImpl& impl) { return impl.Count(range); }},
-                      impl_);
+    return std::visit(Overload{[&](const auto& impl) { return impl.Count(range); }}, impl_);
   }
 
   size_t LexCount(const zlexrangespec& range) const {
-    return std::visit(Overload{[&](const RdImpl& impl) { return impl.LexCount(range); },
-                               [&](const DfImpl& impl) { return impl.LexCount(range); }},
-                      impl_);
+    return std::visit(Overload{[&](const auto& impl) { return impl.LexCount(range); }}, impl_);
   }
 
   // Runs cb for each element in the range [start_rank, start_rank + len).
@@ -171,8 +142,7 @@ class SortedMap {
   bool Iterate(unsigned start_rank, unsigned len, bool reverse,
                absl::FunctionRef<bool(sds, double)> cb) const {
     return std::visit(
-        Overload{[&](const RdImpl& impl) { return impl.Iterate(start_rank, len, reverse, cb); },
-                 [&](const DfImpl& impl) { return impl.Iterate(start_rank, len, reverse, cb); }},
+        Overload{[&](const auto& impl) { return impl.Iterate(start_rank, len, reverse, cb); }},
         impl_);
   }
 
