@@ -55,13 +55,13 @@ class MultiCommandSquasher {
   // Retrun squash flags
   SquashResult TrySquash(StoredCmd* cmd);
 
-  // Execute separate non-squashed cmd. Return true if aborting on error.
+  // Execute separate non-squashed cmd. Return false if aborting on error.
   bool ExecuteStandalone(StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
   facade::OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es);
 
-  // Execute all currently squashed commands. Return true if aborting on error.
+  // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed();
 
   // Run all commands until completion.

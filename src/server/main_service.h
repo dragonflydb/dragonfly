@@ -50,8 +50,8 @@ class Service : public facade::ServiceInterface {
   // execution
   std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandId* cid);
 
-  // Verify command prepares excution in correct state/
-  // Its usually called before command execution. Only for multi/exec transactions it's checked
+  // Verify command prepares excution in correct state.
+  // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
   std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
                                                        const ConnectionContext& cntx);

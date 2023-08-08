@@ -102,7 +102,7 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   if (verify_commands_) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
       (*cntx_)->SendError(move(*err));
-      return error_abort_;
+      return !error_abort_;
     }
   }
 
@@ -114,7 +114,7 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
     tx->InitByArgs(cntx_->conn_state.db_index, args);
   service_->InvokeCmd(cmd->Cid(), args, cntx_);
 
-  return false;
+  return true;
 }
 
 OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
@@ -200,7 +200,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     sinfo.cmds.clear();
 
   order_.clear();
-  return aborted;
+  return !aborted;
 }
 
 void MultiCommandSquasher::Run() {
@@ -211,12 +211,12 @@ void MultiCommandSquasher::Run() {
       break;
 
     if (res == SquashResult::NOT_SQUASHED || res == SquashResult::SQUASHED_FULL) {
-      if (ExecuteSquashed())
+      if (!ExecuteSquashed())
         break;
     }
 
     if (res == SquashResult::NOT_SQUASHED) {
-      if (ExecuteStandalone(&cmd))
+      if (!ExecuteStandalone(&cmd))
         break;
     }
   }

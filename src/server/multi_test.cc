@@ -866,7 +866,9 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_lua_auto_async, true);
 
-  // The script should abort only at the second error, no further commands should be executed
+  // The script below contains two commands for which execution can't even be prepared
+  // (FIRST/SECOND WRONG). The first is issued with pcall, so its error should be completely
+  // ignored, the second one should cause an abort and no further commands should be executed
   string_view s = R"(
     redis.pcall('INCR', 'A')
     redis.pcall('FIRST WRONG')
