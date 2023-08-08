@@ -11,7 +11,6 @@
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/service_interface.h"
-#include "server/config_registry.h"
 #include "util/proactor_pool.h"
 
 using namespace std;
@@ -156,7 +155,6 @@ error_code Listener::ConfigureServerSocket(int fd) {
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
-
   bool success = ConfigureKeepAlive(fd);
 
   if (!success) {
