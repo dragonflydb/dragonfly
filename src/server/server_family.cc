@@ -372,14 +372,15 @@ string FormatTs(absl::Time now) {
   return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
 }
 
-void ExtendDfsFilename(absl::AlphaNum postfix, fs::path* filename) {
+// modifies 'filename' to be "filename-postfix.extension"
+void SetExtension(absl::AlphaNum postfix, string_view extension, fs::path* filename) {
   filename->replace_extension();  // clear if exists
-  *filename += StrCat("-", postfix, ".dfs");
+  *filename += StrCat("-", postfix, extension);
 }
 
-void ExtendDfsFilenameWithShard(int shard, fs::path* filename) {
+void ExtendDfsFilenameWithShard(int shard, string_view extension, fs::path* filename) {
   // dragonfly snapshot.
-  ExtendDfsFilename(absl::Dec(shard, absl::kZeroPad4), filename);
+  SetExtension(absl::Dec(shard, absl::kZeroPad4), extension, filename);
 }
 
 GenericError ValidateFilename(const fs::path& filename, bool new_version) {
@@ -1090,14 +1091,8 @@ static void RunStage(
 
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
-GenericError DoPartialSave(fs::path full_filename, const dfly::StringVec& scripts,
+GenericError DoPartialSave(const fs::path& full_filename, const dfly::StringVec& scripts,
                            RdbSnapshot* snapshot, EngineShard* shard) {
-  if (shard == nullptr) {
-    ExtendDfsFilename("summary", &full_filename);
-  } else {
-    ExtendDfsFilenameWithShard(shard->shard_id(), &full_filename);
-  }
-
   // Start rdb saving.
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   GenericError local_ec = snapshot->Start(mode, full_filename.string(), scripts);
@@ -1156,19 +1151,19 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
   shared_ptr<LastSaveInfo> save_info;
 
-  vector<unique_ptr<RdbSnapshot>> snapshots;
+  vector<pair<unique_ptr<RdbSnapshot>, fs::path>> snapshots;
   absl::flat_hash_map<string_view, size_t> rdb_name_map;
   Mutex mu;  // guards rdb_name_map
 
   auto save_cb = [&](unsigned index) {
-    auto& snapshot = snapshots[index];
+    auto& snapshot = snapshots[index].first;
     if (snapshot && snapshot->HasStarted()) {
       ec = snapshot->SaveBody();
     }
   };
 
   auto close_cb = [&](unsigned index) {
-    auto& snapshot = snapshots[index];
+    auto& snapshot = snapshots[index].first;
     if (snapshot) {
       ec = snapshot->Close();
 
@@ -1190,7 +1185,9 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
   fpath /= filename;
 
-  if (IsCloudPath(fpath.string())) {
+  const bool is_cloud = IsCloudPath(fpath.string());
+
+  if (is_cloud) {
     if (!aws_) {
       aws_ = make_unique<cloud::AWS>("s3");
       if (auto ec = aws_->Init(); ec) {
@@ -1205,16 +1202,29 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   if (new_version) {
     // In the new version (.dfs) we store a file for every shard and one more summary file.
     // Summary file is always last in snapshots array.
-    snapshots.resize(shard_set->size() + 1);
+    const size_t sz = shard_set->size();
+    constexpr string_view ext = ".dfs.tmp"sv;
+    snapshots.resize(sz + 1);
+
+    // Set file names for shards
+    for (auto sid = 0u; sid < sz; ++sid) {
+      auto& filename = snapshots[sid].second;
+      filename = fpath;                                 // starts with fpath
+      ExtendDfsFilenameWithShard(sid, ext, &filename);  // later append -<shard id>.dfs.tmp
+    }
+
+    // Set summary file name
+    snapshots.back().second = fpath;
+    SetExtension("summary", ext, &snapshots.back().second);
 
     // Save summary file.
     {
       auto scripts = get_scripts();
-      auto& snapshot = snapshots[shard_set->size()];
+      auto& [snapshot, filename] = snapshots[sz];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
 
       snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(fpath, scripts, snapshot.get(), nullptr); local_ec) {
+      if (auto local_ec = DoPartialSave(filename, scripts, snapshot.get(), nullptr); local_ec) {
         ec = local_ec;
         snapshot.reset();
       }
@@ -1222,10 +1232,10 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
     // Save shard files.
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto& snapshot = snapshots[shard->shard_id()];
+      auto& [snapshot, filename] = snapshots[shard->shard_id()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
       snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(fpath, {}, snapshot.get(), shard); local_ec) {
+      if (auto local_ec = DoPartialSave(filename, {}, snapshot.get(), shard); local_ec) {
         ec = local_ec;
         snapshot.reset();
       }
@@ -1235,26 +1245,33 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     trans->ScheduleSingleHop(std::move(cb));
   } else {
     snapshots.resize(1);
+    auto& [snapshot, filename] = snapshots[0];
 
     if (!fpath.has_extension()) {
       fpath += ".rdb";
     }
 
-    snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
+    // begin by saving as temp, and later rename to the actual target
+    fpath += ".tmp";
+
+    filename = fpath;
+
+    snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
     auto lua_scripts = get_scripts();
 
-    snapshots[0]->SetAWS(aws_.get());
-    ec = snapshots[0]->Start(SaveMode::RDB, fpath.string(), lua_scripts);
+    snapshot->SetAWS(aws_.get());
+    ec = snapshot->Start(SaveMode::RDB, filename,
+                         lua_scripts);  // filename == fpath, for consistency use filename
 
     if (!ec) {
       auto cb = [&](Transaction* t, EngineShard* shard) {
-        snapshots[0]->StartInShard(shard);
+        snapshot->StartInShard(shard);
         return OpStatus::OK;
       };
 
       trans->ScheduleSingleHop(std::move(cb));
     } else {
-      snapshots[0].reset();
+      snapshot.reset();
     }
   }
 
@@ -1271,8 +1288,9 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   RunStage(new_version, close_cb, reset_event_cb);
 
   if (new_version) {
-    ExtendDfsFilename("summary", &fpath);
-  }
+    SetExtension("summary", ".dfs", &fpath);
+  } else
+    fpath.replace_extension();  // remove .tmp
 
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -1281,6 +1299,15 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   if (!ec) {
     LOG(INFO) << "Saving " << fpath << " finished after "
               << strings::HumanReadableElapsedTime(seconds);
+
+    if (!is_cloud)
+      for (const auto& [_, filename] : snapshots) {
+        auto copy = filename;
+        copy.replace_extension();
+
+        VLOG(1) << "snapshotting: rename " << filename.string() << " -> " << copy.string();
+        filesystem::rename(filename, copy);
+      }
 
     save_info = make_shared<LastSaveInfo>();
     for (const auto& k_v : rdb_name_map) {

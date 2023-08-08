@@ -60,18 +60,18 @@ void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
   ent.second += (after - before) / 1000;
 }
 
-optional<facade::ErrorReply> CommandId::Validate(CmdArgList args) const {
-  if ((arity() > 0 && args.size() != size_t(arity())) ||
-      (arity() < 0 && args.size() < size_t(-arity()))) {
+optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
+  if ((arity() > 0 && tail_args.size() + 1 != size_t(arity())) ||
+      (arity() < 0 && tail_args.size() + 1 < size_t(-arity()))) {
     return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
-  if (key_arg_step() == 2 && (args.size() % 2) == 0) {
+  if (key_arg_step() == 2 && (tail_args.size() % 2) != 0) {
     return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
   if (validator_)
-    return validator_(args.subspan(1));
+    return validator_(tail_args);
   return nullopt;
 }
 

@@ -72,7 +72,7 @@ class CommandId : public facade::CommandId {
   void Invoke(CmdArgList args, ConnectionContext* cntx) const;
 
   // Returns error if validation failed, otherwise nullopt
-  std::optional<facade::ErrorReply> Validate(CmdArgList args) const;
+  std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
 
   bool IsTransactional() const;
 
