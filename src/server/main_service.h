@@ -39,10 +39,22 @@ class Service : public facade::ServiceInterface {
 
   void Shutdown();
 
+  // Prepare command execution, verify and execute, reply to context
   void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
 
-  // Returns true if command was executed successfully.
-  bool InvokeCmd(CmdArgList args, const CommandId* cid, ConnectionContext* cntx, bool record_stats);
+  // Check VerifyCommandExecution and invoke command with args
+  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* reply_cntx,
+                 bool record_stats = false);
+
+  // Verify command can be executed now (check out of memory), always called immediately before
+  // execution
+  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandId* cid);
+
+  // Verify command prepares excution in correct state.
+  // It's usually called before command execution. Only for multi/exec transactions it's checked
+  // when the command is queued for execution, not before the execution itself.
+  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
+                                                       const ConnectionContext& cntx);
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   facade::ConnectionContext* cntx) final;
@@ -51,6 +63,24 @@ class Service : public facade::ServiceInterface {
                                            facade::Connection* owner) final;
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
+
+  const CommandId* FindCmd(std::string_view cmd) const {
+    return registry_.Find(cmd);
+  }
+
+  facade::ErrorReply ReportUnknownCmd(std::string_view cmd_name);
+
+  // Returns: the new state.
+  // if from equals the old state then the switch is performed "to" is returned.
+  // Otherwise, does not switch and returns the current state in the system.
+  // Upon switch, updates cached global state in threadlocal ServerState struct.
+  GlobalState SwitchState(GlobalState from, GlobalState to);
+
+  GlobalState GetGlobalState() const;
+
+  void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
+  void OnClose(facade::ConnectionContext* cntx) final;
+  std::string GetContextInfo(facade::ConnectionContext* cntx) final;
 
   uint32_t shard_count() const {
     return shard_set->size();
@@ -66,10 +96,6 @@ class Service : public facade::ServiceInterface {
 
   absl::flat_hash_map<std::string, unsigned> UknownCmdMap() const;
 
-  const CommandId* FindCmd(std::string_view cmd) const {
-    return registry_.Find(cmd);
-  }
-
   ScriptMgr* script_mgr() {
     return server_family_.script_mgr();
   }
@@ -77,18 +103,6 @@ class Service : public facade::ServiceInterface {
   ServerFamily& server_family() {
     return server_family_;
   }
-
-  // Returns: the new state.
-  // if from equals the old state then the switch is performed "to" is returned.
-  // Otherwise, does not switch and returns the current state in the system.
-  // Upon switch, updates cached global state in threadlocal ServerState struct.
-  GlobalState SwitchState(GlobalState from, GlobalState to);
-
-  GlobalState GetGlobalState() const;
-
-  void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
-  void OnClose(facade::ConnectionContext* cntx) final;
-  std::string GetContextInfo(facade::ConnectionContext* cntx) final;
 
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
@@ -118,13 +132,6 @@ class Service : public facade::ServiceInterface {
     std::string_view sha;  // only one of them is defined.
     CmdArgList keys, args;
   };
-
-  // Verify command exists and has no obvious formatting errors
-  std::optional<facade::ErrorReply> VerifyCommandArguments(const CommandId* cid, CmdArgList args);
-
-  // Verify command can be executed
-  std::optional<facade::ErrorReply> VerifyCommand(const CommandId* cid, CmdArgList args,
-                                                  const ConnectionContext& cntx);
 
   // Return error if not all keys are owned by the server when running in cluster mode
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
