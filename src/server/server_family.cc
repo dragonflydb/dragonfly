@@ -1164,7 +1164,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
   fpath /= filename;
 
-  bool is_cloud = IsCloudPath(fpath.string());
+  const bool is_cloud = IsCloudPath(fpath.string());
 
   if (is_cloud) {
     if (!aws_) {
@@ -1182,7 +1182,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     // In the new version (.dfs) we store a file for every shard and one more summary file.
     // Summary file is always last in snapshots array.
     const size_t sz = shard_set->size();
-    constexpr const string_view ext = ".dfs.tmp"sv;
+    constexpr string_view ext = ".dfs.tmp"sv;
     snapshots.resize(sz + 1);
 
     // Set file names for shards
