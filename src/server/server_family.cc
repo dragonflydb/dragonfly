@@ -94,11 +94,13 @@ ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
-#define RETURN_ON_ERROR(m)                                               \
-  do {                                                                   \
-    *err = m;                                                            \
-    LOG(WARNING) << "Error in parsing arguments for --replicaof: " << m; \
-    return false;                                                        \
+#define RETURN_ON_ERROR(cond, m)                                           \
+  do {                                                                     \
+    if ((cond)) {                                                          \
+      *err = m;                                                            \
+      LOG(WARNING) << "Error in parsing arguments for --replicaof: " << m; \
+      return false;                                                        \
+    }                                                                      \
   } while (0)
 
   if (in.empty()) {  // on empty flag "parse" nothing. If we return false then DF exists.
@@ -107,24 +109,21 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
   }
 
   auto pos = in.find_last_of(':');
-  if (pos == string::npos)
-    RETURN_ON_ERROR("missing ':'.");
+  RETURN_ON_ERROR(pos == string::npos, "missing ':'.");
 
   string_view ip = in.substr(0, pos);
   flag->port = in.substr(pos + 1);
 
-  if (ip.empty() || flag->port.empty())
-    RETURN_ON_ERROR("IP/host or port are empty.");
+  RETURN_ON_ERROR(ip.empty() || flag->port.empty(), "IP/host or port are empty.");
 
   // For IPv6: ip1.front == '[' AND ip1.back == ']'
   // For IPv4: ip1.front != '[' AND ip1.back != ']'
   // Together, this ip1.front == '[' iff ip1.back == ']', which can be implemented as XNOR (NOT XOR)
-  if ((ip.front() == '[') ^ (ip.back() == ']'))
-    RETURN_ON_ERROR("unclosed brackets.");
+  RETURN_ON_ERROR(((ip.front() == '[') ^ (ip.back() == ']')), "unclosed brackets.");
 
   if (ip.front() == '[') {
-    if (ip.length() <= 2)
-      RETURN_ON_ERROR("IPv6 host name is too short.");
+    // shortest possible IPv6 is '::1' (loopback)
+    RETURN_ON_ERROR(ip.length() <= 2, "IPv6 host name is too short");
 
     flag->host = ip.substr(1, ip.length() - 2);
     VLOG(1) << "received IP of type IPv6: " << flag->host;
@@ -490,17 +489,6 @@ void SlowLog(CmdArgList args, ConnectionContext* cntx) {
   }
 
   (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
-}
-
-void FlushEntireDb(Transaction* transaction) {
-  transaction->Schedule();
-
-  auto cb = [](Transaction* t, EngineShard* shard) {
-    shard->db_slice().FlushDb(DbSlice::kDbAll);
-    return OpStatus::OK;
-  };
-
-  transaction->Execute(std::move(cb), true);
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -2058,7 +2046,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
-                                     ShouldFlushDb should_flush_db, ActionOnConnectionFail on_err) {
+                                     ActionOnConnectionFail on_err) {
   auto& pool = service_.proactor_pool();
   LOG(INFO) << "Replicating " << host << ":" << port_sv;
 
@@ -2113,9 +2101,6 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
     return;
   }
 
-  if (should_flush_db == ShouldFlushDb::kFlush)
-    FlushEntireDb(cntx->transaction);
-
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
   lk.unlock();
@@ -2153,8 +2138,11 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   string_view host = ArgS(args, 0);
   string_view port = ArgS(args, 1);
 
-  ReplicaOfInternal(host, port, cntx, ShouldFlushDb::kFlush,
-                    ActionOnConnectionFail::kReturnOnError);
+  // don't flush if input is NO ONE
+  if (!(absl::EqualsIgnoreCase(host, "NO") && absl::EqualsIgnoreCase(port, "ONE")))
+    Drakarys(cntx->transaction, DbSlice::kDbAll);
+
+  ReplicaOfInternal(host, port, cntx, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -2164,8 +2152,7 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)
 
-  ReplicaOfInternal(host, port, &ctxt, ShouldFlushDb::kDontFlush,
-                    ActionOnConnectionFail::kContinueReplication);
+  ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
 
   CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
       << "error in switching state from LOADING to ACTIVE when replicating via --replicaof.";

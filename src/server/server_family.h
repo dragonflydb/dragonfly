@@ -195,11 +195,6 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  enum ShouldFlushDb {
-    kFlush,  // flush database before replicating master
-    kDontFlush,
-  };
-
   enum ActionOnConnectionFail {
     kReturnOnError,        // if we fail to connect to master, return to err
     kContinueReplication,  // continue attempting to connect to master, regardless of initial
@@ -208,7 +203,7 @@ class ServerFamily {
 
   // REPLICAOF implementation. See arguments above
   void ReplicaOfInternal(std::string_view host, std::string_view port, ConnectionContext* cntx,
-                         ShouldFlushDb should_flush_db, ActionOnConnectionFail on_error);
+                         ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
