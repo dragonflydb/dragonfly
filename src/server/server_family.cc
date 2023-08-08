@@ -517,6 +517,10 @@ void ValidateServerTlsFlags() {
   }
 }
 
+bool IsReplicatingNoOne(string_view host, string_view port) {
+  return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
+}
+
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -2063,7 +2067,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   VLOG(1) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
 
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_sv, "one")) {
+  if (IsReplicatingNoOne(host, port_sv)) {
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -2139,7 +2143,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   string_view port = ArgS(args, 1);
 
   // don't flush if input is NO ONE
-  if (!(absl::EqualsIgnoreCase(host, "NO") && absl::EqualsIgnoreCase(port, "ONE")))
+  if (!IsReplicatingNoOne(host, port))
     Drakarys(cntx->transaction, DbSlice::kDbAll);
 
   ReplicaOfInternal(host, port, cntx, ActionOnConnectionFail::kReturnOnError);
