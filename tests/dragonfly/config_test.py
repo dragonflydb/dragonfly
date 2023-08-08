@@ -1,0 +1,21 @@
+import pytest
+import redis
+from .utility import *
+from . import DflyStartException
+
+
+async def test_maxclients(df_factory):
+    # Needs some authentication
+    server = df_factory.create(port=1111, maxclients=1)
+    server.start()
+
+    async with server.client() as client1:
+        assert [b"maxclients", b"1"] == await client1.execute_command("CONFIG GET maxclients")
+
+        with pytest.raises(redis.exceptions.ConnectionError):
+            async with server.client() as client2:
+                await client2.get("test")
+
+        await client1.execute_command("CONFIG SET maxclients 3")
+        async with server.client() as client2:
+            await client2.get("test")

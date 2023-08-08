@@ -267,6 +267,10 @@ void Listener::OnConnectionClose(util::Connection* conn) {
   }
 }
 
+void Listener::OnMaxConnectionsReached(util::FiberSocketBase* sock) {
+  sock->Write(io::Buffer("-ERR max number of clients reached\r\n"));
+}
+
 // We can limit number of threads handling dragonfly connections.
 ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
   util::ProactorPool* pp = pool();

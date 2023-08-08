@@ -41,6 +41,7 @@ class Listener : public util::ListenerInterface {
 
   void OnConnectionStart(util::Connection* conn) final;
   void OnConnectionClose(util::Connection* conn) final;
+  void OnMaxConnectionsReached(util::FiberSocketBase* sock) final;
   void PreAcceptLoop(ProactorBase* pb) final;
 
   void PreShutdown() final;
