@@ -38,6 +38,10 @@ class TestConnection : public facade::Connection {
   bool is_admin_ = false;
 };
 
+// The TransactionSuspension class is designed to facilitate the temporary suspension of commands
+// executions. When the 'start' method is invoked, it enforces the suspension of other
+// transactions by acquiring a global shard lock. Conversely, invoking the 'terminate' method
+// releases the global shard lock, enabling all transactions in the queue to resume execution.
 class TransactionSuspension {
  public:
   void Start();
