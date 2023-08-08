@@ -101,14 +101,12 @@ SSL_CTX* CreateSslServerCntx() {
 }
 #endif
 
-uint32_t tcp_keepalive;
-
 bool ConfigureKeepAlive(int fd) {
-  DCHECK_GT(tcp_keepalive, 3u);
   int val = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) < 0)
     return false;
 
+  uint32_t tcp_keepalive = absl::GetFlag(FLAGS_tcp_keepalive);
   val = tcp_keepalive;
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0)
     return false;
@@ -116,7 +114,7 @@ bool ConfigureKeepAlive(int fd) {
   /* Send next probes after the specified interval. Note that we set the
    * delay as interval / 3, as we send three probes before detecting
    * an error (see the next setsockopt call). */
-  val = tcp_keepalive / 3;
+  val = std::max(tcp_keepalive / 3, 1u);
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0)
     return false;
 
@@ -142,18 +140,6 @@ Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), prot
   http_base_.reset(new HttpListener<>);
   http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
   si->ConfigureHttpHandlers(http_base_.get());
-
-  tcp_keepalive = absl::GetFlag(FLAGS_tcp_keepalive);
-  CHECK_GT(tcp_keepalive, 3u) << FLAGS_tcp_keepalive.Name() << " " << FLAGS_tcp_keepalive.Help();
-}
-
-bool Listener::SetTcpKeepalive(uint32_t val) {
-  if (val <= 3) {
-    LOG(ERROR) << FLAGS_tcp_keepalive.Name() << " " << FLAGS_tcp_keepalive.Help();
-    return false;
-  }
-  tcp_keepalive = val;
-  return true;
 }
 
 Listener::~Listener() {
