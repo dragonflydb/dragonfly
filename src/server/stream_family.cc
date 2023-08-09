@@ -879,30 +879,37 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
   return result;
 }
 
-Record streamWithRange(stream* s, streamID sstart, streamID send, int reverse) {
+vector<Record> streamWithRange(stream* s, streamID start, streamID end, int reverse, size_t count) {
   streamIterator si;
   int64_t numfields;
   streamID id;
+  size_t arraylen = 0;
+  vector<Record> records;
 
-  streamIteratorStart(&si, s, &sstart, &send, reverse);
-  streamIteratorGetID(&si, &id, &numfields);
-  Record rec;
-  rec.id = id;
-  rec.kv_arr.reserve(numfields);
+  streamIteratorStart(&si, s, &start, &end, reverse);
+  while (streamIteratorGetID(&si, &id, &numfields)) {
+    Record rec;
+    rec.id = id;
+    rec.kv_arr.reserve(numfields);
 
-  while (numfields--) {
-    unsigned char *key, *value;
-    int64_t key_len, value_len;
-    streamIteratorGetField(&si, &key, &value, &key_len, &value_len);
-    string skey(reinterpret_cast<char*>(key), key_len);
-    string sval(reinterpret_cast<char*>(value), value_len);
+    while (numfields--) {
+      unsigned char *key, *value;
+      int64_t key_len, value_len;
+      streamIteratorGetField(&si, &key, &value, &key_len, &value_len);
+      string skey(reinterpret_cast<char*>(key), key_len);
+      string sval(reinterpret_cast<char*>(value), value_len);
 
-    rec.kv_arr.emplace_back(move(skey), move(sval));
+      rec.kv_arr.emplace_back(move(skey), move(sval));
+    }
+    records.push_back(rec);
+    arraylen++;
+    if (count && count == arraylen)
+      break;
   }
 
   streamIteratorStop(&si);
 
-  return rec;
+  return records;
 }
 
 void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
@@ -973,7 +980,7 @@ void getConsumers(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
 }
 
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard,
-                               int full) {
+                               int full, size_t count) {
   auto& db_slice = shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
   if (!res_it)
@@ -993,6 +1000,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
   sinfo.entries_added = s->entries_added;
   sinfo.recorded_first_entry_id = s->first_id;
   sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
+  sinfo.entries = streamWithRange(s, s->first_id, s->last_id, 0, count);
 
   if (full) {
     if (s->cgroups) {
@@ -1022,11 +1030,11 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
     }
   } else {
     sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
-  }
-
-  if (!full) {
-    sinfo.first_entry = streamWithRange(s, s->first_id, s->last_id, 0);
-    sinfo.last_entry = streamWithRange(s, s->first_id, s->last_id, 1);
+    // TODO : fix for empty stream
+    vector<Record> first_entry_vector = streamWithRange(s, s->first_id, s->last_id, 0, 1);
+    sinfo.first_entry = first_entry_vector.at(0);
+    vector<Record> last_entry_vector = streamWithRange(s, s->first_id, s->last_id, 1, 1);
+    sinfo.last_entry = last_entry_vector.at(0);
   }
 
   return sinfo;
@@ -1666,7 +1674,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       return (*cntx)->SendError(result.status());
     } else if (sub_cmd == "STREAM") {
       int full = 0;
-      long count;
+      size_t count = 10;  // default count for xinfo streams
 
       if (args.size() == 4) {
         return (*cntx)->SendError(
@@ -1676,9 +1684,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       if (args.size() >= 3) {
         full = 1;
         string_view full_arg = ArgS(args, 2);
-        if (args.size() == 3) {
-          count = 10;  // default count for xinfo streams
-        } else {
+        if (args.size() > 3) {
           string_view count_arg = ArgS(args, 3);
           string_view count_value_arg = ArgS(args, 4);
           if (full_arg != "full" || count_arg != "count") {
@@ -1695,13 +1701,13 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
         DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
-        return OpStreams(db_context, key, shard, full);
+        return OpStreams(db_context, key, shard, full, count);
       };
 
       OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
       if (sinfo) {
         if (full) {
-          (*cntx)->StartCollection(8, RedisReplyBuilder::MAP);
+          (*cntx)->StartCollection(9, RedisReplyBuilder::MAP);
         } else {
           (*cntx)->StartCollection(10, RedisReplyBuilder::MAP);
         }
@@ -1728,6 +1734,18 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendBulkString(StreamIdRepr(sinfo->recorded_first_entry_id));
 
         if (full) {
+          (*cntx)->SendBulkString("entries");
+          (*cntx)->StartArray(sinfo->entries.size());
+          for (const auto& entry : sinfo->entries) {
+            (*cntx)->StartArray(2);
+            (*cntx)->SendBulkString(StreamIdRepr(entry.id));
+            (*cntx)->StartArray(2);
+            for (const auto& k_v : entry.kv_arr) {
+              (*cntx)->SendBulkString(k_v.first);
+              (*cntx)->SendBulkString(k_v.second);
+            }
+          }
+
           (*cntx)->SendBulkString("groups");
           (*cntx)->StartArray(sinfo->cgroups.size());
           for (const auto& ginfo : sinfo->cgroups) {
