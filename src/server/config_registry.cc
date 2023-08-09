@@ -43,7 +43,7 @@ std::optional<std::string> ConfigRegistry::Get(std::string_view config_name) {
   unique_lock lk(mu_);
   auto it = registry_.find(config_name);
   if (it == registry_.end())
-    return {};
+    return std::nullopt;
   auto cb = it->second;
   lk.unlock();
 

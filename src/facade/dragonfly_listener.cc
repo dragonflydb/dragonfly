@@ -202,6 +202,14 @@ bool Listener::AwaitDispatches(absl::Duration timeout,
   return false;
 }
 
+bool Listener::IsAdminInterface() const {
+  return is_admin_;
+}
+
+void Listener::SetAdminInterface(bool is_admin) {
+  is_admin_ = is_admin;
+}
+
 void Listener::PreShutdown() {
   // Iterate on all connections and allow them to finish their commands for
   // a short period.

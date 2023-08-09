@@ -388,6 +388,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
     Listener* admin_listener = new Listener{Protocol::REDIS, &service};
+    admin_listener->SetAdminInterface();
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener);
 
     if (ec) {

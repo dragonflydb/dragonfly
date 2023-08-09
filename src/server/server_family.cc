@@ -565,25 +565,26 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
+void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients) {
+  for (auto* listener : listeners) {
+    if (!listener->IsAdminInterface()) {
+      listener->SetMaxClients(maxclients);
+    }
+  }
+}
+
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
 
-  for (auto* listener : listeners_) {
-    listener->SetMaxClients(absl::GetFlag(FLAGS_maxclients));
-  }
+  SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
   config_registry.Register("maxclients", [this](const absl::CommandLineFlag& flag) {
     auto res = flag.TryGet<uint32_t>();
-    if (!res)
-      return false;
-
-    for (auto* listener : listeners_) {
-      listener->SetMaxClients(res.value());
-    }
-
-    return true;
+    if (res.has_value())
+      SetMaxClients(listeners_, res.value());
+    return res.has_value();
   });
 
   pb_task_ = shard_set->pool()->GetNextProactor();
