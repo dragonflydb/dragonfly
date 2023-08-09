@@ -117,6 +117,8 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git describe --always --tags ${{ github.sha }}
           ./tools/release.sh
+          # once the build is over, we want to generate a Debian package
+          ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
           #    - name: Run regression tests
           #      uses: ./.github/actions/regression-tests
           #      with:
@@ -124,11 +126,6 @@ jobs:
           #        gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           #        run-on-ubuntu-latest: true
           #
-    - name: Build artifact package
-      run: |
-          # once the build is over, we want to generate a Debian package
-          ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
-
     - name: Save artifacts
       run: |
           # place all artifacts at the same location
@@ -138,7 +135,7 @@ jobs:
     - name: Upload
       uses: actions/upload-artifact@v3
       with:
-        name: dragonfly-x86_64
+        name: dragonfly-amd64
         path: results-artifacts/*
   publish_release:
     runs-on: ubuntu-latest
