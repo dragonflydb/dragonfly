@@ -81,7 +81,7 @@ struct NACKInfo {
 
 struct ConsumerInfo {
   string name;
-  string seen_time;
+  size_t seen_time;
   size_t pel_count;
   vector<NACKInfo> pending;
 };
@@ -1017,7 +1017,6 @@ long long streamEstimateDistanceFromFirstEverEntry(stream* s, streamID* id) {
 }
 
 void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
-  // TODO : implement this
   int valid = 0;
   long long lag = 0;
 
@@ -1102,6 +1101,7 @@ void getConsumers(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
       consumer_pel_vec.push_back(nack_info);
       arraylen_cpel++;
     }
+    consumer_info.pending = consumer_pel_vec;
     consumer_info_vec.push_back(consumer_info);
     raxStop(&ri_cpel);
   }
@@ -1915,7 +1915,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
               (*cntx)->SendBulkString(consumer_info.name);
 
               (*cntx)->SendBulkString("seen-time");
-              (*cntx)->SendBulkString(consumer_info.seen_time);
+              (*cntx)->SendLong(consumer_info.seen_time);
 
               (*cntx)->SendBulkString("pel-count");
               (*cntx)->SendLong(consumer_info.pel_count);
@@ -1923,6 +1923,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
               (*cntx)->SendBulkString("pending");
               if (consumer_info.pending.size() == 0) {
                 (*cntx)->SendEmptyArray();
+              } else {
+                (*cntx)->StartArray(consumer_info.pending.size());
               }
               for (const auto& pending : consumer_info.pending) {
                 (*cntx)->StartArray(3);
