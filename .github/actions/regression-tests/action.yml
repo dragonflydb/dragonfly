@@ -67,5 +67,5 @@ runs:
         curl -s \
           -X POST \
           -H 'Content-Type: application/json' \
-          '${{ gspace-secret }}' \
+          '${{ inputs.gspace-secret }}' \
           -d '{"text": "'"${message}"'"}'
