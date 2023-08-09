@@ -33,21 +33,6 @@ class ClusterFamilyTest : public BaseFamilyTest {
  protected:
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
-  void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
-                                    absl::Duration timeout = absl::Seconds(10)) {
-    absl::Time deadline = absl::Now() + timeout;
-
-    while (deadline > absl::Now()) {
-      if (condition()) {
-        break;
-      }
-      absl::SleepFor(absl::Milliseconds(10));
-    }
-
-    EXPECT_LE(absl::Now(), deadline)
-        << "Timeout of " << timeout << " reached when expecting condition";
-  }
-
   string GetMyId() {
     return RunAdmin({"dflycluster", "myid"}).GetString();
   }

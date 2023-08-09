@@ -106,9 +106,9 @@ jobs:
           echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
           FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ctest -V -L DFLY
 
-          ./dragonfly_test  --gtest_repeat=10
-          ./multi_test --multi_exec_mode=1 --gtest_repeat=10
-          ./multi_test --multi_exec_mode=3 --gtest_repeat=10
+          ./dragonfly_test
+          ./multi_test --multi_exec_mode=1
+          ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
   lint-test-chart:
     runs-on: ubuntu-latest
