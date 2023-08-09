@@ -120,8 +120,10 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git describe --always --tags ${{ github.sha }}
           ./tools/release.sh
+          apt update && apt install -y pip jq
           # once the build is over, we want to generate a Debian package
-          ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
+          #./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
+          #
     - name: Run regression tests
       uses: ./.github/actions/regression-tests
       with:
