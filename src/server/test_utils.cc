@@ -68,7 +68,8 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
 
 void TransactionSuspension::Start() {
   CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0};
-  transaction_.reset(new dfly::Transaction{&cid});
+
+  transaction_ = new dfly::Transaction{&cid};
 
   auto st = transaction_->InitByArgs(0, {});
   CHECK_EQ(st, OpStatus::OK);
@@ -518,6 +519,21 @@ absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
   shard_set->pool()->AwaitFiberOnAll(add_keys);
 
   return result;
+}
+
+void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& condition,
+                                                  absl::Duration timeout) {
+  absl::Time deadline = absl::Now() + timeout;
+
+  while (deadline > absl::Now()) {
+    if (condition()) {
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+
+  EXPECT_LE(absl::Now(), deadline)
+      << "Timeout of " << timeout << " reached when expecting condition";
 }
 
 void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {

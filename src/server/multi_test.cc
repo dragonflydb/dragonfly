@@ -817,12 +817,8 @@ TEST_F(MultiTest, TestLockedKeys) {
     EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
   });
 
-  for (int i = 0; i < 1000; ++i) {
-    if (service_->IsLocked(0, "key1") && service_->IsLocked(0, "key2")) {
-      break;
-    }
-    ThisFiber::SleepFor(1ms);
-  }
+  ExpectConditionWithinTimeout(
+      [&]() { return service_->IsLocked(0, "key1") && service_->IsLocked(0, "key2"); });
 
   tx.Terminate();
   fb0.Join();
