@@ -1016,9 +1016,7 @@ bad_header:
 }
 
 Replica::Info Replica::GetInfo() const {
-  CHECK(Sock());
-
-  return Proactor()->AwaitBrief([this] {
+  auto f = [this]() {
     auto last_io_time = LastIoTime();
     for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
       last_io_time = std::max(last_io_time, flow->LastIoTime());
@@ -1032,7 +1030,21 @@ Replica::Info Replica::GetInfo() const {
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     return res;
-  });
+  };
+
+  if (ABSL_PREDICT_TRUE(Sock()))
+    return Proactor()->AwaitBrief(f);
+  else
+    return ProactorBase::me()->AwaitBrief(f);
+  /**
+   * when this branch happens: there is a very short grace period
+   * where Sock() is not initialized, yet the server can
+   * receive ROLE/INFO commands. That period happens when launching
+   * an instance with '--replicaof' and then \b immediately
+   * sending a command.
+   *
+   * In that instance, we have to run f() on the current fiber.
+   */
 }
 
 std::vector<uint64_t> Replica::GetReplicaOffset() const {

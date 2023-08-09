@@ -2078,6 +2078,9 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
       replica_.reset();
     }
 
+    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
+        << "Server is set to replica no one, yet state is not active!";
+
     return (*cntx)->SendOk();
   }
 
@@ -2157,9 +2160,6 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   // (and also because there is nothing to flush)
 
   ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
-
-  CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
-      << "error in switching state from LOADING to ACTIVE when replicating via --replicaof.";
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
