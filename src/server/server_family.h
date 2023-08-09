@@ -163,6 +163,9 @@ class ServerFamily {
   bool AwaitDispatches(absl::Duration timeout,
                        const std::function<bool(util::Connection*)>& filter);
 
+  // Sets the server to replicate another instance. Does not flush the database beforehand!
+  void Replicate(std::string_view host, std::string_view port);
+
  private:
   uint32_t shard_count() const {
     return shard_set->size();
@@ -192,7 +195,17 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  // Returns the number of loaded keys if successfull.
+  enum ActionOnConnectionFail {
+    kReturnOnError,        // if we fail to connect to master, return to err
+    kContinueReplication,  // continue attempting to connect to master, regardless of initial
+                           // failure
+  };
+
+  // REPLICAOF implementation. See arguments above
+  void ReplicaOfInternal(std::string_view host, std::string_view port, ConnectionContext* cntx,
+                         ActionOnConnectionFail on_error);
+
+  // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
 
   void SnapshotScheduling();

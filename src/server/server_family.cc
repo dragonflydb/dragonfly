@@ -25,6 +25,7 @@ extern "C" {
 #include "base/logging.h"
 #include "croncpp.h"  // cron::cronexpr
 #include "facade/dragonfly_connection.h"
+#include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "server/command_registry.h"
@@ -54,6 +55,18 @@ extern "C" {
 
 using namespace std;
 
+struct ReplicaOfFlag {
+  string host;
+  string port;
+
+  bool has_value() const {
+    return !host.empty() && !port.empty();
+  }
+};
+
+static bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err);
+static std::string AbslUnparseFlag(const ReplicaOfFlag& flag);
+
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump-{timestamp}", "the filename to save/load the DB");
 ABSL_FLAG(string, requirepass, "",
@@ -68,6 +81,10 @@ ABSL_FLAG(bool, df_snapshot_format, true,
 ABSL_FLAG(int, epoll_file_threads, 0,
           "thread size for file workers when running in epoll mode, default is hardware concurrent "
           "threads");
+ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
+          "Specifies a host and port which point to a target master "
+          "to replicate. "
+          "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -75,6 +92,54 @@ ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
+
+bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
+#define RETURN_ON_ERROR(cond, m)                                           \
+  do {                                                                     \
+    if ((cond)) {                                                          \
+      *err = m;                                                            \
+      LOG(WARNING) << "Error in parsing arguments for --replicaof: " << m; \
+      return false;                                                        \
+    }                                                                      \
+  } while (0)
+
+  if (in.empty()) {  // on empty flag "parse" nothing. If we return false then DF exists.
+    *flag = ReplicaOfFlag{};
+    return true;
+  }
+
+  auto pos = in.find_last_of(':');
+  RETURN_ON_ERROR(pos == string::npos, "missing ':'.");
+
+  string_view ip = in.substr(0, pos);
+  flag->port = in.substr(pos + 1);
+
+  RETURN_ON_ERROR(ip.empty() || flag->port.empty(), "IP/host or port are empty.");
+
+  // For IPv6: ip1.front == '[' AND ip1.back == ']'
+  // For IPv4: ip1.front != '[' AND ip1.back != ']'
+  // Together, this ip1.front == '[' iff ip1.back == ']', which can be implemented as XNOR (NOT XOR)
+  RETURN_ON_ERROR(((ip.front() == '[') ^ (ip.back() == ']')), "unclosed brackets.");
+
+  if (ip.front() == '[') {
+    // shortest possible IPv6 is '::1' (loopback)
+    RETURN_ON_ERROR(ip.length() <= 2, "IPv6 host name is too short");
+
+    flag->host = ip.substr(1, ip.length() - 2);
+    VLOG(1) << "received IP of type IPv6: " << flag->host;
+  } else {
+    flag->host = ip;
+    VLOG(1) << "received IP of type IPv4 (or a host): " << flag->host;
+  }
+
+  VLOG(1) << "--replicaof: Received " << flag->host << " :  " << flag->port;
+  return true;
+#undef RETURN_ON_ERROR
+}
+
+std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
+  return (flag.has_value()) ? absl::StrCat(flag.host, ":", flag.port) : "";
+}
 
 namespace dfly {
 
@@ -453,6 +518,10 @@ void ValidateServerTlsFlags() {
   }
 }
 
+bool IsReplicatingNoOne(string_view host, string_view port) {
+  return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
+}
+
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -593,6 +662,13 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   uint32_t period_ms = max(1u, 1000 / cache_hz);
   stats_caching_task_ =
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
+
+  // check for '--replicaof' before loading anything
+  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
+    service_.proactor_pool().GetNextProactor()->Await(
+        [this, &flag]() { this->Replicate(flag.host, flag.port); });
+    return;  // DONT load any snapshots
+  }
 
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
@@ -2000,12 +2076,10 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view host = ArgS(args, 0);
-  std::string_view port_s = ArgS(args, 1);
+void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
+                                     ActionOnConnectionFail on_err) {
   auto& pool = service_.proactor_pool();
-
-  LOG(INFO) << "Replicating " << host << ":" << port_s;
+  LOG(INFO) << "Replicating " << host << ":" << port_sv;
 
   // We lock to protect global state changes that we perform during the replication setup:
   // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
@@ -2020,7 +2094,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
 
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
+  if (IsReplicatingNoOne(host, port_sv)) {
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -2031,12 +2105,15 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
       replica_.reset();
     }
 
+    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
+        << "Server is set to replica no one, yet state is not active!";
+
     return (*cntx)->SendOk();
   }
 
   uint32_t port;
 
-  if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
+  if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
     (*cntx)->SendError(kInvalidIntErr);
     return;
   }
@@ -2058,20 +2135,20 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  // Flushing all the data after we marked this instance as replica.
-  Transaction* transaction = cntx->transaction;
-  transaction->Schedule();
-
-  auto cb = [](Transaction* t, EngineShard* shard) {
-    shard->db_slice().FlushDb(DbSlice::kDbAll);
-    return OpStatus::OK;
-  };
-  transaction->Execute(std::move(cb), true);
-
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
   lk.unlock();
-  error_code ec = new_replica->Start(cntx);
+  error_code ec{};
+
+  switch (on_err) {
+    case ActionOnConnectionFail::kReturnOnError:
+      ec = new_replica->Start(cntx);
+      break;
+    case ActionOnConnectionFail::kContinueReplication:  // set DF to replicate, and forget about it
+      new_replica->EnableReplication(cntx);
+      break;
+  };
+
   VLOG(1) << "Acquire replica lock";
   lk.lock();
 
@@ -2089,6 +2166,27 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   } else {
     new_replica->Stop();
   }
+}
+
+void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
+  string_view host = ArgS(args, 0);
+  string_view port = ArgS(args, 1);
+
+  // don't flush if input is NO ONE
+  if (!IsReplicatingNoOne(host, port))
+    Drakarys(cntx->transaction, DbSlice::kDbAll);
+
+  ReplicaOfInternal(host, port, cntx, ActionOnConnectionFail::kReturnOnError);
+}
+
+void ServerFamily::Replicate(string_view host, string_view port) {
+  io::NullSink sink;
+  ConnectionContext ctxt{&sink, nullptr};
+
+  // we don't flush the database as the context is null
+  // (and also because there is nothing to flush)
+
+  ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
