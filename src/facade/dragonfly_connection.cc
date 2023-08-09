@@ -14,6 +14,7 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
@@ -440,9 +441,6 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_ = service_->GetThreadLocalConnectionStats();
 
-  auto dispatch_fb =
-      fb2::Fiber(dfly::Launch::dispatch, "connection_dispatch", [&] { DispatchFiber(peer); });
-
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
@@ -479,7 +477,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   VLOG(1) << "Before dispatch_fb.join()";
-  dispatch_fb.Join();
+  if (dispatch_fb_.IsJoinable())
+    dispatch_fb_.Join();
   VLOG(1) << "After dispatch_fb.join()";
   service_->OnClose(cc_.get());
 
@@ -840,6 +839,12 @@ void Connection::ShutdownSelf() {
 }
 
 void Connection::Migrate(util::fb2::ProactorBase* dest) {
+  // Migrate is used only by replication, so it doesn't have properties of full-fledged
+  // connections
+  CHECK(!cc_->async_dispatch);
+  CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
+  CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
+
   owner()->Migrate(this, dest);
 }
 
@@ -873,12 +878,20 @@ void Connection::SendMonitorMessageAsync(string msg) {
 
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
+  DCHECK(owner());
+  DCHECK_EQ(ProactorBase::me(), owner()->socket()->proactor());
 
   if (cc_->conn_closing)
     return;
 
-  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+  if (!dispatch_fb_.IsJoinable()) {
+    DCHECK_EQ(dispatch_q_.size(), 0u);
+    auto* peer = socket_.get();
+    dispatch_fb_ =
+        fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
+  }
 
+  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   dispatch_q_.push_back(move(msg));
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.

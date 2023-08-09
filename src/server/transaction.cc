@@ -66,6 +66,9 @@ Transaction::~Transaction() {
 }
 
 void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
+  // Switching db index is only possible for non-atomic execution
+  DCHECK(!multi_ || (db_index_ == dbid || multi_->mode == NON_ATOMIC));
+
   global_ = false;
   db_index_ = dbid;
   full_args_ = args;

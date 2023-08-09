@@ -22,6 +22,13 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
     f(args[*keys.bonus]);
 }
 
+void CheckConnStateClean(const ConnectionState& state) {
+  DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
+  DCHECK(state.exec_info.body.empty());
+  DCHECK(!state.script_info);
+  DCHECK(!state.subscribe_info);
+}
+
 }  // namespace
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
@@ -124,6 +131,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{local_tx, &crb};
+  local_cntx.conn_state.db_index = cntx_->conn_state.db_index;
 
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
@@ -145,10 +153,15 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     local_cntx.cid = cmd->Cid();
     crb.SetReplyMode(cmd->ReplyMode());
 
-    local_tx->InitByArgs(parent_tx->GetDbIndex(), args);
+    local_tx->InitByArgs(local_cntx.conn_state.db_index, args);
     service_->InvokeCmd(cmd->Cid(), args, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
+
+    // Assert commands made no persistent state changes to stub context state
+    const auto& local_state = local_cntx.conn_state;
+    DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
+    CheckConnStateClean(local_state);
   }
 
   // ConnectionContext deletes the reply builder upon destruction, so
@@ -160,6 +173,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 }
 
 bool MultiCommandSquasher::ExecuteSquashed() {
+  DCHECK(!cntx_->conn_state.exec_info.IsCollecting());
+
   if (order_.empty())
     return false;
 
