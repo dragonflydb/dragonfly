@@ -2,8 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
-#include <absl/container/btree_map.h>
-#include <absl/container/btree_set.h>
+#include "core/sorted_map.h"
+
 #include <mimalloc.h>
 
 #include "base/gtest.h"
@@ -12,14 +12,14 @@
 
 extern "C" {
 #include "redis/zmalloc.h"
-#include "redis/zset.h"
 }
 
 using namespace std;
 
 namespace dfly {
 
-// TODO: to actually add tests covering sorted_map.
+using detail::SortedMap;
+
 class SortedMapTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -33,37 +33,25 @@ class SortedMapTest : public ::testing::Test {
   }
 };
 
-// not a real test, just to see how much memory is used by zskiplist.
-TEST_F(SortedMapTest, MemoryUsage) {
-  zskiplist* zsl = zslCreate();
-  std::vector<sds> sds_vec;
-  for (size_t i = 0; i < 10'000; ++i) {
-    sds_vec.push_back(sdsnew("f"));
-  }
-  size_t sz_before = zmalloc_used_memory_tl;
-  LOG(INFO) << "zskiplist before: " << sz_before << " bytes";
+TEST_F(SortedMapTest, Add) {
+  SortedMap sm;
+  int out_flags;
+  double new_score;
 
-  for (size_t i = 0; i < sds_vec.size(); ++i) {
-    zslInsert(zsl, i, sds_vec[i]);
-  }
-  LOG(INFO) << "zskiplist took: " << zmalloc_used_memory_tl - sz_before << " bytes";
-  zslFree(zsl);
+  sds ele = sdsnew("a");
+  int res = sm.Add(1.0, ele, 0, &out_flags, &new_score);
+  EXPECT_EQ(1, res);
+  EXPECT_EQ(ZADD_OUT_ADDED, out_flags);
+  EXPECT_EQ(1, new_score);
 
-  sds_vec.clear();
-  for (size_t i = 0; i < 10'000; ++i) {
-    sds_vec.push_back(sdsnew("f"));
-  }
+  res = sm.Add(2.0, ele, ZADD_IN_NX, &out_flags, &new_score);
+  EXPECT_EQ(1, res);
+  EXPECT_EQ(ZADD_OUT_NOP, out_flags);
 
-  MiMemoryResource mi_alloc(mi_heap_get_backing());
-  using AllocType = PMR_NS::polymorphic_allocator<std::pair<double, sds>>;
-  AllocType alloc(&mi_alloc);
-  absl::btree_set<pair<double, sds>, std::greater<pair<double, sds>>, AllocType> btree(alloc);
-
-  LOG(INFO) << "btree before: " << mi_alloc.used() << " bytes";
-  for (size_t i = 0; i < sds_vec.size(); ++i) {
-    btree.emplace(i, sds_vec[i]);
-  }
-  LOG(INFO) << "btree after: " << mi_alloc.used() << " bytes";
+  res = sm.Add(2.0, ele, ZADD_IN_INCR, &out_flags, &new_score);
+  EXPECT_EQ(1, res);
+  EXPECT_EQ(ZADD_OUT_UPDATED, out_flags);
+  EXPECT_EQ(3, new_score);
 }
 
 }  // namespace dfly
