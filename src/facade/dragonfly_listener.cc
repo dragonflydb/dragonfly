@@ -26,7 +26,9 @@ ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
 ABSL_FLAG(string, tls_ca_cert_file, "", "ca signed certificate to validate tls connections");
 ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
-ABSL_FLAG(uint32_t, tcp_keepalive, 300, "the period in seconds used to send ACKs to client");
+ABSL_FLAG(uint32_t, tcp_keepalive, 300,
+          "the period in seconds of inactivity after which keep-alives are triggerred,"
+          "the duration until an inactive connection is terminated is twice the specified time");
 
 #if 0
 enum TlsClientAuth {
