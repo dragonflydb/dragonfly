@@ -879,7 +879,7 @@ void Connection::SendMonitorMessageAsync(string msg) {
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(owner());
-  DCHECK_EQ(ProactorBase::me(), owner()->socket()->proactor());
+  DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
   if (cc_->conn_closing)
     return;
