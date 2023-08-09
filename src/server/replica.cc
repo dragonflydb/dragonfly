@@ -1032,19 +1032,20 @@ Replica::Info Replica::GetInfo() const {
     return res;
   };
 
-  if (ABSL_PREDICT_TRUE(Sock()))
+  if (Sock())
     return Proactor()->AwaitBrief(f);
-  else
-    return ProactorBase::me()->AwaitBrief(f);
-  /**
-   * when this branch happens: there is a very short grace period
-   * where Sock() is not initialized, yet the server can
-   * receive ROLE/INFO commands. That period happens when launching
-   * an instance with '--replicaof' and then \b immediately
-   * sending a command.
-   *
-   * In that instance, we have to run f() on the current fiber.
-   */
+  else {
+    /**
+     * when this branch happens: there is a very short grace period
+     * where Sock() is not initialized, yet the server can
+     * receive ROLE/INFO commands. That period happens when launching
+     * an instance with '--replicaof' and then immediately
+     * sending a command.
+     *
+     * In that instance, we have to run f() on the current fiber.
+     */
+    return f();
+  }
 }
 
 std::vector<uint64_t> Replica::GetReplicaOffset() const {
