@@ -263,6 +263,9 @@ class Transaction {
     return unique_shard_cnt_;
   }
 
+  // This method is meaningless if GetUniqueShardCnt() != 1.
+  ShardId GetUniqueShard() const;
+
   bool IsMulti() const {
     return bool(multi_);
   }

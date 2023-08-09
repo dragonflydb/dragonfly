@@ -1438,15 +1438,22 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     sinfo->keys.insert(KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i)));
   }
   sinfo->async_cmds_heap_limit = absl::GetFlag(FLAGS_multi_eval_squash_buffer);
-  DCHECK(cntx->transaction);
+  Transaction* tx = cntx->transaction;
+  CHECK(tx != nullptr);
 
-  bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx->transaction);
+  bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, tx);
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
   interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
 
-  Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
+  Interpreter::RunResult result;
+  if (tx->GetMultiMode() == Transaction::LOCK_AHEAD && tx->GetUniqueShardCnt() == 1) {
+    ShardId sid = tx->GetUniqueShard();
+    pp_.at(sid)->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+  } else {
+    result = interpreter->RunFunction(eval_args.sha, &error);
+  }
   absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
 
   if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
