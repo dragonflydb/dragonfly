@@ -42,6 +42,7 @@ runs:
 
     - name: Send notification on failure
       if: failure()
+      shell: bash
       run: |
         get_failed_tests() {
           local report_file=$1
@@ -66,5 +67,5 @@ runs:
         curl -s \
           -X POST \
           -H 'Content-Type: application/json' \
-          '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+          '${{ gspace-secret }}' \
           -d '{"text": "'"${message}"'"}'
