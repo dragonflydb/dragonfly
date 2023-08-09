@@ -807,6 +807,11 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
 }
 
 TEST_F(MultiTest, TestLockedKeys) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode != Transaction::LOCK_AHEAD) {
+    GTEST_SKIP() << "Skipped TestLockedKeys test because multi_exec_mode is not lock ahead";
+    return;
+  }
+
   TransactionSuspension tx;
   tx.Start();
 
