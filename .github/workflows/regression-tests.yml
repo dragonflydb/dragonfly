@@ -41,3 +41,4 @@ jobs:
         with:
           dfly-executable: dragonfly
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          run-only-on-ubuntu-latest: true
