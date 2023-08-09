@@ -1019,8 +1019,8 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
         ginfo.pending_size = raxSize(cg->pel);
         getConsumerGroupLag(s, cg, &ginfo);
         ginfo.pel_count = raxSize(cg->pel);
-        getGroupPEL(s, cg, &ginfo, 1);   // TODO : fix count
-        getConsumers(s, cg, &ginfo, 1);  // TODO : fix count
+        getGroupPEL(s, cg, &ginfo, count);
+        getConsumers(s, cg, &ginfo, count);
 
         group_info_vec.push_back(ginfo);
       }
@@ -1767,8 +1767,14 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
             (*cntx)->SendLong(ginfo.pel_count);
 
             (*cntx)->SendBulkString("pending");
-            (*cntx)->SendLong(
-                ginfo.pending_size);  // TODO : fix this, has to be array of pending events.
+            (*cntx)->StartArray(ginfo.stream_nack_vec.size());
+            for (const auto& pending_info : ginfo.stream_nack_vec) {
+              (*cntx)->StartArray(4);
+              (*cntx)->SendBulkString(StreamIdRepr(pending_info.pel_id));
+              (*cntx)->SendBulkString(pending_info.consumer_name);
+              (*cntx)->SendLong(pending_info.delivery_time);
+              (*cntx)->SendLong(pending_info.delivery_count);
+            }
 
             (*cntx)->SendBulkString("consumers");
             (*cntx)->StartArray(ginfo.consumer_info_vec.size());
