@@ -11,6 +11,7 @@ inputs:
 
 
 runs:
+  using: "composite"
   steps:
     - name: Run PyTests
       shell: bash
