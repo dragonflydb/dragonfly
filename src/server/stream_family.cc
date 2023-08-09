@@ -93,6 +93,7 @@ struct GroupInfo {
   streamID last_id;
   size_t pel_count;
   size_t entries_read;
+  size_t lag;
   vector<NACKInfo> stream_nack_vec;
   vector<ConsumerInfo> consumer_info_vec;
 };
@@ -912,8 +913,137 @@ vector<Record> streamWithRange(stream* s, streamID start, streamID end, int reve
   return records;
 }
 
+/* A helper that returns non-zero if the range from 'start' to `end`
+ * contains a tombstone.
+ *
+ * NOTE: this assumes that the caller had verified that 'start' is less than
+ * 's->last_id'. */
+int streamRangeHasTombstones(stream* s, streamID* start, streamID* end) {
+  streamID start_id, end_id;
+
+  if (!s->length || streamIDEqZero(&s->max_deleted_entry_id)) {
+    /* The stream is empty or has no tombstones. */
+    return 0;
+  }
+
+  if (streamCompareID(&s->first_id, &s->max_deleted_entry_id) > 0) {
+    /* The latest tombstone is before the first entry. */
+    return 0;
+  }
+
+  if (start) {
+    start_id = *start;
+  } else {
+    start_id.ms = 0;
+    start_id.seq = 0;
+  }
+
+  if (end) {
+    end_id = *end;
+  } else {
+    end_id.ms = UINT64_MAX;
+    end_id.seq = UINT64_MAX;
+  }
+
+  if (streamCompareID(&start_id, &s->max_deleted_entry_id) <= 0 &&
+      streamCompareID(&s->max_deleted_entry_id, &end_id) <= 0) {
+    /* start_id <= max_deleted_entry_id <= end_id: The range does include a tombstone. */
+    return 1;
+  }
+
+  /* The range doesn't includes a tombstone. */
+  return 0;
+}
+
+/* This function returns a value that is the ID's logical read counter, or its
+ * distance (the number of entries) from the first entry ever to have been added
+ * to the stream.
+ *
+ * A counter is returned only in one of the following cases:
+ * 1. The ID is the same as the stream's last ID. In this case, the returned
+ *    is the same as the stream's entries_added counter.
+ * 2. The ID equals that of the currently first entry in the stream, and the
+ *    stream has no tombstones. The returned value, in this case, is the result
+ *    of subtracting the stream's length from its added_entries, incremented by
+ *    one.
+ * 3. The ID less than the stream's first current entry's ID, and there are no
+ *    tombstones. Here the estimated counter is the result of subtracting the
+ *    stream's length from its added_entries.
+ * 4. The stream's added_entries is zero, meaning that no entries were ever
+ *    added.
+ *
+ * The special return value of ULLONG_MAX signals that the counter's value isn't
+ * obtainable. It is returned in these cases:
+ * 1. The provided ID, if it even exists, is somewhere between the stream's
+ *    current first and last entries' IDs, or in the future.
+ * 2. The stream contains one or more tombstones. */
+long long streamEstimateDistanceFromFirstEverEntry(stream* s, streamID* id) {
+  /* The counter of any ID in an empty, never-before-used stream is 0. */
+  if (!s->entries_added) {
+    return 0;
+  }
+
+  /* In the empty stream, if the ID is smaller or equal to the last ID,
+   * it can set to the current added_entries value. */
+  if (!s->length && streamCompareID(id, &s->last_id) < 1) {
+    return s->entries_added;
+  }
+
+  int cmp_last = streamCompareID(id, &s->last_id);
+  if (cmp_last == 0) {
+    /* Return the exact counter of the last entry in the stream. */
+    return s->entries_added;
+  } else if (cmp_last > 0) {
+    /* The counter of a future ID is unknown. */
+    return SCG_INVALID_ENTRIES_READ;
+  }
+
+  int cmp_id_first = streamCompareID(id, &s->first_id);
+  int cmp_xdel_first = streamCompareID(&s->max_deleted_entry_id, &s->first_id);
+  if (streamIDEqZero(&s->max_deleted_entry_id) || cmp_xdel_first < 0) {
+    /* There's definitely no fragmentation ahead. */
+    if (cmp_id_first < 0) {
+      /* Return the estimated counter. */
+      return s->entries_added - s->length;
+    } else if (cmp_id_first == 0) {
+      /* Return the exact counter of the first entry in the stream. */
+      return s->entries_added - s->length + 1;
+    }
+  }
+
+  /* The ID is either before an XDEL that fragments the stream or an arbitrary
+   * ID. Either case, so we can't make a prediction. */
+  return SCG_INVALID_ENTRIES_READ;
+}
+
 void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
   // TODO : implement this
+  int valid = 0;
+  long long lag = 0;
+
+  if (!s->entries_added) {
+    /* The lag of a newly-initialized stream is 0. */
+    lag = 0;
+    valid = 1;
+  } else if (cg->entries_read != SCG_INVALID_ENTRIES_READ &&
+             !streamRangeHasTombstones(s, &cg->last_id, NULL)) {
+    /* No fragmentation ahead means that the group's logical reads counter
+     * is valid for performing the lag calculation. */
+    lag = (long long)s->entries_added - cg->entries_read;
+    valid = 1;
+  } else {
+    /* Attempt to retrieve the group's last ID logical read counter. */
+    long long entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg->last_id);
+    if (entries_read != SCG_INVALID_ENTRIES_READ) {
+      /* A valid counter was obtained. */
+      lag = (long long)s->entries_added - entries_read;
+      valid = 1;
+    }
+  }
+
+  if (valid) {
+    ginfo->lag = lag;
+  }
 }
 
 void getGroupPEL(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
@@ -1758,10 +1888,10 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
             (*cntx)->SendBulkString(StreamIdRepr(ginfo.last_id));
 
             (*cntx)->SendBulkString("entries-read");
-            (*cntx)->SendLong(ginfo.entries_read);
+            (*cntx)->SendLong(ginfo.entries_read);  // TODO : check this, value is incorrect.
 
             (*cntx)->SendBulkString("lag");
-            (*cntx)->SendLong(1);  // TODO : fix
+            (*cntx)->SendLong(ginfo.lag);
 
             (*cntx)->SendBulkString("pel-count");
             (*cntx)->SendLong(ginfo.pel_count);
