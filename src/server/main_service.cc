@@ -1412,6 +1412,34 @@ const CommandId* Service::FindCmd(CmdArgList args) const {
   return res;
 }
 
+namespace {
+optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
+  if (tx.GetMultiMode() != Transaction::LOCK_AHEAD) {
+    return nullopt;
+  }
+
+  if (tx.GetUniqueShardCnt() != 1) {
+    return nullopt;
+  }
+
+  // At this point `tx` can run on a single shard, but we only return `true` if that shard !=
+  // current shard.
+
+  ShardId sid = tx.GetUniqueShard();
+  if (EngineShard::tlocal() == nullptr) {
+    // There is no current shard, so definitely run remotely
+    return sid;
+  }
+
+  if (EngineShard::tlocal()->shard_id() == sid) {
+    // Same shard, so no point in an extra Await() and a new Fiber
+    return nullopt;
+  }
+
+  return sid;
+}
+}  // namespace
+
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
@@ -1448,9 +1476,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
 
   Interpreter::RunResult result;
-  if (tx->GetMultiMode() == Transaction::LOCK_AHEAD && tx->GetUniqueShardCnt() == 1) {
-    ShardId sid = tx->GetUniqueShard();
-    pp_.at(sid)->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+  optional<ShardId> sid = GetRemoteShardToRunAt(*tx);
+  if (sid.has_value()) {
+    // If script runs on a single shard, we run it remotely to save hops.
+    pp_.at(sid.value())->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
   } else {
     result = interpreter->RunFunction(eval_args.sha, &error);
   }
