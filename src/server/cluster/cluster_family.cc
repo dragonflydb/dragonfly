@@ -23,6 +23,7 @@
 #include "server/replica.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/shared_thread_local.h"
 
 ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
 
@@ -43,7 +44,7 @@ constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only under admin port";
 
-thread_local shared_ptr<ClusterConfig> tl_cluster_config;
+using SharedClusterConfig = SharedThreadLocal<ClusterConfig>;
 
 }  // namespace
 
@@ -53,7 +54,7 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
 }
 
 ClusterConfig* ClusterFamily::cluster_config() {
-  return tl_cluster_config.get();
+  return SharedClusterConfig::Get();
 }
 
 ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
@@ -156,8 +157,8 @@ void ClusterShardsImpl(const ClusterShards& config, ConnectionContext* cntx) {
 void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
   if (ClusterConfig::IsEmulated()) {
     return ClusterShardsImpl({GetEmulatedShardInfo(cntx)}, cntx);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterShardsImpl(tl_cluster_config->GetConfig(), cntx);
+  } else if (SharedClusterConfig::HasValue()) {
+    return ClusterShardsImpl(SharedClusterConfig::Get()->GetConfig(), cntx);
   } else {
     return (*cntx)->SendError(kClusterNotConfigured);
   }
@@ -199,8 +200,8 @@ void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
 void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
   if (ClusterConfig::IsEmulated()) {
     return ClusterSlotsImpl({GetEmulatedShardInfo(cntx)}, cntx);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterSlotsImpl(tl_cluster_config->GetConfig(), cntx);
+  } else if (SharedClusterConfig::HasValue()) {
+    return ClusterSlotsImpl(SharedClusterConfig::Get()->GetConfig(), cntx);
   } else {
     return (*cntx)->SendError(kClusterNotConfigured);
   }
@@ -252,8 +253,9 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
   if (ClusterConfig::IsEmulated()) {
     return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, server_family_->master_id(), cntx);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterNodesImpl(tl_cluster_config->GetConfig(), server_family_->master_id(), cntx);
+  } else if (SharedClusterConfig::HasValue()) {
+    return ClusterNodesImpl(SharedClusterConfig::Get()->GetConfig(), server_family_->master_id(),
+                            cntx);
   } else {
     return (*cntx)->SendError(kClusterNotConfigured);
   }
@@ -314,8 +316,8 @@ void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
 void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
   if (ClusterConfig::IsEmulated()) {
     return ClusterInfoImpl({GetEmulatedShardInfo(cntx)}, cntx);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterInfoImpl(tl_cluster_config->GetConfig(), cntx);
+  } else if (SharedClusterConfig::HasValue()) {
+    return ClusterInfoImpl(SharedClusterConfig::Get()->GetConfig(), cntx);
   } else {
     return ClusterInfoImpl({}, cntx);
   }
@@ -496,17 +498,16 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   bool is_first_config = true;
   SlotSet before;
-  if (tl_cluster_config != nullptr) {
+  if (SharedClusterConfig::HasValue()) {
     is_first_config = false;
-    before = tl_cluster_config->GetOwnedSlots();
+    before = SharedClusterConfig::Get()->GetOwnedSlots();
   }
 
-  auto cb = [&](util::ProactorBase* pb) { tl_cluster_config = new_config; };
-  server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
+  SharedClusterConfig::Set(std::move(new_config));
 
-  DCHECK(tl_cluster_config != nullptr);
+  DCHECK(SharedClusterConfig::HasValue());
 
-  SlotSet after = tl_cluster_config->GetOwnedSlots();
+  SlotSet after = SharedClusterConfig::Get()->GetOwnedSlots();
 
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = GetDeletedSlots(is_first_config, before, after);
