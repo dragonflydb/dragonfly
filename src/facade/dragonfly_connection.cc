@@ -887,7 +887,8 @@ void Connection::SendAsync(MessageHandle msg) {
   if (!dispatch_fb_.IsJoinable()) {
     DCHECK_EQ(dispatch_q_.size(), 0u);
     auto* peer = socket_.get();
-    dispatch_fb_ = MakeFiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
+    dispatch_fb_ =
+        fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
   }
 
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
