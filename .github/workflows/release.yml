@@ -78,6 +78,7 @@ jobs:
             fi
             ./tools/release.sh
             ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-aarch64
+            mv dragonfly_*.deb build-opt/
     - name: Run regression tests
       uses: ./.github/actions/regression-tests
       with:
@@ -139,9 +140,6 @@ jobs:
       with:
         name: dragonfly-x86_64
         path: results-artifacts/*
-  run-regression-tests:
-    needs: build-native
-    uses: ./.github/workflows/reusable-regression-tests.yml
   publish_release:
     runs-on: ubuntu-latest
     needs: [build-native, build-qemu]

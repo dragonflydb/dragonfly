@@ -36,7 +36,7 @@ runs:
 
 
     - name: Run PyTests replication test
-      if: ${{ run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
+      if: ${{ inputs.run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
       shell: bash
       run: |
         cd ${GITHUB_WORKSPACE}/tests
