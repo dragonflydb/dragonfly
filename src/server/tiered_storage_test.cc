@@ -32,6 +32,13 @@ class TieredStorageTest : public BaseFamilyTest {
 void TieredStorageTest::SetUpTestSuite() {
   BaseFamilyTest::SetUpTestSuite();
   SetFlag(&FLAGS_spill_file_prefix, "/tmp/spill");
+
+  auto* force_epoll = absl::FindCommandLineFlag("force_epoll");
+  if (force_epoll->CurrentValue() == "true") {
+    LOG(WARNING) << "Tiered storage only works with io uring, skipping tests.";
+    // Exiting directly, as otherwise EngineShardSet will exit with error status.
+    exit(0);
+  }
 }
 
 void TieredStorageTest::FillExternalKeys(unsigned count) {

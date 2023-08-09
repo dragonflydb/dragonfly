@@ -97,6 +97,9 @@ jobs:
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
 
+          echo "Running tests with --force_epoll"
+          FLAGS_force_epoll=true ctest -V -L DFLY
+
           echo "Running tests with --cluster_mode=emulated"
           FLAGS_cluster_mode=emulated ctest -V -L DFLY
 

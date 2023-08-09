@@ -577,6 +577,10 @@ TEST_F(DflyEngineTest, Issue742) {
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
+  if (pp_->GetNextProactor()->GetKind() == util::ProactorBase::EPOLL) {
+    GTEST_SKIP() << "Defragmentation via idle task is only supported in io uring";
+  }
+
   absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.02);
   //  Fill data into dragonfly and then check if we have
   //  any location in memory to defrag. See issue #448 for details about this.
