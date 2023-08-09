@@ -622,6 +622,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
+  config_registry.Register("dir");
+  config_registry.Register("requirepass");
+  config_registry.Register("masterauth");
+  config_registry.Register("tcp_keepalive");
+
   pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);

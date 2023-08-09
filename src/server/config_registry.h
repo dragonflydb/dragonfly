@@ -15,6 +15,7 @@ class ConfigRegistry {
   using WriteCb = std::function<bool(const absl::CommandLineFlag&)>;
 
   ConfigRegistry& Register(std::string_view name, WriteCb cb);
+  ConfigRegistry& Register(std::string_view name);
 
   // Returns true if the value was updated.
   bool Set(std::string_view config_name, std::string_view value);

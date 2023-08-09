@@ -388,7 +388,7 @@ GenericError ValidateFilename(const fs::path& filename, bool new_version) {
 
   if (!filename.parent_path().empty() && !is_cloud_path) {
     return {absl::StrCat("filename may not contain directory separators (Got \"", filename.c_str(),
-                         "\")")};
+                         "\"). dbfilename should specify the filename without the directory")};
   }
 
   if (!filename.has_extension()) {
