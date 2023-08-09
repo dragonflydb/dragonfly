@@ -76,6 +76,17 @@ const CommandId* StoredCmd::Cid() const {
   return cid_;
 }
 
+ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
+                                     facade::CapturingReplyBuilder* crb)
+    : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
+  if (tx) {  // If we have a carrier transaction, this context is used for squashing
+    DCHECK(owner);
+    conn_state.db_index = owner->conn_state.db_index;
+    conn_state.squashing_info = {owner};
+  }
+  delete Inject(crb);  // deletes the previous reply builder.
+}
+
 void ConnectionContext::ChangeMonitor(bool start) {
   // This will either remove or register a new connection
   // at the "top level" thread --> ServerState context

@@ -123,21 +123,28 @@ struct ConnectionState {
     DflyVersion repl_version = DflyVersion::VER0;
   };
 
+  struct SquashingInfo {
+    const ConnectionContext* owner = nullptr;
+  };
+
   enum MCGetMask {
     FETCH_CAS_VER = 1,
   };
 
+ public:
   DbIndex db_index = 0;
 
   // used for memcache set/get commands.
   // For set op - it's the flag value we are storing along with the value.
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
+
   bool is_blocking = false;  // whether this connection is blocking on a command
 
   ExecInfo exec_info;
   ReplicationInfo replication_info;
 
+  std::optional<SquashingInfo> squashing_info;
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
 };
@@ -148,10 +155,8 @@ class ConnectionContext : public facade::ConnectionContext {
       : facade::ConnectionContext(stream, owner) {
   }
 
-  ConnectionContext(Transaction* tx, facade::CapturingReplyBuilder* crb)
-      : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
-    delete Inject(crb);  // deletes the previous reply builder.
-  }
+  ConnectionContext(const ConnectionContext* owner, Transaction* tx,
+                    facade::CapturingReplyBuilder* crb);
 
   struct DebugInfo {
     uint32_t shards_count = 0;

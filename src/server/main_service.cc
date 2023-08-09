@@ -190,28 +190,33 @@ auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
   return result;
 }
 
-std::string MakeMonitorMessage(const ConnectionState& conn_state,
-                               const facade::Connection* connection, CmdArgList args) {
-  std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", conn_state.db_index);
+std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* cid,
+                               CmdArgList tail_args) {
+  std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", cntx->conn_state.db_index);
 
-  if (conn_state.script_info) {
-    absl::StrAppend(&message, " lua] ");
+  if (cntx->conn_state.squashing_info)
+    cntx = cntx->conn_state.squashing_info->owner;
+
+  string endpoint;
+  if (cntx->conn_state.script_info) {
+    endpoint = "lua";
+  } else if (const auto* conn = cntx->owner(); conn != nullptr) {
+    endpoint = conn->RemoteEndpointStr();
   } else {
-    auto endpoint = connection == nullptr ? "REPLICATION:0" : connection->RemoteEndpointStr();
-    absl::StrAppend(&message, " ", endpoint, "] ");
+    endpoint = "REPLICATION:0";
   }
-  if (args.empty()) {
-    absl::StrAppend(&message, "error - empty cmd list!");
-  } else if (auto cmd_name = std::string_view(args[0].data(), args[0].size());
-             cmd_name == "AUTH") {  // we cannot just send auth details in this case
-    absl::StrAppend(&message, "\"", cmd_name, "\"");
-  } else {
-    message = std::accumulate(args.begin(), args.end(), message, [](auto str, const auto& cmd) {
-      absl::StrAppend(&str, " ", CmdEntryToMonitorFormat(std::string_view(cmd.data(), cmd.size())));
-      return str;
-    });
-  }
-  return message;
+  absl::StrAppend(&message, " ", endpoint, "] ");
+
+  absl::StrAppend(&message, "\"", cid->name(), "\"");
+
+  if (cid->name() == "AUTH")
+    return message;
+
+  auto accum = [](auto str, const auto& cmd) {
+    absl::StrAppend(&str, " ", CmdEntryToMonitorFormat(std::string_view(cmd.data(), cmd.size())));
+    return str;
+  };
+  return std::accumulate(tail_args.begin(), tail_args.end(), message, accum);
 }
 
 void SendMonitor(const std::string& msg) {
@@ -228,9 +233,9 @@ void SendMonitor(const std::string& msg) {
   }
 }
 
-void DispatchMonitor(ConnectionContext* cntx, CmdArgList args) {
+void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList tail_args) {
   //  We have connections waiting to get the info on the last command, send it to them
-  string monitor_msg = MakeMonitorMessage(cntx->conn_state, cntx->owner(), args);
+  string monitor_msg = MakeMonitorMessage(cntx, cid, tail_args);
 
   VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
 
@@ -880,14 +885,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     return (*cntx)->SendSimpleString("QUEUED");
   }
 
-  // We are not sending any admin command in the monitor, and we do not want to
-  // do any processing if we don't have any waiting connections with monitor
-  // enabled on them - see https://redis.io/commands/monitor/
-  const MonitorsRepo& monitors = etl.Monitors();
-  if (!monitors.Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
-    DispatchMonitor(dfly_cntx, args);
-  }
-
   uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
 
   // Create command transaction
@@ -953,6 +950,15 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return true;  // return false only for internal error aborts
   }
 
+  // We are not sending any admin command in the monitor, and we do not want to
+  // do any processing if we don't have any waiting connections with monitor
+  // enabled on them - see https://redis.io/commands/monitor/
+  ServerState& etl = *ServerState::tlocal();
+  const MonitorsRepo& monitors = etl.Monitors();
+  if (!monitors.Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
+    DispatchMonitor(cntx, cid, tail_args);
+  }
+
   try {
     cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
@@ -962,7 +968,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   if (record_stats) {
     DCHECK(cntx->transaction);
-    ServerState& etl = *ServerState::tlocal();
     bool is_ooo = cntx->transaction->IsOOO();
 
     cntx->last_command_debug.clock = cntx->transaction->txid();
