@@ -126,7 +126,7 @@ jobs:
     - name: Run regression tests
       uses: ./.github/actions/regression-tests
       with:
-        dfly-executable: dragonfly
+        dfly-executable: dragonfly-x86_64
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
         run-only-on-ubuntu-latest: false
           #    - name: Save artifacts
