@@ -35,6 +35,8 @@ jobs:
           cd ${GITHUB_WORKSPACE}/build-opt  && ninja dragonfly
           pwd
           ls -l ..
-  run-tests:
-    needs: build
-    uses: ./.github/workflows/reusable-regression-tests.yml
+
+      - name: Run regression tests action
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
