@@ -3,9 +3,6 @@ name: Version Release
 on:
   # push:
   # branches: [ main ]
-  push:
-     tags:
-     - '*'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -20,6 +17,7 @@ jobs:
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
+          tag: temp
           allowUpdates: true
           omitBody: true
           prerelease: true
