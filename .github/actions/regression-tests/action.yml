@@ -5,11 +5,15 @@ inputs:
   dfly-executable:
     required: true
     type: string
+  gspace-secret:
+    required: true
+    type: string
+
 
 runs:
   steps:
     - name: Run PyTests
-      timeout-minutes: 20
+      shell: bash
       run: |
         ls -l ${GITHUB_WORKSPACE}/
         cd ${GITHUB_WORKSPACE}/tests
@@ -25,7 +29,7 @@ runs:
 
     - name: Run PyTests replication test
       if: ${{ matrix.runner  == 'ubuntu-latest' }}
-      timeout-minutes: 20
+      shell: bash
       run: |
         cd ${GITHUB_WORKSPACE}/tests
         # used by PyTests

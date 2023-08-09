@@ -40,3 +40,4 @@ jobs:
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
