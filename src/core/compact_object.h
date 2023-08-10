@@ -41,10 +41,6 @@ class RobjWrapper {
   void SetString(std::string_view s, MemoryResource* mr);
   void Init(unsigned type, unsigned encoding, void* inner);
 
-  // Equivalent to zsetAdd
-  int AddZsetMember(std::string_view member, double score, int in_flags, int* out_flags,
-                    double* newscore);
-
   unsigned type() const {
     return type_;
   }

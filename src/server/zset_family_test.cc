@@ -525,7 +525,7 @@ TEST_F(ZSetFamilyTest, ZPopMax) {
 TEST_F(ZSetFamilyTest, ZAddPopCrash) {
   for (int i = 0; i < 129; ++i) {
     auto resp = Run({"zadd", "key", absl::StrCat(i), absl::StrCat("element:", i)});
-    EXPECT_THAT(resp, IntArg(1));
+    EXPECT_THAT(resp, IntArg(1)) << i;
   }
 
   auto resp = Run({"zpopmin", "key"});

@@ -946,6 +946,11 @@ string_view Transaction::Name() const {
   return cid_->name();
 }
 
+ShardId Transaction::GetUniqueShard() const {
+  DCHECK_EQ(GetUniqueShardCnt(), 1U);
+  return unique_shard_id_;
+}
+
 KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;

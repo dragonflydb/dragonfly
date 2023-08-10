@@ -7,7 +7,6 @@
 #ifdef DFLY_USE_SSL
 #include <openssl/ssl.h>
 #endif
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
@@ -27,6 +26,9 @@ ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
 ABSL_FLAG(string, tls_ca_cert_file, "", "ca signed certificate to validate tls connections");
 ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
+ABSL_FLAG(uint32_t, tcp_keepalive, 300,
+          "the period in seconds of inactivity after which keep-alives are triggerred,"
+          "the duration until an inactive connection is terminated is twice the specified time");
 
 #if 0
 enum TlsClientAuth {
@@ -99,21 +101,19 @@ SSL_CTX* CreateSslServerCntx() {
 }
 #endif
 
-bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
-  DCHECK_GT(interval_sec, 3u);
-
+bool ConfigureKeepAlive(int fd) {
   int val = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) < 0)
     return false;
 
-  val = interval_sec;
+  val = absl::GetFlag(FLAGS_tcp_keepalive);
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0)
     return false;
 
   /* Send next probes after the specified interval. Note that we set the
    * delay as interval / 3, as we send three probes before detecting
    * an error (see the next setsockopt call). */
-  val = interval_sec / 3;
+  val = std::max(val / 3, 1);
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0)
     return false;
 
@@ -153,12 +153,11 @@ util::Connection* Listener::NewConnection(ProactorBase* proactor) {
 
 error_code Listener::ConfigureServerSocket(int fd) {
   int val = 1;
-  constexpr int kInterval = 300;  // 300 seconds is ok to start checking for liveness.
 
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
-  bool success = ConfigureKeepAlive(fd, kInterval);
+  bool success = ConfigureKeepAlive(fd);
 
   if (!success) {
     int myerr = errno;

@@ -77,6 +77,9 @@ ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
+ABSL_FLAG(double, oom_deny_ratio, 1.1,
+          "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
+          "memory is above this value");
 
 bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err) {
   int64_t val;
@@ -583,6 +586,27 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
+  if (tx.GetMultiMode() != Transaction::LOCK_AHEAD) {
+    return nullopt;
+  }
+
+  if (tx.GetUniqueShardCnt() != 1) {
+    return nullopt;
+  }
+
+  // At this point `tx` can run on a single shard, but we only return `sid` if that shard !=
+  // current shard.
+
+  ShardId sid = tx.GetUniqueShard();
+
+  if (ServerState::tlocal()->thread_index() == sid) {
+    // Same shard, so no point in an extra Await() and a new Fiber
+    return nullopt;
+  }
+
+  return sid;
+}
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -622,6 +646,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     max_memory_limit = res->value;
     return true;
   });
+
+  config_registry.Register("dir");
+  config_registry.Register("requirepass");
+  config_registry.Register("masterauth");
+  config_registry.Register("tcp_keepalive");
 
   pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 
@@ -884,7 +913,15 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     return (*cntx)->SendSimpleString("QUEUED");
   }
 
-  uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
+  uint64_t start_ns = absl::GetCurrentTimeNanos();
+
+  if (cid->opt_mask() & CO::DENYOOM) {
+    int64_t used_memory = etl.GetUsedMemory(start_ns);
+    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
+    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
+      return (*cntx)->SendError(kOutOfMemory);
+    }
+  }
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
@@ -931,7 +968,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
-  end_ns = ProactorBase::GetMonotonicTimeNs();
+  uint64_t end_ns = ProactorBase::GetMonotonicTimeNs();
   request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
@@ -1265,12 +1302,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
-  uint32_t num_keys;
-
-  CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
-
   string_view body = ArgS(args, 0);
-  // body = absl::StripAsciiWhitespace(body);
 
   if (body.empty()) {
     return (*cntx)->SendNull();
@@ -1286,30 +1318,24 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
 
   string sha{move(res.value())};
 
-  EvalArgs eval_args;
-  eval_args.sha = sha;
-  eval_args.keys = args.subspan(2, num_keys);
-  eval_args.args = args.subspan(2 + num_keys);
-
-  uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(eval_args, interpreter, cntx);
-
-  uint64_t end = absl::GetCurrentTimeNanos();
-  ss->RecordCallLatency(sha, (end - start) / 1000);
+  CallSHA(args, sha, interpreter, cntx);
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
-  string_view num_keys_str = ArgS(args, 1);
-  uint32_t num_keys;
-
-  CHECK(absl::SimpleAtoi(num_keys_str, &num_keys));
-
   ToLower(&args[0]);
-
   string_view sha = ArgS(args, 0);
+
   ServerState* ss = ServerState::tlocal();
   auto interpreter = ss->BorrowInterpreter();
   absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
+
+  CallSHA(args, sha, interpreter, cntx);
+}
+
+void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter,
+                      ConnectionContext* cntx) {
+  uint32_t num_keys;
+  CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
 
   EvalArgs ev_args;
   ev_args.sha = sha;
@@ -1320,7 +1346,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   EvalInternal(ev_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
-  ss->RecordCallLatency(sha, (end - start) / 1000);
+  ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
 optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_mgr,
@@ -1426,15 +1452,23 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     sinfo->keys.insert(KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i)));
   }
   sinfo->async_cmds_heap_limit = absl::GetFlag(FLAGS_multi_eval_squash_buffer);
-  DCHECK(cntx->transaction);
+  Transaction* tx = cntx->transaction;
+  CHECK(tx != nullptr);
 
-  bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx->transaction);
+  bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, tx);
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
   interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
 
-  Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
+  Interpreter::RunResult result;
+  optional<ShardId> sid = GetRemoteShardToRunAt(*tx);
+  if (sid.has_value()) {
+    // If script runs on a single shard, we run it remotely to save hops.
+    pp_.at(sid.value())->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+  } else {
+    result = interpreter->RunFunction(eval_args.sha, &error);
+  }
   absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
 
   if (auto err = FlushEvalAsyncCmds(cntx, true); err) {

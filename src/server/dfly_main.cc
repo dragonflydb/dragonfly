@@ -203,6 +203,10 @@ bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
     if (remote_x > current_x) {
       return true;
     }
+
+    if (remote_x < current_x) {
+      return false;
+    }
   }
 
   return false;

@@ -21,6 +21,10 @@ ConfigRegistry& ConfigRegistry::Register(std::string_view name, WriteCb cb) {
   return *this;
 }
 
+ConfigRegistry& ConfigRegistry::Register(std::string_view name) {
+  return Register(name, [](const absl::CommandLineFlag& flag) { return true; });
+}
+
 // Returns true if the value was updated.
 bool ConfigRegistry::Set(std::string_view config_name, std::string_view value) {
   unique_lock lk(mu_);

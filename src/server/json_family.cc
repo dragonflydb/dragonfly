@@ -1796,19 +1796,17 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(StrLen);
   *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjLen);
   *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ArrLen);
-  *registry << CI{"JSON.TOGGLE", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Toggle);
-  *registry << CI{"JSON.NUMINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(
-      NumIncrBy);
-  *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(
-      NumMultBy);
+  *registry << CI{"JSON.TOGGLE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Toggle);
+  *registry << CI{"JSON.NUMINCRBY", CO::WRITE | CO::FAST, 4, 1, 1, 1}.HFUNC(NumIncrBy);
+  *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::FAST, 4, 1, 1, 1}.HFUNC(NumMultBy);
   *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, 1}.HFUNC(Del);
   *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, 1}.HFUNC(Del);  // An alias of JSON.DEL.
   *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjKeys);
   *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
       StrAppend);
-  *registry << CI{"JSON.CLEAR", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Clear);
-  *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::DENYOOM | CO::FAST, -3, 1, 1, 1}.HFUNC(ArrPop);
-  *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::DENYOOM | CO::FAST, 5, 1, 1, 1}.HFUNC(ArrTrim);
+  *registry << CI{"JSON.CLEAR", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Clear);
+  *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::FAST, -3, 1, 1, 1}.HFUNC(ArrPop);
+  *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::FAST, 5, 1, 1, 1}.HFUNC(ArrTrim);
   *registry << CI{"JSON.ARRINSERT", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
       ArrInsert);
   *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
