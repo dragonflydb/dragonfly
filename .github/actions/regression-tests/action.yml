@@ -39,6 +39,7 @@ runs:
       if: ${{ inputs.run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
       shell: bash
       run: |
+        echo "Running PyTests replication test with flag: ${{ inputs.run-only-on-ubuntu-latest }}"
         cd ${GITHUB_WORKSPACE}/tests
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build-opt/${{inputs.dfly-executable}}"
