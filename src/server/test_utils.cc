@@ -541,6 +541,16 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
       << "Timeout of " << timeout << " reached when expecting condition";
 }
 
+Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
+  TransactionSuspension tx;
+  tx.Start();
+  auto fb = pp_->at(1)->LaunchFiber([condition, tx = std::move(tx)]() mutable {
+    ExpectConditionWithinTimeout(condition);
+    tx.Terminate();
+  });
+  return fb;
+}
+
 void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
   auto* flag = absl::FindCommandLineFlag(flag_name);
   CHECK_NE(flag, nullptr);

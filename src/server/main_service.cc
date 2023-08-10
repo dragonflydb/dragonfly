@@ -1441,7 +1441,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   Transaction* tx = cntx->transaction;
   CHECK(tx != nullptr);
 
-  optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, tx);
+  optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
   if (!scheduled) {
     return;
   }

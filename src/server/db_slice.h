@@ -312,7 +312,7 @@ class DbSlice {
   }
 
   // Test hook to inspect last locked keys.
-  absl::flat_hash_set<std::string> TEST_GetLastLockedKeys() const {
+  absl::flat_hash_set<std::string_view> TEST_GetLastLockedKeys() const {
     return uniq_keys_;
   }
 
@@ -374,7 +374,7 @@ class DbSlice {
   DbTableArray db_arr_;
 
   // Used in temporary computations in Acquire/Release.
-  mutable absl::flat_hash_set<std::string> uniq_keys_;
+  mutable absl::flat_hash_set<std::string_view> uniq_keys_;
 
   // ordered from the smallest to largest version.
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
