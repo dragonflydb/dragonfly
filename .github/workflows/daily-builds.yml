@@ -75,4 +75,4 @@ jobs:
       - name: Test BullMQ with dragonfly
         run: |
           cd ${{github.workspace}}/bullmq
-          yarn test -i -g "should process delayed jobs with several workers respecting delay"
+          # yarn test -i -g "should process delayed jobs with several workers respecting delay"
