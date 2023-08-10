@@ -582,6 +582,27 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
+  if (tx.GetMultiMode() != Transaction::LOCK_AHEAD) {
+    return nullopt;
+  }
+
+  if (tx.GetUniqueShardCnt() != 1) {
+    return nullopt;
+  }
+
+  // At this point `tx` can run on a single shard, but we only return `sid` if that shard !=
+  // current shard.
+
+  ShardId sid = tx.GetUniqueShard();
+
+  if (ServerState::tlocal()->thread_index() == sid) {
+    // Same shard, so no point in an extra Await() and a new Fiber
+    return nullopt;
+  }
+
+  return sid;
+}
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1411,34 +1432,6 @@ const CommandId* Service::FindCmd(CmdArgList args) const {
   }
   return res;
 }
-
-namespace {
-optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
-  if (tx.GetMultiMode() != Transaction::LOCK_AHEAD) {
-    return nullopt;
-  }
-
-  if (tx.GetUniqueShardCnt() != 1) {
-    return nullopt;
-  }
-
-  // At this point `tx` can run on a single shard, but we only return `true` if that shard !=
-  // current shard.
-
-  ShardId sid = tx.GetUniqueShard();
-  if (EngineShard::tlocal() == nullptr) {
-    // There is no current shard, so definitely run remotely
-    return sid;
-  }
-
-  if (EngineShard::tlocal()->shard_id() == sid) {
-    // Same shard, so no point in an extra Await() and a new Fiber
-    return nullopt;
-  }
-
-  return sid;
-}
-}  // namespace
 
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
