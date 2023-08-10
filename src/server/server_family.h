@@ -64,8 +64,9 @@ struct Metrics {
   bool is_master = true;
 
   facade::ConnectionStats conn_stats;
-  absl::flat_hash_map<const char*, std::pair<uint64_t, uint64_t>>
-      cmd_stats_map;  // command statistics; see ServerState
+
+  // command statistics; see CommandId.
+  std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
 
   std::vector<ReplicaRoleInfo> replication_metrics;
 };

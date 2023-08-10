@@ -1006,17 +1006,11 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
 
   // Command stats
   {
-    vector<pair<const char*, pair<uint64_t, uint64_t>>> commands(m.cmd_stats_map.cbegin(),
-                                                                 m.cmd_stats_map.cend());
-
-    sort(commands.begin(), commands.end(),
-         [](const auto& s1, const auto& s2) { return std::strcmp(s1.first, s2.first) < 0; });
-
     string command_metrics;
 
     AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
                        &command_metrics);
-    for (const auto& [name, stat] : commands) {
+    for (const auto& [name, stat] : m.cmd_stats_map) {
       const auto calls = stat.first;
       const auto duration_seconds = stat.second * 0.001;
       AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
@@ -1597,15 +1591,15 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {
-    shard_set->pool()->Await([](auto*) {
+    shard_set->pool()->Await([registry = service_.mutable_registry()](unsigned index, auto*) {
+      registry->ResetCallStats(index);
       auto& sstate = *ServerState::tlocal();
-      sstate.cmd_stats_map.clear();
-
       auto& stats = sstate.connection_stats;
       stats.err_count_map.clear();
       stats.command_cnt = 0;
       stats.async_writes_cnt = 0;
     });
+
     return (*cntx)->SendOk();
   } else {
     return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
@@ -1676,7 +1670,7 @@ Metrics ServerFamily::GetMetrics() const {
 
   Mutex mu;
 
-  auto cb = [&](ProactorBase* pb) {
+  auto cb = [&](unsigned index, ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
     ServerState* ss = ServerState::tlocal();
 
@@ -1686,11 +1680,13 @@ Metrics ServerFamily::GetMetrics() const {
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
-    for (const auto& [k, v] : ss->cmd_stats_map) {
-      auto& ent = result.cmd_stats_map[k];
-      ent.first += v.first;
-      ent.second += v.second;
-    }
+
+    service_.mutable_registry()->MergeCallStats(
+        index, [&dest_map = result.cmd_stats_map](string_view name, const CmdCallStats& src) {
+          auto& ent = dest_map[string{name}];
+          ent.first += src.first;
+          ent.second += src.second;
+        });
 
     if (shard) {
       MergeInto(shard->db_slice().GetStats(), &result);
