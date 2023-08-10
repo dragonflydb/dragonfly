@@ -1040,7 +1040,7 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    bool is_multi =
+    const bool is_multi =
         dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
 
     if (!is_multi && cid != nullptr) {
