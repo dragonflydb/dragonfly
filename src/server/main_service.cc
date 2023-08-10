@@ -582,6 +582,27 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
+  if (tx.GetMultiMode() != Transaction::LOCK_AHEAD) {
+    return nullopt;
+  }
+
+  if (tx.GetUniqueShardCnt() != 1) {
+    return nullopt;
+  }
+
+  // At this point `tx` can run on a single shard, but we only return `sid` if that shard !=
+  // current shard.
+
+  ShardId sid = tx.GetUniqueShard();
+
+  if (ServerState::tlocal()->thread_index() == sid) {
+    // Same shard, so no point in an extra Await() and a new Fiber
+    return nullopt;
+  }
+
+  return sid;
+}
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1437,9 +1458,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
 
   Interpreter::RunResult result;
-  if (tx->GetMultiMode() == Transaction::LOCK_AHEAD && tx->GetUniqueShardCnt() == 1) {
-    ShardId sid = tx->GetUniqueShard();
-    pp_.at(sid)->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+  optional<ShardId> sid = GetRemoteShardToRunAt(*tx);
+  if (sid.has_value()) {
+    // If script runs on a single shard, we run it remotely to save hops.
+    pp_.at(sid.value())->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
   } else {
     result = interpreter->RunFunction(eval_args.sha, &error);
   }
