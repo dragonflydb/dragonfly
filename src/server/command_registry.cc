@@ -54,8 +54,7 @@ void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
   uint64_t before = absl::GetCurrentTimeNanos();
   handler_(std::move(args), cntx);
   uint64_t after = absl::GetCurrentTimeNanos();
-
-  auto& ent = ServerState::tlocal()->cmd_stats_map[cntx->cid->name().data()];
+  auto& ent = command_stats_[ServerState::tlocal()->thread_index()];
   ++ent.first;
   ent.second += (after - before) / 1000;
 }
@@ -86,6 +85,12 @@ CommandRegistry::CommandRegistry() {
       LOG(ERROR) << "Invalid rename_command flag, trying to give 2 names to a command";
       exit(1);
     }
+  }
+}
+
+void CommandRegistry::Init(unsigned int thread_count) {
+  for (auto& [_, cmd] : cmd_map_) {
+    cmd.Init(thread_count);
   }
 }
 
