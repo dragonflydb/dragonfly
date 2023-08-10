@@ -896,7 +896,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     DispatchMonitor(dfly_cntx, args);
   }
 
-  uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
+  uint64_t start_ns = absl::GetCurrentTimeNanos();
 
   if (cid->opt_mask() & CO::DENYOOM) {
     int64_t used_memory = etl.GetUsedMemory(start_ns);
@@ -951,7 +951,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
-  end_ns = ProactorBase::GetMonotonicTimeNs();
+  uint64_t end_ns = ProactorBase::GetMonotonicTimeNs();
   request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
@@ -1277,12 +1277,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
-  uint32_t num_keys;
-
-  CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
-
   string_view body = ArgS(args, 0);
-  // body = absl::StripAsciiWhitespace(body);
 
   if (body.empty()) {
     return (*cntx)->SendNull();
@@ -1298,30 +1293,24 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
 
   string sha{move(res.value())};
 
-  EvalArgs eval_args;
-  eval_args.sha = sha;
-  eval_args.keys = args.subspan(2, num_keys);
-  eval_args.args = args.subspan(2 + num_keys);
-
-  uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(eval_args, interpreter, cntx);
-
-  uint64_t end = absl::GetCurrentTimeNanos();
-  ss->RecordCallLatency(sha, (end - start) / 1000);
+  CallSHA(args, sha, interpreter, cntx);
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
-  string_view num_keys_str = ArgS(args, 1);
-  uint32_t num_keys;
-
-  CHECK(absl::SimpleAtoi(num_keys_str, &num_keys));
-
   ToLower(&args[0]);
-
   string_view sha = ArgS(args, 0);
+
   ServerState* ss = ServerState::tlocal();
   auto interpreter = ss->BorrowInterpreter();
   absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
+
+  CallSHA(args, sha, interpreter, cntx);
+}
+
+void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter,
+                      ConnectionContext* cntx) {
+  uint32_t num_keys;
+  CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
 
   EvalArgs ev_args;
   ev_args.sha = sha;
@@ -1332,7 +1321,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   EvalInternal(ev_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
-  ss->RecordCallLatency(sha, (end - start) / 1000);
+  ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
 optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_mgr,

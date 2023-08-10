@@ -140,6 +140,8 @@ class Service : public facade::ServiceInterface {
   const CommandId* FindCmd(CmdArgList args) const;
 
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
+  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
+               ConnectionContext* cntx);
 
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
