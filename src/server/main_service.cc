@@ -1979,6 +1979,9 @@ void Service::RegisterCommands() {
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
 
+  // Only after all the commands are registered
+  registry_.Init(pp_.size());
+
   if (VLOG_IS_ON(1)) {
     LOG(INFO) << "Multi-key commands are: ";
     registry_.Traverse([](std::string_view key, const CI& cid) {

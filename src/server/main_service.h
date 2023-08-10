@@ -68,6 +68,10 @@ class Service : public facade::ServiceInterface {
     return registry_.Find(cmd);
   }
 
+  CommandRegistry* mutable_registry() {
+    return &registry_;
+  }
+
   facade::ErrorReply ReportUnknownCmd(std::string_view cmd_name);
 
   // Returns: the new state.
