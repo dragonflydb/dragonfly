@@ -84,7 +84,8 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
     conn_state.db_index = owner->conn_state.db_index;
     conn_state.squashing_info = {owner};
   }
-  delete Inject(crb);  // deletes the previous reply builder.
+  auto* prev_reply_builder = Inject(crb);
+  CHECK_EQ(prev_reply_builder, nullptr);
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {

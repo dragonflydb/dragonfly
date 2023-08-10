@@ -212,11 +212,10 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
   if (cid->name() == "AUTH")
     return message;
 
-  auto accum = [](auto str, const auto& cmd) {
-    absl::StrAppend(&str, " ", CmdEntryToMonitorFormat(std::string_view(cmd.data(), cmd.size())));
-    return str;
-  };
-  return std::accumulate(tail_args.begin(), tail_args.end(), message, accum);
+  for (auto arg : tail_args)
+    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(facade::ToSV(arg)));
+
+  return message;
 }
 
 void SendMonitor(const std::string& msg) {
