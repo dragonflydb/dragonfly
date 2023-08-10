@@ -547,7 +547,19 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
 }
 
 void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
-  using io::Exists;
+  using absl::StrCat;
+
+  auto read_mem = [](string_view path, size_t* output) {
+    auto file = io::ReadFileToString(path);
+    DVLOG(1) << "container limits: read " << path << ": " << file.value_or("N/A");
+
+    size_t temp = numeric_limits<size_t>::max();
+
+    if (file.has_value() && !absl::StartsWith(*file, "max"))
+      CHECK(absl::SimpleAtoi(*file, &temp));
+
+    *output = min(*output, temp);
+  };
 
   string mem_path, cpu_path;
   auto err = GetCGroupPath(&mem_path, &cpu_path);
@@ -557,32 +569,22 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     return;
   }
 
-  auto original_memory = mdata->mem_total;
+  LOG(INFO) << "mem_path = " << mem_path;
+  LOG(INFO) << "cpu_path = " << cpu_path;
 
   /* Update memory limits */
-  auto mlimit = io::ReadFileToString(mem_path + "/memory.limit_in_bytes");
-  DVLOG(1) << "memory/memory.limit_in_bytes: " << mlimit.value_or("N/A");
 
-  if (mlimit && !absl::StartsWith(*mlimit, "max")) {
-    CHECK(absl::SimpleAtoi(*mlimit, &mdata->mem_total));
-  }
+  // Start by reading global memory limits
+  constexpr auto base = "/sys/fs/cgroup/memory"sv;
+  read_mem(StrCat(base, "/memory.limit_in_bytes"), &mdata->mem_total);
+  read_mem(StrCat(base, "/memory.max"), &mdata->mem_total);
 
-  auto mmax = io::ReadFileToString(mem_path + "/memory.max");
-  DVLOG(1) << "memory.max: " << mmax.value_or("N/A");
+  // Read cgroup-specific limits
+  read_mem(StrCat(mem_path, "/memory.limit_in_bytes"), &mdata->mem_total);
+  read_mem(StrCat(mem_path, "/memory.max"), &mdata->mem_total);
+  read_mem(StrCat(mem_path, "/memory.high"), &mdata->mem_avail);
 
-  if (mmax && !absl::StartsWith(*mmax, "max")) {
-    CHECK(absl::SimpleAtoi(*mmax, &mdata->mem_total));
-  }
-
-  mdata->mem_avail = mdata->mem_total;
-  auto mhigh = io::ReadFileToString(mem_path + "/memory.high");
-
-  if (mhigh && !absl::StartsWith(*mhigh, "max")) {
-    CHECK(absl::SimpleAtoi(*mhigh, &mdata->mem_avail));
-  }
-
-  if (numeric_limits<size_t>::max() == mdata->mem_total)
-    mdata->mem_avail = original_memory;
+  mdata->mem_avail = min(mdata->mem_avail, mdata->mem_total);
 
   /* Update thread limits */
 
