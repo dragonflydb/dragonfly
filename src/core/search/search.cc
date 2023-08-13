@@ -264,19 +264,19 @@ struct BasicSearch {
 }  // namespace
 
 FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, indices_{} {
-  for (auto& [field, type] : schema_.fields) {
-    switch (type) {
-      case Schema::TAG:
-        indices_[field] = make_unique<TagIndex>();
+  for (const auto& [field_name, field_info] : schema_.fields) {
+    switch (field_info.type) {
+      case SchemaField::TAG:
+        indices_[field_name] = make_unique<TagIndex>();
         break;
-      case Schema::TEXT:
-        indices_[field] = make_unique<TextIndex>();
+      case SchemaField::TEXT:
+        indices_[field_name] = make_unique<TextIndex>();
         break;
-      case Schema::NUMERIC:
-        indices_[field] = make_unique<NumericIndex>();
+      case SchemaField::NUMERIC:
+        indices_[field_name] = make_unique<NumericIndex>();
         break;
-      case Schema::VECTOR:
-        indices_[field] = make_unique<VectorIndex>();
+      case SchemaField::VECTOR:
+        indices_[field_name] = make_unique<VectorIndex>();
         break;
     }
   }
@@ -284,14 +284,14 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
 
 void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Add(doc, access, field);
+    index->Add(doc, access, schema_.fields[field].identifier);
   }
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
 }
 
 void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Remove(doc, access, field);
+    index->Remove(doc, access, schema_.fields[field].identifier);
   }
   auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
   CHECK(it != all_ids_.end() && *it == doc);
@@ -305,10 +305,10 @@ BaseIndex* FieldIndices::GetIndex(string_view field) const {
 
 std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   vector<TextIndex*> out;
-  for (auto& [field, type] : schema_.fields) {
-    if (type != Schema::TEXT)
+  for (auto& [field_name, field_info] : schema_.fields) {
+    if (field_info.type != SchemaField::TEXT)
       continue;
-    auto* index = dynamic_cast<TextIndex*>(GetIndex(field));
+    auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));
     DCHECK(index);
     out.push_back(index);
   }

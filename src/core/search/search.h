@@ -19,10 +19,15 @@ namespace dfly::search {
 struct AstNode;
 struct TextIndex;
 
-struct Schema {
+struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
-  absl::flat_hash_map<std::string, FieldType> fields;
+  std::string identifier;
+  FieldType type;
+};
+
+struct Schema {
+  absl::flat_hash_map<std::string, SchemaField> fields;
 };
 
 // Collection of indices for all fields in schema

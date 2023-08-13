@@ -68,10 +68,18 @@ struct MockedDocument : public DocumentAccessor {
   Map fields_{};
 };
 
+Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+  Schema schema;
+  for (auto [name, type] : ilist) {
+    schema.fields[name] = {string{name}, type};
+  }
+  return schema;
+}
+
 class SearchParserTest : public ::testing::Test {
  protected:
   SearchParserTest() {
-    PrepareSchema();
+    PrepareSchema({{"field", SchemaField::TEXT}});
   }
 
   ~SearchParserTest() {
@@ -82,8 +90,8 @@ class SearchParserTest : public ::testing::Test {
     params_.knn_vec = vec;
   }
 
-  void PrepareSchema(Schema schema = {{{"field", Schema::TEXT}}}) {
-    schema_ = schema;
+  void PrepareSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
+    schema_ = MakeSimpleSchema(ilist);
   }
 
   void PrepareQuery(string_view query) {
@@ -248,7 +256,7 @@ TEST_F(SearchParserTest, CheckParenthesisPriority) {
 using Map = MockedDocument::Map;
 
 TEST_F(SearchParserTest, MatchField) {
-  PrepareSchema({{{"f1", Schema::TEXT}, {"f2", Schema::TEXT}, {"f3", Schema::TEXT}}});
+  PrepareSchema({{"f1", SchemaField::TEXT}, {"f2", SchemaField::TEXT}, {"f3", SchemaField::TEXT}});
   PrepareQuery("@f1:foo @f2:bar @f3:baz");
 
   ExpectAll(Map{{"f1", "foo"}, {"f2", "bar"}, {"f3", "baz"}});
@@ -260,7 +268,7 @@ TEST_F(SearchParserTest, MatchField) {
 }
 
 TEST_F(SearchParserTest, MatchRange) {
-  PrepareSchema({{{"f1", Schema::NUMERIC}, {"f2", Schema::NUMERIC}}});
+  PrepareSchema({{"f1", SchemaField::NUMERIC}, {"f2", SchemaField::NUMERIC}});
   PrepareQuery("@f1:[1 10] @f2:[50 100]");
 
   ExpectAll(Map{{"f1", "5"}, {"f2", "50"}}, Map{{"f1", "1"}, {"f2", "100"}},
@@ -277,7 +285,7 @@ TEST_F(SearchParserTest, MatchStar) {
 }
 
 TEST_F(SearchParserTest, CheckExprInField) {
-  PrepareSchema({{{"f1", Schema::TEXT}, {"f2", Schema::TEXT}, {"f3", Schema::TEXT}}});
+  PrepareSchema({{"f1", SchemaField::TEXT}, {"f2", SchemaField::TEXT}, {"f3", SchemaField::TEXT}});
   {
     PrepareQuery("@f1:(a|b) @f2:(c d) @f3:-e");
 
@@ -300,7 +308,7 @@ TEST_F(SearchParserTest, CheckExprInField) {
 }
 
 TEST_F(SearchParserTest, CheckTag) {
-  PrepareSchema({{{"f1", Schema::TAG}, {"f2", Schema::TAG}}});
+  PrepareSchema({{"f1", SchemaField::TAG}, {"f2", SchemaField::TAG}});
 
   PrepareQuery("@f1:{red | blue} @f2:{circle | square}");
 
@@ -316,7 +324,7 @@ TEST_F(SearchParserTest, CheckTag) {
 }
 
 TEST_F(SearchParserTest, SimpleKnn) {
-  Schema schema{{{"even", Schema::TAG}, {"pos", Schema::VECTOR}}};
+  auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   FieldIndices indices{schema};
 
   // Place points on a straight line
@@ -366,7 +374,7 @@ TEST_F(SearchParserTest, Simple2dKnn) {
   // 0      1
   const pair<float, float> kTestCoords[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0.5, 0.5}};
 
-  Schema schema{{{"pos", Schema::VECTOR}}};
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   FieldIndices indices{schema};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {

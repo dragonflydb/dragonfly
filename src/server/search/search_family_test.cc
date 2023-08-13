@@ -89,10 +89,11 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_THAT(info, RespArray(ElementsAre(
-                        _, _, "fields",
-                        RespArray(ElementsAre(RespArray(ElementsAre("name", "type", "TEXT")))),
-                        "num_docs", IntArg(15))));
+  EXPECT_THAT(
+      info, RespArray(ElementsAre(_, _, "fields",
+                                  RespArray(ElementsAre(RespArray(ElementsAre(
+                                      "identifier", "name", "attribute", "name", "type", "TEXT")))),
+                                  "num_docs", IntArg(15))));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
@@ -132,7 +133,9 @@ TEST_F(SearchFamilyTest, Json) {
   Run({"json.set", "k2", ".", R"({"a": "another test", "b": "more details"})"});
   Run({"json.set", "k3", ".", R"({"a": "last test", "b": "secret details"})"});
 
-  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "a", "text", "b", "text"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "$.a", "as", "a", "text", "$.b", "as",
+                 "b", "text"}),
+            "OK");
 
   EXPECT_THAT(Run({"ft.search", "i1", "some|more"}), AreDocIds("k1", "k2"));
   EXPECT_THAT(Run({"ft.search", "i1", "some|more|secret"}), AreDocIds("k1", "k2", "k3"));
@@ -143,6 +146,18 @@ TEST_F(SearchFamilyTest, Json) {
 
   EXPECT_THAT(Run({"ft.search", "i1", "none"}), kNoResults);
   EXPECT_THAT(Run({"ft.search", "i1", "@a:small @b:secret"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, AttributesJsonPaths) {
+  Run({"json.set", "k1", ".", R"(   {"nested": {"value": "no"}} )"});
+  Run({"json.set", "k2", ".", R"(   {"nested": {"value": "yes"}} )"});
+  Run({"json.set", "k3", ".", R"(   {"nested": {"value": "maybe"}} )"});
+
+  EXPECT_EQ(
+      Run({"ft.create", "i1", "on", "json", "schema", "$.nested.value", "as", "value", "text"}),
+      "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "yes"}), AreDocIds("k2"));
 }
 
 TEST_F(SearchFamilyTest, Tags) {

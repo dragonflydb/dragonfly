@@ -55,6 +55,8 @@ struct StringMapAccessor : public BaseAccessor {
 
 // Accessor for json values
 struct JsonAccessor : public BaseAccessor {
+  struct JsonPathContainer;  // contains jsoncons::jsonpath::jsonpath_expression
+
   explicit JsonAccessor(JsonType* json) : json_{json} {
   }
 
@@ -63,8 +65,14 @@ struct JsonAccessor : public BaseAccessor {
   SearchDocData Serialize(search::Schema schema) const override;
 
  private:
-  mutable std::string buf_;
+  JsonPathContainer* GetPath(std::string_view field) const;
+
   JsonType* json_;
+  mutable std::string buf_;
+
+  // Contains built json paths to avoid parsing them repeatedly
+  static thread_local absl::flat_hash_map<std::string, std::unique_ptr<JsonPathContainer>>
+      path_cache_;
 };
 
 // Get accessor for value

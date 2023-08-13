@@ -8,6 +8,7 @@
 #include <absl/strings/str_join.h>
 
 #include <jsoncons/json.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 
 #include "core/json_object.h"
 #include "core/search/search.h"
@@ -55,7 +56,7 @@ SearchDocData ListPackAccessor::Serialize(search::Schema schema) const {
     string_view v = container_utils::LpGetView(fptr, intbuf_[1].data());
     fptr = lpNext(lp_, fptr);
 
-    if (schema.fields.at(k) == search::Schema::VECTOR)
+    if (schema.fields.at(k).type == search::SchemaField::VECTOR)
       out[k] = FtVectorToString(GetVector(k));
     else
       out[k] = v;
@@ -78,7 +79,7 @@ SearchDocData StringMapAccessor::Serialize(search::Schema schema) const {
     string_view k = SdsToSafeSv(kptr);
     string_view v = SdsToSafeSv(vptr);
 
-    if (schema.fields.at(k) == search::Schema::VECTOR)
+    if (schema.fields.at(k).type == search::SchemaField::VECTOR)
       out[k] = FtVectorToString(GetVector(k));
     else
       out[k] = v;
@@ -87,16 +88,45 @@ SearchDocData StringMapAccessor::Serialize(search::Schema schema) const {
   return out;
 }
 
+struct JsonAccessor::JsonPathContainer : public jsoncons::jsonpath::jsonpath_expression<JsonType> {
+};
+
 string_view JsonAccessor::GetString(string_view active_field) const {
-  buf_ = json_->get_value_or<string>(active_field, string{});
+  auto res = GetPath(active_field)->evaluate(*json_);
+  DCHECK(res.is_array());
+  if (res.empty())
+    return "";
+  buf_ = res[0].as_string();
   return buf_;
 }
 
 search::FtVector JsonAccessor::GetVector(string_view active_field) const {
+  auto res = GetPath(active_field)->evaluate(*json_);
+  DCHECK(res.is_array());
+  if (res.empty())
+    return {};
+
   search::FtVector out;
-  for (auto v : json_->at(active_field).array_range())
+  for (auto v : res[0].array_range())
     out.push_back(v.as<float>());
   return out;
+}
+
+JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) const {
+  if (auto it = path_cache_.find(field); it != path_cache_.end()) {
+    return it->second.get();
+  } else {
+    error_code ec;
+    auto path_expr = jsoncons::jsonpath::make_expression<JsonType>(field, ec);
+    DCHECK(!ec) << "missing validation on ft.create step";
+
+    JsonPathContainer path_container{move(path_expr)};
+    auto ptr = make_unique<JsonPathContainer>(move(path_container));
+
+    JsonPathContainer* path = ptr.get();
+    path_cache_[field] = move(ptr);
+    return path;
+  }
 }
 
 SearchDocData JsonAccessor::Serialize(search::Schema schema) const {
@@ -106,6 +136,9 @@ SearchDocData JsonAccessor::Serialize(search::Schema schema) const {
   }
   return out;
 }
+
+thread_local absl::flat_hash_map<std::string, std::unique_ptr<JsonAccessor::JsonPathContainer>>
+    JsonAccessor::path_cache_;
 
 unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON);
