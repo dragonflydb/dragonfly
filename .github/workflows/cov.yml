@@ -1,9 +1,6 @@
 name: Daily Coverage
 
 on:
-    pull_request:
-        branches: [main]
-    # TODO: Remove this. This is for testing
     schedule:
       - cron: '0 6 * * *' # run at 6 AM UTC
     workflow_dispatch:
