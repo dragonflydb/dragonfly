@@ -22,3 +22,17 @@ tls:
     AwEHoUQDQgAEFjX07jY4TxIu4dXIgktCLXyoIgYcSxpRdzLY5RU4wq85Mp0kgAaD
     LTZY3AxNIZv4s20VKIAHAxXL5J7woc8Wqg==
     -----END EC PRIVATE KEY-----
+
+extraObjects:
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: dfly-password
+  stringData:
+    password: foobar
+
+passwordFromSecret:
+  enable: true
+  existingSecret:
+    name: dfly-password
+    key: password
