@@ -7,8 +7,9 @@
 #include <xxhash.h>
 
 namespace dfly {
+
 User::User() {
-  //acl_categories_ = AclCat::ACL_CATEGORY_ADMIN;
+  // acl_categories_ = AclCat::ACL_CATEGORY_ADMIN;
 }
 
 void User::Update(UpdateRequest&& req) {
