@@ -17,8 +17,9 @@ namespace dfly {
 
 class CommandId;
 
-bool CheckIfCommandAllowed(uint64_t command_id, const CommandId& command);
-bool CheckIfAclCategoryAllowed(uint64_t command_id, const CommandId& command);
+// TODO implement these
+//#bool CheckIfCommandAllowed(uint64_t command_id, const CommandId& command);
+//#bool CheckIfAclCategoryAllowed(uint64_t command_id, const CommandId& command);
 
 namespace AclCat {
 /* There are 21 ACL categories as of redis 7
@@ -49,27 +50,29 @@ namespace AclCat {
  *
  * bits 21..31: tba
  */
-inline constexpr uint32_t ACL_CATEGORY_KEYSPACE = 1ULL << 0;
-inline constexpr uint32_t ACL_CATEGORY_READ = 1ULL << 1;
-inline constexpr uint32_t ACL_CATEGORY_WRITE = 1ULL << 2;
-inline constexpr uint32_t ACL_CATEGORY_SET = 1ULL << 3;
-inline constexpr uint32_t ACL_CATEGORY_SORTEDSET = 1ULL << 4;
-inline constexpr uint32_t ACL_CATEGORY_LIST = 1ULL << 5;
-inline constexpr uint32_t ACL_CATEGORY_HASH = 1ULL << 6;
-inline constexpr uint32_t ACL_CATEGORY_STRING = 1ULL << 7;
-inline constexpr uint32_t ACL_CATEGORY_BITMAP = 1ULL << 8;
-inline constexpr uint32_t ACL_CATEGORY_HYPERLOGLOG = 1ULL << 9;
-inline constexpr uint32_t ACL_CATEGORY_GEO = 1ULL << 10;
-inline constexpr uint32_t ACL_CATEGORY_STREAM = 1ULL << 11;
-inline constexpr uint32_t ACL_CATEGORY_PUBSUB = 1ULL << 12;
-inline constexpr uint32_t ACL_CATEGORY_ADMIN = 1ULL << 13;
-inline constexpr uint32_t ACL_CATEGORY_FAST = 1ULL << 14;
-inline constexpr uint32_t ACL_CATEGORY_SLOW = 1ULL << 15;
-inline constexpr uint32_t ACL_CATEGORY_BLOCKING = 1ULL << 16;
-inline constexpr uint32_t ACL_CATEGORY_DANGEROUS = 1ULL << 17;
-inline constexpr uint32_t ACL_CATEGORY_CONNECTION = 1ULL << 18;
-inline constexpr uint32_t ACL_CATEGORY_TRANSACTION = 1ULL << 19;
-inline constexpr uint32_t ACL_CATEGORY_SCRIPTING = 1ULL << 20;
+enum AclCat {
+  ACL_CATEGORY_KEYSPACE = 1ULL << 0,
+  ACL_CATEGORY_READ = 1ULL << 1,
+  ACL_CATEGORY_WRITE = 1ULL << 2,
+  ACL_CATEGORY_SET = 1ULL << 3,
+  ACL_CATEGORY_SORTEDSET = 1ULL << 4,
+  ACL_CATEGORY_LIST = 1ULL << 5,
+  ACL_CATEGORY_HASH = 1ULL << 6,
+  ACL_CATEGORY_STRING = 1ULL << 7,
+  ACL_CATEGORY_BITMAP = 1ULL << 8,
+  ACL_CATEGORY_HYPERLOGLOG = 1ULL << 9,
+  ACL_CATEGORY_GEO = 1ULL << 10,
+  ACL_CATEGORY_STREAM = 1ULL << 11,
+  ACL_CATEGORY_PUBSUB = 1ULL << 12,
+  ACL_CATEGORY_ADMIN = 1ULL << 13,
+  ACL_CATEGORY_FAST = 1ULL << 14,
+  ACL_CATEGORY_SLOW = 1ULL << 15,
+  ACL_CATEGORY_BLOCKING = 1ULL << 16,
+  ACL_CATEGORY_DANGEROUS = 1ULL << 17,
+  ACL_CATEGORY_CONNECTION = 1ULL << 18,
+  ACL_CATEGORY_TRANSACTION = 1ULL << 19,
+  ACL_CATEGORY_SCRIPTING = 1ULL << 20
+};
 
 // Special flag/mask for all
 inline constexpr uint32_t ACL_CATEGORY_NONE = 0;
@@ -102,14 +105,14 @@ inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABL
 class User final {
  public:
   struct UpdateRequest {
-    std::optional<std::string> password;
+    std::optional<std::string> password{};
 
-    std::optional<uint32_t> plus_acl_categories;
-    std::optional<uint32_t> minus_acl_categories;
+    std::optional<uint32_t> plus_acl_categories{};
+    std::optional<uint32_t> minus_acl_categories{};
 
     // DATATYPE_BITSET commands;
 
-    std::optional<bool> is_active;
+    std::optional<bool> is_active{};
   };
 
   /* Used for default user
@@ -153,7 +156,7 @@ class User final {
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64
   std::optional<uint64_t> password_;
-  uint32_t acl_categories_{0};
+  uint32_t acl_categories_{AclCat::ACL_CATEGORY_NONE};
 
   // we have at least 221 commands including a bunch of subcommands
   //  LARGE_BITFIELD_DATATYPE acl_commands_;

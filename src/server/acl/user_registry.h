@@ -6,9 +6,11 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
-#include "server/acl/user.h"
 
 #include <string>
+
+#include "core/fibers.h"
+#include "server/acl/user.h"
 
 namespace dfly {
 
@@ -49,7 +51,7 @@ class UserRegistry {
  private:
   absl::flat_hash_map<std::string, User> registry_;
   // TODO add abseil mutex attributes
-  mutable absl::Mutex mu_;
+  mutable util::SharedMutex mu_;
 };
 
 }  // namespace dfly
