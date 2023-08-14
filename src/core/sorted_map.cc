@@ -158,34 +158,6 @@ optional<double> SortedMap::RdImpl::GetScore(sds member) const {
   return *(double*)dictGetVal(de);
 }
 
-int SortedMap::DfImpl::Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
-  LOG(FATAL) << "TBD";
-  return 0;
-}
-
-optional<double> SortedMap::DfImpl::GetScore(sds ele) const {
-  LOG(FATAL) << "TBD";
-  return std::nullopt;
-}
-
-void SortedMap::DfImpl::Init() {
-  LOG(FATAL) << "TBD";
-}
-
-void SortedMap::DfImpl::Free() {
-  LOG(FATAL) << "TBD";
-}
-
-bool SortedMap::DfImpl::Insert(double score, sds member) {
-  LOG(FATAL) << "TBD";
-  return false;
-}
-
-optional<unsigned> SortedMap::DfImpl::GetRank(sds ele, bool reverse) const {
-  LOG(FATAL) << "TBD";
-  return std::nullopt;
-}
-
 SortedMap::ScoredArray SortedMap::RdImpl::GetRange(const zrangespec& range, unsigned offset,
                                                    unsigned limit, bool reverse) const {
   /* If reversed, get the last node in range as starting point. */
@@ -215,12 +187,6 @@ SortedMap::ScoredArray SortedMap::RdImpl::GetRange(const zrangespec& range, unsi
     ln = Next(reverse, ln);
   }
   return result;
-}
-
-SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsigned offset,
-                                                   unsigned limit, bool reverse) const {
-  LOG(FATAL) << "TBD";
-  return {};
 }
 
 SortedMap::ScoredArray SortedMap::RdImpl::GetLexRange(const zlexrangespec& range, unsigned offset,
@@ -259,12 +225,6 @@ SortedMap::ScoredArray SortedMap::RdImpl::GetLexRange(const zlexrangespec& range
   return result;
 }
 
-SortedMap::ScoredArray SortedMap::DfImpl::GetLexRange(const zlexrangespec& range, unsigned offset,
-                                                      unsigned limit, bool reverse) const {
-  LOG(FATAL) << "TBD";
-  return {};
-}
-
 uint8_t* SortedMap::RdImpl::ToListPack() const {
   uint8_t* lp = lpNew(0);
 
@@ -278,11 +238,6 @@ uint8_t* SortedMap::RdImpl::ToListPack() const {
   }
 
   return lp;
-}
-
-uint8_t* SortedMap::DfImpl::ToListPack() const {
-  LOG(FATAL) << "TBD";
-  return nullptr;
 }
 
 bool SortedMap::RdImpl::Delete(sds member) {
@@ -307,11 +262,6 @@ bool SortedMap::RdImpl::Delete(sds member) {
   DCHECK(retval);
 
   return true;
-}
-
-bool SortedMap::DfImpl::Delete(sds ele) {
-  LOG(FATAL) << "TBD";
-  return false;
 }
 
 SortedMap::ScoredArray SortedMap::RdImpl::PopTopScores(unsigned count, bool reverse) {
@@ -404,6 +354,56 @@ bool SortedMap::RdImpl::Iterate(unsigned start_rank, unsigned len, bool reverse,
       break;
   }
   return success;
+}
+
+int SortedMap::DfImpl::Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
+  LOG(FATAL) << "TBD";
+  return 0;
+}
+
+optional<double> SortedMap::DfImpl::GetScore(sds ele) const {
+  LOG(FATAL) << "TBD";
+  return std::nullopt;
+}
+
+void SortedMap::DfImpl::Init() {
+  LOG(FATAL) << "TBD";
+}
+
+void SortedMap::DfImpl::Free() {
+  LOG(FATAL) << "TBD";
+}
+
+bool SortedMap::DfImpl::Insert(double score, sds member) {
+  LOG(FATAL) << "TBD";
+  return false;
+}
+
+optional<unsigned> SortedMap::DfImpl::GetRank(sds ele, bool reverse) const {
+  LOG(FATAL) << "TBD";
+  return std::nullopt;
+}
+
+SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsigned offset,
+                                                   unsigned limit, bool reverse) const {
+  LOG(FATAL) << "TBD";
+  return {};
+}
+
+SortedMap::ScoredArray SortedMap::DfImpl::GetLexRange(const zlexrangespec& range, unsigned offset,
+                                                      unsigned limit, bool reverse) const {
+  LOG(FATAL) << "TBD";
+  return {};
+}
+
+uint8_t* SortedMap::DfImpl::ToListPack() const {
+  LOG(FATAL) << "TBD";
+  return nullptr;
+}
+
+bool SortedMap::DfImpl::Delete(sds ele) {
+  LOG(FATAL) << "TBD";
+  return false;
 }
 
 SortedMap::ScoredArray SortedMap::DfImpl::PopTopScores(unsigned count, bool reverse) {
