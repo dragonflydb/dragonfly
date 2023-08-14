@@ -287,4 +287,23 @@ TEST_F(SearchFamilyTest, SimpleUpdates) {
   }
 }
 
+TEST_F(SearchFamilyTest, Unicode) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
+
+  // Explicitly using screaming uppercase to check utf-8 to lowercase functionality
+  Run({"hset", "d:1", "title", "Веселая СТРЕКОЗА Иван", "visits", "400"});
+  Run({"hset", "d:2", "title", "Die fröhliche Libelle Günther", "visits", "300"});
+  Run({"hset", "d:3", "title", "השפירית המהירה יעקב", "visits", "200"});
+  Run({"hset", "d:4", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας", "visits", "100"});
+
+  // Check we find our dragonfly in all languages
+  EXPECT_THAT(Run({"ft.search", "i1", "стРекоЗа|liBellE|השפירית|λΙβελλοΎλη"}),
+              AreDocIds("d:1", "d:2", "d:3", "d:4"));
+
+  // Check the result is valid
+  auto resp = Run({"ft.search", "i1", "λιβελλούλη"});
+  EXPECT_THAT(resp.GetVec()[2].GetVec(),
+              UnorderedElementsAre("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας"));
+}
+
 }  // namespace dfly
