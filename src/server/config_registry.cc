@@ -41,10 +41,8 @@ bool ConfigRegistry::Set(std::string_view config_name, std::string_view value) {
 
 std::optional<std::string> ConfigRegistry::Get(std::string_view config_name) {
   unique_lock lk(mu_);
-  auto it = registry_.find(config_name);
-  if (it == registry_.end())
+  if (!registry_.contains(config_name))
     return std::nullopt;
-  auto cb = it->second;
   lk.unlock();
 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(config_name);
