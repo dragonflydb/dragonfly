@@ -57,18 +57,10 @@ inline bool IsUnder(bool reverse, double score, const zrangespec& spec) {
   return reverse ? zslValueGteMin(score, &spec) : zslValueLteMax(score, &spec);
 }
 
-union DoubleIntUnion {
-  double score;
-  uint64_t u64;
-};
-
 double GetObjScore(const void* obj) {
-  DoubleIntUnion u;
   sds s = (sds)obj;
   char* ptr = s + sdslen(s) + 1;
-  u.u64 = absl::little_endian::Load64(ptr);
-
-  return u.score;
+  return absl::bit_cast<double>(absl::little_endian::Load64(ptr));
 }
 
 }  // namespace
@@ -374,10 +366,10 @@ bool SortedMap::RdImpl::Iterate(unsigned start_rank, unsigned len, bool reverse,
 uint64_t SortedMap::RdImpl::Scan(uint64_t cursor,
                                  absl::FunctionRef<void(std::string_view, double)> cb) const {
   auto scanCb = [](void* privdata, const dictEntry* de) {
-    auto* cb = (absl::FunctionRef<void(std::string_view, double)>*)privdata;
+    auto* cb = reinterpret_cast<absl::FunctionRef<void(std::string_view, double)>*>(privdata);
 
     sds key = (sds)de->key;
-    double score = *(double*)dictGetVal(de);
+    double score = *reinterpret_cast<double*>(dictGetVal(de));
     (*cb)(std::string_view(key, sdslen(key)), score);
   };
 

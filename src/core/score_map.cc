@@ -19,22 +19,13 @@ namespace dfly {
 
 namespace {
 
-union DoubleUnion {
-  double d;
-  uint64_t u;
-};
-
 inline double GetValue(sds key) {
   char* valptr = key + sdslen(key) + 1;
-  DoubleUnion u;
-  u.u = absl::little_endian::Load64(valptr);
-  return u.d;
+  return absl::bit_cast<double>(absl::little_endian::Load64(valptr));
 }
 
 void* AllocateScored(string_view field, double value) {
   size_t meta_offset = field.size() + 1;
-  DoubleUnion u;
-  u.d = value;
 
   // The layout is:
   // key, '\0', 8-byte double value
@@ -44,7 +35,7 @@ void* AllocateScored(string_view field, double value) {
     memcpy(newkey, field.data(), field.size());
   }
 
-  absl::little_endian::Store64(newkey + meta_offset, u.u);
+  absl::little_endian::Store64(newkey + meta_offset, absl::bit_cast<uint64_t>(value));
 
   return newkey;
 }

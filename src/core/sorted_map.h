@@ -80,7 +80,7 @@ class SortedMap {
   }
 
   uint64_t Scan(uint64_t cursor, absl::FunctionRef<void(std::string_view, double)> cb) const {
-    return std::visit(Overload{[&](const auto& impl) { return impl.Scan(cursor, cb); }}, impl_);
+    return std::visit([&](const auto& impl) { return impl.Scan(cursor, cb); }, impl_);
   }
 
   size_t DeleteRangeByRank(unsigned start, unsigned end) {

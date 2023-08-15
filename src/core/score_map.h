@@ -77,8 +77,8 @@ class ScoreMap : public DenseSet {
     }
   };
 
-  // Returns true if field was added
-  // otherwise updates its value and returns false.
+  // Returns pointer to the internal objest and the insertion result.
+  // i.e. true if field was added, otherwise updates its value and returns false.
   std::pair<void*, bool> AddOrUpdate(std::string_view field, double value);
 
   // Returns true if field was added
