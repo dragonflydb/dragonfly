@@ -147,15 +147,12 @@ class User final {
   // For is_active flag
   void SetIsActive(bool is_active);
 
-  // Helper function for hashing passwords
-  uint32_t HashPassword(std::string_view password) const;
-
   // For passwords
-  void SetPassword(std::string_view password);
+  void SetPasswordHash(std::string_view password);
 
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64
-  std::optional<uint64_t> password_;
+  std::optional<std::string> password_hash_;
   uint32_t acl_categories_{AclCat::ACL_CATEGORY_NONE};
 
   // we have at least 221 commands including a bunch of subcommands
