@@ -315,6 +315,17 @@ TEST_F(SearchParserTest, CheckTag) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+TEST_F(SearchParserTest, IntegerTerms) {
+  PrepareSchema({{{"status", Schema::TAG}, {"title", Schema::TEXT}}});
+
+  PrepareQuery("@status:{1} @title:33");
+
+  ExpectAll(Map{{"status", "1"}, {"title", "33 cars on the road"}});
+  ExpectNone(Map{{"status", "0"}, {"title", "22 trains on the tracks"}});
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
 TEST_F(SearchParserTest, SimpleKnn) {
   Schema schema{{{"even", Schema::TAG}, {"pos", Schema::VECTOR}}};
   FieldIndices indices{schema};
