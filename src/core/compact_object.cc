@@ -430,7 +430,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
        * becomes too long *before* executing zzlInsert. */
       if (zl_len + 1 > server.zset_max_listpack_entries ||
           sdslen(ele) > server.zset_max_listpack_value || !lpSafeToAdd(lp, sdslen(ele))) {
-        unique_ptr<SortedMap> ss = SortedMap::FromListPack(lp);
+        unique_ptr<SortedMap> ss = SortedMap::FromListPack(tl.local_mr, lp);
         lpFree(lp);
         inner_obj_ = ss.release();
         encoding_ = OBJ_ENCODING_SKIPLIST;

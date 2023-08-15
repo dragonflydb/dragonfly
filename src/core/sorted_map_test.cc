@@ -22,6 +22,9 @@ using detail::SortedMap;
 
 class SortedMapTest : public ::testing::Test {
  protected:
+  SortedMapTest() : mr_(mi_heap_get_backing()) {
+  }
+
   static void SetUpTestSuite() {
     // configure redis lib zmalloc which requires mimalloc heap to work.
     auto* tlh = mi_heap_get_backing();
@@ -31,10 +34,13 @@ class SortedMapTest : public ::testing::Test {
   void AddMember(zskiplist* zsl, double score, sds ele) {
     zslInsert(zsl, score, ele);
   }
+
+  MiMemoryResource mr_;
 };
 
 TEST_F(SortedMapTest, Add) {
-  SortedMap sm;
+  SortedMap sm(&mr_);
+
   int out_flags;
   double new_score;
 
@@ -52,6 +58,32 @@ TEST_F(SortedMapTest, Add) {
   EXPECT_EQ(1, res);
   EXPECT_EQ(ZADD_OUT_UPDATED, out_flags);
   EXPECT_EQ(3, new_score);
+  EXPECT_EQ(3, sm.GetScore(ele));
+}
+
+TEST_F(SortedMapTest, Scan) {
+  SortedMap sm(&mr_);
+
+  for (unsigned i = 0; i < 972; ++i) {
+    sm.Insert(i, sdsfromlonglong(i));
+  }
+  uint64_t cursor = 0;
+
+  unsigned cnt = 0;
+  do {
+    cursor = sm.Scan(cursor, [&](string_view str, double score) { ++cnt; });
+  } while (cursor != 0);
+  EXPECT_EQ(972, cnt);
+}
+
+TEST_F(SortedMapTest, Insert) {
+  SortedMap sm(&mr_);
+  for (unsigned i = 0; i < 256; ++i) {
+    sds s = sdsempty();
+
+    s = sdscatfmt(s, "a%u", i);
+    ASSERT_TRUE(sm.Insert(1000, s));
+  }
 }
 
 }  // namespace dfly

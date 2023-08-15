@@ -19,28 +19,13 @@ namespace dfly {
 
 namespace {
 
-union DoubleUnion {
-  double d;
-  uint64_t u;
-};
-
 inline double GetValue(sds key) {
   char* valptr = key + sdslen(key) + 1;
-  DoubleUnion u;
-  u.u = absl::little_endian::Load64(valptr);
-  return u.d;
+  return absl::bit_cast<double>(absl::little_endian::Load64(valptr));
 }
 
-}  // namespace
-
-ScoreMap::~ScoreMap() {
-  Clear();
-}
-
-bool ScoreMap::AddOrUpdate(string_view field, double value) {
+void* AllocateScored(string_view field, double value) {
   size_t meta_offset = field.size() + 1;
-  DoubleUnion u;
-  u.d = value;
 
   // The layout is:
   // key, '\0', 8-byte double value
@@ -50,23 +35,35 @@ bool ScoreMap::AddOrUpdate(string_view field, double value) {
     memcpy(newkey, field.data(), field.size());
   }
 
-  absl::little_endian::Store64(newkey + meta_offset, u.u);
+  absl::little_endian::Store64(newkey + meta_offset, absl::bit_cast<uint64_t>(value));
+
+  return newkey;
+}
+
+}  // namespace
+
+ScoreMap::~ScoreMap() {
+  Clear();
+}
+
+pair<void*, bool> ScoreMap::AddOrUpdate(string_view field, double value) {
+  void* newkey = AllocateScored(field, value);
 
   // Replace the whole entry.
   sds prev_entry = (sds)AddOrReplaceObj(newkey, false);
   if (prev_entry) {
     ObjDelete(prev_entry, false);
-    return false;
+    return {newkey, false};
   }
 
-  return true;
+  return {newkey, true};
 }
 
-bool ScoreMap::AddOrSkip(std::string_view field, double value) {
+std::pair<void*, bool> ScoreMap::AddOrSkip(std::string_view field, double value) {
   void* obj = FindInternal(&field, 1);  // 1 - string_view
 
   if (obj)
-    return false;
+    return {obj, false};
 
   return AddOrUpdate(field, value);
 }
