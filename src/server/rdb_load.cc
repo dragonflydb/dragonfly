@@ -696,7 +696,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t zsetlen = ltrace->blob_count();
-  detail::SortedMap* zs = new detail::SortedMap;
+  detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
   unsigned encoding = OBJ_ENCODING_SKIPLIST;
   auto cleanup = absl::MakeCleanup([&] { delete zs; });
 
@@ -995,7 +995,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned encoding = OBJ_ENCODING_LISTPACK;
     void* inner;
     if (lpBytes(lp) > server.zset_max_listpack_entries) {
-      inner = detail::SortedMap::FromListPack(lp).release();
+      inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp).release();
       lpFree(lp);
       encoding = OBJ_ENCODING_SKIPLIST;
     } else {

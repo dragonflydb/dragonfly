@@ -39,14 +39,14 @@ class SortedMap {
   using ScoredMember = std::pair<std::string, double>;
   using ScoredArray = std::vector<ScoredMember>;
 
-  SortedMap();
+  SortedMap(PMR_NS::memory_resource* res);
   SortedMap(const SortedMap&) = delete;
   SortedMap& operator=(const SortedMap&) = delete;
 
   ~SortedMap();
 
   // The ownership for the returned SortedMap stays with the caller
-  static std::unique_ptr<SortedMap> FromListPack(const uint8_t* lp);
+  static std::unique_ptr<SortedMap> FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp);
 
   size_t Size() const {
     return std::visit(Overload{[](const auto& impl) { return impl.Size(); }}, impl_);
@@ -66,6 +66,7 @@ class SortedMap {
         impl_);
   }
 
+  // Takes ownership over member.
   bool Insert(double score, sds member) {
     return std::visit(Overload{[&](auto& impl) { return impl.Insert(score, member); }}, impl_);
   }
@@ -78,9 +79,8 @@ class SortedMap {
     return std::visit(Overload{[](const auto& impl) { return impl.MallocSize(); }}, impl_);
   }
 
-  // TODO: to get rid of this method.
-  dict* GetDict() const {
-    return std::get<RdImpl>(impl_).dict;
+  uint64_t Scan(uint64_t cursor, absl::FunctionRef<void(std::string_view, double)> cb) const {
+    return std::visit(Overload{[&](const auto& impl) { return impl.Scan(cursor, cb); }}, impl_);
   }
 
   size_t DeleteRangeByRank(unsigned start, unsigned end) {
@@ -203,13 +203,26 @@ class SortedMap {
     // Stops iteration if cb returns false. Returns false in this case.
     bool Iterate(unsigned start_rank, unsigned len, bool reverse,
                  absl::FunctionRef<bool(sds, double)> cb) const;
+
+    uint64_t Scan(uint64_t cursor, absl::FunctionRef<void(std::string_view, double)> cb) const;
   };
 
   struct DfImpl {
     ScoreMap* score_map = nullptr;
-    BPTree<uint64_t>* bptree = nullptr;  // just a stub for now.
+    using ScoreSds = void*;
 
-    void Init();
+    struct ScoreSdsPolicy {
+      using KeyT = ScoreSds;
+
+      struct KeyCompareTo {
+        int operator()(KeyT a, KeyT b) const;
+      };
+    };
+
+    using ScoreTree = BPTree<ScoreSds, ScoreSdsPolicy>;
+    ScoreTree* score_tree = nullptr;  // just a stub for now.
+
+    void Init(PMR_NS::memory_resource* mr);
 
     void Free();
 
@@ -260,9 +273,12 @@ class SortedMap {
     // Stops iteration if cb returns false. Returns false in this case.
     bool Iterate(unsigned start_rank, unsigned len, bool reverse,
                  absl::FunctionRef<bool(sds, double)> cb) const;
+
+    uint64_t Scan(uint64_t cursor, absl::FunctionRef<void(std::string_view, double)> cb) const;
   };
 
   std::variant<RdImpl, DfImpl> impl_;
+  PMR_NS::memory_resource* mr_res_;
 };
 
 }  // namespace detail

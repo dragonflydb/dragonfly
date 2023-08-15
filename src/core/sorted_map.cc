@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "base/endian.h"
 #include "base/logging.h"
 
 using namespace std;
@@ -54,6 +55,20 @@ inline zskiplistNode* Next(bool reverse, zskiplistNode* ln) {
 
 inline bool IsUnder(bool reverse, double score, const zrangespec& spec) {
   return reverse ? zslValueGteMin(score, &spec) : zslValueLteMax(score, &spec);
+}
+
+union DoubleIntUnion {
+  double score;
+  uint64_t u64;
+};
+
+double GetObjScore(const void* obj) {
+  DoubleIntUnion u;
+  sds s = (sds)obj;
+  char* ptr = s + sdslen(s) + 1;
+  u.u64 = absl::little_endian::Load64(ptr);
+
+  return u.score;
 }
 
 }  // namespace
@@ -356,6 +371,33 @@ bool SortedMap::RdImpl::Iterate(unsigned start_rank, unsigned len, bool reverse,
   return success;
 }
 
+uint64_t SortedMap::RdImpl::Scan(uint64_t cursor,
+                                 absl::FunctionRef<void(std::string_view, double)> cb) const {
+  auto scanCb = [](void* privdata, const dictEntry* de) {
+    auto* cb = (absl::FunctionRef<void(std::string_view, double)>*)privdata;
+
+    sds key = (sds)de->key;
+    double score = *(double*)dictGetVal(de);
+    (*cb)(std::string_view(key, sdslen(key)), score);
+  };
+
+  return dictScan(this->dict, cursor, scanCb, NULL, &cb);
+}
+
+int SortedMap::DfImpl::ScoreSdsPolicy::KeyCompareTo::operator()(ScoreSds a, ScoreSds b) const {
+  double sa = GetObjScore(a);
+  double sb = GetObjScore(b);
+
+  if (sa < sb)
+    return -1;
+  if (sa > sb)
+    return 1;
+
+  sds sdsa = (sds)a;
+  sds sdsb = (sds)b;
+  return sdscmp(sdsa, sdsb);
+}
+
 int SortedMap::DfImpl::Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
   LOG(FATAL) << "TBD";
   return 0;
@@ -366,7 +408,7 @@ optional<double> SortedMap::DfImpl::GetScore(sds ele) const {
   return std::nullopt;
 }
 
-void SortedMap::DfImpl::Init() {
+void SortedMap::DfImpl::Init(PMR_NS::memory_resource* mr) {
   LOG(FATAL) << "TBD";
 }
 
@@ -427,19 +469,26 @@ bool SortedMap::DfImpl::Iterate(unsigned start_rank, unsigned len, bool reverse,
   return false;
 }
 
+uint64_t SortedMap::DfImpl::Scan(uint64_t cursor,
+                                 absl::FunctionRef<void(std::string_view, double)> cb) const {
+  LOG(FATAL) << "TBD";
+  return 0;
+}
+
 /***************************************************************************/
 /* SortedMap */
 /***************************************************************************/
-SortedMap::SortedMap() : impl_(RdImpl()) {
-  std::visit(Overload{[](RdImpl& impl) { impl.Init(); }, [](DfImpl& impl) { impl.Init(); }}, impl_);
+SortedMap::SortedMap(PMR_NS::memory_resource* mr) : impl_(RdImpl()), mr_res_(mr) {
+  std::visit(Overload{[](RdImpl& impl) { impl.Init(); }, [mr](DfImpl& impl) { impl.Init(mr); }},
+             impl_);
 }
 
 SortedMap::~SortedMap() {
-  std::visit(Overload{[](RdImpl& impl) { impl.Free(); }, [](DfImpl& impl) { impl.Free(); }}, impl_);
+  std::visit(Overload{[](auto& impl) { impl.Free(); }}, impl_);
 }
 
 // taken from zsetConvert
-unique_ptr<SortedMap> SortedMap::FromListPack(const uint8_t* lp) {
+unique_ptr<SortedMap> SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp) {
   uint8_t* zl = (uint8_t*)lp;
   unsigned char *eptr, *sptr;
   unsigned char* vstr;
@@ -447,7 +496,7 @@ unique_ptr<SortedMap> SortedMap::FromListPack(const uint8_t* lp) {
   long long vlong;
   sds ele;
 
-  unique_ptr<SortedMap> zs(new SortedMap());
+  unique_ptr<SortedMap> zs(new SortedMap(res));
 
   eptr = lpSeek(zl, 0);
   if (eptr != NULL) {

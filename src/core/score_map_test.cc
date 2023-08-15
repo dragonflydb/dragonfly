@@ -54,7 +54,7 @@ class ScoreMapTest : public ::testing::Test {
 };
 
 TEST_F(ScoreMapTest, Basic) {
-  EXPECT_TRUE(sm_->AddOrUpdate("foo", 5));
+  EXPECT_TRUE(sm_->AddOrUpdate("foo", 5).second);
   EXPECT_EQ(5, sm_->Find("foo"));
 
   auto it = sm_->begin();
@@ -70,13 +70,13 @@ TEST_F(ScoreMapTest, Basic) {
   }
 
   size_t sz = sm_->ObjMallocUsed();
-  EXPECT_FALSE(sm_->AddOrUpdate("foo", 17));
+  EXPECT_FALSE(sm_->AddOrUpdate("foo", 17).second);
   EXPECT_EQ(sm_->ObjMallocUsed(), sz);
 
   it = sm_->begin();
   EXPECT_EQ(17, it->second);
 
-  EXPECT_FALSE(sm_->AddOrSkip("foo", 31));
+  EXPECT_FALSE(sm_->AddOrSkip("foo", 31).second);
   EXPECT_EQ(17, it->second);
 }
 
