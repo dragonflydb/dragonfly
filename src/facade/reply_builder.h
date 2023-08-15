@@ -8,11 +8,20 @@
 #include <optional>
 #include <string_view>
 
+#include "base/logging.h"
+
+//#include "src/facade/conn_context.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "io/io.h"
 
+// namespace dfly {
+//   class ConnectionContext;
+// };
+
 namespace facade {
+
+class ConnectionContext;
 
 // Reply mode allows filtering replies.
 enum class ReplyMode {
@@ -170,7 +179,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
 
-  RedisReplyBuilder(::io::Sink* stream);
+  RedisReplyBuilder(::io::Sink* stream, facade::ConnectionContext* cntx, ::io::StringSink* save_to);
 
   void SetResp3(bool is_resp3);
 
@@ -208,6 +217,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   // into the string that would be sent
   static std::string_view StatusToMsg(OpStatus status);
 
+  const std::string& GetSavedErrors(void) const;
+
  protected:
   struct WrappedStrSpan : public StrSpan {
     size_t Size() const;
@@ -220,6 +231,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   const char* NullString();
 
   bool is_resp3_ = false;
+  ::io::StringSink* save_to_;  // save errors to this Sink
+  facade::ConnectionContext* cntx_;
 };
 
 class ReqSerializer {

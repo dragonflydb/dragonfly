@@ -68,7 +68,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
  public:
   CapturingReplyBuilder(ReplyMode mode = ReplyMode::FULL)
-      : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {
+      : RedisReplyBuilder{nullptr, nullptr, nullptr}, reply_mode_{mode}, stack_{}, current_{} {
   }
 
   using Payload = std::variant<std::monostate, Null, Error, OpStatus, long, double, SimpleString,

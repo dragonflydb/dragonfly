@@ -79,7 +79,7 @@ class RedisReplyBuilderTest : public testing::Test {
 
   void SetUp() {
     sink_.Clear();
-    builder_.reset(new RedisReplyBuilder(&sink_));
+    builder_.reset(new RedisReplyBuilder(&sink_, nullptr, new ::io::StringSink));
   }
 
  protected:

@@ -10,6 +10,10 @@
 
 #include "base/logging.h"
 #include "facade/error.h"
+#include "src/facade/conn_context.h"
+#include "src/facade/dragonfly_connection.h"
+//#include "src/server/conn_context.h"
+//#include "src/server/command_registry.h"
 
 using namespace std;
 using absl::StrAppend;
@@ -193,7 +197,9 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
   return sb.Finalize();
 }
 
-RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
+RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink, facade::ConnectionContext* cntx,
+                                     ::io::StringSink* save_to)
+    : SinkReplyBuilder(sink), save_to_{save_to}, cntx_{cntx} {
 }
 
 void RedisReplyBuilder::SetResp3(bool is_resp3) {
@@ -201,7 +207,7 @@ void RedisReplyBuilder::SetResp3(bool is_resp3) {
 }
 
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
-  VLOG(1) << "Error: " << str;
+  LOG(INFO) << "Error: " << str << " of type: " << err_type.empty() ? "(no type)"sv : err_type;
 
   if (err_type.empty()) {
     err_type = str;
@@ -211,12 +217,30 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
 
   err_count_[err_type]++;
 
-  if (str[0] == '-') {
-    iovec v[] = {IoVec(str), IoVec(kCRLF)};
-    Send(v, ABSL_ARRAYSIZE(v));
-  } else {
-    iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
-    Send(v, ABSL_ARRAYSIZE(v));
+  vector<iovec> v(3u);
+
+  //  if (str[0] == '-') {
+  //    iovec v[] = {IoVec(str), IoVec(kCRLF)};
+  //    Send(v, ABSL_ARRAYSIZE(v));
+  //  } else {
+  //    iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
+  //    Send(v, ABSL_ARRAYSIZE(v));
+  //  }
+
+  if (str[0] != '-')
+    v.push_back(IoVec(kErrPref));
+
+  v.insert(v.end(), {IoVec(str), IoVec(kCRLF)});
+  v.shrink_to_fit();
+  Send(v.data(), v.size());
+  if (save_to_) {
+    //    auto s = absl::StrCat(cntx_->cid->name(), ": ", str , "\n");
+    auto s = absl::StrCat("<cid?>", ": ", str, "\n");
+    //    auto what = cntx_->owner()->raw_input();
+    //    auto s = absl::StrCat(what, ": ", str , "\n");
+
+    iovec iv[] = {IoVec(s)};
+    save_to_->Write(iv, ABSL_ARRAYSIZE(iv));
   }
 }
 
@@ -498,6 +522,10 @@ void RedisReplyBuilder::SendStringArrInternal(WrappedStrSpan arr, CollectionType
   vec[vec_indx].iov_base = start;
   vec[vec_indx].iov_len = 2;
   Send(vec.data(), vec_indx + 1);
+}
+
+const std::string& RedisReplyBuilder::GetSavedErrors(void) const {
+  return save_to_->str();
 }
 
 void ReqSerializer::SendCommand(std::string_view str) {

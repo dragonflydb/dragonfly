@@ -21,6 +21,7 @@
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
+#include "src/facade/reply_builder.h"
 
 using namespace std;
 
@@ -210,6 +211,11 @@ void DoBuildObjHist(EngineShard* shard, ObjHistMap* obj_hist_map) {
   }
 }
 
+void ErrorStatsInternal(ConnectionContext* cntx) {
+  auto* rb = cntx->operator->();  // returns RedisReplyBuilder and checks it is valid
+  rb->SendSimpleString(rb->GetSavedErrors());
+}
+
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
@@ -244,6 +250,10 @@ void DebugCmd::Run(CmdArgList args) {
         "    If SLOTS is specified then create keys only in given slots range."
         "OBJHIST",
         "    Prints histogram of object sizes.",
+        "ERRORS [DISABLE] [ENABLE <count>]",
+        "    Returns the last <count> errors recorded in the database, starting from the last",
+        "    [ENABLE] command.",
+        "    By default, this option is disabled."
         "HELP",
         "    Prints this help.",
     };
@@ -283,6 +293,14 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "OBJHIST") {
     return ObjHist();
   }
+
+  if (subcmd == "ERRORS") {
+    if (args.size() > 1) {  // received arguments
+      return (*cntx_)->SendSimpleString("NOT IMPLEMENTED: received arguments");
+    } else
+      return ErrorStatsInternal(cntx_);
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return (*cntx_)->SendError(reply, kSyntaxErrType);
 }
