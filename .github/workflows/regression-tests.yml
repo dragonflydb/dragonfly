@@ -29,10 +29,10 @@ jobs:
       - name: Configure & Build
         run: |
           apt update && apt install -y pip jq
-          cmake -B ${GITHUB_WORKSPACE}/build-opt -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
-          cd ${GITHUB_WORKSPACE}/build-opt  && ninja dragonfly
+          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
           pwd
           ls -l ..
 
@@ -42,3 +42,4 @@ jobs:
           dfly-executable: dragonfly
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           run-only-on-ubuntu-latest: true
+          build-folder-name: build

@@ -13,6 +13,9 @@ inputs:
     # is not supported in composite actions
     required: true
     type: string
+  build-folder-name:
+    required: true
+    type: string
 
 
 runs:
@@ -28,7 +31,7 @@ runs:
         echo "Current commit is ${{github.sha}}"
         pip install -r dragonfly/requirements.txt
         # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build-opt/${{inputs.dfly-executable}}"
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
         pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
@@ -42,7 +45,7 @@ runs:
         echo "Running PyTests replication test with flag: ${{ inputs.run-only-on-ubuntu-latest }}"
         cd ${GITHUB_WORKSPACE}/tests
         # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build-opt/${{inputs.dfly-executable}}"
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
         pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
         pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
