@@ -531,14 +531,134 @@ optional<unsigned> SortedMap::DfImpl::GetRank(sds ele, bool reverse) const {
 
 SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsigned offset,
                                                    unsigned limit, bool reverse) const {
-  LOG(FATAL) << "TBD";
-  return {};
+  ScoredArray arr;
+  if (score_tree->Size() <= offset || limit == 0)
+    return arr;
+
+  char buf[16];
+  if (reverse) {
+    ScoreSds key = BuilScoredKey(range.max, !range.maxex, buf);
+    auto path = score_tree->LEQ(key);
+    if (path.Empty())
+      return arr;
+
+    if (range.maxex && range.max == GetObjScore(path.Terminal())) {
+      ++offset;
+    }
+    DCHECK_LE(GetObjScore(path.Terminal()), range.max);
+
+    while (offset--) {
+      if (!path.Prev())
+        return arr;
+    }
+
+    while (limit--) {
+      ScoreSds ele = path.Terminal();
+
+      double score = GetObjScore(ele);
+      if (range.min > score || (range.min == score && range.minex))
+        break;
+      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      if (!path.Prev())
+        break;
+    }
+  } else {
+    ScoreSds key = BuilScoredKey(range.min, range.minex, buf);
+    auto path = score_tree->GEQ(key);
+    if (path.Empty())
+      return arr;
+
+    while (offset--) {
+      if (!path.Next())
+        return arr;
+    }
+
+    while (limit--) {
+      ScoreSds ele = path.Terminal();
+
+      double score = GetObjScore(ele);
+      if (range.max < score || (range.max == score && range.maxex))
+        break;
+
+      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      if (!path.Next())
+        break;
+    }
+  }
+
+  return arr;
 }
 
 SortedMap::ScoredArray SortedMap::DfImpl::GetLexRange(const zlexrangespec& range, unsigned offset,
                                                       unsigned limit, bool reverse) const {
-  LOG(FATAL) << "TBD";
-  return {};
+  if (score_tree->Size() <= offset || limit == 0)
+    return {};
+
+  detail::BPTreePath<ScoreSds> path;
+  ScoredArray arr;
+
+  if (reverse) {
+    if (range.max != cmaxstring) {
+      ScoreSds range_key = (ScoreSds)(uint64_t(range.max) | kIgnoreDoubleTag);
+      path = score_tree->LEQ(range_key);
+      if (path.Empty())
+        return {};
+
+      if (range.maxex && sdscmp((sds)path.Terminal(), range.max) == 0) {
+        ++offset;
+      }
+      while (offset--) {
+        if (!path.Prev())
+          return {};
+      }
+    } else {
+      path = score_tree->FromRank(score_tree->Size() - offset - 1);
+    }
+
+    while (limit--) {
+      ScoreSds ele = path.Terminal();
+
+      if (range.min != cminstring) {
+        int cmp = sdscmp((sds)ele, range.min);
+        if (cmp < 0 || (cmp == 0 && range.minex))
+          break;
+      }
+      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      if (!path.Prev())
+        break;
+    }
+  } else {
+    if (range.min != cminstring) {
+      ScoreSds range_key = (ScoreSds)(uint64_t(range.min) | kIgnoreDoubleTag);
+      path = score_tree->GEQ(range_key);
+      if (path.Empty())
+        return {};
+
+      if (range.minex && sdscmp((sds)path.Terminal(), range.min) == 0) {
+        ++offset;
+      }
+      while (offset--) {
+        if (!path.Next())
+          return {};
+      }
+    } else {
+      path = score_tree->FromRank(offset);
+    }
+
+    while (limit--) {
+      ScoreSds ele = path.Terminal();
+
+      if (range.max != cmaxstring) {
+        int cmp = sdscmp((sds)ele, range.max);
+        if (cmp > 0 || (cmp == 0 && range.maxex))
+          break;
+      }
+      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      if (!path.Next())
+        break;
+    }
+  }
+  return arr;
 }
 
 uint8_t* SortedMap::DfImpl::ToListPack() const {
@@ -660,8 +780,45 @@ size_t SortedMap::DfImpl::Count(const zrangespec& range) const {
 }
 
 size_t SortedMap::DfImpl::LexCount(const zlexrangespec& range) const {
-  LOG(FATAL) << "TBD";
-  return 0;
+  if (score_tree->Size() == 0)
+    return 0;
+
+  uint32_t min_rank = 0;
+  detail::BPTreePath<ScoreSds> path;
+
+  if (range.min != cminstring) {
+    ScoreSds range_key = (ScoreSds)(uint64_t(range.min) | kIgnoreDoubleTag);
+    path = score_tree->GEQ(range_key);
+    if (path.Empty())
+      return 0;
+
+    min_rank = path.Rank();
+    if (range.minex && sdscmp((sds)path.Terminal(), range.min) == 0) {
+      ++min_rank;
+      if (min_rank >= score_tree->Size())
+        return 0;
+    }
+  }
+
+  uint32_t max_rank = score_tree->Size() - 1;
+  if (range.max != cmaxstring) {
+    ScoreSds range_key = (ScoreSds)(uint64_t(range.max) | kIgnoreDoubleTag);
+    path = score_tree->GEQ(range_key);
+    if (!path.Empty()) {
+      max_rank = path.Rank();
+
+      // fix the max rank, if needed.
+      int cmp = sdscmp((sds)path.Terminal(), range.max);
+      DCHECK_GE(cmp, 0);
+      if (cmp > 0 || range.maxex) {
+        if (max_rank <= min_rank)
+          return 0;
+        --max_rank;
+      }
+    }
+  }
+
+  return max_rank < min_rank ? 0 : max_rank - min_rank + 1;
 }
 
 bool SortedMap::DfImpl::Iterate(unsigned start_rank, unsigned len, bool reverse,
