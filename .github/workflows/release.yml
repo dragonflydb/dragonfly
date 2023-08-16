@@ -34,15 +34,16 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
-        runner: [[linux, arm64], [linux, amd64]]
+          #        runner: [[linux, arm64], [linux, x86]]
+        runner: [[ubuntu-20.04]]
         include:
+          #          - container: "ubuntu-dev:20"
+          #            runner: [linux, arm64]
+          #            df-binary-name: dragonfly-aarch64
+          #            platform: aarch64
+          #            name: dragonfly-aarch64
           - container: "ubuntu-dev:20"
-            runner: [linux, arm64]
-            df-binary-name: dragonfly-aarch64
-            platform: aarch64
-            name: dragonfly-aarch64
-          - container: "ubuntu-dev:20"
-            runner: [linux, amd64]
+            runner: [ubuntu-20.04]
             df-binary-name: dragonfly-x86_64
             platform: x86_64
             name: dragonfly-amd64
