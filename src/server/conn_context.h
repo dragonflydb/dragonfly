@@ -124,6 +124,9 @@ struct ConnectionState {
   };
 
   struct SquashingInfo {
+    // Pointer to the original underlying context of the base command.
+    // Only const access it possible for reading from multiple threads,
+    // each squashing thread has its own proxy context that contains this info.
     const ConnectionContext* owner = nullptr;
   };
 
