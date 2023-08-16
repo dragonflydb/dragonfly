@@ -11,7 +11,7 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-  
+
 permissions:
   contents: write
 
@@ -29,16 +29,23 @@ jobs:
           draft: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  build-qemu:
+  build:
     strategy:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
-        runner: [[self-hosted, linux, ARM64]]
+        runner: [[self-hosted, linux], [self-hosted, linux, ARM64]]
+        include:
+          - runner: [self-hosted, linux]
+            df-binary-name: dragonfly-aarch64
+            platform: aarch64
+          - runner: [self-hosted, linux, ARM64]
+            df-binary-name: dragonfly-amd64
+            platform: amd64
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/romange/${{ matrix.container }}
-    name: Build aarch64 on ubuntu20.04
+    name: Build ${{ matrix.platform }} on ubuntu20.04
     needs: create-release
     steps:
     - uses: actions/checkout@v3
@@ -52,68 +59,27 @@ jobs:
           ./tools/release.sh
           ls -lah build-opt
           apt update && apt install -y debhelper moreutils pip jq
-          #            ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-aarch64
-          #            mv dragonfly_*.deb build-opt/
+          ./tools/packaging/generate_debian_package.sh build-opt/${{ matrix.df-binary-name}}
+          mv dragonfly_*.deb build-opt/
     - name: Run regression tests
       uses: ./.github/actions/regression-tests
       with:
-        dfly-executable: dragonfly-aarch64
+        dfly-executable: ${{ matrix.df-binary-name }}
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
         run-only-on-ubuntu-latest: false
         build-folder-name: build-opt
-          #    - name: Save artifacts
-          #      run: |
-          #          # place all artifacts at the same location
-          #          mkdir -p results-artifacts
-          #          mv build-opt/dragonfly-*tar.gz results-artifacts
-          #          mv dragonfly_*.deb results-artifacts
-          #    - name: Upload
-          #      uses: actions/upload-artifact@v3
-          #      with:
-          #        name: dragonfly-aarch64
-          #        path: results-artifacts/*
-          #
-  build-native:
-    runs-on: ubuntu-latest
-    needs: create-release
-    container:
-      image: ghcr.io/romange/ubuntu-dev:20
-    steps:
-    - uses: actions/checkout@v3
+    - name: Save artifacts
+      run: |
+          # place all artifacts at the same location
+          mkdir -p results-artifacts
+          mv build-opt/dragonfly-*tar.gz results-artifacts
+          mv dragonfly_*.deb results-artifacts
+    - name: Upload
+      uses: actions/upload-artifact@v3
       with:
-        submodules: true
-    - name: Configure
-      run: |
-          apt update && apt install -y debhelper moreutils pip jq
-    - name: Build artifacts
-      run: |
-          # Work around https://github.com/actions/checkout/issues/766
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git describe --always --tags ${{ github.sha }}
-          ./tools/release.sh
-          # once the build is over, we want to generate a Debian package
-          #./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
-    - name: Run regression tests
-      uses: ./.github/actions/regression-tests
-      with:
-        dfly-executable: dragonfly-x86_64
-        gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
-        run-only-on-ubuntu-latest: false
-        build-folder-name: build-opt
-    - name: Gen(should fail)
-      run: |
-          ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
-          #    - name: Save artifacts
-          #      run: |
-          #          # place all artifacts at the same location
-          #          mkdir -p results-artifacts
-          #          mv build-opt/dragonfly-*tar.gz results-artifacts
-          #          mv dragonfly_*.deb results-artifacts
-          #    - name: Upload
-          #      uses: actions/upload-artifact@v3
-          #      with:
-          #        name: dragonfly-amd64
-          #        path: results-artifacts/*
+        name: ${{ matrix.df-binary-name }}
+        path: results-artifacts/*
+
           #  publish_release:
           #    runs-on: ubuntu-latest
           #    needs: [build-native, build-qemu]
