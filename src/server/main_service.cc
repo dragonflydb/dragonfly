@@ -622,6 +622,8 @@ Service::Service(ProactorPool* pp)
   CHECK_LT(pp->size(), kMaxThreadSize);
   RegisterCommands();
 
+  exec_cid_ = FindCmd("EXEC");
+
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
@@ -1015,7 +1017,6 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
 
-  auto* exec_cid = registry_.Find("EXEC");
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
 
@@ -1024,7 +1025,7 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
       return;
 
     if (!dist_trans) {
-      dist_trans.reset(new Transaction{exec_cid});
+      dist_trans.reset(new Transaction{exec_cid_});
       dist_trans->StartMultiNonAtomic();
     }
 
@@ -1049,12 +1050,11 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
       continue;
     }
 
+    // Squash accumulated commands
     perform_squash();
 
+    // Dispatch non squashed command only after all squshed commands were executed and replied
     DispatchCommand(args, cntx);
-
-    if (cid == nullptr)
-      (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
   }
 
   perform_squash();

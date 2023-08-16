@@ -774,8 +774,12 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     // Special case: if the dispatch queue accumulated a big number of commands,
     // we can try to squash them
-    if (dispatch_q_cmds_count_ > squashing_threshold &&
-        dispatch_q_cmds_count_ == dispatch_q_.size()) {
+    // It is only enabled if the threshold is reached and the whole dispatch queue
+    // consists only of commands (no pubsub or monitor messages)
+    bool squashing_enabled = squashing_threshold > 0;
+    bool threshold_reached = dispatch_q_cmds_count_ > squashing_threshold;
+    bool are_all_plain_cmds = dispatch_q_cmds_count_ == dispatch_q_.size();
+    if (squashing_enabled && threshold_reached && are_all_plain_cmds) {
       vector<CmdArgList> args;
       args.reserve(dispatch_q_.size());
       for (auto& msg : dispatch_q_) {

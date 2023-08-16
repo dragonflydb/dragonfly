@@ -165,6 +165,8 @@ class Service : public facade::ServiceInterface {
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 
+  const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
+
   mutable Mutex mu_;
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
 };

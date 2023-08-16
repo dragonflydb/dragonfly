@@ -501,3 +501,21 @@ async def test_tls_reject(with_ca_tls_server_args, with_tls_client_args, df_loca
     except redis_conn_error:
         pass
     await client.close()
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
+async def test_squashed_pipeline(async_client: aioredis.Redis):
+    p = async_client.pipeline(transaction=False)
+
+    for j in range(50):
+        for i in range(10):
+            p.incr(f"k{i}")
+        p.execute_command("NOTFOUND")
+
+    res = await p.execute(raise_on_error=False)
+
+    for j in range(50):
+        assert res[0:10] == [j + 1] * 10
+        assert isinstance(res[10], aioredis.ResponseError)
+        res = res[11:]
