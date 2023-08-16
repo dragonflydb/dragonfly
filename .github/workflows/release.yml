@@ -34,19 +34,20 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
-          #        runner: [[linux, arm64], [linux, x86]]
-        runner: [[ubuntu-20.04]]
+        runner: [[ubuntu-20.04, arm64], [ubuntu-20.04, x86]]
         include:
-          #          - container: "ubuntu-dev:20"
-          #            runner: [linux, arm64]
-          #            df-binary-name: dragonfly-aarch64
-          #            platform: aarch64
-          #            name: dragonfly-aarch64
           - container: "ubuntu-dev:20"
-            runner: [ubuntu-20.04]
+            runner: [ubuntu-20.04, arm64]
+            df-binary-name: dragonfly-aarch64
+            platform: aarch64
+            name: dragonfly-aarch64
+            not-replication: true
+          - container: "ubuntu-dev:20"
+            runner: [ubuntu-20.04, x86]
             df-binary-name: dragonfly-x86_64
             platform: x86_64
             name: dragonfly-amd64
+            not-replication: false
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -62,15 +63,15 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git describe --always --tags ${{ github.sha }}
           ./tools/release.sh
-          ls -lah build-opt
           ./tools/packaging/generate_debian_package.sh build-opt/${{ matrix.df-binary-name}}
           mv dragonfly_*.deb build-opt/
+          ls -lah build-opt
     - name: Run regression tests
       uses: ./.github/actions/regression-tests
       with:
         dfly-executable: ${{ matrix.df-binary-name }}
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
-        run-only-on-ubuntu-latest: false
+        run-only-on-ubuntu-latest: ${{ matrix.not-replication }}
         build-folder-name: build-opt
     - name: Save artifacts
       run: |
