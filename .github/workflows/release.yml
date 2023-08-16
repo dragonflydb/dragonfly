@@ -34,13 +34,15 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
-        runner: [[], [linux, ARM64]]
+        runner: [[linux, arm64], [linux, amd64]]
         include:
-          - runner: [linux, ARM64]
+          - container: "ubuntu-dev:20"
+            runner: [linux, arm64]
             df-binary-name: dragonfly-aarch64
             platform: aarch64
             name: dragonfly-aarch64
-          - runner: []
+          - container: "ubuntu-dev:20"
+            runner: [linux, amd64]
             df-binary-name: dragonfly-x86_64
             platform: x86_64
             name: dragonfly-amd64
@@ -60,7 +62,6 @@ jobs:
           git describe --always --tags ${{ github.sha }}
           ./tools/release.sh
           ls -lah build-opt
-          apt update && apt install -y debhelper moreutils pip jq
           ./tools/packaging/generate_debian_package.sh build-opt/${{ matrix.df-binary-name}}
           mv dragonfly_*.deb build-opt/
     - name: Run regression tests
