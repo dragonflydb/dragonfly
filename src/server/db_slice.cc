@@ -924,11 +924,20 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
     return make_pair(it, expire_it);
 
+  string tmp_key_buf;
+  string_view tmp_key;
+
   // Replicate expiry
   if (auto journal = EngineShard::tlocal()->journal(); journal) {
-    std::string stash;
-    it->first.GetString(&stash);
-    RecordExpiry(cntx.db_index, stash);
+    tmp_key = it->first.GetSlice(&tmp_key_buf);
+    RecordExpiry(cntx.db_index, tmp_key);
+  }
+
+  auto obj_type = it->second.ObjType();
+  if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
+    if (tmp_key.empty())
+      tmp_key = it->first.GetSlice(&tmp_key_buf);
+    doc_del_cb_(tmp_key, cntx, it->second);
   }
 
   PerformDeletion(it, expire_it, shard_owner(), db.get());
