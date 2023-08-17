@@ -65,6 +65,7 @@ struct JsonAccessor : public BaseAccessor {
   SearchDocData Serialize(search::Schema schema) const override;
 
  private:
+  /// Parses `field` into a JSON path. Caches the results internally.
   JsonPathContainer* GetPath(std::string_view field) const;
 
   JsonType* json_;
