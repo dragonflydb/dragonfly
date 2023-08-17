@@ -3,6 +3,8 @@
 //
 #include "server/list_family.h"
 
+#include "server/acl/acl_commands_def.h"
+
 extern "C" {
 #include "redis/object.h"
 #include "redis/sds.h"
@@ -1296,32 +1298,67 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&ListFamily::x)
 
+namespace {
+namespace Acl {
+namespace Cat = AclCategory;
+constexpr uint32_t kLPush = Cat::WRITE | Cat::LIST | Cat::FAST;
+constexpr uint32_t kLPushX = Cat::WRITE | Cat::LIST | Cat::FAST;
+constexpr uint32_t kLPop = Cat::WRITE | Cat::LIST | Cat::FAST;
+constexpr uint32_t kRPush = Cat::WRITE | Cat::LIST | Cat::FAST;
+constexpr uint32_t kRPushX = Cat::WRITE | Cat::LIST | Cat::FAST;
+constexpr uint32_t kRPop = Cat::WRITE | Cat::LIST | Cat::FAST;
+constexpr uint32_t kRPopLPush = Cat::WRITE | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kBRPopLPush = Cat::WRITE | Cat::LIST | Cat::SLOW | Cat::BLOCKING;
+constexpr uint32_t kBLPop = Cat::WRITE | Cat::LIST | Cat::SLOW | Cat::BLOCKING;
+constexpr uint32_t kBRPop = Cat::WRITE | Cat::LIST | Cat::SLOW | Cat::BLOCKING;
+constexpr uint32_t kLLen = Cat::READ | Cat::LIST | Cat::FAST;
+constexpr uint32_t kLPos = Cat::READ | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kLIndex = Cat::READ | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kLInsert = Cat::READ | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kLRange = Cat::READ | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kLSet = Cat::WRITE | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kLTrim = Cat::WRITE | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kLRem = Cat::WRITE | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kLMove = Cat::WRITE | Cat::LIST | Cat::SLOW;
+constexpr uint32_t kBLMove = Cat::READ | Cat::LIST | Cat::SLOW | Cat::BLOCKING;
+}  // namespace Acl
+}  // namespace
+
 void ListFamily::Register(CommandRegistry* registry) {
   *registry
-      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(LPush)
-      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(LPushX)
-      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1}.HFUNC(LPop)
-      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPush)
-      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPushX)
-      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}.SetHandler(
-             RPopLPush)
-      << CI{"BRPOPLPUSH", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2, 1}
+      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, Acl::kLPush}.HFUNC(LPush)
+      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, Acl::kLPushX}.HFUNC(LPushX)
+      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1, Acl::kLPop}.HFUNC(LPop)
+      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, Acl::kRPush}.HFUNC(RPush)
+      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, Acl::kRPushX}.HFUNC(RPushX)
+      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1, Acl::kRPop}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, Acl::kRPopLPush}
+             .SetHandler(RPopLPush)
+      << CI{"BRPOPLPUSH",
+            CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+            4,
+            1,
+            2,
+            1,
+            Acl::kBRPopLPush}
              .SetHandler(BRPopLPush)
-      << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1}
+      << CI{"BLPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1,
+            Acl::kBLPop}
              .HFUNC(BLPop)
-      << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1}
+      << CI{"BRPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1,
+            Acl::kBRPop}
              .HFUNC(BRPop)
-      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)
-      << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(LPos)
-      << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex)
-      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1, 1}.HFUNC(LInsert)
-      << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(LRange)
-      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(LSet)
-      << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LTrim)
-      << CI{"LREM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LRem)
-      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, 1}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1}.SetHandler(BLMove);
+      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kLLen}.HFUNC(LLen)
+      << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, 1, Acl::kLPos}.HFUNC(LPos)
+      << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1, Acl::kLIndex}.HFUNC(LIndex)
+      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1, 1, Acl::kLInsert}.HFUNC(LInsert)
+      << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1, Acl::kLRange}.HFUNC(LRange)
+      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1, Acl::kLSet}.HFUNC(LSet)
+      << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1, Acl::kLTrim}.HFUNC(LTrim)
+      << CI{"LREM", CO::WRITE, 4, 1, 1, 1, Acl::kLRem}.HFUNC(LRem)
+      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, 1, Acl::kLMove}.HFUNC(LMove)
+      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1, Acl::kBLMove}
+             .SetHandler(BLMove);
 }
 
 }  // namespace dfly

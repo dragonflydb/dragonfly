@@ -22,6 +22,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_capture.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
 #include "server/conn_context.h"
@@ -1962,29 +1963,58 @@ using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 #define MFUNC(x) \
   SetHandler([this](CmdArgList sp, ConnectionContext* cntx) { this->x(std::move(sp), cntx); })
 
+namespace {
+namespace Acl {
+namespace Cat = AclCategory;
+constexpr uint32_t kQuit = Cat::FAST | Cat::CONNECTION;
+constexpr uint32_t kMulti = Cat::FAST | Cat::TRANSACTION;
+constexpr uint32_t kWatch = Cat::FAST | Cat::TRANSACTION;
+constexpr uint32_t kUnwatch = Cat::FAST | Cat::TRANSACTION;
+constexpr uint32_t kDiscard = Cat::FAST | Cat::TRANSACTION;
+constexpr uint32_t kEval = Cat::SLOW | Cat::SCRIPTING;
+constexpr uint32_t kEvalSha = Cat::SLOW | Cat::SCRIPTING;
+constexpr uint32_t kExec = Cat::SLOW | Cat::TRANSACTION;
+constexpr uint32_t kPublish = Cat::PUBSUB | Cat::FAST;
+constexpr uint32_t kSubscribe = Cat::PUBSUB | Cat::SLOW;
+constexpr uint32_t kUnsubscribe = Cat::PUBSUB | Cat::SLOW;
+constexpr uint32_t kPSubscribe = Cat::PUBSUB | Cat::SLOW;
+constexpr uint32_t kPUnsubsribe = Cat::PUBSUB | Cat::SLOW;
+constexpr uint32_t kFunction = Cat::SLOW;
+constexpr uint32_t kMonitor = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
+constexpr uint32_t kPubSub = Cat::SLOW;
+constexpr uint32_t kCommand = Cat::SLOW | Cat::CONNECTION;
+}  // namespace Acl
+}  // namespace
+
 void Service::RegisterCommands() {
   using CI = CommandId;
 
   registry_
-      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
-      << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
-      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1}.HFUNC(Watch)
-      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0}.HFUNC(Unwatch)
-      << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
-      << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(Eval).SetValidator(
-             &EvalValidator)
-      << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(EvalSha).SetValidator(
-             &EvalValidator)
-      << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, 1}.MFUNC(Exec)
-      << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
-      << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
-      << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
-      << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
-      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
-      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
-      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub)
-      << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0}.MFUNC(Command);
+      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0, Acl::kQuit}.HFUNC(Quit)
+      << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, Acl::kMulti}.HFUNC(Multi)
+      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1, Acl::kWatch}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0, Acl::kUnwatch}.HFUNC(Unwatch)
+      << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, Acl::kDiscard}.MFUNC(
+             Discard)
+      << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, Acl::kEval}
+             .MFUNC(Eval)
+             .SetValidator(&EvalValidator)
+      << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, Acl::kEvalSha}
+             .MFUNC(EvalSha)
+             .SetValidator(&EvalValidator)
+      << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, 1, Acl::kExec}.MFUNC(Exec)
+      << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0, Acl::kPublish}.MFUNC(Publish)
+      << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, Acl::kSubscribe}.MFUNC(Subscribe)
+      << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, Acl::kUnsubscribe}.MFUNC(
+             Unsubscribe)
+      << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, Acl::kPSubscribe}.MFUNC(
+             PSubscribe)
+      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, Acl::kPUnsubsribe}.MFUNC(
+             PUnsubscribe)
+      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0, Acl::kFunction}.MFUNC(Function)
+      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0, Acl::kMonitor}.MFUNC(Monitor)
+      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0, Acl::kPubSub}.MFUNC(Pubsub)
+      << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0, Acl::kCommand}.MFUNC(Command);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);

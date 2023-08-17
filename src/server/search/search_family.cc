@@ -17,6 +17,7 @@
 #include "core/search/search.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -350,15 +351,21 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
 
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
+// Redis search is a module. Therefore we introduce dragonfly extension search
+// to set as the default for the search family of commands. More sensible defaults,
+// should also be considered in the future
+
 void SearchFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
-  *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(FtCreate)
-            << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(FtDropIndex)
-            << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0}.HFUNC(FtInfo)
-            // Underscore same as in RediSearch because it's "temporary" (long time already)
-            << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(FtList)
-            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0}.HFUNC(FtSearch);
+  *registry
+      << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtCreate)
+      << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(
+             FtDropIndex)
+      << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtInfo)
+      // Underscore same as in RediSearch because it's "temporary" (long time already)
+      << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtList)
+      << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtSearch);
 }
 
 }  // namespace dfly

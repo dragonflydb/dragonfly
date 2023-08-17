@@ -7,6 +7,7 @@
 #include <gmock/gmock.h>
 
 #include "base/logging.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
@@ -22,7 +23,7 @@ using namespace testing;
 
 class BlockingControllerTest : public Test {
  protected:
-  BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, 1) {
+  BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, 1, AclCategory::NONE) {
   }
   void SetUp() override;
   void TearDown() override;

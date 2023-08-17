@@ -13,6 +13,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "redis/rdb.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -1445,39 +1446,77 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&GenericFamily::x)
 
+namespace {
+namespace Acl {
+namespace Cat = AclCategory;
+constexpr uint32_t kDel = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW;
+constexpr uint32_t kPing = Cat::FAST | Cat::CONNECTION;
+constexpr uint32_t kEcho = Cat::FAST | Cat::CONNECTION;
+constexpr uint32_t kExists = Cat::KEYSPACE | Cat::READ | Cat::FAST;
+constexpr uint32_t kTouch = Cat::KEYSPACE | Cat::READ | Cat::FAST;
+constexpr uint32_t kExpire = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+constexpr uint32_t kExpireAt = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+constexpr uint32_t kPersist = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+constexpr uint32_t kKeys = Cat::KEYSPACE | Cat::READ | Cat::SLOW | Cat::DANGEROUS;
+constexpr uint32_t kPExpireAt = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+constexpr uint32_t kPExpire = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+constexpr uint32_t kRename = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW;
+constexpr uint32_t kRenamNX = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+constexpr uint32_t kSelect = Cat::FAST | Cat::CONNECTION;
+constexpr uint32_t kScan = Cat::KEYSPACE | Cat::READ | Cat::SLOW;
+constexpr uint32_t kTTL = Cat::KEYSPACE | Cat::READ | Cat::FAST;
+constexpr uint32_t kPTTL = Cat::KEYSPACE | Cat::READ | Cat::FAST;
+constexpr uint32_t kTime = Cat::FAST;
+constexpr uint32_t kType = Cat::KEYSPACE | Cat::READ | Cat::FAST;
+constexpr uint32_t kDump = Cat::KEYSPACE | Cat::READ | Cat::SLOW;
+constexpr uint32_t kUnlink = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+// TODO investigate what stick is
+constexpr uint32_t kStick = Cat::SLOW;
+constexpr uint32_t kSort =
+    Cat::WRITE | Cat::SET | Cat::SORTEDSET | Cat::LIST | Cat::SLOW | Cat::DANGEROUS;
+constexpr uint32_t kMove = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+constexpr uint32_t kRestore = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW | Cat::DANGEROUS;
+}  // namespace Acl
+}  // namespace
+
 void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
 
-  *registry << CI{"DEL", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
-            /* Redis compatibility:
-             * We don't allow PING during loading since in Redis PING is used as
-             * failure detection, and a loading server is considered to be
-             * not available. */
-            << CI{"PING", CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
-            << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0}.HFUNC(Echo)
-            << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
-            << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
-            << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Expire)
-            << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(ExpireAt)
-            << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Persist)
-            << CI{"KEYS", CO::READONLY, 2, 0, 0, 0}.HFUNC(Keys)
-            << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(
-                   PexpireAt)
-            << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Pexpire)
-            << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}.HFUNC(Rename)
-            << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}.HFUNC(RenameNx)
-            << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)
-            << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Scan)
-            << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Ttl)
-            << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Pttl)
-            << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, 0}.HFUNC(Time)
-            << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1}.HFUNC(Type)
-            << CI{"DUMP", CO::READONLY, 2, 1, 1, 1}.HFUNC(Dump)
-            << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
-            << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick)
-            << CI{"SORT", CO::READONLY, -2, 1, 1, 1}.HFUNC(Sort)
-            << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Move)
-            << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1}.HFUNC(Restore);
+  *registry
+      << CI{"DEL", CO::WRITE, -2, 1, -1, 1, Acl::kDel}.HFUNC(Del)
+      /* Redis compatibility:
+       * We don't allow PING during loading since in Redis PING is used as
+       * failure detection, and a loading server is considered to be
+       * not available. */
+      << CI{"PING", CO::FAST, -1, 0, 0, 0, Acl::kPing}.HFUNC(Ping)
+      << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0, Acl::kEcho}.HFUNC(Echo)
+      << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1, Acl::kExists}.HFUNC(Exists)
+      << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1, Acl::kTouch}.HFUNC(Exists)
+      << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kExpire}.HFUNC(
+             Expire)
+      << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kExpireAt}
+             .HFUNC(ExpireAt)
+      << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1, Acl::kPersist}.HFUNC(Persist)
+      << CI{"KEYS", CO::READONLY, 2, 0, 0, 0, Acl::kKeys}.HFUNC(Keys)
+      << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kPExpireAt}
+             .HFUNC(PexpireAt)
+      << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kPExpire}.HFUNC(
+             Pexpire)
+      << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, Acl::kRename}.HFUNC(Rename)
+      << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, Acl::kRenamNX}.HFUNC(RenameNx)
+      << CI{"SELECT", kSelectOpts, 2, 0, 0, 0, Acl::kSelect}.HFUNC(Select)
+      << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0, Acl::kScan}.HFUNC(Scan)
+      << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kTTL}.HFUNC(Ttl)
+      << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kPTTL}.HFUNC(Pttl)
+      << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, 0, Acl::kTime}.HFUNC(Time)
+      << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1, Acl::kType}.HFUNC(Type)
+      << CI{"DUMP", CO::READONLY, 2, 1, 1, 1, Acl::kDump}.HFUNC(Dump)
+      << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1, Acl::kUnlink}.HFUNC(Del)
+      << CI{"STICK", CO::WRITE, -2, 1, -1, 1, Acl::kStick}.HFUNC(Stick)
+      << CI{"SORT", CO::READONLY, -2, 1, 1, 1, Acl::kSort}.HFUNC(Sort)
+      << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kMove}
+             .HFUNC(Move)
+      << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1, Acl::kRestore}.HFUNC(Restore);
 }
 
 }  // namespace dfly

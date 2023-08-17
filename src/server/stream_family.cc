@@ -13,6 +13,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -2005,23 +2006,45 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
 
 #define HFUNC(x) SetHandler(&StreamFamily::x)
 
+namespace {
+namespace Acl {
+namespace Cat = AclCategory;
+constexpr uint32_t kXAdd = Cat::WRITE | Cat::STREAM | Cat::FAST;
+constexpr uint32_t kXDel = Cat::WRITE | Cat::STREAM | Cat::FAST;
+constexpr uint32_t kXGroup = Cat::SLOW;
+constexpr uint32_t kXInfo = Cat::SLOW;
+constexpr uint32_t kXLen = Cat::READ | Cat::STREAM | Cat::FAST;
+constexpr uint32_t kXRange = Cat::READ | Cat::STREAM | Cat::SLOW;
+constexpr uint32_t kXRevRange = Cat::READ | Cat::STREAM | Cat::SLOW;
+constexpr uint32_t kXRead = Cat::READ | Cat::STREAM | Cat::SLOW | Cat::BLOCKING;
+constexpr uint32_t kXReadGroup = Cat::WRITE | Cat::STREAM | Cat::SLOW | Cat::BLOCKING;
+constexpr uint32_t kXSetId = Cat::WRITE | Cat::STREAM | Cat::SLOW;
+constexpr uint32_t kXTrim = Cat::WRITE | Cat::STREAM | Cat::SLOW;
+constexpr uint32_t kXGroupHelp = Cat::READ | Cat::STREAM | Cat::SLOW;
+}  // namespace Acl
+}  // namespace
+
 void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
-  *registry << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1}.HFUNC(XAdd)
-            << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, 1}.HFUNC(XDel)
-            << CI{"XGROUP", CO::WRITE | CO::DENYOOM, -3, 2, 2, 1}.HFUNC(XGroup)
-            << CI{"XINFO", CO::READONLY | CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(XInfo)
-            << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(XLen)
-            << CI{"XRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRange)
-            << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRevRange)
-            << CI{"XREAD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 3, 3, 1}
-                   .HFUNC(XRead)
-            << CI{"XREADGROUP", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -6, 6, 6, 1}
-                   .HFUNC(XReadGroup)
-            << CI{"XSETID", CO::WRITE, 3, 1, 1, 1}.HFUNC(XSetId)
-            << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, 1}.HFUNC(XTrim)
-            << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0}.SetHandler(XGroupHelp);
+  *registry
+      << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1, Acl::kXAdd}.HFUNC(XAdd)
+      << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, 1, Acl::kXDel}.HFUNC(XDel)
+      << CI{"XGROUP", CO::WRITE | CO::DENYOOM, -3, 2, 2, 1, Acl::kXGroup}.HFUNC(XGroup)
+      << CI{"XINFO", CO::READONLY | CO::NOSCRIPT, -2, 0, 0, 0, Acl::kXInfo}.HFUNC(XInfo)
+      << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kXLen}.HFUNC(XLen)
+      << CI{"XRANGE", CO::READONLY, -4, 1, 1, 1, Acl::kXRange}.HFUNC(XRange)
+      << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, 1, Acl::kXRevRange}.HFUNC(XRevRange)
+      << CI{"XREAD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 3, 3, 1,
+            Acl::kXRead}
+             .HFUNC(XRead)
+      << CI{"XREADGROUP",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -6, 6, 6, 1,
+            Acl::kXReadGroup}
+             .HFUNC(XReadGroup)
+      << CI{"XSETID", CO::WRITE, 3, 1, 1, 1, Acl::kXSetId}.HFUNC(XSetId)
+      << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, 1, Acl::kXTrim}.HFUNC(XTrim)
+      << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0, Acl::kXGroupHelp}.SetHandler(
+             XGroupHelp);
 }
 
 }  // namespace dfly

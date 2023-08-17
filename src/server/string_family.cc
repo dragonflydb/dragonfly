@@ -19,6 +19,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "redis/util.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -1467,32 +1468,70 @@ void StringFamily::Shutdown() {
 
 #define HFUNC(x) SetHandler(&StringFamily::x)
 
+namespace {
+namespace Acl {
+namespace Cat = AclCategory;
+constexpr uint32_t kSet = Cat::WRITE | Cat::STRING | Cat::SLOW;
+constexpr uint32_t kSetEx = Cat::WRITE | Cat::STRING | Cat::SLOW;
+constexpr uint32_t kPSetEx = Cat::WRITE | Cat::STRING | Cat::SLOW;
+constexpr uint32_t kSetNx = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kAppend = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kPrepend = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kIncr = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kDecr = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kIncrBy = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kIncrByFloat = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kDecrBy = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kGet = Cat::READ | Cat::STRING | Cat::FAST;
+constexpr uint32_t kGetDel = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kGetEx = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kGetSet = Cat::WRITE | Cat::STRING | Cat::FAST;
+constexpr uint32_t kMGet = Cat::READ | Cat::STRING | Cat::FAST;
+constexpr uint32_t kMSet = Cat::WRITE | Cat::STRING | Cat::SLOW;
+constexpr uint32_t kMSetNx = Cat::WRITE | Cat::STRING | Cat::SLOW;
+constexpr uint32_t kStrLen = Cat::READ | Cat::STRING | Cat::FAST;
+constexpr uint32_t kGetRange = Cat::READ | Cat::STRING | Cat::SLOW;
+constexpr uint32_t kSubStr = Cat::READ | Cat::STRING | Cat::SLOW;
+constexpr uint32_t kSetRange = Cat::WRITE | Cat::STRING | Cat::SLOW;
+// ClThrottle is a module in redis. Therefore we introduce a new extension
+// to the category. We should consider other defaults as well
+constexpr uint32_t kClThrottle = Cat::THROTTLE;
+}  // namespace Acl
+}  // namespace
+
 void StringFamily::Register(CommandRegistry* registry) {
   *registry
-      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1}.HFUNC(Set)
-      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(SetEx)
-      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(PSetEx)
-      << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(SetNx)
-      << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
-      << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)
-      << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)
-      << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Decr)
-      << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrBy)
-      << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrByFloat)
-      << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
-      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
-      << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(GetDel)
-      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, 1}.HFUNC(
-             GetEx)
-      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
-      << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1}.HFUNC(MGet)
-      << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
-      << CI{"MSETNX", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSetNx)
-      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(StrLen)
-      << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)
-      << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
-      << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetRange)
-      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1}.HFUNC(ClThrottle);
+      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1, Acl::kSet}.HFUNC(Set)
+      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1, Acl::kSetEx}.HFUNC(
+             SetEx)
+      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1, Acl::kPSetEx}.HFUNC(
+             PSetEx)
+      << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1, Acl::kSetNx}.HFUNC(SetNx)
+      << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1, Acl::kAppend}.HFUNC(Append)
+      << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1, Acl::kPrepend}.HFUNC(Prepend)
+      << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1, 1, Acl::kIncr}.HFUNC(Incr)
+      << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1, 1, Acl::kDecr}.HFUNC(Decr)
+      << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1, 1, Acl::kIncrBy}.HFUNC(IncrBy)
+      << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1, 1, Acl::kIncrByFloat}.HFUNC(IncrByFloat)
+      << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1, 1, Acl::kDecrBy}.HFUNC(DecrBy)
+      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kGet}.HFUNC(Get)
+      << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1, 1, Acl::kGetDel}.HFUNC(GetDel)
+      << CI{"GETEX",    CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, 1,
+            Acl::kGetEx}
+             .HFUNC(GetEx)
+      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1, Acl::kGetSet}.HFUNC(GetSet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1, Acl::kMGet}.HFUNC(
+             MGet)
+      << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2, Acl::kMSet}.HFUNC(MSet)
+      << CI{"MSETNX", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2, Acl::kMSetNx}.HFUNC(MSetNx)
+      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kStrLen}.HFUNC(StrLen)
+      << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1, Acl::kGetRange}.HFUNC(GetRange)
+      << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1, Acl::kSubStr}.HFUNC(
+             GetRange)  // Alias for GetRange
+      << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1, Acl::kSetRange}.HFUNC(
+             SetRange)
+      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1, Acl::kClThrottle}.HFUNC(
+             ClThrottle);
 }
 
 }  // namespace dfly

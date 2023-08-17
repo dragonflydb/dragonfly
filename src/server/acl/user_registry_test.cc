@@ -9,6 +9,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/acl/user.h"
 
 using namespace testing;
@@ -27,18 +28,18 @@ TEST_F(UserRegistryTest, BasicOp) {
   CHECK_EQ(registry.AuthUser(username, pass), true);
   CHECK_EQ(registry.IsUserActive(username), false);
 
-  CHECK_EQ(registry.GetCredentials(username).acl_categories, AclCat::ACL_CATEGORY_NONE);
+  CHECK_EQ(registry.GetCredentials(username).acl_categories, AclCategory::NONE);
 
-  const uint32_t set_category = 0 | AclCat::ACL_CATEGORY_LIST | AclCat::ACL_CATEGORY_SET;
+  const uint32_t set_category = 0 | AclCategory::LIST | AclCategory::SET;
   req = User::UpdateRequest{{}, set_category, {}, {}};
   registry.MaybeAddAndUpdate(username, std::move(req));
   auto acl_categories = registry.GetCredentials(username).acl_categories;
   CHECK_EQ(acl_categories, set_category);
 
-  req = User::UpdateRequest{{}, {}, 0 | AclCat::ACL_CATEGORY_LIST, {}};
+  req = User::UpdateRequest{{}, {}, 0 | AclCategory::LIST, {}};
   registry.MaybeAddAndUpdate(username, std::move(req));
   acl_categories = registry.GetCredentials(username).acl_categories;
-  const uint32_t expected_res = 0 | AclCat::ACL_CATEGORY_SET;
+  const uint32_t expected_res = 0 | AclCategory::SET;
   CHECK_EQ(acl_categories, expected_res);
 }
 
