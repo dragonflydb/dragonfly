@@ -324,7 +324,7 @@ TEST_F(SearchParserTest, CheckTag) {
 }
 
 TEST_F(SearchParserTest, IntegerTerms) {
-  PrepareSchema({{{"status", Schema::TAG}, {"title", Schema::TEXT}}});
+  PrepareSchema({{"status", SchemaField::TAG}, {"title", SchemaField::TEXT}});
 
   PrepareQuery("@status:{1} @title:33");
 
