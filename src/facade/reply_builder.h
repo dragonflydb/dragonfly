@@ -64,6 +64,8 @@ class SinkReplyBuilder {
     should_batch_ = batch;
   }
 
+  void FlushBatch();
+
   // Used for QUIT - > should move to conn_context?
   void CloseConnection();
 

@@ -112,9 +112,10 @@ class DflyInstance:
     def format_args(args):
         out = []
         for k, v in args.items():
-            out.append(f"--{k}")
             if v is not None:
-                out.append(str(v))
+                out.append(f"--{k}={v}")
+            else:
+                out.append(f"--{k}")
         return out
 
     async def metrics(self):
