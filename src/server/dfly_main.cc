@@ -581,8 +581,8 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
   CHECK(!err) << "Unsupported cgroup v2 format, read:" << mem_path;
 
-  LOG(INFO) << "mem_path = " << mem_path;
-  LOG(INFO) << "cpu_path = " << cpu_path;
+  VLOG(1) << "mem_path = " << mem_path;
+  VLOG(1) << "cpu_path = " << cpu_path;
 
   /* Update memory limits */
 
@@ -658,8 +658,8 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     }
   };
 
-  read_cpu(base_cpu, max_threads);
-  read_cpu(cpu_path, max_threads);
+  read_cpu(base_cpu, max_threads);  // global cpu limits
+  read_cpu(cpu_path, max_threads);  // cgroup-specific limits
 
   if (!read_something) {
     LOG(ERROR) << "Failed in deducing any cgroup limits with paths " << mem_path << " and "
