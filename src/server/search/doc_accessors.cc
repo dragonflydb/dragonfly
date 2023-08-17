@@ -92,7 +92,7 @@ struct JsonAccessor::JsonPathContainer : public jsoncons::jsonpath::jsonpath_exp
 };
 
 string_view JsonAccessor::GetString(string_view active_field) const {
-  auto res = GetPath(active_field)->evaluate(*json_);
+  auto res = GetPath(active_field)->evaluate(json_);
   DCHECK(res.is_array());
   if (res.empty())
     return "";
@@ -101,7 +101,7 @@ string_view JsonAccessor::GetString(string_view active_field) const {
 }
 
 search::FtVector JsonAccessor::GetVector(string_view active_field) const {
-  auto res = GetPath(active_field)->evaluate(*json_);
+  auto res = GetPath(active_field)->evaluate(json_);
   DCHECK(res.is_array());
   if (res.empty())
     return {};
@@ -115,26 +115,30 @@ search::FtVector JsonAccessor::GetVector(string_view active_field) const {
 JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) const {
   if (auto it = path_cache_.find(field); it != path_cache_.end()) {
     return it->second.get();
-  } else {
-    error_code ec;
-    auto path_expr = jsoncons::jsonpath::make_expression<JsonType>(field, ec);
-    DCHECK(!ec) << "missing validation on ft.create step";
-
-    JsonPathContainer path_container{move(path_expr)};
-    auto ptr = make_unique<JsonPathContainer>(move(path_container));
-
-    JsonPathContainer* path = ptr.get();
-    path_cache_[field] = move(ptr);
-    return path;
   }
+
+  error_code ec;
+  auto path_expr = jsoncons::jsonpath::make_expression<JsonType>(field, ec);
+  DCHECK(!ec) << "missing validation on ft.create step";
+
+  JsonPathContainer path_container{move(path_expr)};
+  auto ptr = make_unique<JsonPathContainer>(move(path_container));
+
+  JsonPathContainer* path = ptr.get();
+  path_cache_[field] = move(ptr);
+  return path;
 }
 
 SearchDocData JsonAccessor::Serialize(search::Schema schema) const {
   SearchDocData out{};
-  for (const auto& member : json_->object_range()) {
+  for (const auto& member : json_.object_range()) {
     out[member.key()] = member.value().as_string();
   }
   return out;
+}
+
+void JsonAccessor::RemoveFieldFromCache(string_view field) {
+  path_cache_.erase(field);
 }
 
 thread_local absl::flat_hash_map<std::string, std::unique_ptr<JsonAccessor::JsonPathContainer>>
