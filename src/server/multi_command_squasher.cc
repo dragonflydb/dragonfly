@@ -130,9 +130,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{local_tx, &crb};
-  local_cntx.conn_state.db_index = cntx_->conn_state.db_index;
-
+  ConnectionContext local_cntx{cntx_, local_tx, &crb};
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
   for (auto* cmd : sinfo.cmds) {
