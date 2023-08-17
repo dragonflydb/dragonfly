@@ -92,10 +92,14 @@ search_expr:
  | search_expr OR_OP search_expr        { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
  | NOT_OP search_expr                   { $$ = AstNegateNode(move($2)); }
  | TERM                                 { $$ = AstTermNode(move($1)); }
+ | INT64                                { $$ = AstTermNode(to_string($1)); }
  | FIELD COLON field_cond               { $$ = AstFieldNode(move($1), move($3)); }
 
+// field_cond doesn't implicitly turn into field_cond_expr that can contain multi-term and/or expressions,
+// as those can only be contained inside parentheses
 field_cond:
   TERM                                  { $$ = AstTermNode(move($1)); }
+  | INT64                               { $$ = AstTermNode(to_string($1)); }
   | NOT_OP field_cond                   { $$ = AstNegateNode(move($2)); }
   | LPAREN field_cond_expr RPAREN       { $$ = move($2); }
   | LBRACKET INT64 INT64 RBRACKET       { $$ = AstRangeNode(move($2), move($3)); }
@@ -107,10 +111,13 @@ field_cond_expr:
   | field_cond_expr OR_OP field_cond_expr         { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
   | NOT_OP field_cond_expr                        { $$ = AstNegateNode(move($2)); };
   | TERM                                          { $$ = AstTermNode(move($1)); }
+  | INT64                                         { $$ = AstTermNode(to_string($1)); }
 
 tag_list:
   TERM                       { $$ = AstTagsNode(move($1)); }
+  | INT64                    { $$ = AstTagsNode(to_string($1)); }
   | tag_list OR_OP TERM      { $$ = AstTagsNode(move($1), move($3)); }
+  | tag_list OR_OP INT64     { $$ = AstTagsNode(move($1), to_string($3)); }
 
 %%
 

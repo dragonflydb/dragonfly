@@ -11,6 +11,14 @@ metadata:
     app.kubernetes.io/version: "v1.8.0"
     app.kubernetes.io/managed-by: Helm
 ---
+# Source: dragonfly/templates/extra-manifests.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dfly-password
+stringData:
+  password: foobar
+---
 # Source: dragonfly/templates/tls-secret.yaml
 apiVersion: v1
 kind: Secret
@@ -114,6 +122,12 @@ spec:
           volumeMounts:
             - mountPath: /etc/dragonfly/tls
               name: tls
+          env:
+            - name: DFLY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dfly-password
+                  key: password
       volumes:
         - name: tls
           secret:

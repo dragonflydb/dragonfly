@@ -164,7 +164,7 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
 
   if (add_res.second || zparams.override) {
     if (member_len > kMaxListPackValue) {
-      detail::SortedMap* zs = new detail::SortedMap();
+      detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, zs);
     } else {
       unsigned char* lp = lpNew(0);
@@ -1564,35 +1564,21 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   } else {
     CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), pv.Encoding());
     uint32_t count = scan_op.limit;
-    detail::SortedMap* zs = (detail::SortedMap*)pv.RObjPtr();
-
-    dict* ht = zs->GetDict();
+    detail::SortedMap* sm = (detail::SortedMap*)pv.RObjPtr();
     long maxiterations = count * 10;
+    uint64_t cur = *cursor;
 
-    struct ScanArgs {
-      char* sbuf;
-      StringVec* res;
-      const ScanOpts* scan_op;
-    } sargs = {buf, &res, &scan_op};
-
-    auto scanCb = [](void* privdata, const dictEntry* de) {
-      ScanArgs* sargs = (ScanArgs*)privdata;
-
-      sds key = (sds)de->key;
-      if (!sargs->scan_op->Matches(key)) {
-        return;
+    auto cb = [&](string_view str, double score) {
+      if (scan_op.Matches(str)) {
+        res.emplace_back(str);
+        char* str = RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf));
+        res.emplace_back(str);
       }
-
-      double score = *(double*)dictGetVal(de);
-
-      sargs->res->emplace_back(key, sdslen(key));
-      char* str = RedisReplyBuilder::FormatDouble(score, sargs->sbuf, sizeof(buf));
-      sargs->res->emplace_back(str);
     };
-
     do {
-      *cursor = dictScan(ht, *cursor, scanCb, NULL, &sargs);
-    } while (*cursor && maxiterations-- && res.size() < count);
+      cur = sm->Scan(cur, cb);
+    } while (cur && maxiterations-- && res.size() < count);
+    *cursor = cur;
   }
 
   return res;
