@@ -110,9 +110,12 @@ void SinkReplyBuilder::StopAggregate() {
   if (should_batch_ || batch_.empty())
     return;
 
+  FlushBatch();
+}
+
+void SinkReplyBuilder::FlushBatch() {
   error_code ec = sink_->Write(io::Buffer(batch_));
   batch_.clear();
-
   if (ec)
     ec_ = ec;
 }

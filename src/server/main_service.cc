@@ -626,6 +626,8 @@ Service::Service(ProactorPool* pp)
   CHECK_LT(pp->size(), kMaxThreadSize);
   RegisterCommands();
 
+  exec_cid_ = FindCmd("EXEC");
+
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
@@ -1012,6 +1014,57 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   }
 
   return true;
+}
+
+void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                   facade::ConnectionContext* cntx) {
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
+
+  vector<StoredCmd> stored_cmds;
+  intrusive_ptr<Transaction> dist_trans;
+
+  auto perform_squash = [&] {
+    if (stored_cmds.empty())
+      return;
+
+    if (!dist_trans) {
+      dist_trans.reset(new Transaction{exec_cid_});
+      dist_trans->StartMultiNonAtomic();
+    }
+
+    dfly_cntx->transaction = dist_trans.get();
+    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds), dfly_cntx, this, true, false);
+    dfly_cntx->transaction = nullptr;
+    stored_cmds.clear();
+  };
+
+  for (auto args : args_list) {
+    ToUpper(&args[0]);
+    const CommandId* cid = FindCmd(args);
+
+    // MULTI...EXEC commands need to be collected into a single context, so squashing is not
+    // possible
+    const bool is_multi =
+        dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
+
+    if (!is_multi && cid != nullptr) {
+      stored_cmds.reserve(args_list.size());
+      stored_cmds.emplace_back(cid, args.subspan(1));
+      continue;
+    }
+
+    // Squash accumulated commands
+    perform_squash();
+
+    // Dispatch non squashed command only after all squshed commands were executed and replied
+    DispatchCommand(args, cntx);
+  }
+
+  perform_squash();
+
+  if (dist_trans)
+    dist_trans->UnlockMulti();
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
