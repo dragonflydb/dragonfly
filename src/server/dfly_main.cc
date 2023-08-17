@@ -515,8 +515,10 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
   if (groups.size() == 1) {
     // for v2 we only read 0::<name>
     size_t pos = cgv.rfind(':');
-    if (pos == string::npos)
+    if (pos == string::npos) {
+      *memory_path = cgv;
       return make_error_code(errc::not_supported);
+    }
 
     string_view res = absl::StripTrailingAsciiWhitespace(cgv.substr(pos + 1));
 
@@ -556,7 +558,8 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     size_t temp = numeric_limits<size_t>::max();
 
     if (file.has_value() && !absl::StartsWith(*file, "max"))
-      CHECK(absl::SimpleAtoi(*file, &temp));
+      CHECK(absl::SimpleAtoi(*file, &temp))
+          << "Failed in parsing cgroup limits, path: " << path << " (read: " << *file << ")";
 
     *output = min(*output, temp);
   };
@@ -569,15 +572,17 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     return;
   }
 
+  CHECK(!err) << "Unsupported cgroup v2 format, read:" << mem_path;
+
   LOG(INFO) << "mem_path = " << mem_path;
   LOG(INFO) << "cpu_path = " << cpu_path;
 
   /* Update memory limits */
 
   // Start by reading global memory limits
-  constexpr auto base = "/sys/fs/cgroup/memory"sv;
-  read_mem(StrCat(base, "/memory.limit_in_bytes"), &mdata->mem_total);
-  read_mem(StrCat(base, "/memory.max"), &mdata->mem_total);
+  constexpr auto base_mem = "/sys/fs/cgroup/memory"sv;
+  read_mem(StrCat(base_mem, "/memory.limit_in_bytes"), &mdata->mem_total);
+  read_mem(StrCat(base_mem, "/memory.max"), &mdata->mem_total);
 
   // Read cgroup-specific limits
   read_mem(StrCat(mem_path, "/memory.limit_in_bytes"), &mdata->mem_total);
@@ -588,39 +593,62 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
   /* Update thread limits */
 
-  double count = 0, timeshare = 1;
+  constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
+  auto read_cpu = [](string_view path, size_t* output) {
+    double count{0}, timeshare{1};
 
-  if (auto cpu = ReadFileToString(cpu_path + "/cpu.max"); cpu.has_value()) {
-    vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
+    /**
+     * Summarized: the function does one of the following:
+     *
+     * 1. read path/cpu.max -- for v2. The format of this file is:
+     *  $COUNT $PERIOD
+     * which indicates that we can use upto $COUNT shares in a $PERIOD of time.
+     * If $COUNT is max, then we can use as much CPU as the system has. Otherwise,
+     * this translates to $COUNT/$PERIOD threads.
+     *
+     * 2. read path/cpu.cfs_quota_us & path/cpu.cfs_period_us -- same idea, but for v1.
+     */
 
-    CHECK_EQ(res.size(), 2u);
+    if (auto cpu = ReadFileToString(StrCat(path, "/cpu.max")); cpu.has_value()) {
+      vector<string_view> res = absl::StrSplit(*cpu, ' ');
 
-    if (res[0] == "max")
-      *max_threads = 0u;
-    else {
-      CHECK(absl::SimpleAtod(res[0], &count));
-      CHECK(absl::SimpleAtod(res[1], &timeshare));
+      CHECK_EQ(res.size(), 2u);
 
-      *max_threads = static_cast<size_t>(ceil(count / timeshare));
+      if (res[0] == "max")
+        *output = 0u;
+      else {
+        CHECK(absl::SimpleAtod(res[0], &count))
+            << "Failed in parsing cgroupv2 cpu count, path = " << path << " (read: " << *cpu << ")";
+        CHECK(absl::SimpleAtod(res[1], &timeshare))
+            << "Failed in parsing cgroupv2 cpu timeshare, path = " << path << " (read: " << *cpu
+            << ")";
+
+        *output = static_cast<size_t>(ceil(count / timeshare));
+      }
+    } else if (auto quota = ReadFileToString(StrCat(path, "/cpu.cfs_quota_us"));
+               quota.has_value()) {
+      auto period = ReadFileToString(StrCat(path, "/cpu.cfs_period_us"));
+
+      CHECK(period.has_value()) << "Failed to read cgroup cpu.cfs_period_us, but read "
+                                   "cpu.cfs_quota_us (this shouldn't happen!)";
+
+      CHECK(absl::SimpleAtod(quota.value(), &count))
+          << "Failed in parsing cgroupv1 cpu timeshare, quota = " << path << " (read: " << *quota
+          << ")";
+
+      if (count == -1)  // on -1 there is no limit.
+        count = 0;
+
+      CHECK(absl::SimpleAtod(period.value(), &timeshare))
+          << "Failed in parsing cgroupv1 cpu timeshare, path = " << path << " (read: " << *period
+          << ")";
     }
-  } else if (auto quota = ReadFileToString(cpu_path + "/cpu.cfs_quota_us"); quota.has_value()) {
-    auto period = ReadFileToString(cpu_path + "/cpu.cfs_period_us");
 
-    CHECK(period.has_value()) << "Failed to read cgroup cpu.cfs_period_us, but read cpu.cfs_quota "
-                                 "us (this shouldn't happen!)";
+    *output = static_cast<size_t>(count / timeshare);
+  };
 
-    CHECK(absl::SimpleAtod(quota.value(), &count));
-
-    if (count == -1)  // on -1 there is no limit.
-      count = 0;
-
-    CHECK(absl::SimpleAtod(period.value(), &timeshare));
-  } else {
-    *max_threads = 0u;  // cpuset, this is handled later.
-    return;
-  }
-
-  *max_threads = static_cast<size_t>(ceil(count / timeshare));
+  read_cpu(base_cpu, max_threads);
+  read_cpu(cpu_path, max_threads);
 }
 
 }  // namespace
