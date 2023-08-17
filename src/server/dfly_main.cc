@@ -551,15 +551,22 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
 void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
   using absl::StrCat;
 
-  auto read_mem = [](string_view path, size_t* output) {
+  // did we succeed in reading *something*? if not, exit.
+  // note that all processes in Linux are in some cgroup, so at the very
+  // least we should read something.
+  bool read_something = false;
+
+  auto read_mem = [&read_something](string_view path, size_t* output) {
     auto file = io::ReadFileToString(path);
     DVLOG(1) << "container limits: read " << path << ": " << file.value_or("N/A");
 
     size_t temp = numeric_limits<size_t>::max();
 
-    if (file.has_value() && !absl::StartsWith(*file, "max"))
+    if (file.has_value() && !absl::StartsWith(*file, "max")) {
       CHECK(absl::SimpleAtoi(*file, &temp))
           << "Failed in parsing cgroup limits, path: " << path << " (read: " << *file << ")";
+      read_something = true;
+    }
 
     *output = min(*output, temp);
   };
@@ -594,7 +601,7 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   /* Update thread limits */
 
   constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
-  auto read_cpu = [](string_view path, size_t* output) {
+  auto read_cpu = [&read_something](string_view path, size_t* output) {
     double count{0}, timeshare{1};
 
     /**
@@ -625,6 +632,9 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
         *output = static_cast<size_t>(ceil(count / timeshare));
       }
+
+      read_something = true;
+
     } else if (auto quota = ReadFileToString(StrCat(path, "/cpu.cfs_quota_us"));
                quota.has_value()) {
       auto period = ReadFileToString(StrCat(path, "/cpu.cfs_period_us"));
@@ -642,13 +652,20 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
       CHECK(absl::SimpleAtod(period.value(), &timeshare))
           << "Failed in parsing cgroupv1 cpu timeshare, path = " << path << " (read: " << *period
           << ")";
-    }
 
-    *output = static_cast<size_t>(count / timeshare);
+      *output = static_cast<size_t>(count / timeshare);
+      read_something = true;
+    }
   };
 
   read_cpu(base_cpu, max_threads);
   read_cpu(cpu_path, max_threads);
+
+  if (!read_something) {
+    LOG(ERROR) << "Failed in deducing any cgroup limits with paths " << mem_path << " and "
+               << cpu_path << ". Exiting.";
+    exit(1);
+  }
 }
 
 }  // namespace
