@@ -798,8 +798,10 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
         dispatch_q_.pop_front();
       }
 
-      if (dispatch_q_.empty())
+      if (dispatch_q_.empty()) {
         builder->FlushBatch();
+        builder->SetBatchMode(false);  // in case the next dispatch is sync
+      }
     } else {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
