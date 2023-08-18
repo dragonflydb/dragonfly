@@ -306,4 +306,28 @@ TEST_F(SearchFamilyTest, Unicode) {
               UnorderedElementsAre("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας"));
 }
 
+TEST_F(SearchFamilyTest, SimpleExpiry) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "expires-in", "numeric"}), "OK");
+
+  Run({"hset", "d:1", "title", "never to expire", "expires-in", "100500"});
+
+  Run({"hset", "d:2", "title", "first to expire", "expires-in", "50"});
+  Run({"pexpire", "d:2", "50"});
+
+  Run({"hset", "d:3", "title", "second to expire", "expires-in", "100"});
+  Run({"pexpire", "d:3", "100"});
+
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:2", "d:3"));
+
+  shard_set->TEST_EnableHeartBeat();
+
+  AdvanceTime(60);
+  ThisFiber::SleepFor(5ms);  // Give heartbeat time to delete expired doc
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:3"));
+
+  AdvanceTime(60);
+  Run({"HGETALL", "d:3"});  // Trigger expiry by access
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
+}
+
 }  // namespace dfly

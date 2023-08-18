@@ -132,7 +132,7 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
     async def test_snapshot(self, df_local_factory, save_type, dbfilename):
         df_args = {"dbfilename": dbfilename, **BASIC_ARGS, "port": 1111}
         if save_type == "rdb":
-            df_args["nodf_snapshot_format"] = ""
+            df_args["nodf_snapshot_format"] = None
         df_server = df_local_factory.create(**df_args)
         df_server.start()
 

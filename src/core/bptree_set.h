@@ -65,7 +65,7 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
 
   void Clear();
 
-  BPTreeNode* DEBUG_root() {
+  const BPTreeNode* DEBUG_root() const {
     return root_;
   }
 
@@ -299,10 +299,10 @@ void BPTree<T, Policy>::InsertToFullLeaf(KeyT item, const BPTreePath& path) {
   assert(node->NumItems() < Layout::kMaxLeafKeys);
 
   if (insert_pos <= node->NumItems()) {
-    assert(Comp()(item, median) == -1);
+    assert(Comp()(item, median) < 0);
     node->LeafInsert(insert_pos, item);
   } else {
-    assert(Comp()(item, median) == 1);
+    assert(Comp()(item, median) > 0);
     right->LeafInsert(insert_pos - node->NumItems() - 1, item);
   }
 
@@ -359,12 +359,12 @@ void BPTree<T, Policy>::InsertToFullLeaf(KeyT item, const BPTreePath& path) {
     assert(node->NumItems() < Layout::kMaxInnerKeys);
 
     if (pos <= node->NumItems()) {
-      assert(Comp()(median, next_median) == -1);
+      assert(Comp()(median, next_median) < 0);
 
       node->InnerInsert(pos, median, right);
       node->IncreaseTreeCount(1);
     } else {
-      assert(Comp()(median, next_median) == 1);
+      assert(Comp()(median, next_median) > 0);
 
       next_right->InnerInsert(pos - node->NumItems() - 1, median, right);
 
@@ -566,7 +566,7 @@ template <typename T, typename Policy> void BPTree<T, Policy>::Delete(BPTreePath
     path.DigRight();
 
     BPTreeNode* leaf = path.Last().first;
-    assert(Comp()(leaf->Key(leaf->NumItems() - 1), node->Key(key_pos)) == -1);
+    assert(Comp()(leaf->Key(leaf->NumItems() - 1), node->Key(key_pos)) < 0);
 
     // set a new separator.
     node->SetKey(key_pos, leaf->Key(leaf->NumItems() - 1));

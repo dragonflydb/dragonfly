@@ -139,20 +139,25 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   auto search_results = search_algo->Search(&indices_);
 
   size_t serialize_count = min(search_results.ids.size(), params.limit_offset + params.limit_total);
+  vector<SerializedSearchDoc> out;
+  out.reserve(serialize_count);
 
-  vector<SerializedSearchDoc> out(serialize_count);
-  for (size_t i = 0; i < serialize_count; i++) {
+  size_t expired_count = 0;
+  for (size_t i = 0; i < search_results.ids.size() && out.size() < serialize_count; i++) {
     auto key = key_index_.Get(search_results.ids[i]);
     auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
-    CHECK(it) << "Expected key: " << key << " to exist";
+
+    if (!it || !IsValid(*it)) {  // Item must have expired
+      expired_count++;
+      continue;
+    }
 
     auto doc_data = GetAccessor(op_args.db_cntx, (*it)->second)->Serialize(base_->schema);
     float score = search_results.knn_distances.empty() ? 0 : search_results.knn_distances[i];
-
-    out[i] = SerializedSearchDoc{string{key}, std::move(doc_data), score};
+    out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), score});
   }
 
-  return SearchResult{std::move(out), search_results.ids.size()};
+  return SearchResult{std::move(out), search_results.ids.size() - expired_count};
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {

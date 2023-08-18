@@ -110,13 +110,16 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   if (owner) {
     protocol_ = owner->protocol();
   }
-  switch (protocol_) {
-    case Protocol::REDIS:
-      rbuilder_.reset(new RedisReplyBuilder(stream));
-      break;
-    case Protocol::MEMCACHE:
-      rbuilder_.reset(new MCReplyBuilder(stream));
-      break;
+
+  if (stream) {
+    switch (protocol_) {
+      case Protocol::REDIS:
+        rbuilder_.reset(new RedisReplyBuilder(stream));
+        break;
+      case Protocol::MEMCACHE:
+        rbuilder_.reset(new MCReplyBuilder(stream));
+        break;
+    }
   }
 
   conn_closing = false;
