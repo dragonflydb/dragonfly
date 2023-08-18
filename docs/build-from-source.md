@@ -16,21 +16,21 @@ On Debian/Ubuntu:
 
 ```bash
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev
+     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev libicu-dev
 ```
 
 On Fedora:
 
 ```bash
 sudo yum install automake boost-devel g++ git cmake libtool ninja-build libzstd-devel  \
-     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel
+     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel libicu-devel
 ```
 
 On openSUSE:
 
 ```bash
 sudo zypper install automake boost-devel gcc-c++ git cmake libtool ninja libzstd-devel  \
-     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel \
+     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel libicu-devel \
      libboost_context-devel libboost_system-devel
 ```
 
