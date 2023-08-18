@@ -272,7 +272,7 @@ def with_tls_server_args(tmp_dir, gen_ca_cert):
         tls_server_cert,
     )
 
-    args = {"tls": "", "tls_key_file": tls_server_key, "tls_cert_file": tls_server_cert}
+    args = {"tls": None, "tls_key_file": tls_server_key, "tls_cert_file": tls_server_cert}
     return args
 
 
