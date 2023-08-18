@@ -6,6 +6,7 @@ import pytest
 from redis import asyncio as aioredis
 from .utility import *
 from . import dfly_args
+import copy
 
 import numpy as np
 
@@ -46,6 +47,17 @@ BASIC_TEST_SCHEMA = [
     NumericField("views"),
     TagField("topic"),
 ]
+
+
+def fix_schema_naming(itype: IndexType, idx_list: list):
+    """Copy all schema fields and for json types, change name to json $.path and add alias"""
+    if itype == IndexType.HASH:
+        return idx_list
+    copies = [copy.copy(idx) for idx in idx_list]
+    for idx in copies:
+        idx.as_name = idx.name
+        idx.name = "$." + idx.name
+    return copies
 
 
 async def index_test_data(async_client: aioredis.Redis, itype: IndexType, prefix=""):
@@ -101,11 +113,17 @@ async def test_management(async_client: aioredis.Redis):
 
     i1info = await i1.info()
     assert i1info["num_docs"] == 10
-    assert sorted(i1info["fields"]) == [["f1", "type", "TEXT"], ["f2", "type", "NUMERIC"]]
+    assert sorted(i1info["fields"]) == [
+        ["identifier", "f1", "attribute", "f1", "type", "TEXT"],
+        ["identifier", "f2", "attribute", "f2", "type", "NUMERIC"],
+    ]
 
     i2info = await i2.info()
     assert i2info["num_docs"] == 15
-    assert sorted(i2info["fields"]) == [["f3", "type", "NUMERIC"], ["f4", "type", "TAG"]]
+    assert sorted(i2info["fields"]) == [
+        ["identifier", "f3", "attribute", "f3", "type", "NUMERIC"],
+        ["identifier", "f4", "attribute", "f4", "type", "TAG"],
+    ]
 
     await i1.dropindex()
     await i2.dropindex()
@@ -119,7 +137,10 @@ async def test_basic(async_client: aioredis.Redis, index_type):
     i1 = async_client.ft("i1-" + str(index_type))
 
     await index_test_data(async_client, index_type)
-    await i1.create_index(BASIC_TEST_SCHEMA, definition=IndexDefinition(index_type=index_type))
+    await i1.create_index(
+        fix_schema_naming(index_type, BASIC_TEST_SCHEMA),
+        definition=IndexDefinition(index_type=index_type),
+    )
 
     res = await i1.search("article")
     assert contains_test_data(res, [0, 1])
@@ -176,7 +197,8 @@ async def test_knn(async_client: aioredis.Redis, index_type):
     )
 
     await i2.create_index(
-        [TagField("even"), vector_field], definition=IndexDefinition(index_type=index_type)
+        fix_schema_naming(index_type, [TagField("even"), vector_field]),
+        definition=IndexDefinition(index_type=index_type),
     )
 
     pipe = async_client.pipeline()
@@ -223,7 +245,10 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type):
     )
 
     i3 = async_client.ft("i3-" + str(index_type))
-    await i3.create_index([vector_field], definition=IndexDefinition(index_type=index_type))
+    await i3.create_index(
+        fix_schema_naming(index_type, [vector_field]),
+        definition=IndexDefinition(index_type=index_type),
+    )
 
     def rand_point():
         return np.random.uniform(0, 10, NUM_DIMS).astype(np.float32)
