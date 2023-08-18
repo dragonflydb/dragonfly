@@ -19,10 +19,17 @@ namespace dfly::search {
 struct AstNode;
 struct TextIndex;
 
-struct Schema {
+// Describes a specific index field
+struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
-  absl::flat_hash_map<std::string, FieldType> fields;
+  std::string identifier;  // short alias name is stored only in schema
+  FieldType type;
+};
+
+// Describes the fields of an index
+struct Schema {
+  absl::flat_hash_map<std::string /*name*/, SchemaField> fields;
 };
 
 // Collection of indices for all fields in schema

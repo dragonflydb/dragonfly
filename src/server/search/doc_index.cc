@@ -182,7 +182,17 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
 }
 
 bool ShardDocIndices::DropIndex(string_view name) {
-  return indices_.erase(name) > 0;
+  auto it = indices_.find(name);
+  if (it == indices_.end())
+    return false;
+
+  // Clean caches that might have data from this index
+  auto info = it->second->GetInfo();
+  for (const auto& [_, field] : info.schema.fields)
+    JsonAccessor::RemoveFieldFromCache(field.identifier);
+
+  indices_.erase(it);
+  return true;
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {

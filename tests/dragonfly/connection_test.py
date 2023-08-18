@@ -507,3 +507,10 @@ async def test_squashed_pipeline(async_client: aioredis.Redis):
         assert res[0:10] == [j + 1] * 10
         assert isinstance(res[10], aioredis.ResponseError)
         res = res[11:]
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
+async def test_squashed_pipeline_seeder(df_server, df_seeder_factory):
+    seeder = df_seeder_factory.create(port=df_server.port, keys=10_000)
+    await seeder.run(target_deviation=0.1)

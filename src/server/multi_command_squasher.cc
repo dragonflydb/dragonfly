@@ -36,7 +36,8 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
     : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr},
       verify_commands_{verify_commands}, error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
-  base_cid_ = mode == Transaction::NON_ATOMIC ? nullptr : cntx->transaction->GetCId();
+  base_cid_ = cntx->transaction->GetCId();
+  atomic_ = mode != Transaction::NON_ATOMIC;
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
@@ -49,7 +50,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
     if (IsAtomic()) {
       sinfo.local_tx = new Transaction{cntx_->transaction};
     } else {
-      sinfo.local_tx = new Transaction{cntx_->transaction->GetCId()};
+      sinfo.local_tx = new Transaction{base_cid_};
       sinfo.local_tx->StartMultiNonAtomic();
     }
   }
@@ -174,7 +175,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
   DCHECK(!cntx_->conn_state.exec_info.IsCollecting());
 
   if (order_.empty())
-    return false;
+    return true;
 
   for (auto& sd : sharded_)
     sd.replies.reserve(sd.cmds.size());
@@ -254,7 +255,7 @@ void MultiCommandSquasher::Run() {
 }
 
 bool MultiCommandSquasher::IsAtomic() const {
-  return base_cid_ != nullptr;
+  return atomic_;
 }
 
 }  // namespace dfly

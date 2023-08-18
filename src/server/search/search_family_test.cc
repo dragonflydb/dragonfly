@@ -89,10 +89,11 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_THAT(info, RespArray(ElementsAre(
-                        _, _, "fields",
-                        RespArray(ElementsAre(RespArray(ElementsAre("name", "type", "TEXT")))),
-                        "num_docs", IntArg(15))));
+  EXPECT_THAT(
+      info, RespArray(ElementsAre(_, _, "fields",
+                                  RespArray(ElementsAre(RespArray(ElementsAre(
+                                      "identifier", "name", "attribute", "name", "type", "TEXT")))),
+                                  "num_docs", IntArg(15))));
 }
 
 TEST_F(SearchFamilyTest, Simple) {
@@ -132,7 +133,9 @@ TEST_F(SearchFamilyTest, Json) {
   Run({"json.set", "k2", ".", R"({"a": "another test", "b": "more details"})"});
   Run({"json.set", "k3", ".", R"({"a": "last test", "b": "secret details"})"});
 
-  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "a", "text", "b", "text"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "$.a", "as", "a", "text", "$.b", "as",
+                 "b", "text"}),
+            "OK");
 
   EXPECT_THAT(Run({"ft.search", "i1", "some|more"}), AreDocIds("k1", "k2"));
   EXPECT_THAT(Run({"ft.search", "i1", "some|more|secret"}), AreDocIds("k1", "k2", "k3"));
@@ -143,6 +146,18 @@ TEST_F(SearchFamilyTest, Json) {
 
   EXPECT_THAT(Run({"ft.search", "i1", "none"}), kNoResults);
   EXPECT_THAT(Run({"ft.search", "i1", "@a:small @b:secret"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, AttributesJsonPaths) {
+  Run({"json.set", "k1", ".", R"(   {"nested": {"value": "no"}} )"});
+  Run({"json.set", "k2", ".", R"(   {"nested": {"value": "yes"}} )"});
+  Run({"json.set", "k3", ".", R"(   {"nested": {"value": "maybe"}} )"});
+
+  EXPECT_EQ(
+      Run({"ft.create", "i1", "on", "json", "schema", "$.nested.value", "as", "value", "text"}),
+      "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "yes"}), AreDocIds("k2"));
 }
 
 TEST_F(SearchFamilyTest, Tags) {
@@ -285,6 +300,25 @@ TEST_F(SearchFamilyTest, SimpleUpdates) {
     EXPECT_THAT(Run({"ft.search", "i1", "dragonfly"}), AreDocIds("d:1"));
     EXPECT_THAT(Run({"ft.search", "i1", "butterfly | bumblebee"}), kNoResults);
   }
+}
+
+TEST_F(SearchFamilyTest, Unicode) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
+
+  // Explicitly using screaming uppercase to check utf-8 to lowercase functionality
+  Run({"hset", "d:1", "title", "Веселая СТРЕКОЗА Иван", "visits", "400"});
+  Run({"hset", "d:2", "title", "Die fröhliche Libelle Günther", "visits", "300"});
+  Run({"hset", "d:3", "title", "השפירית המהירה יעקב", "visits", "200"});
+  Run({"hset", "d:4", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας", "visits", "100"});
+
+  // Check we find our dragonfly in all languages
+  EXPECT_THAT(Run({"ft.search", "i1", "стРекоЗа|liBellE|השפירית|λΙβελλοΎλη"}),
+              AreDocIds("d:1", "d:2", "d:3", "d:4"));
+
+  // Check the result is valid
+  auto resp = Run({"ft.search", "i1", "λιβελλούλη"});
+  EXPECT_THAT(resp.GetVec()[2].GetVec(),
+              UnorderedElementsAre("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας"));
 }
 
 TEST_F(SearchFamilyTest, SimpleExpiry) {

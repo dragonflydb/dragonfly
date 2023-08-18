@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <jsoncons/json.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <variant>
 #include <vector>
 
@@ -32,24 +33,44 @@ using namespace facade;
 
 namespace {
 
-const absl::flat_hash_map<string_view, search::Schema::FieldType> kSchemaTypes = {
-    {"TAG"sv, search::Schema::TAG},
-    {"TEXT"sv, search::Schema::TEXT},
-    {"NUMERIC"sv, search::Schema::NUMERIC},
-    {"VECTOR"sv, search::Schema::VECTOR}};
+const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTypes = {
+    {"TAG"sv, search::SchemaField::TAG},
+    {"TEXT"sv, search::SchemaField::TEXT},
+    {"NUMERIC"sv, search::SchemaField::NUMERIC},
+    {"VECTOR"sv, search::SchemaField::VECTOR}};
 
 static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", "DIM",
                                                  "DISTANCE_METRIC"};
 
-optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* cntx) {
+optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList args,
+                                            ConnectionContext* cntx) {
   search::Schema schema;
   for (size_t i = 0; i < args.size(); i++) {
-    string_view field = ArgS(args, i);
-    if (i++ >= args.size()) {
+    string_view field = ArgS(args, i++);
+
+    // Verify json path is correct
+    if (type == DocIndex::JSON) {
+      error_code ec;
+      jsoncons::jsonpath::make_expression<JsonType>(field, ec);
+      if (ec) {
+        (*cntx)->SendError("Bad json path: " + string{field});
+        return nullopt;
+      }
+    }
+
+    // Check optional AS [alias]
+    string_view field_alias = field;  // by default "alias" is same as identifier
+    if (i + 1 < args.size() && absl::AsciiStrToUpper(ArgS(args, i)) == "AS") {
+      field_alias = ArgS(args, i + 1);
+      i += 2;
+    }
+
+    if (i >= args.size()) {
       (*cntx)->SendError("No field type for field: " + string{field});
       return nullopt;
     }
 
+    // Determine type
     ToUpper(&args[i]);
     string_view type_str = ArgS(args, i);
     auto it = kSchemaTypes.find(type_str);
@@ -59,7 +80,7 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
     }
 
     // Skip {algorithm} {dim} flags
-    if (it->second == search::Schema::VECTOR)
+    if (it->second == search::SchemaField::VECTOR)
       i += 2;
 
     // Skip all trailing ignored parameters
@@ -67,7 +88,7 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
       i += 2;
     }
 
-    schema.fields[field] = it->second;
+    schema.fields[field_alias] = {string{field}, it->second};
   }
 
   return schema;
@@ -175,7 +196,7 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
   }
 }
 
-string_view GetSchemaTypeName(search::Schema::FieldType type) {
+string_view GetSchemaTypeName(search::SchemaField::FieldType type) {
   for (const auto& [iname, itype] : kSchemaTypes) {
     if (itype == type)
       return iname;
@@ -226,7 +247,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
       if (i++ >= args.size())
         return (*cntx)->SendError("Empty schema");
 
-      auto schema = ParseSchemaOrReply(args.subspan(i), cntx);
+      auto schema = ParseSchemaOrReply(index.type, args.subspan(i), cntx);
       if (!schema)
         return;
       index.schema = move(*schema);
@@ -279,7 +300,7 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   if (num_notfound > 0u)
     return (*cntx)->SendError("Unknown index name");
 
-  DCHECK(infos.front().schema.fields == infos.back().schema.fields);
+  DCHECK_EQ(infos.front().schema.fields.size(), infos.back().schema.fields.size());
 
   size_t total_num_docs = 0;
   for (const auto& info : infos)
@@ -293,8 +314,10 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendSimpleString("fields");
   const auto& fields = infos.front().schema.fields;
   (*cntx)->StartArray(fields.size());
-  for (auto [field, type] : fields) {
-    string_view reply[3] = {string_view{field}, "type"sv, GetSchemaTypeName(type)};
+  for (const auto& [field_name, field_info] : fields) {
+    string_view reply[6] = {"identifier", string_view{field_info.identifier},
+                            "attribute",  string_view{field_name},
+                            "type"sv,     GetSchemaTypeName(field_info.type)};
     (*cntx)->SendSimpleStrArr(reply);
   }
 
