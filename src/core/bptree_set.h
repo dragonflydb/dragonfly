@@ -79,13 +79,13 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   /// @param rank_start
   /// @param rank_end - inclusive.
   /// @param cb - callback to be called for each item in the range.
-  void Iterate(uint32_t rank_start, uint32_t rank_end, std::function<void(KeyT)> cb) const;
+  bool Iterate(uint32_t rank_start, uint32_t rank_end, std::function<bool(KeyT)> cb) const;
 
   /// @brief Iterates over all items in the range [rank_start, rank_end] by rank in reverse order.
   /// @param rank_start
   /// @param rank_end
   /// @param cb
-  void IterateReverse(uint32_t rank_start, uint32_t rank_end, std::function<void(KeyT)> cb) const;
+  bool IterateReverse(uint32_t rank_start, uint32_t rank_end, std::function<bool(KeyT)> cb) const;
 
   /// @brief  Deletes all items in the range [start, end] by rank.
   /// @param start
@@ -106,7 +106,12 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   /// @param item
   /// @return the path if such item exists, empty path otherwise.
   /// @todo: to wrap the result into iterator to avoid the leakage of internal data structures.
-  detail::BPTreePath<T> LowerBound(KeyT key) const;
+  detail::BPTreePath<T> GEQ(KeyT key) const;
+
+  /// @brief Returns the path to the largest item in the tree that is less or equal to key.
+  /// @param key
+  /// @return the path if such item exists, empty path otherwise.
+  detail::BPTreePath<T> LEQ(KeyT key) const;
 
  private:
   BPTreeNode* CreateNode(bool leaf);
@@ -236,21 +241,7 @@ std::optional<uint32_t> BPTree<T, Policy>::GetRank(KeyT item) const {
   if (!found)
     return std::nullopt;
 
-  uint32_t rank = 0;
-  unsigned bound = path.Depth();
-
-  for (unsigned i = 0; i < bound; ++i) {
-    BPTreeNode* node = path.Node(i);
-    unsigned pos = path.Position(i);
-    if (!node->IsLeaf()) {
-      unsigned delta = (i == bound - 1) ? 1 : 0;
-      for (unsigned j = 0; j < pos + delta; ++j) {
-        rank += node->Child(j)->TreeCount();
-      }
-    }
-    rank += pos;
-  }
-  return rank;
+  return path.Rank();
 }
 
 template <typename T, typename Policy>
@@ -416,29 +407,35 @@ void BPTree<T, Policy>::IncreaseSubtreeCounts(const BPTreePath& path, unsigned d
 }
 
 template <typename T, typename Policy>
-void BPTree<T, Policy>::Iterate(uint32_t rank_start, uint32_t rank_end,
-                                std::function<void(KeyT)> cb) const {
+bool BPTree<T, Policy>::Iterate(uint32_t rank_start, uint32_t rank_end,
+                                std::function<bool(KeyT)> cb) const {
   assert(rank_start <= rank_end && rank_end < count_);
 
   BPTreePath path;
   ToRank(rank_start, &path);
   for (uint32_t i = rank_start; i <= rank_end; ++i) {
-    cb(path.Terminal());
+    if (!cb(path.Terminal()))
+      return false;
+
     path.Next();
   }
+  return true;
 }
 
 template <typename T, typename Policy>
-void BPTree<T, Policy>::IterateReverse(uint32_t rank_start, uint32_t rank_end,
-                                       std::function<void(KeyT)> cb) const {
+bool BPTree<T, Policy>::IterateReverse(uint32_t rank_start, uint32_t rank_end,
+                                       std::function<bool(KeyT)> cb) const {
   assert(rank_start <= rank_end && rank_end < count_);
 
   BPTreePath path;
   ToRank(rank_end, &path);
   for (uint32_t i = rank_start; i <= rank_end; ++i) {
-    cb(path.Terminal());
+    if (!cb(path.Terminal()))
+      return false;
+
     path.Prev();
   }
+  return true;
 }
 
 template <typename T, typename Policy>
@@ -533,11 +530,23 @@ size_t BPTree<T, Policy>::DeleteRange(KeyT first, KeyT last, std::function<void(
 }
 
 template <typename T, typename Policy>
-detail::BPTreePath<T> BPTree<T, Policy>::LowerBound(KeyT item) const {
+detail::BPTreePath<T> BPTree<T, Policy>::GEQ(KeyT item) const {
   BPTreePath path;
   Locate(item, &path);
   if (path.Last().second >= path.Last().first->NumItems())
     path.Clear();
+
+  return path;
+}
+
+template <typename T, typename Policy>
+detail::BPTreePath<T> BPTree<T, Policy>::LEQ(KeyT item) const {
+  BPTreePath path;
+  bool res = Locate(item, &path);
+
+  if (!res) {  // fix the result in case the path leads to key greater than item.
+    path.Prev();
+  }
 
   return path;
 }

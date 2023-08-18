@@ -87,6 +87,10 @@ class ScoreMap : public DenseSet {
 
   bool Erase(std::string_view s1);
 
+  bool Erase(sds s1) {
+    return EraseInternal(s1, 0);
+  }
+
   /// @brief  Returns value of the key or nullptr if key not found.
   /// @param key
   /// @return sds
