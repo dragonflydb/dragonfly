@@ -14,7 +14,7 @@
 #include "absl/hash/hash.h"
 #include "server/acl/acl_commands_def.h"
 
-namespace dfly {
+namespace dfly::acl {
 
 class CommandId;
 
@@ -73,7 +73,7 @@ class User final {
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64
   std::optional<std::string> password_hash_;
-  uint32_t acl_categories_{AclCategory::NONE};
+  uint32_t acl_categories_{NONE};
 
   // we have at least 221 commands including a bunch of subcommands
   //  LARGE_BITFIELD_DATATYPE acl_commands_;
@@ -82,4 +82,4 @@ class User final {
   bool is_active_{false};
 };
 
-}  // namespace dfly
+}  // namespace dfly::acl

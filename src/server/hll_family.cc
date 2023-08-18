@@ -285,21 +285,19 @@ void PFMerge(CmdArgList args, ConnectionContext* cntx) {
 }
 
 }  // namespace
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kPFAdd = Cat::WRITE | Cat::HYPERLOGLOG | Cat::FAST;
-constexpr uint32_t kPFCount = Cat::READ | Cat::HYPERLOGLOG | Cat::SLOW;
-constexpr uint32_t kPFMerge = Cat::WRITE | Cat::HYPERLOGLOG | Cat::SLOW;
-}  // namespace Acl
-}  // namespace
+
+namespace acl {
+constexpr uint32_t kPFAdd = WRITE | HYPERLOGLOG | FAST;
+constexpr uint32_t kPFCount = READ | HYPERLOGLOG | SLOW;
+constexpr uint32_t kPFMerge = WRITE | HYPERLOGLOG | SLOW;
+}  // namespace acl
 
 void HllFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
-  *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, 1, Acl::kPFAdd}.SetHandler(PFAdd)
-            << CI{"PFCOUNT", CO::WRITE, -2, 1, -1, 1, Acl::kPFCount}.SetHandler(PFCount)
-            << CI{"PFMERGE", CO::WRITE, -2, 1, -1, 1, Acl::kPFMerge}.SetHandler(PFMerge);
+  *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
+            << CI{"PFCOUNT", CO::WRITE, -2, 1, -1, 1, acl::kPFCount}.SetHandler(PFCount)
+            << CI{"PFMERGE", CO::WRITE, -2, 1, -1, 1, acl::kPFMerge}.SetHandler(PFMerge);
 }
 
 const char HllFamily::kInvalidHllErr[] = "Key is not a valid HyperLogLog string value.";

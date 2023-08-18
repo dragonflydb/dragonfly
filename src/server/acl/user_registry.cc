@@ -8,7 +8,7 @@
 
 #include "core/fibers.h"
 
-namespace dfly {
+namespace dfly::acl {
 
 void UserRegistry::MaybeAddAndUpdate(std::string_view username, User::UpdateRequest req) {
   std::unique_lock<util::SharedMutex> lock(mu_);
@@ -50,4 +50,4 @@ bool UserRegistry::AuthUser(std::string_view username, std::string_view password
   return user->second.HasPassword(password);
 }
 
-}  // namespace dfly
+}  // namespace dfly::acl

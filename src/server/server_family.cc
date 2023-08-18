@@ -2415,66 +2415,63 @@ void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kAuth = Cat::FAST | Cat::CONNECTION;
-constexpr uint32_t kBGSave = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kClient = Cat::SLOW | Cat::CONNECTION;
-constexpr uint32_t kConfig = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kDbSize = Cat::KEYSPACE | Cat::READ | Cat::FAST;
-constexpr uint32_t kDebug = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kFlushDB = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kFlushAll = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kInfo = Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kHello = Cat::FAST | Cat::CONNECTION;
-constexpr uint32_t kLastSave = Cat::ADMIN | Cat::FAST | Cat::DANGEROUS;
-constexpr uint32_t kLatency = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kMemory = Cat::READ | Cat::SLOW;
-constexpr uint32_t kSave = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kShutDown = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kSlaveOf = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kReplicaOf = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kReplTakeOver = Cat::DANGEROUS;
-constexpr uint32_t kReplConf = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kRole = Cat::ADMIN | Cat::FAST | Cat::DANGEROUS;
-constexpr uint32_t kSlowLog = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kScript = Cat::SLOW | Cat::SCRIPTING;
-constexpr uint32_t kDfly = Cat::ADMIN;
-}  // namespace Acl
-}  // namespace
+namespace acl {
+constexpr uint32_t kAuth = FAST | CONNECTION;
+constexpr uint32_t kBGSave = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kClient = SLOW | CONNECTION;
+constexpr uint32_t kConfig = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kDbSize = KEYSPACE | READ | FAST;
+constexpr uint32_t kDebug = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kFlushDB = KEYSPACE | WRITE | SLOW | DANGEROUS;
+constexpr uint32_t kFlushAll = KEYSPACE | WRITE | SLOW | DANGEROUS;
+constexpr uint32_t kInfo = SLOW | DANGEROUS;
+constexpr uint32_t kHello = FAST | CONNECTION;
+constexpr uint32_t kLastSave = ADMIN | FAST | DANGEROUS;
+constexpr uint32_t kLatency = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kMemory = READ | SLOW;
+constexpr uint32_t kSave = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kShutDown = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kSlaveOf = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kReplicaOf = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kReplTakeOver = DANGEROUS;
+constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
+constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kScript = SLOW | SCRIPTING;
+constexpr uint32_t kDfly = ADMIN;
+}  // namespace acl
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
 
   *registry
-      << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0, Acl::kAuth}.HFUNC(Auth)
-      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0, Acl::kBGSave}.HFUNC(Save)
-      << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, Acl::kClient}.HFUNC(Client)
-      << CI{"CONFIG", CO::ADMIN, -2, 0, 0, 0, Acl::kConfig}.HFUNC(Config)
-      << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0, Acl::kDbSize}.HFUNC(DbSize)
-      << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, 0, Acl::kDebug}.HFUNC(Debug)
-      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, 0, Acl::kFlushDB}.HFUNC(FlushDb)
-      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, Acl::kFlushAll}.HFUNC(FlushAll)
-      << CI{"INFO", CO::LOADING, -1, 0, 0, 0, Acl::kInfo}.HFUNC(Info)
-      << CI{"HELLO", CO::LOADING, -1, 0, 0, 0, Acl::kHello}.HFUNC(Hello)
-      << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, 0, Acl::kLastSave}.HFUNC(LastSave)
-      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0, Acl::kLatency}.HFUNC(
+      << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kAuth}.HFUNC(Auth)
+      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::kBGSave}.HFUNC(Save)
+      << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kClient}.HFUNC(Client)
+      << CI{"CONFIG", CO::ADMIN, -2, 0, 0, 0, acl::kConfig}.HFUNC(Config)
+      << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kDbSize}.HFUNC(DbSize)
+      << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, 0, acl::kDebug}.HFUNC(Debug)
+      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::kFlushDB}.HFUNC(FlushDb)
+      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::kFlushAll}.HFUNC(FlushAll)
+      << CI{"INFO", CO::LOADING, -1, 0, 0, 0, acl::kInfo}.HFUNC(Info)
+      << CI{"HELLO", CO::LOADING, -1, 0, 0, 0, acl::kHello}.HFUNC(Hello)
+      << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, 0, acl::kLastSave}.HFUNC(LastSave)
+      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0, acl::kLatency}.HFUNC(
              Latency)
-      << CI{"MEMORY", kMemOpts, -2, 0, 0, 0, Acl::kMemory}.HFUNC(Memory)
-      << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0, Acl::kSave}.HFUNC(Save)
-      << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, Acl::kShutDown}.HFUNC(
+      << CI{"MEMORY", kMemOpts, -2, 0, 0, 0, acl::kMemory}.HFUNC(Memory)
+      << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::kSave}.HFUNC(Save)
+      << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kShutDown}.HFUNC(
              ShutdownCmd)
-      << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0, Acl::kSlaveOf}.HFUNC(ReplicaOf)
-      << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0, Acl::kReplicaOf}.HFUNC(ReplicaOf)
-      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, 0, Acl::kReplTakeOver}.HFUNC(
+      << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
+      << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
+      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
-      << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0, Acl::kReplConf}.HFUNC(ReplConf)
-      << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0, Acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, Acl::kSlowLog}.SetHandler(SlowLog)
-      << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_JOURNAL, -2, 0, 0, 0, Acl::kScript}.HFUNC(Script)
-      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, Acl::kDfly}.HFUNC(Dfly);
+      << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
+      << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0, acl::kRole}.HFUNC(Role)
+      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.SetHandler(SlowLog)
+      << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_JOURNAL, -2, 0, 0, 0, acl::kScript}.HFUNC(Script)
+      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, acl::kDfly}.HFUNC(Dfly);
 }
 
 }  // namespace dfly

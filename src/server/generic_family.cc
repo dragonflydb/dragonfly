@@ -1446,77 +1446,73 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&GenericFamily::x)
 
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kDel = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW;
-constexpr uint32_t kPing = Cat::FAST | Cat::CONNECTION;
-constexpr uint32_t kEcho = Cat::FAST | Cat::CONNECTION;
-constexpr uint32_t kExists = Cat::KEYSPACE | Cat::READ | Cat::FAST;
-constexpr uint32_t kTouch = Cat::KEYSPACE | Cat::READ | Cat::FAST;
-constexpr uint32_t kExpire = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
-constexpr uint32_t kExpireAt = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
-constexpr uint32_t kPersist = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
-constexpr uint32_t kKeys = Cat::KEYSPACE | Cat::READ | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kPExpireAt = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
-constexpr uint32_t kPExpire = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
-constexpr uint32_t kRename = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW;
-constexpr uint32_t kRenamNX = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
-constexpr uint32_t kSelect = Cat::FAST | Cat::CONNECTION;
-constexpr uint32_t kScan = Cat::KEYSPACE | Cat::READ | Cat::SLOW;
-constexpr uint32_t kTTL = Cat::KEYSPACE | Cat::READ | Cat::FAST;
-constexpr uint32_t kPTTL = Cat::KEYSPACE | Cat::READ | Cat::FAST;
-constexpr uint32_t kTime = Cat::FAST;
-constexpr uint32_t kType = Cat::KEYSPACE | Cat::READ | Cat::FAST;
-constexpr uint32_t kDump = Cat::KEYSPACE | Cat::READ | Cat::SLOW;
-constexpr uint32_t kUnlink = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
+namespace acl {
+constexpr uint32_t kDel = KEYSPACE | WRITE | SLOW;
+constexpr uint32_t kPing = FAST | CONNECTION;
+constexpr uint32_t kEcho = FAST | CONNECTION;
+constexpr uint32_t kExists = KEYSPACE | READ | FAST;
+constexpr uint32_t kTouch = KEYSPACE | READ | FAST;
+constexpr uint32_t kExpire = KEYSPACE | WRITE | FAST;
+constexpr uint32_t kExpireAt = KEYSPACE | WRITE | FAST;
+constexpr uint32_t kPersist = KEYSPACE | WRITE | FAST;
+constexpr uint32_t kKeys = KEYSPACE | READ | SLOW | DANGEROUS;
+constexpr uint32_t kPExpireAt = KEYSPACE | WRITE | FAST;
+constexpr uint32_t kPExpire = KEYSPACE | WRITE | FAST;
+constexpr uint32_t kRename = KEYSPACE | WRITE | SLOW;
+constexpr uint32_t kRenamNX = KEYSPACE | WRITE | FAST;
+constexpr uint32_t kSelect = FAST | CONNECTION;
+constexpr uint32_t kScan = KEYSPACE | READ | SLOW;
+constexpr uint32_t kTTL = KEYSPACE | READ | FAST;
+constexpr uint32_t kPTTL = KEYSPACE | READ | FAST;
+constexpr uint32_t kTime = FAST;
+constexpr uint32_t kType = KEYSPACE | READ | FAST;
+constexpr uint32_t kDump = KEYSPACE | READ | SLOW;
+constexpr uint32_t kUnlink = KEYSPACE | WRITE | FAST;
 // TODO investigate what stick is
-constexpr uint32_t kStick = Cat::SLOW;
-constexpr uint32_t kSort =
-    Cat::WRITE | Cat::SET | Cat::SORTEDSET | Cat::LIST | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kMove = Cat::KEYSPACE | Cat::WRITE | Cat::FAST;
-constexpr uint32_t kRestore = Cat::KEYSPACE | Cat::WRITE | Cat::SLOW | Cat::DANGEROUS;
-}  // namespace Acl
-}  // namespace
+constexpr uint32_t kStick = SLOW;
+constexpr uint32_t kSort = WRITE | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
+constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
+constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
+}  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
 
   *registry
-      << CI{"DEL", CO::WRITE, -2, 1, -1, 1, Acl::kDel}.HFUNC(Del)
+      << CI{"DEL", CO::WRITE, -2, 1, -1, 1, acl::kDel}.HFUNC(Del)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
        * failure detection, and a loading server is considered to be
        * not available. */
-      << CI{"PING", CO::FAST, -1, 0, 0, 0, Acl::kPing}.HFUNC(Ping)
-      << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0, Acl::kEcho}.HFUNC(Echo)
-      << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1, Acl::kExists}.HFUNC(Exists)
-      << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1, Acl::kTouch}.HFUNC(Exists)
-      << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kExpire}.HFUNC(
+      << CI{"PING", CO::FAST, -1, 0, 0, 0, acl::kPing}.HFUNC(Ping)
+      << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0, acl::kEcho}.HFUNC(Echo)
+      << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1, acl::kExists}.HFUNC(Exists)
+      << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1, acl::kTouch}.HFUNC(Exists)
+      << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kExpire}.HFUNC(
              Expire)
-      << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kExpireAt}
+      << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kExpireAt}
              .HFUNC(ExpireAt)
-      << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1, Acl::kPersist}.HFUNC(Persist)
-      << CI{"KEYS", CO::READONLY, 2, 0, 0, 0, Acl::kKeys}.HFUNC(Keys)
-      << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kPExpireAt}
+      << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1, acl::kPersist}.HFUNC(Persist)
+      << CI{"KEYS", CO::READONLY, 2, 0, 0, 0, acl::kKeys}.HFUNC(Keys)
+      << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kPExpireAt}
              .HFUNC(PexpireAt)
-      << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kPExpire}.HFUNC(
+      << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kPExpire}.HFUNC(
              Pexpire)
-      << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, Acl::kRename}.HFUNC(Rename)
-      << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, Acl::kRenamNX}.HFUNC(RenameNx)
-      << CI{"SELECT", kSelectOpts, 2, 0, 0, 0, Acl::kSelect}.HFUNC(Select)
-      << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0, Acl::kScan}.HFUNC(Scan)
-      << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kTTL}.HFUNC(Ttl)
-      << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kPTTL}.HFUNC(Pttl)
-      << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, 0, Acl::kTime}.HFUNC(Time)
-      << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1, Acl::kType}.HFUNC(Type)
-      << CI{"DUMP", CO::READONLY, 2, 1, 1, 1, Acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1, Acl::kUnlink}.HFUNC(Del)
-      << CI{"STICK", CO::WRITE, -2, 1, -1, 1, Acl::kStick}.HFUNC(Stick)
-      << CI{"SORT", CO::READONLY, -2, 1, 1, 1, Acl::kSort}.HFUNC(Sort)
-      << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, Acl::kMove}
+      << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, acl::kRename}.HFUNC(Rename)
+      << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, acl::kRenamNX}.HFUNC(RenameNx)
+      << CI{"SELECT", kSelectOpts, 2, 0, 0, 0, acl::kSelect}.HFUNC(Select)
+      << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kScan}.HFUNC(Scan)
+      << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kTTL}.HFUNC(Ttl)
+      << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kPTTL}.HFUNC(Pttl)
+      << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, 0, acl::kTime}.HFUNC(Time)
+      << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1, acl::kType}.HFUNC(Type)
+      << CI{"DUMP", CO::READONLY, 2, 1, 1, 1, acl::kDump}.HFUNC(Dump)
+      << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1, acl::kUnlink}.HFUNC(Del)
+      << CI{"STICK", CO::WRITE, -2, 1, -1, 1, acl::kStick}.HFUNC(Stick)
+      << CI{"SORT", CO::READONLY, -2, 1, 1, 1, acl::kSort}.HFUNC(Sort)
+      << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kMove}
              .HFUNC(Move)
-      << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1, Acl::kRestore}.HFUNC(Restore);
+      << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1, acl::kRestore}.HFUNC(Restore);
 }
 
 }  // namespace dfly

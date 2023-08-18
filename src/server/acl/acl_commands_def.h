@@ -6,8 +6,7 @@
 
 #include "absl/container/flat_hash_map.h"
 
-namespace dfly {
-namespace AclCategory {
+namespace dfly::acl {
 /* There are 21 ACL categories as of redis 7
  *
  * bit 0: keyspace
@@ -66,30 +65,29 @@ enum AclCat {
 };
 
 // Special flag/mask for all
-inline constexpr uint32_t NONE = 0;
-inline constexpr uint32_t ALL = std::numeric_limits<uint32_t>::max();
-}  // namespace AclCategory
+constexpr uint32_t NONE = 0;
+constexpr uint32_t ALL = std::numeric_limits<uint32_t>::max();
 
 inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABLE{
-    {"KEYSPACE", AclCategory::KEYSPACE},
-    {"READ", AclCategory::READ},
-    {"WRITE", AclCategory::WRITE},
-    {"SET", AclCategory::SET},
-    {"SORTED_SET", AclCategory::SORTEDSET},
-    {"LIST", AclCategory::LIST},
-    {"HASH", AclCategory::HASH},
-    {"STRING", AclCategory::STRING},
-    {"BITMAP", AclCategory::BITMAP},
-    {"HYPERLOG", AclCategory::HYPERLOGLOG},
-    {"GEO", AclCategory::GEO},
-    {"STREAM", AclCategory::STREAM},
-    {"PUBSUB", AclCategory::PUBSUB},
-    {"ADMIN", AclCategory::ADMIN},
-    {"FAST", AclCategory::FAST},
-    {"SLOW", AclCategory::SLOW},
-    {"BLOCKING", AclCategory::BLOCKING},
-    {"DANGEROUS", AclCategory::DANGEROUS},
-    {"CONNECTION", AclCategory::CONNECTION},
-    {"TRANSACTION", AclCategory::TRANSACTION},
-    {"SCRIPTING", AclCategory::SCRIPTING}};
-}  // namespace dfly
+    {"KEYSPACE", KEYSPACE},
+    {"READ", READ},
+    {"WRITE", WRITE},
+    {"SET", SET},
+    {"SORTED_SET", SORTEDSET},
+    {"LIST", LIST},
+    {"HASH", HASH},
+    {"STRING", STRING},
+    {"BITMAP", BITMAP},
+    {"HYPERLOG", HYPERLOGLOG},
+    {"GEO", GEO},
+    {"STREAM", STREAM},
+    {"PUBSUB", PUBSUB},
+    {"ADMIN", ADMIN},
+    {"FAST", FAST},
+    {"SLOW", SLOW},
+    {"BLOCKING", BLOCKING},
+    {"DANGEROUS", DANGEROUS},
+    {"CONNECTION", CONNECTION},
+    {"TRANSACTION", TRANSACTION},
+    {"SCRIPTING", SCRIPTING}};
+}  // namespace dfly::acl

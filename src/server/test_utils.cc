@@ -69,7 +69,7 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
 }
 
 void TransactionSuspension::Start() {
-  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, AclCategory::NONE};
+  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::NONE};
 
   transaction_ = new dfly::Transaction{&cid};
 

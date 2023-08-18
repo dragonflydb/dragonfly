@@ -1561,54 +1561,51 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&x)
 
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kSAdd = Cat::WRITE | Cat::SET | Cat::FAST;
-constexpr uint32_t kSDiff = Cat::READ | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSDiffStore = Cat::WRITE | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSInter = Cat::READ | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSInterStore = Cat::WRITE | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSMembers = Cat::READ | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSIsMember = Cat::READ | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSMIsMember = Cat::READ | Cat::SET | Cat::FAST;
-constexpr uint32_t kSMove = Cat::WRITE | Cat::SET | Cat::FAST;
-constexpr uint32_t kSRem = Cat::WRITE | Cat::SET | Cat::FAST;
-constexpr uint32_t kSCard = Cat::READ | Cat::SET | Cat::FAST;
-constexpr uint32_t kSPop = Cat::WRITE | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSUnion = Cat::READ | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSUnionStore = Cat::WRITE | Cat::SET | Cat::SLOW;
-constexpr uint32_t kSScan = Cat::READ | Cat::SET | Cat::SLOW;
-}  // namespace Acl
-}  // namespace
+namespace acl {
+constexpr uint32_t kSAdd = WRITE | SET | FAST;
+constexpr uint32_t kSDiff = READ | SET | SLOW;
+constexpr uint32_t kSDiffStore = WRITE | SET | SLOW;
+constexpr uint32_t kSInter = READ | SET | SLOW;
+constexpr uint32_t kSInterStore = WRITE | SET | SLOW;
+constexpr uint32_t kSMembers = READ | SET | SLOW;
+constexpr uint32_t kSIsMember = READ | SET | SLOW;
+constexpr uint32_t kSMIsMember = READ | SET | FAST;
+constexpr uint32_t kSMove = WRITE | SET | FAST;
+constexpr uint32_t kSRem = WRITE | SET | FAST;
+constexpr uint32_t kSCard = READ | SET | FAST;
+constexpr uint32_t kSPop = WRITE | SET | SLOW;
+constexpr uint32_t kSUnion = READ | SET | SLOW;
+constexpr uint32_t kSUnionStore = WRITE | SET | SLOW;
+constexpr uint32_t kSScan = READ | SET | SLOW;
+}  // namespace acl
 
 void SetFamily::Register(CommandRegistry* registry) {
   *registry
-      << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, Acl::kSAdd}.HFUNC(SAdd)
-      << CI{"SDIFF", CO::READONLY, -2, 1, -1, 1, Acl::kSDiff}.HFUNC(SDiff)
+      << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kSAdd}.HFUNC(SAdd)
+      << CI{"SDIFF", CO::READONLY, -2, 1, -1, 1, acl::kSDiff}.HFUNC(SDiff)
       << CI{"SDIFFSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
-            Acl::kSDiffStore}
+            acl::kSDiffStore}
              .HFUNC(SDiffStore)
-      << CI{"SINTER", CO::READONLY, -2, 1, -1, 1, Acl::kSInter}.HFUNC(SInter)
+      << CI{"SINTER", CO::READONLY, -2, 1, -1, 1, acl::kSInter}.HFUNC(SInter)
       << CI{"SINTERSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
-            Acl::kSInterStore}
+            acl::kSInterStore}
              .HFUNC(SInterStore)
-      << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, 1, Acl::kSMembers}.HFUNC(SMembers)
-      << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, 1, Acl::kSIsMember}.HFUNC(SIsMember)
-      << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, 1, Acl::kSMIsMember}.HFUNC(SMIsMember)
-      << CI{"SMOVE", CO::FAST | CO::WRITE | CO::NO_AUTOJOURNAL, 4, 1, 2, 1, Acl::kSMove}.HFUNC(
+      << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, 1, acl::kSMembers}.HFUNC(SMembers)
+      << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kSIsMember}.HFUNC(SIsMember)
+      << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, 1, acl::kSMIsMember}.HFUNC(SMIsMember)
+      << CI{"SMOVE", CO::FAST | CO::WRITE | CO::NO_AUTOJOURNAL, 4, 1, 2, 1, acl::kSMove}.HFUNC(
              SMove)
-      << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1, 1, Acl::kSRem}.HFUNC(SRem)
-      << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1, Acl::kSCard}.HFUNC(SCard)
-      << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, Acl::kSPop}.HFUNC(SPop)
-      << CI{"SUNION", CO::READONLY, -2, 1, -1, 1, Acl::kSUnion}.HFUNC(SUnion)
+      << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1, 1, acl::kSRem}.HFUNC(SRem)
+      << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kSCard}.HFUNC(SCard)
+      << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, acl::kSPop}.HFUNC(SPop)
+      << CI{"SUNION", CO::READONLY, -2, 1, -1, 1, acl::kSUnion}.HFUNC(SUnion)
       << CI{"SUNIONSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
-            Acl::kSUnionStore}
+            acl::kSUnionStore}
              .HFUNC(SUnionStore)
-      << CI{"SSCAN", CO::READONLY, -3, 1, 1, 1, Acl::kSScan}.HFUNC(SScan);
+      << CI{"SSCAN", CO::READONLY, -3, 1, 1, 1, acl::kSScan}.HFUNC(SScan);
 
   if (absl::GetFlag(FLAGS_use_set2)) {
-    *registry << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, Acl::kSAdd}.HFUNC(
+    *registry << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kSAdd}.HFUNC(
         SAddEx);
   }
 }

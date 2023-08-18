@@ -2020,58 +2020,55 @@ using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 #define MFUNC(x) \
   SetHandler([this](CmdArgList sp, ConnectionContext* cntx) { this->x(std::move(sp), cntx); })
 
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kQuit = Cat::FAST | Cat::CONNECTION;
-constexpr uint32_t kMulti = Cat::FAST | Cat::TRANSACTION;
-constexpr uint32_t kWatch = Cat::FAST | Cat::TRANSACTION;
-constexpr uint32_t kUnwatch = Cat::FAST | Cat::TRANSACTION;
-constexpr uint32_t kDiscard = Cat::FAST | Cat::TRANSACTION;
-constexpr uint32_t kEval = Cat::SLOW | Cat::SCRIPTING;
-constexpr uint32_t kEvalSha = Cat::SLOW | Cat::SCRIPTING;
-constexpr uint32_t kExec = Cat::SLOW | Cat::TRANSACTION;
-constexpr uint32_t kPublish = Cat::PUBSUB | Cat::FAST;
-constexpr uint32_t kSubscribe = Cat::PUBSUB | Cat::SLOW;
-constexpr uint32_t kUnsubscribe = Cat::PUBSUB | Cat::SLOW;
-constexpr uint32_t kPSubscribe = Cat::PUBSUB | Cat::SLOW;
-constexpr uint32_t kPUnsubsribe = Cat::PUBSUB | Cat::SLOW;
-constexpr uint32_t kFunction = Cat::SLOW;
-constexpr uint32_t kMonitor = Cat::ADMIN | Cat::SLOW | Cat::DANGEROUS;
-constexpr uint32_t kPubSub = Cat::SLOW;
-constexpr uint32_t kCommand = Cat::SLOW | Cat::CONNECTION;
-}  // namespace Acl
-}  // namespace
+namespace acl {
+constexpr uint32_t kQuit = FAST | CONNECTION;
+constexpr uint32_t kMulti = FAST | TRANSACTION;
+constexpr uint32_t kWatch = FAST | TRANSACTION;
+constexpr uint32_t kUnwatch = FAST | TRANSACTION;
+constexpr uint32_t kDiscard = FAST | TRANSACTION;
+constexpr uint32_t kEval = SLOW | SCRIPTING;
+constexpr uint32_t kEvalSha = SLOW | SCRIPTING;
+constexpr uint32_t kExec = SLOW | TRANSACTION;
+constexpr uint32_t kPublish = PUBSUB | FAST;
+constexpr uint32_t kSubscribe = PUBSUB | SLOW;
+constexpr uint32_t kUnsubscribe = PUBSUB | SLOW;
+constexpr uint32_t kPSubscribe = PUBSUB | SLOW;
+constexpr uint32_t kPUnsubsribe = PUBSUB | SLOW;
+constexpr uint32_t kFunction = SLOW;
+constexpr uint32_t kMonitor = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kPubSub = SLOW;
+constexpr uint32_t kCommand = SLOW | CONNECTION;
+}  // namespace acl
 
 void Service::RegisterCommands() {
   using CI = CommandId;
 
   registry_
-      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0, Acl::kQuit}.HFUNC(Quit)
-      << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, Acl::kMulti}.HFUNC(Multi)
-      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1, Acl::kWatch}.HFUNC(Watch)
-      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0, Acl::kUnwatch}.HFUNC(Unwatch)
-      << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, Acl::kDiscard}.MFUNC(
+      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0, acl::kQuit}.HFUNC(Quit)
+      << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kMulti}.HFUNC(Multi)
+      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1, acl::kWatch}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
+      << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kDiscard}.MFUNC(
              Discard)
-      << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, Acl::kEval}
+      << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, acl::kEval}
              .MFUNC(Eval)
              .SetValidator(&EvalValidator)
-      << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, Acl::kEvalSha}
+      << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, acl::kEvalSha}
              .MFUNC(EvalSha)
              .SetValidator(&EvalValidator)
-      << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, 1, Acl::kExec}.MFUNC(Exec)
-      << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0, Acl::kPublish}.MFUNC(Publish)
-      << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, Acl::kSubscribe}.MFUNC(Subscribe)
-      << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, Acl::kUnsubscribe}.MFUNC(
+      << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, 1, acl::kExec}.MFUNC(Exec)
+      << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0, acl::kPublish}.MFUNC(Publish)
+      << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
+      << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kUnsubscribe}.MFUNC(
              Unsubscribe)
-      << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, Acl::kPSubscribe}.MFUNC(
+      << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kPSubscribe}.MFUNC(
              PSubscribe)
-      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, Acl::kPUnsubsribe}.MFUNC(
+      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kPUnsubsribe}.MFUNC(
              PUnsubscribe)
-      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0, Acl::kFunction}.MFUNC(Function)
-      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0, Acl::kMonitor}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0, Acl::kPubSub}.MFUNC(Pubsub)
-      << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0, Acl::kCommand}.MFUNC(Command);
+      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0, acl::kFunction}.MFUNC(Function)
+      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0, acl::kMonitor}.MFUNC(Monitor)
+      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
+      << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0, acl::kCommand}.MFUNC(Command);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);

@@ -358,14 +358,12 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
 void SearchFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
-  *registry
-      << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtCreate)
-      << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(
-             FtDropIndex)
-      << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtInfo)
-      // Underscore same as in RediSearch because it's "temporary" (long time already)
-      << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtList)
-      << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, AclCategory::FT_SEARCH}.HFUNC(FtSearch);
+  *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
+            << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtDropIndex)
+            << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+            // Underscore same as in RediSearch because it's "temporary" (long time already)
+            << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
+            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch);
 }
 
 }  // namespace dfly

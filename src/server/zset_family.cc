@@ -2536,57 +2536,54 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kZAdd = Cat::WRITE | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kBZPopMin = Cat::WRITE | Cat::SORTEDSET | Cat::FAST | Cat::BLOCKING;
-constexpr uint32_t kBZPopMax = Cat::WRITE | Cat::SORTEDSET | Cat::FAST | Cat::BLOCKING;
-constexpr uint32_t kZCard = Cat::READ | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZCount = Cat::READ | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZDiff = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZIncrBy = Cat::WRITE | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZInterStore = Cat::WRITE | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZInterCard = Cat::WRITE | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZLexCount = Cat::READ | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZPopMax = Cat::WRITE | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZPopMin = Cat::WRITE | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZRem = Cat::WRITE | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZRange = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRank = Cat::READ | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZRangeByLex = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRangeByScore = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZScore = Cat::READ | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZMScore = Cat::READ | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZRemRangeByRank = Cat::WRITE | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRemRangeByScore = Cat::WRITE | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRemRangeByLex = Cat::WRITE | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRevRange = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRevRangeByLex = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRevRangeByScore = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZRevRank = Cat::READ | Cat::SORTEDSET | Cat::FAST;
-constexpr uint32_t kZScan = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZUnion = Cat::READ | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kZUnionStore = Cat::WRITE | Cat::SORTEDSET | Cat::SLOW;
-constexpr uint32_t kGeoAdd = Cat::WRITE | Cat::GEO | Cat::SLOW;
-constexpr uint32_t kGeoHash = Cat::READ | Cat::GEO | Cat::SLOW;
-constexpr uint32_t kGeoPos = Cat::READ | Cat::GEO | Cat::SLOW;
-constexpr uint32_t kGeoDist = Cat::READ | Cat::GEO | Cat::SLOW;
-}  // namespace Acl
-}  // namespace
+namespace acl {
+constexpr uint32_t kZAdd = WRITE | SORTEDSET | FAST;
+constexpr uint32_t kBZPopMin = WRITE | SORTEDSET | FAST | BLOCKING;
+constexpr uint32_t kBZPopMax = WRITE | SORTEDSET | FAST | BLOCKING;
+constexpr uint32_t kZCard = READ | SORTEDSET | FAST;
+constexpr uint32_t kZCount = READ | SORTEDSET | FAST;
+constexpr uint32_t kZDiff = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZIncrBy = WRITE | SORTEDSET | FAST;
+constexpr uint32_t kZInterStore = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kZInterCard = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kZLexCount = READ | SORTEDSET | FAST;
+constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
+constexpr uint32_t kZPopMin = WRITE | SORTEDSET | FAST;
+constexpr uint32_t kZRem = WRITE | SORTEDSET | FAST;
+constexpr uint32_t kZRange = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZRank = READ | SORTEDSET | FAST;
+constexpr uint32_t kZRangeByLex = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZRangeByScore = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZScore = READ | SORTEDSET | FAST;
+constexpr uint32_t kZMScore = READ | SORTEDSET | FAST;
+constexpr uint32_t kZRemRangeByRank = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kZRemRangeByScore = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kZRemRangeByLex = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kZRevRange = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZRevRangeByLex = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZRevRangeByScore = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZRevRank = READ | SORTEDSET | FAST;
+constexpr uint32_t kZScan = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZUnion = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZUnionStore = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kGeoAdd = WRITE | GEO | SLOW;
+constexpr uint32_t kGeoHash = READ | GEO | SLOW;
+constexpr uint32_t kGeoPos = READ | GEO | SLOW;
+constexpr uint32_t kGeoDist = READ | GEO | SLOW;
+}  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
 
   *registry
-      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1, Acl::kZAdd}.HFUNC(ZAdd)
+      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
       << CI{"BZPOPMIN",
             CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL,
             -3,
             1,
             -2,
             1,
-            Acl::kBZPopMax}
+            acl::kBZPopMax}
              .HFUNC(BZPopMin)
       << CI{"BZPOPMAX",
             CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL,
@@ -2594,46 +2591,46 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             1,
             -2,
             1,
-            Acl::kBZPopMax}
+            acl::kBZPopMax}
              .HFUNC(BZPopMax)
-      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1, Acl::kZCard}.HFUNC(ZCard)
-      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1, Acl::kZCount}.HFUNC(ZCount)
-      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, 1, Acl::kZDiff}.HFUNC(ZDiff)
-      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, 1, Acl::kZIncrBy}.HFUNC(ZIncrBy)
-      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1, Acl::kZInterStore}.HFUNC(ZInterStore)
+      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kZCard}.HFUNC(ZCard)
+      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1, acl::kZCount}.HFUNC(ZCount)
+      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, 1, acl::kZDiff}.HFUNC(ZDiff)
+      << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, 1, acl::kZIncrBy}.HFUNC(ZIncrBy)
+      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1, acl::kZInterStore}.HFUNC(ZInterStore)
       << CI{"ZINTERCARD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1,
-            Acl::kZInterCard}
+            acl::kZInterCard}
              .HFUNC(ZInterCard)
-      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1, Acl::kZLexCount}.HFUNC(ZLexCount)
-      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, 1, Acl::kZPopMax}.HFUNC(ZPopMax)
-      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1, Acl::kZPopMin}.HFUNC(ZPopMin)
-      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1, Acl::kZRem}.HFUNC(ZRem)
-      << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1, Acl::kZRange}.HFUNC(ZRange)
-      << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1, Acl::kZRange}.HFUNC(ZRank)
-      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, 1, Acl::kZRangeByLex}.HFUNC(ZRangeByLex)
-      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1, Acl::kZRangeByScore}.HFUNC(ZRangeByScore)
-      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1, Acl::kZScore}.HFUNC(ZScore)
-      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, 1, Acl::kZMScore}.HFUNC(ZMScore)
-      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1, Acl::kZRemRangeByRank}.HFUNC(ZRemRangeByRank)
-      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1, Acl::kZRemRangeByScore}.HFUNC(
+      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
+      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, 1, acl::kZPopMax}.HFUNC(ZPopMax)
+      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1, acl::kZPopMin}.HFUNC(ZPopMin)
+      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1, acl::kZRem}.HFUNC(ZRem)
+      << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1, acl::kZRange}.HFUNC(ZRange)
+      << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kZRange}.HFUNC(ZRank)
+      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, 1, acl::kZRangeByLex}.HFUNC(ZRangeByLex)
+      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1, acl::kZRangeByScore}.HFUNC(ZRangeByScore)
+      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kZScore}.HFUNC(ZScore)
+      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, 1, acl::kZMScore}.HFUNC(ZMScore)
+      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1, acl::kZRemRangeByRank}.HFUNC(ZRemRangeByRank)
+      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1, acl::kZRemRangeByScore}.HFUNC(
              ZRemRangeByScore)
-      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, 1, Acl::kZRemRangeByLex}.HFUNC(ZRemRangeByLex)
-      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1, 1, Acl::kZRevRange}.HFUNC(ZRevRange)
-      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1, 1, Acl::kZRevRangeByLex}.HFUNC(ZRevRangeByLex)
-      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1, Acl::kZRevRangeByScore}.HFUNC(
+      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, 1, acl::kZRemRangeByLex}.HFUNC(ZRemRangeByLex)
+      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1, 1, acl::kZRevRange}.HFUNC(ZRevRange)
+      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1, 1, acl::kZRevRangeByLex}.HFUNC(ZRevRangeByLex)
+      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1, acl::kZRevRangeByScore}.HFUNC(
              ZRevRangeByScore)
-      << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1, Acl::kZRevRank}.HFUNC(ZRevRank)
-      << CI{"ZSCAN", CO::READONLY, -3, 1, 1, 1, Acl::kZScan}.HFUNC(ZScan)
+      << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kZRevRank}.HFUNC(ZRevRank)
+      << CI{"ZSCAN", CO::READONLY, -3, 1, 1, 1, acl::kZScan}.HFUNC(ZScan)
       << CI{"ZUNION",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1,
-            Acl::kZUnion}
+            acl::kZUnion}
              .HFUNC(ZUnion)
-      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, 1, Acl::kZUnionStore}.HFUNC(ZUnionStore)
+      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, 1, acl::kZUnionStore}.HFUNC(ZUnionStore)
 
       // GEO functions
-      << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, 1, Acl::kGeoAdd}.HFUNC(GeoAdd)
-      << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1, Acl::kGeoHash}.HFUNC(GeoHash)
-      << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1, Acl::kGeoPos}.HFUNC(GeoPos)
-      << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1, Acl::kGeoDist}.HFUNC(GeoDist);
+      << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, 1, acl::kGeoAdd}.HFUNC(GeoAdd)
+      << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
+      << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
+      << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1, acl::kGeoDist}.HFUNC(GeoDist);
 }
 
 }  // namespace dfly

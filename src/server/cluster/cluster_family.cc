@@ -599,24 +599,21 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))
 
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kCluster = Cat::SLOW;
+namespace acl {
+constexpr uint32_t kCluster = SLOW;
 // Reconsider to maybe more sensible defaults
-constexpr uint32_t kDflyCluster = Cat::ADMIN | Cat::SLOW;
-constexpr uint32_t kReadOnly = Cat::FAST | Cat::CONNECTION;
-constexpr uint32_t kReadWrite = Cat::FAST | Cat::CONNECTION;
-}  // namespace Acl
-}  // namespace
+constexpr uint32_t kDflyCluster = ADMIN | SLOW;
+constexpr uint32_t kReadOnly = FAST | CONNECTION;
+constexpr uint32_t kReadWrite = FAST | CONNECTION;
+}  // namespace acl
 
 void ClusterFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, Acl::kCluster}.HFUNC(Cluster)
+  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0,
-                  Acl::kDflyCluster}
+                  acl::kDflyCluster}
                    .HFUNC(DflyCluster)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0, Acl::kReadOnly}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0, Acl::kReadWrite}.HFUNC(ReadWrite);
+            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
+            << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite);
 }
 
 }  // namespace dfly

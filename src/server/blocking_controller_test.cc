@@ -23,7 +23,7 @@ using namespace testing;
 
 class BlockingControllerTest : public Test {
  protected:
-  BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, 1, AclCategory::NONE) {
+  BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, 1, acl::NONE) {
   }
   void SetUp() override;
   void TearDown() override;

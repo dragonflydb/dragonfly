@@ -1061,52 +1061,49 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&HSetFamily::x)
 
-namespace {
-namespace Acl {
-namespace Cat = AclCategory;
-constexpr uint32_t kHDel = Cat::WRITE | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHLen = Cat::READ | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHExists = Cat::READ | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHGet = Cat::READ | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHGetAll = Cat::READ | Cat::HASH | Cat::SLOW;
-constexpr uint32_t kHMGet = Cat::READ | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHMSet = Cat::WRITE | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHIncrBy = Cat::WRITE | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHIncrByFloat = Cat::WRITE | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHKeys = Cat::READ | Cat::HASH | Cat::SLOW;
-constexpr uint32_t kHRandField = Cat::READ | Cat::HASH | Cat::SLOW;
-constexpr uint32_t kHScan = Cat::READ | Cat::HASH | Cat::SLOW;
-constexpr uint32_t kHSet = Cat::WRITE | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHSetEx = Cat::WRITE | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHSetNx = Cat::WRITE | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHStrLen = Cat::READ | Cat::HASH | Cat::FAST;
-constexpr uint32_t kHVals = Cat::READ | Cat::HASH | Cat::SLOW;
-}  // namespace Acl
-}  // namespace
+namespace acl {
+constexpr uint32_t kHDel = WRITE | HASH | FAST;
+constexpr uint32_t kHLen = READ | HASH | FAST;
+constexpr uint32_t kHExists = READ | HASH | FAST;
+constexpr uint32_t kHGet = READ | HASH | FAST;
+constexpr uint32_t kHGetAll = READ | HASH | SLOW;
+constexpr uint32_t kHMGet = READ | HASH | FAST;
+constexpr uint32_t kHMSet = WRITE | HASH | FAST;
+constexpr uint32_t kHIncrBy = WRITE | HASH | FAST;
+constexpr uint32_t kHIncrByFloat = WRITE | HASH | FAST;
+constexpr uint32_t kHKeys = READ | HASH | SLOW;
+constexpr uint32_t kHRandField = READ | HASH | SLOW;
+constexpr uint32_t kHScan = READ | HASH | SLOW;
+constexpr uint32_t kHSet = WRITE | HASH | FAST;
+constexpr uint32_t kHSetEx = WRITE | HASH | FAST;
+constexpr uint32_t kHSetNx = WRITE | HASH | FAST;
+constexpr uint32_t kHStrLen = READ | HASH | FAST;
+constexpr uint32_t kHVals = READ | HASH | SLOW;
+}  // namespace acl
 
 void HSetFamily::Register(CommandRegistry* registry) {
   *registry
-      << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1, 1, Acl::kHDel}.HFUNC(HDel)
-      << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1, 1, Acl::kHLen}.HFUNC(HLen)
-      << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1, 1, Acl::kHExists}.HFUNC(HExists)
-      << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1, 1, Acl::kHGet}.HFUNC(HGet)
-      << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1, 1, Acl::kHGetAll}.HFUNC(HGetAll)
-      << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1, 1, Acl::kHMGet}.HFUNC(HMGet)
-      << CI{"HMSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, Acl::kHMSet}.HFUNC(HSet)
-      << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, Acl::kHIncrBy}.HFUNC(HIncrBy)
-      << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, Acl::kHIncrByFloat}
+      << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1, 1, acl::kHDel}.HFUNC(HDel)
+      << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kHLen}.HFUNC(HLen)
+      << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kHExists}.HFUNC(HExists)
+      << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kHGet}.HFUNC(HGet)
+      << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kHGetAll}.HFUNC(HGetAll)
+      << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1, 1, acl::kHMGet}.HFUNC(HMGet)
+      << CI{"HMSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kHMSet}.HFUNC(HSet)
+      << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHIncrBy}.HFUNC(HIncrBy)
+      << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHIncrByFloat}
              .HFUNC(HIncrByFloat)
-      << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1, Acl::kHKeys}.HFUNC(HKeys)
+      << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1, acl::kHKeys}.HFUNC(HKeys)
 
       // TODO: add options support
-      << CI{"HRANDFIELD", CO::READONLY, 2, 1, 1, 1, Acl::kHRandField}.HFUNC(HRandField)
-      << CI{"HSCAN", CO::READONLY, -3, 1, 1, 1, Acl::kHScan}.HFUNC(HScan)
-      << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, Acl::kHSet}.HFUNC(HSet)
-      << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, 1, Acl::kHSetEx}.SetHandler(
+      << CI{"HRANDFIELD", CO::READONLY, 2, 1, 1, 1, acl::kHRandField}.HFUNC(HRandField)
+      << CI{"HSCAN", CO::READONLY, -3, 1, 1, 1, acl::kHScan}.HFUNC(HScan)
+      << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kHSet}.HFUNC(HSet)
+      << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, 1, acl::kHSetEx}.SetHandler(
              HSetEx)
-      << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, Acl::kHSetNx}.HFUNC(HSetNx)
-      << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, Acl::kHStrLen}.HFUNC(HStrLen)
-      << CI{"HVALS", CO::READONLY, 2, 1, 1, 1, Acl::kHVals}.HFUNC(HVals);
+      << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHSetNx}.HFUNC(HSetNx)
+      << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kHStrLen}.HFUNC(HStrLen)
+      << CI{"HVALS", CO::READONLY, 2, 1, 1, 1, acl::kHVals}.HFUNC(HVals);
 }
 
 uint32_t HSetFamily::MaxListPackLen() {
