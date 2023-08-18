@@ -305,6 +305,10 @@ template <typename T> class BPTreePath {
     depth_ = 0;
   }
 
+  bool Empty() const {
+    return depth_ == 0;
+  }
+
   std::pair<BPTreeNode<T>*, unsigned> Last() const {
     assert(depth_ > 0u);
     return {record_[depth_ - 1].node, record_[depth_ - 1].pos};
@@ -333,6 +337,10 @@ template <typename T> class BPTreePath {
     assert(Last().second < Last().first->NumItems());
     return Last().first->Key(Last().second);
   }
+
+  /// @brief Returns the rank of the path's terminal item.
+  /// Requires that the path is valid and has a terminal item.
+  uint32_t Rank() const;
 
   /// @brief Advances the path to the next item.
   /// @return true if succeeded, false if reached the end.
@@ -688,6 +696,25 @@ template <typename T> void BPTreeNode<T>::MergeFromRight(KeyT key, BPTreeNode<T>
   }
   num_items_ += 1 + right->NumItems();
   right->num_items_ = 0;
+}
+
+template <typename T> uint32_t BPTreePath<T>::Rank() const {
+  uint32_t rank = 0;
+  unsigned bound = Depth();
+
+  for (unsigned i = 0; i < bound; ++i) {
+    auto* node = Node(i);
+    unsigned pos = Position(i);
+    if (!node->IsLeaf()) {
+      unsigned delta = (i == bound - 1) ? 1 : 0;
+      for (unsigned j = 0; j < pos + delta; ++j) {
+        rank += node->Child(j)->TreeCount();
+      }
+    }
+    rank += pos;
+  }
+
+  return rank;
 }
 
 template <typename T> bool BPTreePath<T>::Next() {
