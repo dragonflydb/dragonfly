@@ -69,10 +69,10 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
     return root_;
   }
 
-  KeyT FromRank(uint32_t rank) const {
+  BPTreePath FromRank(uint32_t rank) const {
     BPTreePath path;
     ToRank(rank, &path);
-    return path.Terminal();
+    return path;
   }
 
   /// @brief Iterates over all items in the range [rank_start, rank_end] by rank.

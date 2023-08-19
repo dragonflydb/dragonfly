@@ -21,7 +21,6 @@ using testing::Pair;
 using testing::StrEq;
 
 namespace dfly {
-
 using detail::SortedMap;
 
 class SortedMapTest : public ::testing::Test {
@@ -110,6 +109,58 @@ TEST_F(SortedMapTest, InsertPop) {
                                       Pair(StrEq("a97"), 1000)));
 }
 
+TEST_F(SortedMapTest, LexRanges) {
+  SortedMap sm(&mr_);
+
+  for (unsigned i = 0; i < 100; ++i) {
+    sds s = sdsempty();
+
+    s = sdscatfmt(s, "a%u", i);
+    ASSERT_TRUE(sm.Insert(1, s));
+  }
+
+  zlexrangespec range;
+  range.max = sdsnew("a96");
+  range.min = sdsnew("a93");
+  range.maxex = 0;
+  range.minex = 0;
+  EXPECT_EQ(4, sm.LexCount(range));
+  auto array = sm.GetLexRange(range, 1, 1000, false);
+  ASSERT_EQ(3, array.size());
+  EXPECT_THAT(array.front(), Pair("a94", 1));
+
+  range.maxex = 1;
+  EXPECT_EQ(3, sm.LexCount(range));
+  array = sm.GetLexRange(range, 1, 1000, true);
+  ASSERT_EQ(2, array.size());
+  EXPECT_THAT(array.front(), Pair("a94", 1));
+
+  range.minex = 1;
+  EXPECT_EQ(2, sm.LexCount(range));
+  array = sm.GetLexRange(range, 1, 1000, false);
+  ASSERT_EQ(1, array.size());
+  EXPECT_THAT(array.front(), Pair("a95", 1));
+  sdsfree(range.min);
+
+  range.min = range.max;
+  EXPECT_EQ(0, sm.LexCount(range));
+  range.minex = 0;
+  EXPECT_EQ(0, sm.LexCount(range));
+  sdsfree(range.max);
+
+  range.maxex = 0;
+  range.min = cminstring;
+  range.max = sdsnew("a");
+  EXPECT_EQ(0, sm.LexCount(range));
+  sdsfree(range.max);
+
+  range.max = sdsnew("a0");
+  EXPECT_EQ(1, sm.LexCount(range));
+  range.maxex = 1;
+  EXPECT_EQ(0, sm.LexCount(range));
+  sdsfree(range.max);
+}
+
 TEST_F(SortedMapTest, ScoreRanges) {
   SortedMap sm(&mr_);
 
@@ -133,17 +184,29 @@ TEST_F(SortedMapTest, ScoreRanges) {
   range.maxex = 0;
   range.minex = 0;
   EXPECT_EQ(20, sm.Count(range));
+  detail::SortedMap::ScoredArray array = sm.GetRange(range, 0, 1000, false);
+  ASSERT_EQ(20, array.size());
+  EXPECT_THAT(array.front(), Pair("a0", 1));
+  EXPECT_THAT(array.back(), Pair("b9", 2));
 
   range.minex = 1;  // exclude all the "1" scores.
   EXPECT_EQ(10, sm.Count(range));
+  array = sm.GetRange(range, 2, 1, false);
+  ASSERT_EQ(1, array.size());
+  EXPECT_THAT(array.front(), Pair("b2", 2));
 
   range.max = 1;
   range.minex = 0;
   range.min = -HUGE_VAL;
   EXPECT_EQ(10, sm.Count(range));
+  array = sm.GetRange(range, 2, 2, true);
+  ASSERT_EQ(2, array.size());
+  EXPECT_THAT(array.back(), Pair("a6", 1));
 
   range.maxex = 1;
   EXPECT_EQ(0, sm.Count(range));
+  array = sm.GetRange(range, 0, 2, true);
+  ASSERT_EQ(0, array.size());
 }
 
 }  // namespace dfly
