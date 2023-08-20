@@ -565,7 +565,8 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
     if (file.has_value()) {
       if (!absl::StartsWith(*file, "max"))
-        CHECK(absl::SimpleAtoi(*file, &temp)) << "Failed in parsing cgroup limits, path: " << path << " (read: " << *file << ")";
+        CHECK(absl::SimpleAtoi(*file, &temp))
+            << "Failed in parsing cgroup limits, path: " << path << " (read: " << *file << ")";
       read_something = true;
     }
 
