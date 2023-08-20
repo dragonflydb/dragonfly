@@ -12,7 +12,7 @@
 #include "core/fibers.h"
 #include "server/acl/user.h"
 
-namespace dfly {
+namespace dfly::acl {
 
 class UserRegistry {
  public:
@@ -54,4 +54,4 @@ class UserRegistry {
   mutable util::SharedMutex mu_;
 };
 
-}  // namespace dfly
+}  // namespace dfly::acl

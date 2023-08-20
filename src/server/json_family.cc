@@ -19,6 +19,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "core/json_object.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -1788,33 +1789,42 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
 #define HFUNC(x) SetHandler(&JsonFamily::x)
 
+// Redis modules do not have acl categories, therefore they can not be used by default.
+// However, we do not implement those as modules and therefore we can define our own
+// sensible defaults.
+// For now I introduced only the JSON category which will be the default.
+// TODO: Add sensible defaults/categories to json commands
+
 void JsonFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Get);
-  *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -3, 1, -2, 1}.HFUNC(
-      MGet);
-  *registry << CI{"JSON.TYPE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Type);
-  *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(StrLen);
-  *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjLen);
-  *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ArrLen);
-  *registry << CI{"JSON.TOGGLE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Toggle);
-  *registry << CI{"JSON.NUMINCRBY", CO::WRITE | CO::FAST, 4, 1, 1, 1}.HFUNC(NumIncrBy);
-  *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::FAST, 4, 1, 1, 1}.HFUNC(NumMultBy);
-  *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, 1}.HFUNC(Del);
-  *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, 1}.HFUNC(Del);  // An alias of JSON.DEL.
-  *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjKeys);
-  *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
-      StrAppend);
-  *registry << CI{"JSON.CLEAR", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Clear);
-  *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::FAST, -3, 1, 1, 1}.HFUNC(ArrPop);
-  *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::FAST, 5, 1, 1, 1}.HFUNC(ArrTrim);
-  *registry << CI{"JSON.ARRINSERT", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
-      ArrInsert);
-  *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
-      ArrAppend);
-  *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
-  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Debug);
-  *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Resp);
-  *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(Set);
+  *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Get);
+  *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -3, 1, -2, 1,
+                  acl::JSON}
+                   .HFUNC(MGet);
+  *registry << CI{"JSON.TYPE", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::JSON}.HFUNC(Type);
+  *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::JSON}.HFUNC(StrLen);
+  *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::JSON}.HFUNC(ObjLen);
+  *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::JSON}.HFUNC(ArrLen);
+  *registry << CI{"JSON.TOGGLE", CO::WRITE | CO::FAST, 3, 1, 1, 1, acl::JSON}.HFUNC(Toggle);
+  *registry << CI{"JSON.NUMINCRBY", CO::WRITE | CO::FAST, 4, 1, 1, 1, acl::JSON}.HFUNC(NumIncrBy);
+  *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::FAST, 4, 1, 1, 1, acl::JSON}.HFUNC(NumMultBy);
+  *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, 1, acl::JSON}.HFUNC(Del);
+  *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, 1, acl::JSON}.HFUNC(
+      Del);  // An alias of JSON.DEL.
+  *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::JSON}.HFUNC(ObjKeys);
+  *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}
+                   .HFUNC(StrAppend);
+  *registry << CI{"JSON.CLEAR", CO::WRITE | CO::FAST, 3, 1, 1, 1, acl::JSON}.HFUNC(Clear);
+  *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::FAST, -3, 1, 1, 1, acl::JSON}.HFUNC(ArrPop);
+  *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::FAST, 5, 1, 1, 1, acl::JSON}.HFUNC(ArrTrim);
+  *registry << CI{"JSON.ARRINSERT", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}
+                   .HFUNC(ArrInsert);
+  *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}
+                   .HFUNC(ArrAppend);
+  *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(ArrIndex);
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Debug);
+  *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Resp);
+  *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(
+      Set);
 }
 
 }  // namespace dfly

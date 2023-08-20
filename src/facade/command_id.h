@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "facade/facade_types.h"
+#include "server/acl/acl_commands_def.h"
 
 namespace facade {
 
@@ -30,9 +31,10 @@ class CommandId {
    *                    -1 means the last key index is (arg_length - 1), -2 means that the last key
    * index is (arg_length - 2).
    * @param step -      step count for locating repeating keys
+   * @param acl_categories - bitfield for acl categories of the command
    */
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
-            int8_t step);
+            int8_t step, uint32_t acl_categories);
 
   std::string_view name() const {
     return name_;
@@ -58,6 +60,10 @@ class CommandId {
     return step_key_;
   }
 
+  uint32_t acl_categories() const {
+    return acl_categories_;
+  }
+
   static uint32_t OptCount(uint32_t mask);
 
  protected:
@@ -68,6 +74,7 @@ class CommandId {
   int8_t first_key_;
   int8_t last_key_;
   int8_t step_key_;
+  uint32_t acl_categories_;
 };
 
 }  // namespace facade
