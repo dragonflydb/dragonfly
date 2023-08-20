@@ -12,8 +12,8 @@
 #include "facade/error.h"
 #include "src/facade/conn_context.h"
 #include "src/facade/dragonfly_connection.h"
-//#include "src/server/conn_context.h"
-//#include "src/server/command_registry.h"
+#include "src/server/command_registry.h"
+#include "src/server/conn_context.h"
 
 using namespace std;
 using absl::StrAppend;
@@ -198,8 +198,8 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
 }
 
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink, facade::ConnectionContext* cntx,
-                                     ::io::StringSink* save_to)
-    : SinkReplyBuilder(sink), save_to_{save_to}, cntx_{cntx} {
+                                     unsigned capacity)
+    : SinkReplyBuilder(sink), buffer_(capacity), cntx_{cntx} {
 }
 
 void RedisReplyBuilder::SetResp3(bool is_resp3) {
@@ -233,14 +233,16 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   v.insert(v.end(), {IoVec(str), IoVec(kCRLF)});
   v.shrink_to_fit();
   Send(v.data(), v.size());
-  if (save_to_) {
-    //    auto s = absl::StrCat(cntx_->cid->name(), ": ", str , "\n");
-    auto s = absl::StrCat("<cid?>", ": ", str, "\n");
+  if (buffer_.capacity()) {
+    //       auto s = absl::StrCat(static_cast<dfly::ConnectionContext*>(cntx_)->cid->name(), ": ",
+    //       str , "\n");
+    auto s = absl::StrCat("<cid?>", ": ", str);
     //    auto what = cntx_->owner()->raw_input();
     //    auto s = absl::StrCat(what, ": ", str , "\n");
 
-    iovec iv[] = {IoVec(s)};
-    save_to_->Write(iv, ABSL_ARRAYSIZE(iv));
+    // iovec iv[] = {IoVec(s)};
+    buffer_.EmplaceOrOverride(move(s));
+    //    save_to_->Write(iv, ABSL_ARRAYSIZE(iv));
   }
 }
 
@@ -524,8 +526,27 @@ void RedisReplyBuilder::SendStringArrInternal(WrappedStrSpan arr, CollectionType
   Send(vec.data(), vec_indx + 1);
 }
 
-const std::string& RedisReplyBuilder::GetSavedErrors(void) const {
-  return save_to_->str();
+vector<string> RedisReplyBuilder::GetSavedErrors(void) {
+  /**
+   * Items are inserted to the RingBuffer by its tail, yet GetItem()
+   * returns items starting from the head. This implies that printing
+   * GetItem(0u) would print errors from oldest to newest.
+   * It is not possible to lazily reverse this result, i.e.,
+   * by using GetItem(size() - 1) as the head, since
+   * GetItem(size()) != GetItem(size() - 1)[1], which in words means
+   * that the next item in GetItem(size() - 1) is not what we want.
+   *
+   * Since this is not a hot path, an explicit copy and reversal will suffice.
+   */
+
+  const auto sz = buffer_.size();
+  const auto* items = buffer_.GetItem(0u);
+
+  vector<string> reversed(sz);
+  for (auto i = 0u; i < sz; ++i)
+    reversed[i] = items[sz - 1 - i];
+
+  return reversed;
 }
 
 void ReqSerializer::SendCommand(std::string_view str) {

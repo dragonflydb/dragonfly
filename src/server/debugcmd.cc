@@ -212,8 +212,9 @@ void DoBuildObjHist(EngineShard* shard, ObjHistMap* obj_hist_map) {
 }
 
 void ErrorStatsInternal(ConnectionContext* cntx) {
-  auto* rb = cntx->operator->();  // returns RedisReplyBuilder and checks it is valid
-  rb->SendSimpleString(rb->GetSavedErrors());
+  auto* rb =
+      cntx->operator->();  // returns RedisReplyBuilder, safety checks performed inside operator->()
+  rb->SendStringArr(rb->GetSavedErrors());
 }
 
 }  // namespace
@@ -250,10 +251,12 @@ void DebugCmd::Run(CmdArgList args) {
         "    If SLOTS is specified then create keys only in given slots range."
         "OBJHIST",
         "    Prints histogram of object sizes.",
-        "ERRORS [DISABLE] [ENABLE <count>]",
-        "    Returns the last <count> errors recorded in the database, starting from the last",
-        "    [ENABLE] command.",
-        "    By default, this option is disabled."
+        "ERRORS [FLUSH] [RESIZE <new_size>]",
+        "    Returns the last K errors recorded in Dragonfly. By default, k = 32.",
+        "    It is possible to clear the buffer by using [FLUSH].",
+        "    Resize the buffer using [RESIZE <size>]. This will clear the buffer.",
+        //        "    Returns the last <count> errors recorded in the database, starting from the
+        //        last", "    [ENABLE] command.", "    By default, this option is disabled."
         "HELP",
         "    Prints this help.",
     };

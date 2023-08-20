@@ -6,9 +6,12 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "base/logging.h"
+#include "base/ring_buffer.h"
 
 //#include "src/facade/conn_context.h"
 #include "facade/facade_types.h"
@@ -176,10 +179,13 @@ class MCReplyBuilder : public SinkReplyBuilder {
 class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   enum CollectionType { ARRAY, SET, MAP, PUSH };
+  static constexpr unsigned buffer_capacity = 32u;
 
   using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
 
-  RedisReplyBuilder(::io::Sink* stream, facade::ConnectionContext* cntx, ::io::StringSink* save_to);
+  //! capacity must be a power of 2, see RingBuffer
+  RedisReplyBuilder(::io::Sink* stream, facade::ConnectionContext* cntx,
+                    unsigned capacity = buffer_capacity);
 
   void SetResp3(bool is_resp3);
 
@@ -217,7 +223,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   // into the string that would be sent
   static std::string_view StatusToMsg(OpStatus status);
 
-  const std::string& GetSavedErrors(void) const;
+  std::vector<std::string> GetSavedErrors(void);
 
  protected:
   struct WrappedStrSpan : public StrSpan {
@@ -231,7 +237,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   const char* NullString();
 
   bool is_resp3_ = false;
-  ::io::StringSink* save_to_;  // save errors to this Sink
+  base::RingBuffer<std::string> buffer_;  // DEBUG ERRORS logs error here
   facade::ConnectionContext* cntx_;
 };
 
