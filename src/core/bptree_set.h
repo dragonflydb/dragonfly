@@ -87,21 +87,6 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   /// @param cb
   bool IterateReverse(uint32_t rank_start, uint32_t rank_end, std::function<bool(KeyT)> cb) const;
 
-  /// @brief  Deletes all items in the range [start, end] by rank.
-  /// @param start
-  /// @param end - inclusive. must be >= start.
-  /// @param cb - callback to be called for each deleted item.
-  /// @return number of deleted items.
-  size_t DeleteRangeByRank(uint32_t start, uint32_t end, std::function<void(KeyT)> cb);
-
-  /// @brief Deletes items in [first, last] range.
-  /// @param first
-  /// @param last
-  /// @param cb
-  /// @return
-  size_t DeleteRange(KeyT first, KeyT last, std::function<void(KeyT)> cb, bool inclusive_first,
-                     bool inclusive_last);
-
   /// @brief Returns the path to the first item in the tree that is greater or equal to key.
   /// @param item
   /// @return the path if such item exists, empty path otherwise.
@@ -113,10 +98,13 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   /// @return the path if such item exists, empty path otherwise.
   detail::BPTreePath<T> LEQ(KeyT key) const;
 
+  /// @brief Deletes the element pointed by path.
+  /// @param path
+  void Delete(BPTreePath path);
+
  private:
   BPTreeNode* CreateNode(bool leaf);
 
-  void Delete(BPTreePath path);
   void DestroyNode(BPTreeNode* node);
 
   void InsertToFullLeaf(KeyT item, const BPTreePath& path);
@@ -409,7 +397,10 @@ void BPTree<T, Policy>::IncreaseSubtreeCounts(const BPTreePath& path, unsigned d
 template <typename T, typename Policy>
 bool BPTree<T, Policy>::Iterate(uint32_t rank_start, uint32_t rank_end,
                                 std::function<bool(KeyT)> cb) const {
-  assert(rank_start <= rank_end && rank_end < count_);
+  if (rank_start >= Size())
+    return true;
+
+  assert(rank_start <= rank_end);
 
   BPTreePath path;
   ToRank(rank_start, &path);
@@ -417,7 +408,8 @@ bool BPTree<T, Policy>::Iterate(uint32_t rank_start, uint32_t rank_end,
     if (!cb(path.Terminal()))
       return false;
 
-    path.Next();
+    if (!path.Next())
+      return true;
   }
   return true;
 }
@@ -467,73 +459,10 @@ void BPTree<T, Policy>::ToRank(uint32_t rank, BPTreePath* path) const {
 }
 
 template <typename T, typename Policy>
-size_t BPTree<T, Policy>::DeleteRangeByRank(uint32_t start, uint32_t end,
-                                            std::function<void(KeyT)> cb) {
-  assert(start <= end && end < count_);
-
-  BPTreePath path;
-  size_t deleted = 0;
-  for (uint32_t i = start; i <= end; ++i) {
-    /* Ideally, we would want to advance path to the next item and delete the previous one.
-     * However, we can not do that because the path is invalidated after the
-     * deletion. So we have to recreate the path for each item using the same rank.
-     * Note, it is probably could be improved, but it's much more complicated.
-     */
-
-    ToRank(start, &path);
-    cb(path.Terminal());
-    Delete(path);
-    path.Clear();
-    ++deleted;
-  }
-  return deleted;
-}
-
-template <typename T, typename Policy>
-size_t BPTree<T, Policy>::DeleteRange(KeyT first, KeyT last, std::function<void(KeyT)> cb,
-                                      bool inclusive_first, bool inclusive_last) {
-  using Comp = typename Policy::KeyCompareTo;
-
-  if (!root_)
-    return 0;
-
-  BPTreePath path;
-  bool res = Locate(first, &path);
-  Comp comp;
-  if (res && !inclusive_first) {
-    if (!path.Next())
-      return 0;
-  }
-
-  if (!path.HasValidTerminal())
-    return 0;
-
-  // Set the low bound for deletion.
-  first = path.Terminal();
-
-  int last_bound = inclusive_last ? 0 : -1;
-  size_t deleted = 0;
-  while (comp(path.Terminal(), last) <= last_bound) {
-    cb(path.Terminal());
-    ++deleted;
-    Delete(path);
-
-    if (!root_)
-      break;
-
-    path.Clear();
-    Locate(first, &path);
-    if (!path.HasValidTerminal())
-      break;
-  }
-  return deleted;
-}
-
-template <typename T, typename Policy>
 detail::BPTreePath<T> BPTree<T, Policy>::GEQ(KeyT item) const {
   BPTreePath path;
-  Locate(item, &path);
-  if (path.Last().second >= path.Last().first->NumItems())
+
+  if (!Locate(item, &path) && path.Last().second >= path.Last().first->NumItems())
     path.Clear();
 
   return path;
