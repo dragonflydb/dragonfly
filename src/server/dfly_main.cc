@@ -520,9 +520,10 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
       return make_error_code(errc::not_supported);
     }
 
-    string_view res = absl::StripTrailingAsciiWhitespace(cgv.substr(pos + 1));
+    auto cgroup = string_view(cgv.c_str() + pos + 1);
+    string_view cgroup_stripped = absl::StripTrailingAsciiWhitespace(cgroup);
 
-    *memory_path = absl::StrCat("/sys/fs/cgroup/", res);
+    *memory_path = absl::StrCat("/sys/fs/cgroup/", cgroup_stripped);
     *cpu_path = *memory_path;  // in v2 the path to the cgroup is singular
   } else {
     for (const auto& sv : groups) {
