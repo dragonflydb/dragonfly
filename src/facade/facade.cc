@@ -110,7 +110,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   if (owner) {
     protocol_ = owner->protocol();
   }
-  
+
   if (stream) {
     switch (protocol_) {
       case Protocol::REDIS:
