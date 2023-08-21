@@ -21,6 +21,9 @@ using namespace std;
 
 ABSL_FLAG(bool, use_zset_tree, false, "If true use b+tree for zset implementation");
 
+extern "C" unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele,
+                                      double score);
+
 namespace dfly {
 namespace detail {
 
@@ -39,25 +42,6 @@ size_t DictMallocSize(dict* d) {
                znallocx(sizeof(dict));
 
   return res + dictSize(d) * 16;  // approximation.
-}
-
-unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, double score) {
-  unsigned char* sptr;
-  char scorebuf[128];
-  int scorelen;
-
-  scorelen = d2string(scorebuf, sizeof(scorebuf), score);
-  if (eptr == NULL) {
-    zl = lpAppend(zl, (unsigned char*)ele, sdslen(ele));
-    zl = lpAppend(zl, (unsigned char*)scorebuf, scorelen);
-  } else {
-    /* Insert member before the element 'eptr'. */
-    zl = lpInsertString(zl, (unsigned char*)ele, sdslen(ele), eptr, LP_BEFORE, &sptr);
-
-    /* Insert score after the member. */
-    zl = lpInsertString(zl, (unsigned char*)scorebuf, scorelen, sptr, LP_AFTER, NULL);
-  }
-  return zl;
 }
 
 inline zskiplistNode* Next(bool reverse, zskiplistNode* ln) {
@@ -82,7 +66,7 @@ void SetObjScore(void* obj, double score) {
 
 // buf must be at least 10 chars long.
 // Builds a tagged key that can be used for querying open/closed bounds.
-void* BuilScoredKey(double score, bool is_str_inf, char buf[]) {
+void* BuildScoredKey(double score, bool is_str_inf, char buf[]) {
   buf[0] = SDS_TYPE_5;  // length 0.
   buf[1] = 0;
   absl::little_endian::Store64(buf + 2, absl::bit_cast<uint64_t>(score));
@@ -314,12 +298,14 @@ SortedMap::ScoredArray SortedMap::RdImpl::PopTopScores(unsigned count, bool reve
 
   ScoredArray result;
   while (ln && count--) {
-    result.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
+    sds ele = ln->ele;
+    result.emplace_back(string{ele, sdslen(ele)}, ln->score);
+
+    // Switch to next before deleting the element.
+    ln = Next(reverse, ln);
 
     /* we can delete the element now */
-    CHECK(Delete(ln->ele));
-
-    ln = Next(reverse, ln);
+    CHECK(Delete(ele));
   }
   return result;
 }
@@ -537,7 +523,7 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsi
 
   char buf[16];
   if (reverse) {
-    ScoreSds key = BuilScoredKey(range.max, !range.maxex, buf);
+    ScoreSds key = BuildScoredKey(range.max, !range.maxex, buf);
     auto path = score_tree->LEQ(key);
     if (path.Empty())
       return arr;
@@ -563,7 +549,7 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsi
         break;
     }
   } else {
-    ScoreSds key = BuilScoredKey(range.min, range.minex, buf);
+    ScoreSds key = BuildScoredKey(range.min, range.minex, buf);
     auto path = score_tree->GEQ(key);
     if (path.Empty())
       return arr;
@@ -662,8 +648,14 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetLexRange(const zlexrangespec& range
 }
 
 uint8_t* SortedMap::DfImpl::ToListPack() const {
-  LOG(FATAL) << "TBD";
-  return nullptr;
+  uint8_t* lp = lpNew(0);
+
+  score_tree->Iterate(0, UINT32_MAX, [&](ScoreSds ele) {
+    lp = zzlInsertAt(lp, NULL, (sds)ele, GetObjScore(ele));
+    return true;
+  });
+
+  return lp;
 }
 
 bool SortedMap::DfImpl::Delete(sds ele) {
@@ -687,18 +679,87 @@ bool SortedMap::DfImpl::Reserve(size_t sz) {
 }
 
 size_t SortedMap::DfImpl::DeleteRangeByRank(unsigned start, unsigned end) {
-  LOG(FATAL) << "TBD";
-  return 0;
+  DCHECK_LE(start, end);
+  DCHECK_LT(end, score_tree->Size());
+
+  for (uint32_t i = start; i <= end; ++i) {
+    /* Ideally, we would want to advance path to the next item and delete the previous one.
+     * However, we can not do that because the path is invalidated after the
+     * deletion. So we have to recreate the path for each item using the same rank.
+     * Note, it is probably could be improved, but it's much more complicated.
+     */
+
+    auto path = score_tree->FromRank(start);
+    sds ele = (sds)path.Terminal();
+    score_tree->Delete(path);
+    score_map->Erase(ele);
+  }
+
+  return end - start + 1;
 }
 
 size_t SortedMap::DfImpl::DeleteRangeByScore(const zrangespec& range) {
-  LOG(FATAL) << "TBD";
-  return 0;
+  char buf[16] = {0};
+  size_t deleted = 0;
+
+  while (score_tree->Size() > 0) {
+    ScoreSds min_key = BuildScoredKey(range.min, range.minex, buf);
+    auto path = score_tree->GEQ(min_key);
+    if (path.Empty())
+      break;
+
+    ScoreSds item = path.Terminal();
+    double score = GetObjScore(item);
+
+    if (range.minex) {
+      DCHECK_GT(score, range.min);
+    } else {
+      DCHECK_GE(score, range.min);
+    }
+    if (score > range.max || (range.maxex && score == range.max))
+      break;
+
+    score_tree->Delete(item);
+    ++deleted;
+    score_map->Erase((sds)item);
+  }
+
+  return deleted;
 }
 
 size_t SortedMap::DfImpl::DeleteRangeByLex(const zlexrangespec& range) {
-  LOG(FATAL) << "TBD";
-  return 0;
+  if (score_tree->Size() == 0)
+    return 0;
+
+  size_t deleted = 0;
+
+  uint32_t rank = 0;
+  if (range.min != cminstring) {
+    ScoreSds range_key = (ScoreSds)(uint64_t(range.min) | kIgnoreDoubleTag);
+    auto path = score_tree->GEQ(range_key);
+    if (path.Empty())
+      return {};
+
+    rank = path.Rank();
+    if (range.minex && sdscmp((sds)path.Terminal(), range.min) == 0) {
+      ++rank;
+    }
+  }
+
+  while (rank < score_tree->Size()) {
+    auto path = score_tree->FromRank(rank);
+    ScoreSds item = path.Terminal();
+    if (range.max != cmaxstring) {
+      int cmp = sdscmp((sds)item, range.max);
+      if (cmp > 0 || (cmp == 0 && range.maxex))
+        break;
+    }
+    ++deleted;
+    score_tree->Delete(path);
+    score_map->Erase((sds)item);
+  }
+
+  return deleted;
 }
 
 SortedMap::ScoredArray SortedMap::DfImpl::PopTopScores(unsigned count, bool reverse) {
@@ -723,10 +784,12 @@ SortedMap::ScoredArray SortedMap::DfImpl::PopTopScores(unsigned count, bool reve
   }
 
   for (unsigned i = 0; i < count; ++i) {
-    score_tree->DeleteRangeByRank(rank, rank, [&](ScoreSds obj) {
-      res.emplace_back(string{(sds)obj, sdslen((sds)obj)}, GetObjScore(obj));
-    });
-    score_map->Erase(res.back().first);
+    auto path = score_tree->FromRank(rank);
+    ScoreSds obj = path.Terminal();
+    res.emplace_back(string{(sds)obj, sdslen((sds)obj)}, GetObjScore(obj));
+
+    score_tree->Delete(path);
+    score_map->Erase((sds)obj);
     rank -= step;
   }
 
@@ -742,7 +805,7 @@ size_t SortedMap::DfImpl::Count(const zrangespec& range) const {
   // build min key.
   char buf[16];
 
-  ScoreSds range_key = BuilScoredKey(range.min, range.minex, buf);
+  ScoreSds range_key = BuildScoredKey(range.min, range.minex, buf);
   auto path = score_tree->GEQ(range_key);
   if (path.Empty())
     return 0;
@@ -760,7 +823,7 @@ size_t SortedMap::DfImpl::Count(const zrangespec& range) const {
   // Now build the max key.
   // If we need to exclude the maximum score, set the key'sstring part to empty string,
   // otherwise set it to infinity.
-  range_key = BuilScoredKey(range.max, !range.maxex, buf);
+  range_key = BuildScoredKey(range.max, !range.maxex, buf);
 
   path = score_tree->GEQ(range_key);
   if (path.Empty()) {
