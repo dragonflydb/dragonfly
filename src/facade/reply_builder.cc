@@ -4,6 +4,7 @@
 #include "facade/reply_builder.h"
 
 #include <absl/container/fixed_array.h>
+#include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 #include <double-conversion/double-to-string.h>
@@ -239,7 +240,16 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   if (buffer_.capacity()) {
     //       auto s = absl::StrCat(static_cast<dfly::ConnectionContext*>(cntx_)->cid->name(), ": ",
     //       str , "\n");
-    auto s = absl::StrCat("<cid?>", ": ", str);
+
+    string s;
+    if (absl::StartsWith(str, "unknown command"))
+      s = str;
+    else
+      s = absl::StrCat(static_cast<dfly::ConnectionContext*>(cntx_)->cid->name(), ": ", str);
+
+    // LOG(INFO) << "$$$ " << s;
+
+    //    auto s = absl::StrCat("<cid?>", ": ", str);
     //    auto what = cntx_->owner()->raw_input();
     //    auto s = absl::StrCat(what, ": ", str , "\n");
 
