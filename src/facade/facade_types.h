@@ -62,7 +62,7 @@ struct ConnectionStats {
 
 struct ErrorReply {
   explicit ErrorReply(std::string&& msg, std::string_view kind = {})
-      : message{move(msg)}, kind{kind} {
+      : message{std::move(msg)}, kind{kind} {
   }
   explicit ErrorReply(std::string_view msg, std::string_view kind = {}) : message{msg}, kind{kind} {
   }

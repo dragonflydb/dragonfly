@@ -872,6 +872,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return nullopt;
 }
 
+// For now, we only alow AclCommand in non multi-transaction. This function will
+// be usefull to extend AclCommands for multi-transactions.
 static std::string FullAclCommandFromArgs(CmdArgList args) {
   ToUpper(&args[1]);
   // Guranteed SSO no dynamic allocations here
@@ -885,7 +887,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ServerState& etl = *ServerState::tlocal();
 
   ToUpper(&args[0]);
-  const std::string_view command(args[0].begin(), args[0].end());
+  const std::string_view command(args[0].data(), args[0].size());
   const bool is_acl_command = (command == "ACL");
 
   const CommandId* cid = is_acl_command ? FindCmd(FullAclCommandFromArgs(args)) : FindCmd(args);
@@ -913,7 +915,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
-    (*dfly_cntx)->SendError(move(*err));
+    (*dfly_cntx)->SendError(std::move(*err));
     return;
   }
 
@@ -995,7 +997,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(!cid->Validate(tail_args));
 
   if (auto err = VerifyCommandExecution(cid); err) {
-    (*cntx)->SendError(move(*err));
+    (*cntx)->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
 
@@ -1322,7 +1324,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   info->async_cmds.clear();
 
   auto reply = crb.Take();
-  return CapturingReplyBuilder::GetError(reply) ? make_optional(move(reply)) : nullopt;
+  return CapturingReplyBuilder::GetError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
@@ -1341,7 +1343,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
       auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1), replies);
+      info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
     } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ArgS(ca.args, 0));
@@ -1349,13 +1351,13 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   }
 
   if (auto err = FlushEvalAsyncCmds(cntx, !ca.async || findcmd_err.has_value()); err) {
-    CapturingReplyBuilder::Apply(move(*err), &replier);  // forward error to lua
+    CapturingReplyBuilder::Apply(std::move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
     return;
   }
 
   if (findcmd_err.has_value()) {
-    replier.RedisReplyBuilder::SendError(move(*findcmd_err));
+    replier.RedisReplyBuilder::SendError(std::move(*findcmd_err));
     *ca.requested_abort |= ca.error_abort;
   }
 
@@ -1380,7 +1382,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   if (!res)
     return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
 
-  string sha{move(res.value())};
+  string sha{std::move(res.value())};
 
   CallSHA(args, sha, interpreter, cntx);
 }
@@ -1776,7 +1778,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     for (auto& sub : subscribers)
       sub.conn_cntx->owner()->EnsureAsyncMemoryBudget();
 
-    auto subscribers_ptr = make_shared<decltype(subscribers)>(move(subscribers));
+    auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
     auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
     memcpy(buf.get(), channel.data(), channel.size());
     memcpy(buf.get() + channel.size(), msg.data(), msg.size());
@@ -1788,7 +1790,8 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
       while (it != subscribers_ptr->end() && it->thread_id == idx) {
         facade::Connection* conn = it->conn_cntx->owner();
         DCHECK(conn);
-        conn->SendPubMessageAsync({move(it->pattern), move(buf), channel.size(), msg.size()});
+        conn->SendPubMessageAsync(
+            {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
         it->borrow_token.Dec();
         it++;
       }
