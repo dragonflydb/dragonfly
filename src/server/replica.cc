@@ -337,8 +337,6 @@ error_code Replica::InitiatePSync() {
 
   RETURN_ON_ERR(SendCommand(StrCat("PSYNC ", id, " ", offs)));
 
-  LOG(INFO) << "Starting full sync";
-
   // Master may delay sync response with "repl_diskless_sync_delay"
   PSyncResponse repl_header;
 
@@ -353,8 +351,9 @@ error_code Replica::InitiatePSync() {
 
   // we get token for diskless redis replication. For disk based replication
   // we get the snapshot size.
-  if (snapshot_size || token != nullptr) {  // full sync
-    // Start full sync
+  if (snapshot_size || token != nullptr) {
+    LOG(INFO) << "Starting full sync with Redis master";
+
     state_mask_.fetch_or(R_SYNCING);
 
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
@@ -394,6 +393,8 @@ error_code Replica::InitiatePSync() {
     CHECK(ps.UnusedPrefix().empty());
     io_buf.ConsumeInput(io_buf.InputLen());
     TouchIoTime();
+  } else {
+    LOG(INFO) << "Re-established sync with Redis master with ID=" << id;
   }
 
   state_mask_.fetch_and(~R_SYNCING);

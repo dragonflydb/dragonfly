@@ -111,8 +111,12 @@ TEST_F(ZSetFamilyTest, LargeSet) {
     auto resp = Run({"zadd", "key", absl::StrCat(i), absl::StrCat("element:", i)});
     EXPECT_THAT(resp, IntArg(1)) << i;
   }
+  Run({"zadd", "key", "129", ""});
+
   EXPECT_THAT(Run({"zrangebyscore", "key", "(-inf", "(0.0"}), ArrLen(0));
+  EXPECT_THAT(Run({"zrangebyscore", "key", "(5", "0.0"}), ArrLen(0));
   EXPECT_THAT(Run({"zrangebylex", "key", "-", "(element:0"}), ArrLen(0));
+  EXPECT_EQ(2, CheckedInt({"zremrangebyscore", "key", "127", "(129"}));
 }
 
 TEST_F(ZSetFamilyTest, ZRemRangeRank) {
