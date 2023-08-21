@@ -6,32 +6,12 @@ on:
     workflow_dispatch:
 
 jobs:
-  pre-commit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 2
-      - uses: actions/setup-python@v3
-      - name: Install dependencies
-        run: |
-          python -m pip install pre-commit
-          python -m pip freeze --local
-      - uses: actions/cache@v3
-        with:
-          path: ~/.cache/pre-commit
-          key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
-      - name: Run pre-commit checks
-        run: pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
-        shell: bash
   build:
     # The CMake configure and build commands are platform agnostic and should work equally
     # well on Windows or Mac.  You can convert this to a matrix build if you need
     # cross-platform coverage.
     # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
     runs-on: ubuntu-latest
-    outputs:
-      cov: ${{ steps.cov_gen.outputs.path }}
     strategy:
       matrix:
         include:
