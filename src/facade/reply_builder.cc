@@ -237,15 +237,23 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   v.insert(v.end(), {IoVec(str), IoVec(kCRLF)});
   v.shrink_to_fit();
   Send(v.data(), v.size());
-  if (buffer_.capacity()) {
+  if (buffer_.capacity() > 0u && cntx_ != nullptr) {
     //       auto s = absl::StrCat(static_cast<dfly::ConnectionContext*>(cntx_)->cid->name(), ": ",
     //       str , "\n");
 
     string s;
     if (absl::StartsWith(str, "unknown command"))
       s = str;
-    else
-      s = absl::StrCat(static_cast<dfly::ConnectionContext*>(cntx_)->cid->name(), ": ", str);
+    else {
+      auto* dfly_cntx = static_cast<dfly::ConnectionContext*>(cntx_);
+      string_view cid;
+      if (dfly_cntx && dfly_cntx->cid)
+        cid = dfly_cntx->cid->name();
+      else
+        cid = "<no cid>";
+
+      s = absl::StrCat(cid, ": ", str);
+    }
 
     // LOG(INFO) << "$$$ " << s;
 
