@@ -4,6 +4,8 @@
 
 #include "server/hll_family.h"
 
+#include "server/acl/acl_commands_def.h"
+
 extern "C" {
 #include "redis/hyperloglog.h"
 }
@@ -11,6 +13,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -283,12 +286,18 @@ void PFMerge(CmdArgList args, ConnectionContext* cntx) {
 
 }  // namespace
 
+namespace acl {
+constexpr uint32_t kPFAdd = WRITE | HYPERLOGLOG | FAST;
+constexpr uint32_t kPFCount = READ | HYPERLOGLOG | SLOW;
+constexpr uint32_t kPFMerge = WRITE | HYPERLOGLOG | SLOW;
+}  // namespace acl
+
 void HllFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
-  *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, 1}.SetHandler(PFAdd)
-            << CI{"PFCOUNT", CO::WRITE, -2, 1, -1, 1}.SetHandler(PFCount)
-            << CI{"PFMERGE", CO::WRITE, -2, 1, -1, 1}.SetHandler(PFMerge);
+  *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
+            << CI{"PFCOUNT", CO::WRITE, -2, 1, -1, 1, acl::kPFCount}.SetHandler(PFCount)
+            << CI{"PFMERGE", CO::WRITE, -2, 1, -1, 1, acl::kPFMerge}.SetHandler(PFMerge);
 }
 
 const char HllFamily::kInvalidHllErr[] = "Key is not a valid HyperLogLog string value.";

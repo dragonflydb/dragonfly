@@ -28,6 +28,10 @@ class ConnectionContext {
     return owner_;
   }
 
+  const Connection* owner() const {
+    return owner_;
+  }
+
   Protocol protocol() const {
     return protocol_;
   }

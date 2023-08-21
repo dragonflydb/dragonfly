@@ -141,9 +141,8 @@ class SortedMap {
   // Stops iteration if cb returns false. Returns false in this case.
   bool Iterate(unsigned start_rank, unsigned len, bool reverse,
                absl::FunctionRef<bool(sds, double)> cb) const {
-    return std::visit(
-        Overload{[&](const auto& impl) { return impl.Iterate(start_rank, len, reverse, cb); }},
-        impl_);
+    return std::visit([&](const auto& impl) { return impl.Iterate(start_rank, len, reverse, cb); },
+                      impl_);
   }
 
  private:
@@ -236,25 +235,15 @@ class SortedMap {
       return score_map->Size();
     }
 
-    size_t MallocSize() const {
-      return 0;
-    }
+    size_t MallocSize() const;
 
-    bool Reserve(size_t sz) {
-      return false;
-    }
+    bool Reserve(size_t sz);
 
-    size_t DeleteRangeByRank(unsigned start, unsigned end) {
-      return 0;
-    }
+    size_t DeleteRangeByRank(unsigned start, unsigned end);
 
-    size_t DeleteRangeByScore(const zrangespec& range) {
-      return 0;
-    }
+    size_t DeleteRangeByScore(const zrangespec& range);
 
-    size_t DeleteRangeByLex(const zlexrangespec& range) {
-      return 0;
-    }
+    size_t DeleteRangeByLex(const zlexrangespec& range);
 
     ScoredArray PopTopScores(unsigned count, bool reverse);
 

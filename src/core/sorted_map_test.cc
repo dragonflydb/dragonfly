@@ -4,6 +4,7 @@
 
 #include "core/sorted_map.h"
 
+#include <gmock/gmock.h>
 #include <mimalloc.h>
 
 #include "base/gtest.h"
@@ -15,9 +16,11 @@ extern "C" {
 }
 
 using namespace std;
+using testing::ElementsAre;
+using testing::Pair;
+using testing::StrEq;
 
 namespace dfly {
-
 using detail::SortedMap;
 
 class SortedMapTest : public ::testing::Test {
@@ -76,7 +79,7 @@ TEST_F(SortedMapTest, Scan) {
   EXPECT_EQ(972, cnt);
 }
 
-TEST_F(SortedMapTest, Insert) {
+TEST_F(SortedMapTest, InsertPop) {
   SortedMap sm(&mr_);
   for (unsigned i = 0; i < 256; ++i) {
     sds s = sdsempty();
@@ -84,6 +87,126 @@ TEST_F(SortedMapTest, Insert) {
     s = sdscatfmt(s, "a%u", i);
     ASSERT_TRUE(sm.Insert(1000, s));
   }
+
+  vector<sds> vec;
+  bool res = sm.Iterate(1, 2, false, [&](sds ele, double score) {
+    vec.push_back(ele);
+    return true;
+  });
+  EXPECT_TRUE(res);
+  EXPECT_THAT(vec, ElementsAre(StrEq("a1"), StrEq("a10")));
+
+  sds s = sdsnew("a1");
+  EXPECT_EQ(1, sm.GetRank(s, false));
+  EXPECT_EQ(254, sm.GetRank(s, true));
+  sdsfree(s);
+
+  auto top_scores = sm.PopTopScores(3, false);
+  EXPECT_THAT(top_scores, ElementsAre(Pair(StrEq("a0"), 1000), Pair(StrEq("a1"), 1000),
+                                      Pair(StrEq("a10"), 1000)));
+  top_scores = sm.PopTopScores(3, true);
+  EXPECT_THAT(top_scores, ElementsAre(Pair(StrEq("a99"), 1000), Pair(StrEq("a98"), 1000),
+                                      Pair(StrEq("a97"), 1000)));
+}
+
+TEST_F(SortedMapTest, LexRanges) {
+  SortedMap sm(&mr_);
+
+  for (unsigned i = 0; i < 100; ++i) {
+    sds s = sdsempty();
+
+    s = sdscatfmt(s, "a%u", i);
+    ASSERT_TRUE(sm.Insert(1, s));
+  }
+
+  zlexrangespec range;
+  range.max = sdsnew("a96");
+  range.min = sdsnew("a93");
+  range.maxex = 0;
+  range.minex = 0;
+  EXPECT_EQ(4, sm.LexCount(range));
+  auto array = sm.GetLexRange(range, 1, 1000, false);
+  ASSERT_EQ(3, array.size());
+  EXPECT_THAT(array.front(), Pair("a94", 1));
+
+  range.maxex = 1;
+  EXPECT_EQ(3, sm.LexCount(range));
+  array = sm.GetLexRange(range, 1, 1000, true);
+  ASSERT_EQ(2, array.size());
+  EXPECT_THAT(array.front(), Pair("a94", 1));
+
+  range.minex = 1;
+  EXPECT_EQ(2, sm.LexCount(range));
+  array = sm.GetLexRange(range, 1, 1000, false);
+  ASSERT_EQ(1, array.size());
+  EXPECT_THAT(array.front(), Pair("a95", 1));
+  sdsfree(range.min);
+
+  range.min = range.max;
+  EXPECT_EQ(0, sm.LexCount(range));
+  range.minex = 0;
+  EXPECT_EQ(0, sm.LexCount(range));
+  sdsfree(range.max);
+
+  range.maxex = 0;
+  range.min = cminstring;
+  range.max = sdsnew("a");
+  EXPECT_EQ(0, sm.LexCount(range));
+  sdsfree(range.max);
+
+  range.max = sdsnew("a0");
+  EXPECT_EQ(1, sm.LexCount(range));
+  range.maxex = 1;
+  EXPECT_EQ(0, sm.LexCount(range));
+  sdsfree(range.max);
+}
+
+TEST_F(SortedMapTest, ScoreRanges) {
+  SortedMap sm(&mr_);
+
+  for (unsigned i = 0; i < 10; ++i) {
+    sds s = sdsempty();
+
+    s = sdscatfmt(s, "a%u", i);
+    ASSERT_TRUE(sm.Insert(1, s));
+  }
+
+  for (unsigned i = 0; i < 10; ++i) {
+    sds s = sdsempty();
+
+    s = sdscatfmt(s, "b%u", i);
+    ASSERT_TRUE(sm.Insert(2, s));
+  }
+
+  zrangespec range;
+  range.max = 5;
+  range.min = 1;
+  range.maxex = 0;
+  range.minex = 0;
+  EXPECT_EQ(20, sm.Count(range));
+  detail::SortedMap::ScoredArray array = sm.GetRange(range, 0, 1000, false);
+  ASSERT_EQ(20, array.size());
+  EXPECT_THAT(array.front(), Pair("a0", 1));
+  EXPECT_THAT(array.back(), Pair("b9", 2));
+
+  range.minex = 1;  // exclude all the "1" scores.
+  EXPECT_EQ(10, sm.Count(range));
+  array = sm.GetRange(range, 2, 1, false);
+  ASSERT_EQ(1, array.size());
+  EXPECT_THAT(array.front(), Pair("b2", 2));
+
+  range.max = 1;
+  range.minex = 0;
+  range.min = -HUGE_VAL;
+  EXPECT_EQ(10, sm.Count(range));
+  array = sm.GetRange(range, 2, 2, true);
+  ASSERT_EQ(2, array.size());
+  EXPECT_THAT(array.back(), Pair("a6", 1));
+
+  range.maxex = 1;
+  EXPECT_EQ(0, sm.Count(range));
+  array = sm.GetRange(range, 0, 2, true);
+  ASSERT_EQ(0, array.size());
 }
 
 }  // namespace dfly
