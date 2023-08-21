@@ -559,7 +559,7 @@ struct SaveStagesController : public SaveStagesInputs {
 
     RunStage(&SaveStagesController::CloseCb);
 
-    FinalizeFileMovement(bool(shared_err_));
+    FinalizeFileMovement();
 
     if (!shared_err_)
       UpdateSaveInfo();
@@ -595,6 +595,7 @@ struct SaveStagesController : public SaveStagesInputs {
 
   // Start saving a dfs file on shard
   void SaveDfsSingle(EngineShard* shard) {
+    // for summary file, shard=null and index=shard_set->size(), see SaveDfs() above
     auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
 
     SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
@@ -612,14 +613,15 @@ struct SaveStagesController : public SaveStagesInputs {
 
   // Save a single rdb file
   void SaveRdb() {
-    auto& [snapshot, _] = snapshots_.front();
+    auto& [snapshot, filename] = snapshots_.front();
 
-    if (!full_path_.has_extension())
-      full_path_ += ".rdb";
+    filename = full_path_;
+    if (!filename.has_extension())
+      filename += ".rdb";
     if (!is_cloud_)
-      full_path_ += ".tmp";
+      filename += ".tmp";
 
-    if (auto err = snapshot->Start(SaveMode::RDB, full_path_, GetLuaScripts()); err) {
+    if (auto err = snapshot->Start(SaveMode::RDB, filename, GetLuaScripts()); err) {
       snapshot.reset();
       return;
     }
@@ -670,9 +672,12 @@ struct SaveStagesController : public SaveStagesInputs {
   }
 
   // Remove .tmp extension or delete files in case of error
-  void FinalizeFileMovement(bool has_error) {
+  void FinalizeFileMovement() {
     if (is_cloud_)
       return;
+
+    // If the shared_err is set, the snapshot saving failed
+    bool has_error = bool(shared_err_);
 
     for (const auto& [_, filename] : snapshots_) {
       if (has_error)
