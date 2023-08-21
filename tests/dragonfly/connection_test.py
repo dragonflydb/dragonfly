@@ -40,8 +40,10 @@ class CollectingMonitor:
             self._monitor_task = asyncio.create_task(self._monitor())
         await asyncio.sleep(0.1)
 
-    async def stop(self):
+    async def stop(self, timeout=0.1):
         if self._monitor_task:
+            # Wait for Dragonfly to send all async monitor messages
+            await asyncio.sleep(timeout)
             self._monitor_task.cancel()
             try:
                 await self._monitor_task
@@ -98,7 +100,7 @@ async def test_monitor_command_multi(async_pool):
 
     await p.execute()
 
-    collected = await monitor.stop()
+    collected = await monitor.stop(0.3)
     expected = CollectedRedisMsg.all_from_src(*expected)
 
     # The order is random due to squashing
