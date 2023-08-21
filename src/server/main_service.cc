@@ -23,6 +23,7 @@ extern "C" {
 #include "facade/error.h"
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/acl_family.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
 #include "server/conn_context.h"
@@ -611,7 +612,7 @@ optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
 }  // namespace
 
 Service::Service(ProactorPool* pp)
-    : pp_(*pp), server_family_(this), cluster_family_(&server_family_) {
+    : pp_(*pp), server_family_(this, &user_registry_), cluster_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -871,6 +872,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return nullopt;
 }
 
+static std::string FullAclCommandFromArgs(CmdArgList args) {
+  ToUpper(&args[1]);
+  // Guranteed SSO no dynamic allocations here
+  return std::string("ACL ") + std::string(args[1].begin(), args[1].end());
+}
+
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -878,7 +885,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ServerState& etl = *ServerState::tlocal();
 
   ToUpper(&args[0]);
-  const CommandId* cid = FindCmd(args);
+  const std::string_view command(args[0].begin(), args[0].end());
+  const bool is_acl_command = (command == "ACL");
+
+  const CommandId* cid = is_acl_command ? FindCmd(FullAclCommandFromArgs(args)) : FindCmd(args);
 
   if (cid == nullptr) {
     return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
@@ -897,7 +907,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  auto args_no_cmd = args.subspan(1);
+  auto args_no_cmd = is_acl_command ? args.subspan(2) : args.subspan(1);
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1182,7 +1192,7 @@ bool RequireAdminAuth() {
 
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
-  ConnectionContext* res = new ConnectionContext{peer, owner};
+  ConnectionContext* res = new ConnectionContext{peer, owner, &user_registry_};
 
   if (owner->IsAdmin() && !RequireAdminAuth()) {
     res->req_auth = false;
@@ -2081,6 +2091,7 @@ void Service::RegisterCommands() {
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
   SearchFamily::Register(&registry_);
+  acl::AclFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
@@ -2116,6 +2127,10 @@ void SetMaxMemoryFlag(uint64_t value) {
 
 uint64_t GetMaxMemoryFlag() {
   return absl::GetFlag(FLAGS_maxmemory).value;
+}
+
+acl::UserRegistry* Service::UserRegistry() {
+  return &user_registry_;
 }
 
 }  // namespace dfly

@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <optional>
 
+#include "server/acl/user_registry.h"
+
 extern "C" {
 #include "redis/redis_aux.h"
 }
@@ -607,7 +609,8 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   return std::nullopt;
 }
 
-ServerFamily::ServerFamily(Service* service) : service_(*service) {
+ServerFamily::ServerFamily(Service* service, acl::UserRegistry* registry)
+    : service_(*service), user_registry_(registry) {
   start_time_ = time(NULL);
   last_save_info_ = make_shared<LastSaveInfo>();
   last_save_info_->save_time = start_time_;
@@ -2178,7 +2181,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
-  ConnectionContext ctxt{&sink, nullptr};
+  ConnectionContext ctxt{&sink, nullptr, user_registry_};
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)

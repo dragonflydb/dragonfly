@@ -5,6 +5,7 @@
 #include "server/conn_context.h"
 
 #include "base/logging.h"
+#include "server/acl/user_registry.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
@@ -77,8 +78,9 @@ const CommandId* StoredCmd::Cid() const {
 }
 
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
-                                     facade::CapturingReplyBuilder* crb)
-    : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
+                                     facade::CapturingReplyBuilder* crb,
+                                     acl::UserRegistry* registry)
+    : facade::ConnectionContext(nullptr, nullptr), transaction{tx}, user_registry(registry) {
   if (tx) {  // If we have a carrier transaction, this context is used for squashing
     DCHECK(owner);
     conn_state.db_index = owner->conn_state.db_index;

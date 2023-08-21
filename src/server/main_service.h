@@ -7,6 +7,7 @@
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
+#include "server/acl/user_registry.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
@@ -112,6 +113,8 @@ class Service : public facade::ServiceInterface {
     return server_family_;
   }
 
+  acl::UserRegistry* UserRegistry();
+
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
@@ -161,9 +164,9 @@ class Service : public facade::ServiceInterface {
 
   base::VarzValue::Map GetVarzStats();
 
- private:
   util::ProactorPool& pp_;
 
+  acl::UserRegistry user_registry_;
   ServerFamily server_family_;
   ClusterFamily cluster_family_;
   CommandRegistry registry_;

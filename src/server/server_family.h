@@ -10,6 +10,7 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/redis_parser.h"
+#include "server/acl/user_registry.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
@@ -90,7 +91,7 @@ struct ReplicaOffsetInfo {
 
 class ServerFamily {
  public:
-  explicit ServerFamily(Service* service);
+  explicit ServerFamily(Service* service, acl::UserRegistry* registry);
   ~ServerFamily();
 
   void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
@@ -242,6 +243,8 @@ class ServerFamily {
   Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
   std::unique_ptr<util::cloud::AWS> aws_;
+
+  acl::UserRegistry* user_registry_;
 };
 
 }  // namespace dfly

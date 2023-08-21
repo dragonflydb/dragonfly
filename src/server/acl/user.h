@@ -16,8 +16,6 @@
 
 namespace dfly::acl {
 
-class CommandId;
-
 // TODO implement these
 //#bool CheckIfCommandAllowed(uint64_t command_id, const CommandId& command);
 //#bool CheckIfAclCategoryAllowed(uint64_t command_id, const CommandId& command);
@@ -58,6 +56,8 @@ class User final {
   // void AclCommand() const;
 
   bool IsActive() const;
+
+  std::string_view Password() const;
 
  private:
   // For ACL categories

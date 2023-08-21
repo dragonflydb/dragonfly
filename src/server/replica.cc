@@ -503,7 +503,7 @@ error_code Replica::InitiateDflySync() {
 error_code Replica::ConsumeRedisStream() {
   base::IoBuf io_buf(16_KB);
   io::NullSink null_sink;  // we never reply back on the commands.
-  ConnectionContext conn_context{&null_sink, nullptr};
+  ConnectionContext conn_context{&null_sink, nullptr, service_.UserRegistry()};
   conn_context.is_replicating = true;
   ResetParser(true);
 
