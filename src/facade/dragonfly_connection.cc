@@ -550,7 +550,7 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   if (can_dispatch_sync) {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
 
-    RespToArgList(tmp_parse_args_, &tmp_cmd_vec_);
+    RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
 
     {
       cc_->sync_dispatch = true;
@@ -898,15 +898,6 @@ bool Connection::IsCurrentlyDispatching() const {
   if (!cc_)
     return false;
   return cc_->async_dispatch || cc_->sync_dispatch;
-}
-
-void RespToArgList(const RespVec& src, CmdArgVec* dest) {
-  dest->resize(src.size());
-  for (size_t i = 0; i < src.size(); ++i) {
-    DCHECK(src[i].type == RespExpr::STRING);
-
-    (*dest)[i] = ToMSS(src[i].GetBuf());
-  }
 }
 
 void Connection::SendPubMessageAsync(PubMessage msg) {

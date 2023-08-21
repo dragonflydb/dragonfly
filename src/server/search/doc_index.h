@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +21,8 @@ namespace dfly {
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
 
 search::FtVector BytesToFtVector(std::string_view value);
+std::optional<search::SchemaField::FieldType> ParseSearchFieldType(std::string_view name);
+std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
 struct SerializedSearchDoc {
   std::string key;
@@ -57,8 +60,11 @@ struct DocIndex {
 };
 
 struct DocIndexInfo {
-  search::Schema schema;
+  DocIndex base_index;
   size_t num_docs;
+
+  // Build original ft.create command that can be used to re-create this index
+  std::string BuildRestoreCommand() const;
 };
 
 // Stores internal search indices for documents of a document index on a specific shard.
