@@ -882,8 +882,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ServerState& etl = *ServerState::tlocal();
 
   ToUpper(&args[0]);
-  const auto cmd_pair = FindCmd(args);
-  const CommandId* cid = cmd_pair.first;
+  const auto [cid, args_no_cmd] = FindCmd(args);
 
   if (cid == nullptr) {
     return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
@@ -901,8 +900,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   etl.RecordCmd();
-
-  auto args_no_cmd = cmd_pair.second;
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1483,8 +1480,7 @@ static std::string FullAclCommandFromArgs(CmdArgList args) {
 
 std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
   const std::string_view command = facade::ToSV(args[0]);
-  const bool is_acl_command = (command == "ACL");
-  if (is_acl_command) {
+  if (command == "ACL") {
     return {registry_.Find(FullAclCommandFromArgs(args)), args.subspan(2)};
   }
 

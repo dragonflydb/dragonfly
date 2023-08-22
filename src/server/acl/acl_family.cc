@@ -44,13 +44,14 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->StartArray(registry.size());
   for (const auto& [username, user] : registry) {
     std::string buffer = "user ";
-    const bool is_active = user.IsActive();
-    const std::string active_status = is_active ? "on " : "off ";
     const std::string_view pass = user.Password();
     const std::string password = pass == "nopass" ? "nopass" : std::string(pass.substr(0, 15));
     const std::string acl_cat = AclToString(user.AclCategory());
 
-    absl::StrAppend(&buffer, username, " ", active_status, password, " ", acl_cat);
+    using namespace std::string_view_literals;
+
+    absl::StrAppend(&buffer, username, " ", user.IsActive() ? "on "sv : "off "sv, password, " ",
+                    acl_cat);
 
     (*cntx)->SendSimpleString(buffer);
   }
