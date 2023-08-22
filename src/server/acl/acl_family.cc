@@ -3,9 +3,11 @@
 
 #include "server/acl/acl_family.h"
 
+#include "absl/strings/str_cat.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/server_state.h"
 
 namespace dfly::acl {
 
@@ -27,9 +29,7 @@ static std::string AclToString(uint32_t acl_category) {
 
   for (uint32_t step = 0, cat = 0; cat != JSON; cat = 1ULL << ++step) {
     if (acl_category & cat) {
-      tmp += prefix;
-      tmp += REVERSE_CATEGORY_INDEX_TABLE[step];
-      tmp += postfix;
+      absl::StrAppend(&tmp, prefix, REVERSE_CATEGORY_INDEX_TABLE[step], postfix);
     }
   }
   tmp.erase(tmp.size());
@@ -38,52 +38,21 @@ static std::string AclToString(uint32_t acl_category) {
 }
 
 void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
-  auto registry_with_lock = cntx->user_registry->GetRegistryWithLock();
+  const auto registry_with_lock = ServerState::tlocal()->user_registry->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-
-  std::string buffer(255, ' ');
-  buffer.replace(0, 5, "user ");
-
-  auto resize_if_exceeds_size = [](std::string& buffer, size_t size) {
-    if (buffer.size() < size) {
-      buffer.resize(size);
-    }
-  };
-
-  auto step = [&resize_if_exceeds_size](std::string& buffer, size_t& size, size_t increment) {
-    size += increment;
-    resize_if_exceeds_size(buffer, size);
-  };
 
   (*cntx)->StartArray(registry.size());
   for (const auto& [username, user] : registry) {
-    size_t size = 5;
-    buffer.replace(size, username.size(), username);
-    step(buffer, size, username.size());
-
-    buffer.replace(size, 1, " ");
-    step(buffer, size, 1);
-
+    std::string buffer = "user ";
     const bool is_active = user.IsActive();
-    buffer.replace(size, is_active ? 3 : 4, is_active ? "on " : "off ");
-    step(buffer, size, is_active ? 3 : 4);
+    const std::string active_status = is_active ? "on " : "off ";
+    const std::string_view pass = user.Password();
+    const std::string password = pass == "nopass" ? "nopass" : std::string(pass.substr(0, 15));
+    const std::string acl_cat = AclToString(user.AclCategory());
 
-    if (user.Password() == "nopass") {
-      buffer.replace(size, 6, "nopass");
-      step(buffer, size, 6);
-    } else {
-      buffer.replace(size, 15, user.Password().substr(0, 15));
-      step(buffer, size, 15);
-    }
+    absl::StrAppend(&buffer, username, " ", active_status, password, " ", acl_cat);
 
-    buffer.replace(size, 1, " ");
-    step(buffer, size, 1);
-
-    std::string acl_cat = AclToString(user.AclCategory());
-    buffer.replace(size, acl_cat.size(), acl_cat);
-    step(buffer, size, acl_cat.size());
-
-    (*cntx)->SendSimpleString(std::string_view{buffer.data(), size});
+    (*cntx)->SendSimpleString(buffer);
   }
 }
 

@@ -10,7 +10,6 @@
 #include "core/fibers.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
-#include "server/acl/user_registry.h"
 #include "server/common.h"
 #include "server/version.h"
 
@@ -155,12 +154,12 @@ struct ConnectionState {
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
-  ConnectionContext(::io::Sink* stream, facade::Connection* owner, acl::UserRegistry* registry)
-      : facade::ConnectionContext(stream, owner), user_registry(registry) {
+  ConnectionContext(::io::Sink* stream, facade::Connection* owner)
+      : facade::ConnectionContext(stream, owner) {
   }
 
   ConnectionContext(const ConnectionContext* owner, Transaction* tx,
-                    facade::CapturingReplyBuilder* crb, acl::UserRegistry* registry);
+                    facade::CapturingReplyBuilder* crb);
 
   struct DebugInfo {
     uint32_t shards_count = 0;
@@ -196,8 +195,6 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow;
-
-  acl::UserRegistry* user_registry;
 
  private:
   void EnableMonitoring(bool enable) {

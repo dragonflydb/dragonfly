@@ -38,8 +38,8 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
 }  // namespace
 
 JournalExecutor::JournalExecutor(Service* service)
-    : service_{service}, reply_builder_{facade::ReplyMode::NONE},
-      conn_context_{nullptr, nullptr, &reply_builder_, service_->UserRegistry()} {
+    : service_{service}, reply_builder_{facade::ReplyMode::NONE}, conn_context_{nullptr, nullptr,
+                                                                                &reply_builder_} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
 }

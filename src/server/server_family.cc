@@ -2182,7 +2182,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
-  ConnectionContext ctxt{&sink, nullptr, user_registry_};
+  ConnectionContext ctxt{&sink, nullptr};
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)

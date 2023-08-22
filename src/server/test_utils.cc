@@ -88,7 +88,7 @@ void TransactionSuspension::Terminate() {
 
 class BaseFamilyTest::TestConnWrapper {
  public:
-  TestConnWrapper(Protocol proto, acl::UserRegistry* registry);
+  TestConnWrapper(Protocol proto);
   ~TestConnWrapper();
 
   CmdArgVec Args(ArgSlice list);
@@ -125,9 +125,8 @@ class BaseFamilyTest::TestConnWrapper {
   std::unique_ptr<RedisParser> parser_;
 };
 
-BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto, acl::UserRegistry* registry)
-    : dummy_conn_(new TestConnection(proto, &sink_)),
-      cmd_cntx_(&sink_, dummy_conn_.get(), registry) {
+BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
+    : dummy_conn_(new TestConnection(proto, &sink_)), cmd_cntx_(&sink_, dummy_conn_.get()) {
 }
 
 BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
@@ -489,7 +488,7 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
   auto [it, inserted] = connections_.emplace(id, nullptr);
 
   if (inserted) {
-    it->second.reset(new TestConnWrapper(proto, service_->UserRegistry()));
+    it->second.reset(new TestConnWrapper(proto));
   } else {
     it->second->ClearSink();
   }

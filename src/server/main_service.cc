@@ -4,6 +4,9 @@
 
 #include "server/main_service.h"
 
+#include "facade/resp_expr.h"
+#include "server/acl/user_registry.h"
+
 extern "C" {
 #include "redis/redis_aux.h"
 }
@@ -655,8 +658,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("requirepass");
   config_registry.Register("masterauth");
   config_registry.Register("tcp_keepalive");
-
-  pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
+  acl::UserRegistry* reg = &user_registry_;
+  pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0) {
@@ -872,14 +875,6 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return nullopt;
 }
 
-// For now, we only alow AclCommand in non multi-transaction. This function will
-// be usefull to extend AclCommands for multi-transactions.
-static std::string FullAclCommandFromArgs(CmdArgList args) {
-  ToUpper(&args[1]);
-  // Guranteed SSO no dynamic allocations here
-  return std::string("ACL ") + std::string(args[1].begin(), args[1].end());
-}
-
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -887,10 +882,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ServerState& etl = *ServerState::tlocal();
 
   ToUpper(&args[0]);
-  const std::string_view command(args[0].data(), args[0].size());
-  const bool is_acl_command = (command == "ACL");
-
-  const CommandId* cid = is_acl_command ? FindCmd(FullAclCommandFromArgs(args)) : FindCmd(args);
+  const auto cmd_pair = FindCmd(args);
+  const CommandId* cid = cmd_pair.first;
 
   if (cid == nullptr) {
     return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
@@ -909,7 +902,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  auto args_no_cmd = is_acl_command ? args.subspan(2) : args.subspan(1);
+  auto args_no_cmd = cmd_pair.second;
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
@@ -1054,7 +1047,7 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
   for (auto args : args_list) {
     ToUpper(&args[0]);
-    const CommandId* cid = FindCmd(args);
+    const auto [cid, tail_args] = FindCmd(args);
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -1063,7 +1056,7 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
     if (!is_multi && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
-      stored_cmds.emplace_back(cid, args.subspan(1));
+      stored_cmds.emplace_back(cid, tail_args);
       continue;
     }
 
@@ -1194,7 +1187,7 @@ bool RequireAdminAuth() {
 
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
-  ConnectionContext* res = new ConnectionContext{peer, owner, &user_registry_};
+  ConnectionContext* res = new ConnectionContext{peer, owner};
 
   if (owner->IsAdmin() && !RequireAdminAuth()) {
     res->req_auth = false;
@@ -1214,6 +1207,10 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
 facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
   return ServerState::tl_connection_stats();
+}
+
+const CommandId* Service::FindCmd(std::string_view cmd) const {
+  return registry_.Find(cmd);
 }
 
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
@@ -1478,10 +1475,22 @@ bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams param
   return false;
 }
 
-const CommandId* Service::FindCmd(CmdArgList args) const {
+static std::string FullAclCommandFromArgs(CmdArgList args) {
+  ToUpper(&args[1]);
+  // Guranteed SSO no dynamic allocations here
+  return std::string("ACL ") + std::string(args[1].begin(), args[1].end());
+}
+
+std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
+  const std::string_view command = facade::ToSV(args[0]);
+  const bool is_acl_command = (command == "ACL");
+  if (is_acl_command) {
+    return {registry_.Find(FullAclCommandFromArgs(args)), args.subspan(2)};
+  }
+
   const CommandId* res = registry_.Find(ArgS(args, 0));
   if (!res)
-    return nullptr;
+    return {nullptr, args};
 
   // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
   if (args.size() == 2 && res->name() == "XGROUP") {
@@ -1489,7 +1498,7 @@ const CommandId* Service::FindCmd(CmdArgList args) const {
       res = registry_.Find("_XGROUP_HELP");
     }
   }
-  return res;
+  return {res, args.subspan(1)};
 }
 
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
@@ -2130,10 +2139,6 @@ void SetMaxMemoryFlag(uint64_t value) {
 
 uint64_t GetMaxMemoryFlag() {
   return absl::GetFlag(FLAGS_maxmemory).value;
-}
-
-acl::UserRegistry* Service::UserRegistry() {
-  return &user_registry_;
 }
 
 }  // namespace dfly

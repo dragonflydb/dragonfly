@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <utility>
+
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
@@ -69,9 +71,8 @@ class Service : public facade::ServiceInterface {
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
 
-  const CommandId* FindCmd(std::string_view cmd) const {
-    return registry_.Find(cmd);
-  }
+  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
+  const CommandId* FindCmd(std::string_view) const;
 
   CommandRegistry* mutable_registry() {
     return &registry_;
@@ -113,8 +114,6 @@ class Service : public facade::ServiceInterface {
     return server_family_;
   }
 
-  acl::UserRegistry* UserRegistry();
-
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
@@ -147,8 +146,6 @@ class Service : public facade::ServiceInterface {
   // Return error if not all keys are owned by the server when running in cluster mode
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
-
-  const CommandId* FindCmd(CmdArgList args) const;
 
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
