@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/fixed_array.h>
+#include <absl/types/span.h>
 #include <mimalloc.h>
 #include <sys/socket.h>
 
@@ -168,6 +169,10 @@ class Connection : public util::Connection {
   }
 
   ConnectionContext* cntx();
+
+  facade::CmdArgList GetParsedArguments() {
+    return absl::MakeSpan(tmp_cmd_vec_);
+  }
 
  protected:
   void OnShutdown() override;

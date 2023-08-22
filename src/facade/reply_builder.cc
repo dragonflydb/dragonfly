@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 #include <double-conversion/double-to-string.h>
 
 #include "base/logging.h"
@@ -238,32 +239,41 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   v.shrink_to_fit();
   Send(v.data(), v.size());
   if (buffer_.capacity() > 0u && cntx_ != nullptr) {
-    //       auto s = absl::StrCat(static_cast<dfly::ConnectionContext*>(cntx_)->cid->name(), ": ",
-    //       str , "\n");
-
     string s;
+
     if (absl::StartsWith(str, "unknown command"))
       s = str;
     else {
       auto* dfly_cntx = static_cast<dfly::ConnectionContext*>(cntx_);
-      string_view cid;
-      if (dfly_cntx && dfly_cntx->cid)
-        cid = dfly_cntx->cid->name();
-      else
-        cid = "<no cid>";
+      string prefix;
 
-      s = absl::StrCat(cid, ": ", str);
+      if (dfly_cntx && dfly_cntx->cid) {
+        prefix.reserve(128u);
+
+        auto args = dfly_cntx->owner()->GetParsedArguments();
+
+        // limit the length of the prefix to be 128 chars
+        for (auto i = 0u; i < args.length(); ++i) {
+          auto next = ArgS(args, i);
+
+          if ((prefix.length() + next.length()) <= 128u) {
+            prefix.append(next);
+            prefix.append(" ", 1u);
+          } else {
+            prefix.append("...");
+            break;
+          }
+        }
+
+        s = absl::StrCat(prefix, ": ", str);
+      } else {
+        prefix = "<no cid>";
+      }
+
+      s = absl::StrCat(prefix, ": ", str);
     }
 
-    // LOG(INFO) << "$$$ " << s;
-
-    //    auto s = absl::StrCat("<cid?>", ": ", str);
-    //    auto what = cntx_->owner()->raw_input();
-    //    auto s = absl::StrCat(what, ": ", str , "\n");
-
-    // iovec iv[] = {IoVec(s)};
     buffer_.EmplaceOrOverride(move(s));
-    //    save_to_->Write(iv, ABSL_ARRAYSIZE(iv));
   }
 }
 
