@@ -17,8 +17,6 @@
 #include <filesystem>
 #include <optional>
 
-#include "server/acl/user_registry.h"
-
 extern "C" {
 #include "redis/redis_aux.h"
 }
@@ -849,8 +847,7 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   return std::nullopt;
 }
 
-ServerFamily::ServerFamily(Service* service, acl::UserRegistry* registry)
-    : service_(*service), user_registry_(registry) {
+ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
   last_save_info_ = make_shared<LastSaveInfo>();
   last_save_info_->save_time = start_time_;
