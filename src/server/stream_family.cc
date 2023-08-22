@@ -1767,6 +1767,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         "    Show the stream consumer groups.",
         "STREAM <key> [FULL [COUNT <count>]",
         "    Show information about the stream.",
+        "HELP",
+        "    Prints this help."
     };
     return (*cntx)->SendSimpleStrArr(help_arr);
   }
