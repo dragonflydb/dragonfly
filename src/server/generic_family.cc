@@ -41,12 +41,6 @@ using VersionBuffer = std::array<char, sizeof(uint16_t)>;
 using CrcBuffer = std::array<char, sizeof(uint64_t)>;
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
 
-int64_t CalculateExpirationTime(bool seconds, bool absolute, int64_t ts, int64_t now_msec) {
-  int64_t msec = seconds ? ts * 1000 : ts;
-  int64_t rel_msec = absolute ? msec - now_msec : msec;
-  return rel_msec;
-}
-
 VersionBuffer MakeRdbVersion() {
   VersionBuffer buf;
   buf[0] = RDB_SER_VERSION & 0xff;
@@ -188,12 +182,13 @@ class RestoreArgs {
     return replace_;
   }
 
-  constexpr int64_t ExpirationTime() const {
+  uint64_t ExpirationTime() const {
+    DCHECK_GE(expiration_, 0);
     return expiration_;
   }
 
   [[nodiscard]] constexpr bool Expired() const {
-    return ExpirationTime() < 0;
+    return expiration_ < 0;
   }
 
   [[nodiscard]] constexpr bool HasExpiration() const {
@@ -207,14 +202,11 @@ class RestoreArgs {
 
 [[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
   if (HasExpiration()) {
-    auto new_ttl = CalculateExpirationTime(!abs_time_, abs_time_, expiration_, now_msec);
-    if (new_ttl > kMaxExpireDeadlineSec * 1000) {
+    int64_t ttl = abs_time_ ? expiration_ - now_msec : expiration_;
+    if (ttl > kMaxExpireDeadlineSec * 1000)
       return false;
-    }
-    expiration_ = new_ttl;
-    if (new_ttl > 0) {
-      expiration_ += now_msec;
-    }
+
+    expiration_ = ttl < 0 ? -1 : ttl + now_msec;
   }
   return true;
 }

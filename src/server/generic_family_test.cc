@@ -474,11 +474,11 @@ TEST_F(GenericFamilyTest, Restore) {
                                  0x75, 0x59, 0x6d, 0x10, 0x04, 0x3f, 0x5c};
   auto resp = Run({"set", "exiting-key", "1234"});
   EXPECT_EQ(resp, "OK");
-  // try to restore into existing key - this should failed
+  // try to restore into existing key - this should fail
   ASSERT_THAT(Run({"restore", "exiting-key", "0", ToSV(STRING_DUMP_REDIS)}),
               ArgType(RespExpr::ERROR));
 
-  // Try restore while setting expiration into the pass
+  // Try restore while setting expiration into the past
   // note that value for expiration is just some valid unix time stamp from the pass
   resp = Run(
       {"restore", "exiting-key", "1665476212900", ToSV(STRING_DUMP_REDIS), "ABSTTL", "REPLACE"});
@@ -518,11 +518,11 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"dump", "string-key"});
   dump = resp.GetBuf();
   // this will change the value from "hello world" to "1234"
-  resp = Run({"restore", "string-key", "7", ToSV(STRING_DUMP_REDIS), "REPLACE"});
+  resp = Run({"restore", "string-key", "7000", ToSV(STRING_DUMP_REDIS), "REPLACE"});
   resp = Run({"get", "string-key"});
   EXPECT_EQ("1234", resp);
   // check TTL validity
-  EXPECT_EQ(CheckedInt({"ttl", "string-key"}), 7);
+  EXPECT_EQ(CheckedInt({"pttl", "string-key"}), 7000);
 
   // Make check about ttl with abs time, restoring back to "hello world"
   resp = Run({"restore", "string-key", absl::StrCat(TEST_current_time_ms + 2000), ToSV(dump),
