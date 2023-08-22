@@ -3,15 +3,17 @@
 
 #include "server/acl/acl_family.h"
 
+#include <optional>
+#include <variant>
+
 #include "absl/strings/str_cat.h"
+#include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
 
 namespace dfly::acl {
-
-constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
 static std::string AclToString(uint32_t acl_category) {
   std::string tmp;
@@ -57,9 +59,124 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+namespace {
+
+std::optional<std::string> MaybeParsePassword(std::string_view command) {
+  if (command[0] != '>') {
+    return {};
+  }
+
+  return {std::string(command.substr(1))};
+}
+
+std::optional<bool> MaybeParseStatus(std::string_view command) {
+  if (command == "ON") {
+    return true;
+  }
+  if (command == "OFF") {
+    return false;
+  }
+  return {};
+}
+
+using OptCat = std::optional<uint32_t>;
+
+std::pair<OptCat, OptCat> MaybeParseAclCategory(std::string_view command) {
+  if (command[0] != '+' && command[1] != '@') {
+    auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
+    if (res == CATEGORY_INDEX_TABLE.end()) {
+      return {};
+    }
+    return {res->second, {}};
+  }
+
+  if (command[0] != '-' && command[1] != '@') {
+    auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
+    if (res == CATEGORY_INDEX_TABLE.end()) {
+      return {};
+    }
+    return {{}, res->second};
+  }
+
+  return {};
+}
+
+std::variant<User::UpdateRequest, std::string> ParseAclSetUser(CmdArgList args) {
+  User::UpdateRequest req;
+
+  auto maybe_update_acl = [](auto& output, const auto& input) {
+    if (input) {
+      if (!output) {
+        output = *input;
+      }
+      *output |= *input;
+    }
+  };
+
+  for (auto arg : args) {
+    ToUpper(&arg);
+    const auto command = facade::ToSV(arg);
+    if (auto pass = MaybeParsePassword(command); pass) {
+      if (req.password) {
+        return "Only one password is allowed";
+      }
+      req.password = std::move(pass);
+      continue;
+    }
+
+    if (auto status = MaybeParseStatus(command); status) {
+      if (req.is_active) {
+        return "Multiple ON/OFF are not allowed";
+      }
+      req.is_active = *status;
+      continue;
+    }
+
+    auto [acl_plus, acl_minus] = MaybeParseAclCategory(command);
+    if (!acl_plus || !acl_minus) {
+      using namespace std::string_literals;
+      return "Unrecognized parameter: "s + std::string(facade::ToSV(arg));
+    }
+
+    maybe_update_acl(req.plus_acl_categories, acl_plus);
+    maybe_update_acl(req.minus_acl_categories, acl_minus);
+  }
+
+  return req;
+}
+
+}  // namespace
+
+void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view username = facade::ToSV(args[0]);
+  auto req = ParseAclSetUser(args);
+  // TODO replace with Overloaded, move it from dragonfly_connection.cc
+  struct AclVisitor {
+    explicit AclVisitor(std::string_view usr, ConnectionContext* cn) : username(usr), cntx(cn) {
+    }
+    void operator()(std::string&& error) const {
+      (*cntx)->SendError(error);
+    }
+
+    void operator()(User::UpdateRequest&& req) const {
+      ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
+      (*cntx)->SendOk();
+    }
+
+    std::string_view username;
+    ConnectionContext* cntx;
+  };
+
+  AclVisitor visitor(username, cntx);
+  std::visit(visitor, std::move(req));
+}
+
 using CI = dfly::CommandId;
 
 #define HFUNC(x) SetHandler(&AclFamily::x)
+
+constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -71,6 +188,8 @@ using CI = dfly::CommandId;
 void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kList}.HFUNC(
       List);
+  *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kSetUser}
+                   .HFUNC(SetUser);
 }
 
 #undef HFUNC
