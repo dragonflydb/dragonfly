@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <utility>
+
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
+#include "server/acl/user_registry.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
@@ -68,9 +71,8 @@ class Service : public facade::ServiceInterface {
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
 
-  const CommandId* FindCmd(std::string_view cmd) const {
-    return registry_.Find(cmd);
-  }
+  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
+  const CommandId* FindCmd(std::string_view) const;
 
   CommandRegistry* mutable_registry() {
     return &registry_;
@@ -145,8 +147,6 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
-  const CommandId* FindCmd(CmdArgList args) const;
-
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
                ConnectionContext* cntx);
@@ -161,9 +161,9 @@ class Service : public facade::ServiceInterface {
 
   base::VarzValue::Map GetVarzStats();
 
- private:
   util::ProactorPool& pp_;
 
+  acl::UserRegistry user_registry_;
   ServerFamily server_family_;
   ClusterFamily cluster_family_;
   CommandRegistry registry_;
