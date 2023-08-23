@@ -93,7 +93,7 @@ string DocIndexInfo::BuildRestoreCommand() const {
     absl::StrAppend(&out, " PREFIX", " 1 ", base_index.prefix);
 
   absl::StrAppend(&out, " SCHEMA");
-  for (auto [fname, finfo] : base_index.schema.fields) {
+  for (const auto& [fname, finfo] : base_index.schema.fields) {
     absl::StrAppend(&out, " ", finfo.identifier, " AS ", fname, " ",
                     SearchFieldTypeToString(finfo.type));
   }
