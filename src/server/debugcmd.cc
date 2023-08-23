@@ -5,6 +5,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
 #include <filesystem>
@@ -21,7 +22,6 @@
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
-#include "src/facade/reply_builder.h"
 
 using namespace std;
 
@@ -211,10 +211,28 @@ void DoBuildObjHist(EngineShard* shard, ObjHistMap* obj_hist_map) {
   }
 }
 
-void ErrorStatsInternal(ConnectionContext* cntx) {
+void ErrorStatsInternal(ConnectionContext* cntx, CmdArgList args) {
   auto* rb =
       cntx->operator->();  // returns RedisReplyBuilder, safety checks performed inside operator->()
-  rb->SendStringArr(rb->GetSavedErrors());
+
+  if (args.size() > 1) {  // received arguments
+    auto arg = ArgS(args, 1);
+    if (absl::EqualsIgnoreCase(arg, "FLUSH")) {
+      rb->FlushErrors();
+    } else if (absl::EqualsIgnoreCase(arg, "RESIZE")) {
+      unsigned int out{0};
+      if (!absl::SimpleAtoi(ArgS(args, 2), &out)) {
+        return rb->SendError(kInvalidIntErr);
+      }
+      rb->ResizeErrorsBuffer(out);
+    } else {
+      rb->SendError(kSyntaxErrType);
+    }
+  } else {
+    return rb->SendStringArr(rb->GetSavedErrors());
+  }
+
+  rb->SendOk();
 }
 
 }  // namespace
@@ -254,9 +272,8 @@ void DebugCmd::Run(CmdArgList args) {
         "ERRORS [FLUSH] [RESIZE <new_size>]",
         "    Returns the last K errors recorded in Dragonfly. By default, k = 32.",
         "    It is possible to clear the buffer by using [FLUSH].",
-        "    Resize the buffer using [RESIZE <size>]. This will clear the buffer.",
-        //        "    Returns the last <count> errors recorded in the database, starting from the
-        //        last", "    [ENABLE] command.", "    By default, this option is disabled."
+        "    Resize the buffer using [RESIZE <size>]. This will clear the buffer. The new size "
+        "must be a power of 2.",
         "HELP",
         "    Prints this help.",
     };
@@ -298,10 +315,7 @@ void DebugCmd::Run(CmdArgList args) {
   }
 
   if (subcmd == "ERRORS") {
-    if (args.size() > 1) {  // received arguments
-      return (*cntx_)->SendSimpleString("NOT IMPLEMENTED: received arguments");
-    } else
-      return ErrorStatsInternal(cntx_);
+    return ErrorStatsInternal(cntx_, args);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");

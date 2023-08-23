@@ -14,7 +14,6 @@
 #include "facade/error.h"
 #include "src/facade/conn_context.h"
 #include "src/facade/dragonfly_connection.h"
-#include "src/server/command_registry.h"
 #include "src/server/conn_context.h"
 
 using namespace std;
@@ -204,7 +203,8 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
 
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink, facade::ConnectionContext* cntx,
                                      unsigned capacity)
-    : SinkReplyBuilder(sink), buffer_(capacity), cntx_{cntx} {
+    : SinkReplyBuilder(sink),
+      buffer_(new base::RingBuffer<string>(capacity)), buffer_start_{0}, cntx_{cntx} {
 }
 
 void RedisReplyBuilder::SetResp3(bool is_resp3) {
@@ -212,7 +212,7 @@ void RedisReplyBuilder::SetResp3(bool is_resp3) {
 }
 
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
-  LOG(INFO) << "Error: " << str << " of type: " << err_type.empty() ? "(no type)"sv : err_type;
+  VLOG(1) << "Error: " << str << " of type: " << (err_type.empty() ? "(no type)"sv : err_type);
 
   if (err_type.empty()) {
     err_type = str;
@@ -224,21 +224,14 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
 
   vector<iovec> v(3u);
 
-  //  if (str[0] == '-') {
-  //    iovec v[] = {IoVec(str), IoVec(kCRLF)};
-  //    Send(v, ABSL_ARRAYSIZE(v));
-  //  } else {
-  //    iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
-  //    Send(v, ABSL_ARRAYSIZE(v));
-  //  }
-
   if (str[0] != '-')
     v.push_back(IoVec(kErrPref));
 
   v.insert(v.end(), {IoVec(str), IoVec(kCRLF)});
   v.shrink_to_fit();
   Send(v.data(), v.size());
-  if (buffer_.capacity() > 0u && cntx_ != nullptr) {
+
+  if (buffer_->capacity() > 0u && cntx_ != nullptr) {
     string s;
 
     if (absl::StartsWith(str, "unknown command"))
@@ -273,7 +266,7 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
       s = absl::StrCat(prefix, ": ", str);
     }
 
-    buffer_.EmplaceOrOverride(move(s));
+    buffer_start_ += buffer_->EmplaceOrOverride(move(s));
   }
 }
 
@@ -570,12 +563,23 @@ vector<string> RedisReplyBuilder::GetSavedErrors(void) {
    * Since this is not a hot path, an explicit copy and reversal will suffice.
    */
 
-  const auto sz = buffer_.size();
-  const auto* items = buffer_.GetItem(0u);
-
+  const auto sz = buffer_->size();
   vector<string> reversed(sz);
+
+  /**
+   * What is going on here:
+   * In `buffer_start_` we store the index at which the buffer
+   * logically starts, w.r.t time. This means that GetItem(buffer_start_)
+   * is the oldest item in the buffer.
+   *
+   * With this in mind, we want to read the buffer, starting
+   * from buffer_start_, and ending at its size, and reverse it
+   *
+   * Logically this means calling GetItem(buffer_start_), GetItem(buffer_start_ + 1)
+   * till GetItem(buffer_start_ + sz - 1), and to save time we reverse the array immediately
+   */
   for (auto i = 0u; i < sz; ++i)
-    reversed[i] = items[sz - 1 - i];
+    reversed.push_back(*buffer_->GetItem(buffer_start_ + sz - 1 - i));
 
   return reversed;
 }
