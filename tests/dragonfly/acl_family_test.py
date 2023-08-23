@@ -15,10 +15,7 @@ async def test_acl_list_default_user(async_client):
     assert "user default on nopass +@ALL" == result[0]
 
 
-def assert_any_of(assertion, result):
-    assert assertion == result[0] or assertion == result[1]
-
-
+@pytest.mark.asyncio
 async def test_acl_setuser(async_client):
     # Bad input
     with pytest.raises(redis.exceptions.ResponseError):
@@ -27,26 +24,26 @@ async def test_acl_setuser(async_client):
     await async_client.execute_command("ACL SETUSER kostas")
     result = await async_client.execute_command("ACL LIST")
     assert 2 == len(result)
-    assert_any_of("user kostas off nopass +@NONE", result)
+    assert "user kostas off nopass +@NONE" in result
 
     await async_client.execute_command("ACL SETUSER kostas ON")
     result = await async_client.execute_command("ACL LIST")
-    assert_any_of("user kostas on nopass +@NONE", result)
+    assert "user kostas on nopass +@NONE" in result
 
     await async_client.execute_command("ACL SETUSER kostas +@list +@string +@admin")
     result = await async_client.execute_command("ACL LIST")
     # TODO consider printing to lowercase
-    assert_any_of("user kostas on nopass +@LIST +@STRING +@ADMIN", result)
+    assert "user kostas on nopass +@LIST +@STRING +@ADMIN" in result
 
     await async_client.execute_command("ACL SETUSER kostas -@list -@admin")
     result = await async_client.execute_command("ACL LIST")
-    assert_any_of("user kostas on nopass +@STRING", result)
+    assert "user kostas on nopass +@STRING" in result
 
     # mix and match
     await async_client.execute_command("ACL SETUSER kostas +@list -@string")
     result = await async_client.execute_command("ACL LIST")
-    assert_any_of("user kostas on nopass +@LIST", result)
+    assert "user kostas on nopass +@LIST" in result
 
     await async_client.execute_command("ACL SETUSER kostas +@all")
     result = await async_client.execute_command("ACL LIST")
-    assert_any_of("user kostas on nopass +@ALL", result)
+    assert "user kostas on nopass +@ALL" in result

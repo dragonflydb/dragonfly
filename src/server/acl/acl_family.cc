@@ -83,13 +83,15 @@ std::optional<bool> MaybeParseStatus(std::string_view command) {
 
 using OptCat = std::optional<uint32_t>;
 
-std::pair<OptCat, OptCat> MaybeParseAclCategory(std::string_view command) {
+// bool == true if +
+// bool == false if -
+std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
   if (command[0] == '+' && command[1] == '@') {
     auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
     }
-    return {res->second, {}};
+    return {res->second, true};
   }
 
   if (command[0] == '-' && command[1] == '@') {
@@ -97,30 +99,23 @@ std::pair<OptCat, OptCat> MaybeParseAclCategory(std::string_view command) {
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
     }
-    return {{}, res->second};
+    return {res->second, false};
   }
 
   return {};
 }
 
-std::variant<User::UpdateRequest, std::string> ParseAclSetUser(CmdArgList args) {
-  User::UpdateRequest req;
+using facade::ErrorReply;
 
-  auto maybe_update_acl = [](auto& output, const auto& input) {
-    if (input) {
-      if (!output) {
-        output = *input;
-      }
-      *output |= *input;
-    }
-  };
+std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
+  User::UpdateRequest req;
 
   for (auto arg : args) {
     ToUpper(&arg);
     const auto command = facade::ToSV(arg);
     if (auto pass = MaybeParsePassword(command); pass) {
       if (req.password) {
-        return "Only one password is allowed";
+        return ErrorReply("Only one password is allowed");
       }
       req.password = std::move(pass);
       continue;
@@ -128,20 +123,19 @@ std::variant<User::UpdateRequest, std::string> ParseAclSetUser(CmdArgList args) 
 
     if (auto status = MaybeParseStatus(command); status) {
       if (req.is_active) {
-        return "Multiple ON/OFF are not allowed";
+        return ErrorReply("Multiple ON/OFF are not allowed");
       }
       req.is_active = *status;
       continue;
     }
 
-    auto [acl_plus, acl_minus] = MaybeParseAclCategory(command);
-    if (!acl_plus && !acl_minus) {
-      using namespace std::string_literals;
-      return "Unrecognized parameter: "s + std::string(facade::ToSV(arg));
+    auto [cat, add] = MaybeParseAclCategory(command);
+    if (!cat) {
+      return ErrorReply(absl::StrCat("Unrecognized paramter", command));
     }
 
-    maybe_update_acl(req.plus_acl_categories, acl_plus);
-    maybe_update_acl(req.minus_acl_categories, acl_minus);
+    auto* acl_field = add ? &req.plus_acl_categories : &req.minus_acl_categories;
+    *acl_field = acl_field->value_or(0) | *cat;
   }
 
   return req;
@@ -152,7 +146,7 @@ std::variant<User::UpdateRequest, std::string> ParseAclSetUser(CmdArgList args) 
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
   auto req = ParseAclSetUser(args.subspan(1));
-  auto error_case = [cntx](std::string&& error) { (*cntx)->SendError(error); };
+  auto error_case = [cntx](ErrorReply&& error) { (*cntx)->SendError(error); };
   auto update_case = [username, cntx](User::UpdateRequest&& req) {
     ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
     (*cntx)->SendOk();
