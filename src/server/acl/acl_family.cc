@@ -158,7 +158,7 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendOk();
   };
 
-  std::visit(Overloaded(error_case, update_case), std::move(req));
+  std::visit(Overloaded{error_case, update_case}, std::move(req));
 }
 
 using CI = dfly::CommandId;
