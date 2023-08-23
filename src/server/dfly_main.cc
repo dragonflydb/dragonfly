@@ -493,7 +493,7 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
-error_code GetCGroupPath(string* memory_path, string* cpu_path) {
+void GetCGroupPath(string* memory_path, string* cpu_path) {
   CHECK(memory_path != nullptr) << "memory_path is null! (this shouldn't happen!)";
   CHECK(cpu_path != nullptr) << "cpu_path is null! (this shouldn't happen!)";
 
@@ -516,8 +516,8 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
     // for v2 we only read 0::<name>
     size_t pos = cgv.rfind(':');
     if (pos == string::npos) {
-      *memory_path = cgv;
-      return make_error_code(errc::not_supported);
+      LOG(ERROR) << "Failed to parse cgroupv2 format, got: " << cgv;
+      exit(1);
     }
 
     auto cgroup = string_view(cgv.c_str() + pos + 1);
@@ -545,8 +545,6 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
         *cpu_path = absl::StrCat("/sys/fs/cgroup/cpu,cpuacct/", entry[2]);
     }
   }
-
-  return error_code{};
 }
 
 void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
@@ -574,14 +572,12 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   };
 
   string mem_path, cpu_path;
-  auto err = GetCGroupPath(&mem_path, &cpu_path);
+  GetCGroupPath(&mem_path, &cpu_path);
 
   if (mem_path.empty() || cpu_path.empty()) {
-    VLOG(1) << "Failed to get cgroup path, error: " << err;
+    VLOG(1) << "Failed to get cgroup path, error";
     return;
   }
-
-  CHECK(!err) << "Unsupported cgroup v2 format, read:" << mem_path;
 
   VLOG(1) << "mem_path = " << mem_path;
   VLOG(1) << "cpu_path = " << cpu_path;
