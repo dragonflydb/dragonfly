@@ -493,7 +493,7 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
-error_code GetCGroupPath(string* memory_path, string* cpu_path) {
+void GetCGroupPath(string* memory_path, string* cpu_path) {
   CHECK(memory_path != nullptr) << "memory_path is null! (this shouldn't happen!)";
   CHECK(cpu_path != nullptr) << "cpu_path is null! (this shouldn't happen!)";
 
@@ -515,12 +515,15 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
   if (groups.size() == 1) {
     // for v2 we only read 0::<name>
     size_t pos = cgv.rfind(':');
-    if (pos == string::npos)
-      return make_error_code(errc::not_supported);
+    if (pos == string::npos) {
+      LOG(ERROR) << "Failed to parse cgroupv2 format, got: " << cgv;
+      exit(1);
+    }
 
-    string_view res = absl::StripTrailingAsciiWhitespace(cgv.substr(pos + 1));
+    auto cgroup = string_view(cgv.c_str() + pos + 1);
+    string_view cgroup_stripped = absl::StripTrailingAsciiWhitespace(cgroup);
 
-    *memory_path = absl::StrCat("/sys/fs/cgroup/", res);
+    *memory_path = absl::StrCat("/sys/fs/cgroup/", cgroup_stripped);
     *cpu_path = *memory_path;  // in v2 the path to the cgroup is singular
   } else {
     for (const auto& sv : groups) {
@@ -542,83 +545,125 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
         *cpu_path = absl::StrCat("/sys/fs/cgroup/cpu,cpuacct/", entry[2]);
     }
   }
-
-  return error_code{};
 }
 
 void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
-  using io::Exists;
+  using absl::StrCat;
+
+  // did we succeed in reading *something*? if not, exit.
+  // note that all processes in Linux are in some cgroup, so at the very
+  // least we should read something.
+  bool read_something = false;
+
+  auto read_mem = [&read_something](string_view path, size_t* output) {
+    auto file = io::ReadFileToString(path);
+    DVLOG(1) << "container limits: read " << path << ": " << file.value_or("N/A");
+
+    size_t temp = numeric_limits<size_t>::max();
+
+    if (file.has_value()) {
+      if (!absl::StartsWith(*file, "max"))
+        CHECK(absl::SimpleAtoi(*file, &temp))
+            << "Failed in parsing cgroup limits, path: " << path << " (read: " << *file << ")";
+      read_something = true;
+    }
+
+    *output = min(*output, temp);
+  };
 
   string mem_path, cpu_path;
-  auto err = GetCGroupPath(&mem_path, &cpu_path);
+  GetCGroupPath(&mem_path, &cpu_path);
 
   if (mem_path.empty() || cpu_path.empty()) {
-    VLOG(1) << "Failed to get cgroup path, error: " << err;
+    VLOG(1) << "Failed to get cgroup path, error";
     return;
   }
 
-  auto original_memory = mdata->mem_total;
+  VLOG(1) << "mem_path = " << mem_path;
+  VLOG(1) << "cpu_path = " << cpu_path;
 
   /* Update memory limits */
-  auto mlimit = io::ReadFileToString(mem_path + "/memory.limit_in_bytes");
-  DVLOG(1) << "memory/memory.limit_in_bytes: " << mlimit.value_or("N/A");
 
-  if (mlimit && !absl::StartsWith(*mlimit, "max")) {
-    CHECK(absl::SimpleAtoi(*mlimit, &mdata->mem_total));
-  }
+  // Start by reading global memory limits
+  constexpr auto base_mem = "/sys/fs/cgroup/memory"sv;
+  read_mem(StrCat(base_mem, "/memory.limit_in_bytes"), &mdata->mem_total);
+  read_mem(StrCat(base_mem, "/memory.max"), &mdata->mem_total);
 
-  auto mmax = io::ReadFileToString(mem_path + "/memory.max");
-  DVLOG(1) << "memory.max: " << mmax.value_or("N/A");
+  // Read cgroup-specific limits
+  read_mem(StrCat(mem_path, "/memory.limit_in_bytes"), &mdata->mem_total);
+  read_mem(StrCat(mem_path, "/memory.max"), &mdata->mem_total);
+  read_mem(StrCat(mem_path, "/memory.high"), &mdata->mem_avail);
 
-  if (mmax && !absl::StartsWith(*mmax, "max")) {
-    CHECK(absl::SimpleAtoi(*mmax, &mdata->mem_total));
-  }
-
-  mdata->mem_avail = mdata->mem_total;
-  auto mhigh = io::ReadFileToString(mem_path + "/memory.high");
-
-  if (mhigh && !absl::StartsWith(*mhigh, "max")) {
-    CHECK(absl::SimpleAtoi(*mhigh, &mdata->mem_avail));
-  }
-
-  if (numeric_limits<size_t>::max() == mdata->mem_total)
-    mdata->mem_avail = original_memory;
+  mdata->mem_avail = min(mdata->mem_avail, mdata->mem_total);
 
   /* Update thread limits */
 
-  double count = 0, timeshare = 1;
+  constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
+  auto read_cpu = [&read_something](string_view path, size_t* output) {
+    double count{0}, timeshare{1};
 
-  if (auto cpu = ReadFileToString(cpu_path + "/cpu.max"); cpu.has_value()) {
-    vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
+    /**
+     * Summarized: the function does one of the following:
+     *
+     * 1. read path/cpu.max -- for v2. The format of this file is:
+     *  $COUNT $PERIOD
+     * which indicates that we can use upto $COUNT shares in a $PERIOD of time.
+     * If $COUNT is max, then we can use as much CPU as the system has. Otherwise,
+     * this translates to $COUNT/$PERIOD threads.
+     *
+     * 2. read path/cpu.cfs_quota_us & path/cpu.cfs_period_us -- same idea, but for v1.
+     */
 
-    CHECK_EQ(res.size(), 2u);
+    if (auto cpu = ReadFileToString(StrCat(path, "/cpu.max")); cpu.has_value()) {
+      vector<string_view> res = absl::StrSplit(*cpu, ' ');
 
-    if (res[0] == "max")
-      *max_threads = 0u;
-    else {
-      CHECK(absl::SimpleAtod(res[0], &count));
-      CHECK(absl::SimpleAtod(res[1], &timeshare));
+      CHECK_EQ(res.size(), 2u);
 
-      *max_threads = static_cast<size_t>(ceil(count / timeshare));
+      if (res[0] == "max")
+        *output = 0u;
+      else {
+        CHECK(absl::SimpleAtod(res[0], &count))
+            << "Failed in parsing cgroupv2 cpu count, path = " << path << " (read: " << *cpu << ")";
+        CHECK(absl::SimpleAtod(res[1], &timeshare))
+            << "Failed in parsing cgroupv2 cpu timeshare, path = " << path << " (read: " << *cpu
+            << ")";
+
+        *output = static_cast<size_t>(ceil(count / timeshare));
+      }
+
+      read_something = true;
+
+    } else if (auto quota = ReadFileToString(StrCat(path, "/cpu.cfs_quota_us"));
+               quota.has_value()) {
+      auto period = ReadFileToString(StrCat(path, "/cpu.cfs_period_us"));
+
+      CHECK(period.has_value()) << "Failed to read cgroup cpu.cfs_period_us, but read "
+                                   "cpu.cfs_quota_us (this shouldn't happen!)";
+
+      CHECK(absl::SimpleAtod(quota.value(), &count))
+          << "Failed in parsing cgroupv1 cpu timeshare, quota = " << path << " (read: " << *quota
+          << ")";
+
+      if (count == -1)  // on -1 there is no limit.
+        count = 0;
+
+      CHECK(absl::SimpleAtod(period.value(), &timeshare))
+          << "Failed in parsing cgroupv1 cpu timeshare, path = " << path << " (read: " << *period
+          << ")";
+
+      *output = static_cast<size_t>(count / timeshare);
+      read_something = true;
     }
-  } else if (auto quota = ReadFileToString(cpu_path + "/cpu.cfs_quota_us"); quota.has_value()) {
-    auto period = ReadFileToString(cpu_path + "/cpu.cfs_period_us");
+  };
 
-    CHECK(period.has_value()) << "Failed to read cgroup cpu.cfs_period_us, but read cpu.cfs_quota "
-                                 "us (this shouldn't happen!)";
+  read_cpu(base_cpu, max_threads);  // global cpu limits
+  read_cpu(cpu_path, max_threads);  // cgroup-specific limits
 
-    CHECK(absl::SimpleAtod(quota.value(), &count));
-
-    if (count == -1)  // on -1 there is no limit.
-      count = 0;
-
-    CHECK(absl::SimpleAtod(period.value(), &timeshare));
-  } else {
-    *max_threads = 0u;  // cpuset, this is handled later.
-    return;
+  if (!read_something) {
+    LOG(ERROR) << "Failed in deducing any cgroup limits with paths " << mem_path << " and "
+               << cpu_path << ". Exiting.";
+    exit(1);
   }
-
-  *max_threads = static_cast<size_t>(ceil(count / timeshare));
 }
 
 }  // namespace
