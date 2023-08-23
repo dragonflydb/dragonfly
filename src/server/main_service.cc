@@ -1481,6 +1481,9 @@ static std::string FullAclCommandFromArgs(CmdArgList args) {
 std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
   const std::string_view command = facade::ToSV(args[0]);
   if (command == "ACL") {
+    if (args.size() == 1) {
+      return {registry_.Find(ArgS(args, 0)), args};
+    }
     return {registry_.Find(FullAclCommandFromArgs(args)), args.subspan(2)};
   }
 
