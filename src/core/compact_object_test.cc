@@ -601,6 +601,33 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
   }
 }
 
+// Test listpack defragmentation.
+// StringMap has built-in defragmantation that is tested in its own test suite.
+TEST_F(CompactObjectTest, DefragHash) {
+  uint8_t* lp = lpNew(100);
+  for (size_t i = 0; i < 100; i++) {
+    auto s = "v"s + to_string(i);
+    lp = lpAppend(lp, reinterpret_cast<const unsigned char*>(s.data()), s.length());
+  }
+  DCHECK_EQ(lpLength(lp), 100u);
+
+  // Trigger re-allocation
+  cobj_.InitRobj(OBJ_HASH, kEncodingListPack, lp);
+  cobj_.DefragIfNeeded(1.0);
+
+  lp = (uint8_t*)cobj_.RObjPtr();
+  uint8_t* fptr = lpFirst(lp);
+  for (size_t i = 0; i < 100; i++) {
+    int64_t len;
+    auto* s = lpGet(fptr, &len, nullptr);
+
+    string_view sv{reinterpret_cast<const char*>(s), static_cast<uint64_t>(len)};
+    EXPECT_EQ(sv, "v"s + to_string(i));
+
+    fptr = lpNext(lp, fptr);
+  }
+}
+
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 

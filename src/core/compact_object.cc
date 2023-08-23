@@ -36,6 +36,7 @@ using namespace std;
 using absl::GetFlag;
 using detail::binpacked_len;
 using MemoryResource = detail::RobjWrapper::MemoryResource;
+
 namespace {
 
 constexpr XXH64_hash_t kHashSeed = 24061983;
@@ -138,6 +139,38 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
     default:
       LOG(FATAL) << "Unknown sorted set encoding" << encoding;
   }
+}
+
+// Iterates over allocations of internal hash data structed and re-allocates
+// them if their pages are underutilized.
+void* DefragHash(MemoryResource* mr, unsigned encoding, void* ptr, float ratio) {
+  switch (encoding) {
+    // Listpack is stored as a single contiguous array
+    case kEncodingListPack: {
+      uint8_t* lp = (uint8_t*)ptr;
+      if (ratio < 1.0 && !zmalloc_page_is_underutilized(lp, ratio))
+        return lp;
+
+      size_t lp_bytes = lpBytes(lp);
+      uint8_t* replacement = lpNew(lpBytes(lp));
+      memcpy(replacement, lp, lp_bytes);
+      lpFree(lp);
+
+      return replacement;
+    };
+
+    // StringMap supports re-allocation of it's internal nodes
+    case kEncodingStrMap2: {
+      StringMap* sm = (StringMap*)ptr;
+      for (auto it = sm->begin(); it != sm->end(); ++it)
+        it.ReallocIfNeeded(ratio);
+
+      return sm;
+    }
+
+    default:
+      ABSL_UNREACHABLE();
+  };
 }
 
 inline void FreeObjStream(void* ptr) {
@@ -359,10 +392,12 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
 }
 
 bool RobjWrapper::DefragIfNeeded(float ratio) {
-  if (type() == OBJ_STRING) {  // only applicable to strings
+  if (type() == OBJ_STRING) {
     if (zmalloc_page_is_underutilized(inner_obj(), ratio)) {
       return Reallocate(tl.local_mr);
     }
+  } else if (type() == OBJ_HASH) {
+    inner_obj_ = DefragHash(tl.local_mr, encoding_, inner_obj_, ratio);
   }
   return false;
 }

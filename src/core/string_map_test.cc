@@ -117,4 +117,17 @@ TEST_F(StringMapTest, Ttl) {
   EXPECT_TRUE(it == sm_->end());
 }
 
+TEST_F(StringMapTest, ReallocIfNeeded) {
+  for (size_t i = 0; i < 100; i++)
+    sm_->AddOrUpdate(to_string(i), to_string(i + 1), i * 10 + 1);
+
+  // Force reallocation by setting impossible expectations
+  for (auto it = sm_->begin(); it != sm_->end(); ++it)
+    it.ReallocIfNeeded(1.0);
+
+  EXPECT_EQ(sm_->Size(), 100);
+  for (size_t i = 0; i < 100; i++)
+    EXPECT_EQ(sm_->Find(to_string(i)), to_string(i + 1));
+}
+
 }  // namespace dfly
