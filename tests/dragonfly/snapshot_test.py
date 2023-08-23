@@ -44,6 +44,7 @@ class TestRdbSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, async_client, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
@@ -67,6 +68,7 @@ class TestRdbSnapshotExactFilename(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, async_client, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
@@ -91,6 +93,7 @@ class TestDflySnapshot(SnapshotTestBase):
         self.tmp_dir = tmp_dir
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, async_client, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
@@ -157,6 +160,7 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(
             port=df_server.port, keys=10, multi_transaction_probability=0
@@ -178,6 +182,7 @@ class TestCronPeriodicSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(
             port=df_server.port, keys=10, multi_transaction_probability=0
@@ -217,6 +222,7 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         self.tmp_dir = tmp_dir
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
