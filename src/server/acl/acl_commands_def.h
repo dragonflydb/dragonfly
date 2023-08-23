@@ -92,9 +92,9 @@ inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABL
     {"SCRIPTING", SCRIPTING},
     {"FT_SEARCH", FT_SEARCH},
     {"THROTTLE", THROTTLE},
-    {"JSON", JSON}
-
-};
+    {"JSON", JSON},
+    {"ALL", ALL},
+    {"NONE", NONE}};
 
 // bit 0 at index 0
 // bit 1 at index 1

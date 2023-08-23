@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "absl/strings/str_cat.h"
+#include "core/overloaded.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -19,11 +20,11 @@ static std::string AclToString(uint32_t acl_category) {
   std::string tmp;
 
   if (acl_category == acl::ALL) {
-    return "+@all";
+    return "+@ALL";
   }
 
   if (acl_category == acl::NONE) {
-    return "+@none";
+    return "+@NONE";
   }
 
   const std::string prefix = "+@";
@@ -34,7 +35,8 @@ static std::string AclToString(uint32_t acl_category) {
       absl::StrAppend(&tmp, prefix, REVERSE_CATEGORY_INDEX_TABLE[step], postfix);
     }
   }
-  tmp.erase(tmp.size());
+
+  tmp.pop_back();
 
   return tmp;
 }
@@ -82,7 +84,7 @@ std::optional<bool> MaybeParseStatus(std::string_view command) {
 using OptCat = std::optional<uint32_t>;
 
 std::pair<OptCat, OptCat> MaybeParseAclCategory(std::string_view command) {
-  if (command[0] != '+' && command[1] != '@') {
+  if (command[0] == '+' && command[1] == '@') {
     auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
@@ -90,7 +92,7 @@ std::pair<OptCat, OptCat> MaybeParseAclCategory(std::string_view command) {
     return {res->second, {}};
   }
 
-  if (command[0] != '-' && command[1] != '@') {
+  if (command[0] == '-' && command[1] == '@') {
     auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
@@ -133,7 +135,7 @@ std::variant<User::UpdateRequest, std::string> ParseAclSetUser(CmdArgList args) 
     }
 
     auto [acl_plus, acl_minus] = MaybeParseAclCategory(command);
-    if (!acl_plus || !acl_minus) {
+    if (!acl_plus && !acl_minus) {
       using namespace std::string_literals;
       return "Unrecognized parameter: "s + std::string(facade::ToSV(arg));
     }
@@ -149,26 +151,14 @@ std::variant<User::UpdateRequest, std::string> ParseAclSetUser(CmdArgList args) 
 
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
-  auto req = ParseAclSetUser(args);
-  // TODO replace with Overloaded, move it from dragonfly_connection.cc
-  struct AclVisitor {
-    explicit AclVisitor(std::string_view usr, ConnectionContext* cn) : username(usr), cntx(cn) {
-    }
-    void operator()(std::string&& error) const {
-      (*cntx)->SendError(error);
-    }
-
-    void operator()(User::UpdateRequest&& req) const {
-      ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
-      (*cntx)->SendOk();
-    }
-
-    std::string_view username;
-    ConnectionContext* cntx;
+  auto req = ParseAclSetUser(args.subspan(1));
+  auto error_case = [cntx](std::string&& error) { (*cntx)->SendError(error); };
+  auto update_case = [username, cntx](User::UpdateRequest&& req) {
+    ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
+    (*cntx)->SendOk();
   };
 
-  AclVisitor visitor(username, cntx);
-  std::visit(visitor, std::move(req));
+  std::visit(Overloaded(error_case, update_case), std::move(req));
 }
 
 using CI = dfly::CommandId;
@@ -188,7 +178,7 @@ constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kList}.HFUNC(
       List);
-  *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kSetUser}
+  *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSetUser}
                    .HFUNC(SetUser);
 }
 
