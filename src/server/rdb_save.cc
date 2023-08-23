@@ -1157,7 +1157,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
-  RETURN_ON_ERR(SaveAux(move(glob_state)));
+  RETURN_ON_ERR(SaveAux(std::move(glob_state)));
 
   return error_code{};
 }
@@ -1205,10 +1205,15 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   for (const string& s : glob_state.lua_scripts)
     RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("lua", s));
 
-  // Save search index definitions only in summary dfs file.
-  DCHECK(save_mode_ == SaveMode::SUMMARY || glob_state.search_indices.empty());
-  for (const string& s : glob_state.search_indices)
-    RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+  if (save_mode_ == SaveMode::RDB) {
+    if (!glob_state.search_indices.empty())
+      LOG(WARNING) << "Dragonfly search index data is incompatible with the RDB format";
+  } else {
+    // Search index definitions are not tied to shards  and are saved in the summary file
+    DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
+    for (const string& s : glob_state.search_indices)
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+  }
 
   // TODO: "repl-stream-db", "repl-id", "repl-offset"
   return error_code{};
