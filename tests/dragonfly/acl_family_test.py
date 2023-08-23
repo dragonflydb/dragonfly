@@ -12,6 +12,7 @@ async def test_acl_list_default_user(async_client):
     """
     result = await async_client.execute_command("ACL LIST")
     assert 1 == len(result)
+    assert "user default on nopass +@ALL" == result[0]
 
 
 def assert_any_of(assertion, result):
