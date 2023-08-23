@@ -17,6 +17,7 @@ class AclFamily {
   static void Register(CommandRegistry* registry);
 
  private:
+  static void Acl(CmdArgList args, ConnectionContext* cntx);
   static void List(CmdArgList args, ConnectionContext* cntx);
 };
 

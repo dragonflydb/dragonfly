@@ -37,6 +37,10 @@ static std::string AclToString(uint32_t acl_category) {
   return tmp;
 }
 
+void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
+  (*cntx)->SendError("Wrong number of arguments for acl command");
+}
+
 void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = ServerState::tlocal()->user_registry->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
@@ -69,7 +73,8 @@ using CI = dfly::CommandId;
 // easy to handle that case explicitly in `DispatchCommand`.
 
 void AclFamily::Register(dfly::CommandRegistry* registry) {
-  *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kList}.HFUNC(
+  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kList}.HFUNC(Acl);
+  *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kList}.HFUNC(
       List);
 }
 
