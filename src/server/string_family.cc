@@ -1340,7 +1340,10 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
 
     dest.value = GetString(shard, it->second);
     if (fetch_mcflag) {
-      dest.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
+      if (it->second.HasFlag()) {
+        dest.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
+      }
+
       if (fetch_mcver) {
         dest.mc_ver = it.GetVersion();
       }
