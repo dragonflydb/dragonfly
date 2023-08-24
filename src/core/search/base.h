@@ -1,11 +1,8 @@
 #pragma once
 
-#include <algorithm>
-#include <iostream>
-#include <memory>
-#include <ostream>
-#include <regex>
-#include <variant>
+#include <cstdint>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/core_types.h"

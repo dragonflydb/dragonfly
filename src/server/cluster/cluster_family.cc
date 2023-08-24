@@ -14,6 +14,7 @@
 #include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -598,12 +599,21 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))
 
+namespace acl {
+constexpr uint32_t kCluster = SLOW;
+// Reconsider to maybe more sensible defaults
+constexpr uint32_t kDflyCluster = ADMIN | SLOW;
+constexpr uint32_t kReadOnly = FAST | CONNECTION;
+constexpr uint32_t kReadWrite = FAST | CONNECTION;
+}  // namespace acl
+
 void ClusterFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0}.HFUNC(Cluster)
-            << CI{"DFLYCLUSTER", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0}.HFUNC(
-                   DflyCluster)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadWrite);
+  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, acl::kCluster}.HFUNC(Cluster)
+            << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0,
+                  acl::kDflyCluster}
+                   .HFUNC(DflyCluster)
+            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
+            << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite);
 }
 
 }  // namespace dfly

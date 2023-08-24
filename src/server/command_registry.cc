@@ -31,8 +31,8 @@ using absl::StrCat;
 using absl::StrSplit;
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
-                     int8_t last_key, int8_t step)
-    : facade::CommandId(name, mask, arity, first_key, last_key, step) {
+                     int8_t last_key, int8_t step, uint32_t acl_categories)
+    : facade::CommandId(name, mask, arity, first_key, last_key, step, acl_categories) {
   if (mask & CO::ADMIN)
     opt_mask_ |= CO::NOSCRIPT;
 

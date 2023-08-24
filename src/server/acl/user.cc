@@ -6,7 +6,7 @@
 
 #include <openssl/sha.h>
 
-namespace dfly {
+namespace dfly::acl {
 
 namespace {
 std::string StringSHA256(std::string_view password) {
@@ -81,4 +81,10 @@ bool User::IsActive() const {
   return is_active_;
 }
 
-}  // namespace dfly
+static const std::string_view default_pass = "nopass";
+
+std::string_view User::Password() const {
+  return password_hash_ ? *password_hash_ : default_pass;
+}
+
+}  // namespace dfly::acl

@@ -231,6 +231,10 @@ class RdbLoader : protected RdbLoaderBase {
   void FlushShardAsync(ShardId sid);
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
+  void LoadScriptFromAux(std::string&& value);
+  void LoadSearchIndexDefFromAux(std::string&& value);
+
+ private:
   Service* service_;
   ScriptMgr* script_mgr_;
   std::unique_ptr<ItemsBuf[]> shard_buf_;
@@ -245,6 +249,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;
+
   detail::MPSCIntrusiveQueue<Item> item_queue_;
 };
 

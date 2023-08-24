@@ -7,19 +7,24 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
 
+#include <shared_mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "core/fibers.h"
 #include "server/acl/user.h"
 
-namespace dfly {
+namespace dfly::acl {
 
 class UserRegistry {
  public:
-  UserRegistry() = default;
+  UserRegistry();
 
   UserRegistry(const UserRegistry&) = delete;
   UserRegistry(UserRegistry&&) = delete;
+
+  using RegistryType = absl::flat_hash_map<std::string, User>;
 
   // Acquires a write lock of mu_
   // If the user with name `username` does not exist, it's added in the store with
@@ -48,10 +53,23 @@ class UserRegistry {
   // Used by Auth
   bool AuthUser(std::string_view username, std::string_view password) const;
 
+  // Helper class for accessing the registry with a ReadLock outside the scope of UserRegistry
+  class RegistryViewWithLock {
+   public:
+    RegistryViewWithLock(std::shared_lock<util::SharedMutex> mu, const RegistryType& registry);
+    const RegistryType& registry;
+
+   private:
+    std::shared_lock<util::SharedMutex> registry_mu_;
+  };
+
+  // Helper function used for printing users via ACL LIST
+  RegistryViewWithLock GetRegistryWithLock() const;
+
  private:
-  absl::flat_hash_map<std::string, User> registry_;
+  RegistryType registry_;
   // TODO add abseil mutex attributes
   mutable util::SharedMutex mu_;
 };
 
-}  // namespace dfly
+}  // namespace dfly::acl

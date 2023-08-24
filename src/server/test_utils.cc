@@ -4,6 +4,8 @@
 
 #include "server/test_utils.h"
 
+#include "server/acl/acl_commands_def.h"
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -67,7 +69,7 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
 }
 
 void TransactionSuspension::Start() {
-  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0};
+  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::NONE};
 
   transaction_ = new dfly::Transaction{&cid};
 

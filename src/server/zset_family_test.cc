@@ -106,6 +106,19 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   EXPECT_THAT(Run({"zrank", "y", "c"}), ArgType(RespExpr::NIL));
 }
 
+TEST_F(ZSetFamilyTest, LargeSet) {
+  for (int i = 0; i < 129; ++i) {
+    auto resp = Run({"zadd", "key", absl::StrCat(i), absl::StrCat("element:", i)});
+    EXPECT_THAT(resp, IntArg(1)) << i;
+  }
+  Run({"zadd", "key", "129", ""});
+
+  EXPECT_THAT(Run({"zrangebyscore", "key", "(-inf", "(0.0"}), ArrLen(0));
+  EXPECT_THAT(Run({"zrangebyscore", "key", "(5", "0.0"}), ArrLen(0));
+  EXPECT_THAT(Run({"zrangebylex", "key", "-", "(element:0"}), ArrLen(0));
+  EXPECT_EQ(2, CheckedInt({"zremrangebyscore", "key", "127", "(129"}));
+}
+
 TEST_F(ZSetFamilyTest, ZRemRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"ZREMRANGEBYRANK", "y", "0", "1"}), IntArg(0));
@@ -643,6 +656,16 @@ TEST_F(ZSetFamilyTest, ZDiff) {
 
   resp = Run({"zdiff", "2", "z1", "z2", "WITHSCORES"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("two", "2", "three", "3", "four", "4"));
+}
+
+TEST_F(ZSetFamilyTest, Count) {
+  for (int i = 0; i < 129; ++i) {
+    auto resp = Run({"zadd", "key", absl::StrCat(i), absl::StrCat("element:", i)});
+    EXPECT_THAT(resp, IntArg(1)) << i;
+  }
+
+  EXPECT_THAT(CheckedInt({"zcount", "key", "-inf", "+inf"}), 129);
+  EXPECT_THAT(CheckedInt({"zlexcount", "key", "-", "+"}), 129);
 }
 
 TEST_F(ZSetFamilyTest, GeoAdd) {

@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <utility>
+
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
+#include "server/acl/user_registry.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
@@ -42,6 +45,10 @@ class Service : public facade::ServiceInterface {
   // Prepare command execution, verify and execute, reply to context
   void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
 
+  // Execute multiple consecutive commands, possibly in parallel by squashing
+  void DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                            facade::ConnectionContext* cntx) final;
+
   // Check VerifyCommandExecution and invoke command with args
   bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* reply_cntx,
                  bool record_stats = false);
@@ -64,9 +71,8 @@ class Service : public facade::ServiceInterface {
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
 
-  const CommandId* FindCmd(std::string_view cmd) const {
-    return registry_.Find(cmd);
-  }
+  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
+  const CommandId* FindCmd(std::string_view) const;
 
   CommandRegistry* mutable_registry() {
     return &registry_;
@@ -141,8 +147,6 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
-  const CommandId* FindCmd(CmdArgList args) const;
-
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
                ConnectionContext* cntx);
@@ -157,13 +161,15 @@ class Service : public facade::ServiceInterface {
 
   base::VarzValue::Map GetVarzStats();
 
- private:
   util::ProactorPool& pp_;
 
+  acl::UserRegistry user_registry_;
   ServerFamily server_family_;
   ClusterFamily cluster_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
+
+  const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
 
   mutable Mutex mu_;
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;

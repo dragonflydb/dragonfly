@@ -5,147 +5,137 @@ from redis import asyncio as aioredis
 from redis.exceptions import ConnectionError as redis_conn_error
 import async_timeout
 
+from dataclasses import dataclass
+
 from . import DflyInstance, dfly_args
 
 BASE_PORT = 1111
 
 
-async def run_monitor_eval(monitor, expected):
-    async with monitor as mon:
-        count = 0
-        max = len(expected)
-        while count < max:
+@dataclass(frozen=True)
+class CollectedRedisMsg:
+    cmd: str
+    src: str = "tcp"
+
+    @staticmethod
+    def all_from_src(*args, src="tcp"):
+        return [CollectedRedisMsg(arg, src) for arg in args]
+
+
+class CollectingMonitor:
+    """Tracks all monitor messages between start() and stop()"""
+
+    def __init__(self, client):
+        self.client = client
+        self.messages = []
+        self._monitor_task = None
+
+    async def _monitor(self):
+        async with self.client.monitor() as monitor:
+            async for message in monitor.listen():
+                self.messages.append(CollectedRedisMsg(message["command"], message["client_type"]))
+
+    async def start(self):
+        if self._monitor_task is None:
+            self._monitor_task = asyncio.create_task(self._monitor())
+        await asyncio.sleep(0.1)
+
+    async def stop(self, timeout=0.1):
+        if self._monitor_task:
+            # Wait for Dragonfly to send all async monitor messages
+            await asyncio.sleep(timeout)
+            self._monitor_task.cancel()
             try:
-                async with async_timeout.timeout(1):
-                    response = await mon.next_command()
-                    if "select" not in response["command"].lower():
-                        cmd = expected[count]
-                        if cmd not in response["command"]:
-                            print(f"command {response['command']} != {cmd}")
-                            return False
-                        else:
-                            count = count + 1
-            except Exception as e:
-                print(f"failed to monitor: {e}")
-                return False
-    return True
+                await self._monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._monitor_task = None
+
+        if len(self.messages) > 0 and self.messages[0].cmd == "SELECT 1":
+            self.messages = self.messages[1:]
+        return self.messages
 
 
 """
-Test issue https://github.com/dragonflydb/dragonfly/issues/756
-Monitor command do not return when we have lua script issue
+Test MONITOR command with basic use case
 """
 
 
 @pytest.mark.asyncio
-async def test_monitor_command_lua(async_pool):
-    expected = ["EVAL return redis", "EVAL return redis", "SET foo2"]
-
-    conn = aioredis.Redis(connection_pool=async_pool)
-    monitor = conn.monitor()
-
-    cmd1 = aioredis.Redis(connection_pool=async_pool)
-    future = asyncio.create_task(run_monitor_eval(monitor=monitor, expected=expected))
-    await asyncio.sleep(0.1)
-
-    try:
-        res = await cmd1.eval(r'return redis.call("GET", "bar")', 0)
-        assert False  # this will return an error
-    except Exception as e:
-        assert "script tried accessing undeclared key" in str(e)
-
-    try:
-        res = await cmd1.eval(r'return redis.call("SET", KEYS[1], ARGV[1])', 1, "foo2", "bar2")
-    except Exception as e:
-        print(f"EVAL error: {e}")
-        assert False
-
-    await asyncio.sleep(0.1)
-    await future
-    status = future.result()
-    assert status
-
-
-"""
-Test the monitor command.
-Open connection which is used for monitoring
-Then send on other connection commands to dragonfly instance
-Make sure that we are getting the commands in the monitor context
-"""
-
-
-@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4})
 async def test_monitor_command(async_pool):
-    def generate(max):
-        for i in range(max):
-            yield f"key{i}", f"value={i}"
+    monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
+    await monitor.start()
 
-    messages = {a: b for a, b in generate(5)}
-    assert await run_monitor(messages, async_pool)
+    c = aioredis.Redis(connection_pool=async_pool)
+    await c.set("a", 1)
+    await c.get("a")
+    await c.lpush("l", "V")
+    await c.lpop("l")
 
+    collected = await monitor.stop()
+    expected = CollectedRedisMsg.all_from_src("SET a 1", "GET a", "LPUSH l V", "LPOP l")
 
-def verify_response(monitor_response: dict, key: str, value: str) -> bool:
-    if monitor_response is None:
-        return False
-    if monitor_response["db"] == 1 and monitor_response["client_type"] == "tcp":
-        return key in monitor_response["command"] and value in monitor_response["command"]
-    else:
-        return False
+    assert expected == collected
 
 
-async def process_cmd(monitor, key, value):
-    while True:
-        try:
-            async with async_timeout.timeout(1):
-                response = await monitor.next_command()
-                if "select" not in response["command"].lower():
-                    success = verify_response(response, key, value)
-                    if not success:
-                        print(f"failed to verify message {response} for {key}/{value}")
-                        return (
-                            False,
-                            f"failed on the verification of the message {response} at {key}: {value}",
-                        )
-                    else:
-                        return True, None
-        except asyncio.TimeoutError:
-            pass
+"""
+Test MONITOR command with MULTI/EXEC transaction with squashing
+"""
 
 
-async def monitor_cmd(mon: aioredis.client.Monitor, messages: dict):
-    success = None
-    async with mon as monitor:
-        try:
-            for key, value in messages.items():
-                state, msg = await process_cmd(monitor, key, value)
-                if not state:
-                    return state, msg
-            return True, "monitor is successfully done"
-        except Exception as e:
-            return False, f"stopping monitor on {e}"
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4, "multi_exec_squash": "true"})
+async def test_monitor_command_multi(async_pool):
+    monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
+    await monitor.start()
+
+    c = aioredis.Redis(connection_pool=async_pool)
+    p = c.pipeline(transaction=True)
+
+    expected = []
+    for i in range(100):
+        p.lpush(str(i), "V")
+        expected.append(f"LPUSH {i} V")
+
+    await p.execute()
+
+    collected = await monitor.stop(0.3)
+    expected = CollectedRedisMsg.all_from_src(*expected)
+
+    # The order is random due to squashing
+    assert set(expected) == set(collected[2:])
 
 
-async def run_monitor(messages: dict, pool: aioredis.ConnectionPool):
-    cmd1 = aioredis.Redis(connection_pool=pool)
-    conn = aioredis.Redis(connection_pool=pool)
-    monitor = conn.monitor()
-    future = asyncio.create_task(monitor_cmd(monitor, messages))
-    success = True
+"""
+Test MONITOR command with lua script
+https://github.com/dragonflydb/dragonfly/issues/756
+"""
 
-    # make sure that the monitor task starts before we're sending anything else!
-    await asyncio.sleep(0.01)
-    for key, val in messages.items():
-        res = await cmd1.set(key, val)
-        if not res:
-            success = False
-            break
-    await asyncio.sleep(0.01)
-    await future
-    status, message = future.result()
-    if status and success:
-        return True, "successfully completed all"
-    else:
-        return False, f"monitor result: {status}: {message}, set command success {success}"
+TEST_MONITOR_SCRIPT = """
+    redis.call('SET', 'A', 1)
+    redis.call('GET', 'A')
+    redis.call('SADD', 'S', 1, 2, 3)
+    redis.call('LPUSH', 'L', 1)
+    redis.call('LPOP', 'L')
+"""
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4, "lua_auto_async": "false"})
+async def test_monitor_command_lua(async_pool):
+    monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
+    await monitor.start()
+
+    c = aioredis.Redis(connection_pool=async_pool)
+    await c.eval(TEST_MONITOR_SCRIPT, 3, "A", "S", "L")
+
+    collected = await monitor.stop()
+    expected = CollectedRedisMsg.all_from_src(
+        "SET A 1", "GET A", "SADD S 1 2 3", "LPUSH L 1", "LPOP L", src="lua"
+    )
+
+    assert expected == collected[1:]
 
 
 """
@@ -501,3 +491,28 @@ async def test_tls_reject(with_ca_tls_server_args, with_tls_client_args, df_loca
     except redis_conn_error:
         pass
     await client.close()
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
+async def test_squashed_pipeline(async_client: aioredis.Redis):
+    p = async_client.pipeline(transaction=False)
+
+    for j in range(50):
+        for i in range(10):
+            p.incr(f"k{i}")
+        p.execute_command("NOTFOUND")
+
+    res = await p.execute(raise_on_error=False)
+
+    for j in range(50):
+        assert res[0:10] == [j + 1] * 10
+        assert isinstance(res[10], aioredis.ResponseError)
+        res = res[11:]
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
+async def test_squashed_pipeline_seeder(df_server, df_seeder_factory):
+    seeder = df_seeder_factory.create(port=df_server.port, keys=10_000)
+    await seeder.run(target_deviation=0.1)

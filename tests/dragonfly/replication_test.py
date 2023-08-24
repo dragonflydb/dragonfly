@@ -37,6 +37,7 @@ replication_cases = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config, from_admin_port", replication_cases)
 async def test_replication_all(
     df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config, from_admin_port
@@ -292,6 +293,7 @@ master_crash_cases = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
 async def test_disconnect_master(
     df_local_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys
@@ -364,6 +366,7 @@ rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 @pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
 async def test_rotating_masters(
     df_local_factory, df_seeder_factory, t_replica, t_masters, seeder_config
@@ -404,6 +407,7 @@ async def test_rotating_masters(
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_cancel_replication_immediately(df_local_factory, df_seeder_factory):
     """
     Issue 40 replication commands randomally distributed over 10 seconds. This
@@ -1007,6 +1011,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=4, logtostdout=True)
     replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=2, logtostdout=True)

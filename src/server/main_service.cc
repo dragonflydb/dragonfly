@@ -4,6 +4,9 @@
 
 #include "server/main_service.h"
 
+#include "facade/resp_expr.h"
+#include "server/acl/user_registry.h"
+
 extern "C" {
 #include "redis/redis_aux.h"
 }
@@ -22,6 +25,8 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_capture.h"
+#include "server/acl/acl_commands_def.h"
+#include "server/acl/acl_family.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
 #include "server/conn_context.h"
@@ -193,27 +198,31 @@ auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
   return result;
 }
 
-std::string MakeMonitorMessage(const ConnectionState& conn_state,
-                               const facade::Connection* connection, CmdArgList args) {
-  std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", conn_state.db_index);
+std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* cid,
+                               CmdArgList tail_args) {
+  std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", cntx->conn_state.db_index);
 
-  if (conn_state.script_info) {
-    absl::StrAppend(&message, " lua] ");
+  if (cntx->conn_state.squashing_info)
+    cntx = cntx->conn_state.squashing_info->owner;
+
+  string endpoint;
+  if (cntx->conn_state.script_info) {
+    endpoint = "lua";
+  } else if (const auto* conn = cntx->owner(); conn != nullptr) {
+    endpoint = conn->RemoteEndpointStr();
   } else {
-    auto endpoint = connection == nullptr ? "REPLICATION:0" : connection->RemoteEndpointStr();
-    absl::StrAppend(&message, " ", endpoint, "] ");
+    endpoint = "REPLICATION:0";
   }
-  if (args.empty()) {
-    absl::StrAppend(&message, "error - empty cmd list!");
-  } else if (auto cmd_name = std::string_view(args[0].data(), args[0].size());
-             cmd_name == "AUTH") {  // we cannot just send auth details in this case
-    absl::StrAppend(&message, "\"", cmd_name, "\"");
-  } else {
-    message = std::accumulate(args.begin(), args.end(), message, [](auto str, const auto& cmd) {
-      absl::StrAppend(&str, " ", CmdEntryToMonitorFormat(std::string_view(cmd.data(), cmd.size())));
-      return str;
-    });
-  }
+  absl::StrAppend(&message, " ", endpoint, "] ");
+
+  absl::StrAppend(&message, "\"", cid->name(), "\"");
+
+  if (cid->name() == "AUTH")
+    return message;
+
+  for (auto arg : tail_args)
+    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(facade::ToSV(arg)));
+
   return message;
 }
 
@@ -231,9 +240,9 @@ void SendMonitor(const std::string& msg) {
   }
 }
 
-void DispatchMonitor(ConnectionContext* cntx, CmdArgList args) {
+void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList tail_args) {
   //  We have connections waiting to get the info on the last command, send it to them
-  string monitor_msg = MakeMonitorMessage(cntx->conn_state, cntx->owner(), args);
+  string monitor_msg = MakeMonitorMessage(cntx, cid, tail_args);
 
   VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
 
@@ -622,6 +631,8 @@ Service::Service(ProactorPool* pp)
   CHECK_LT(pp->size(), kMaxThreadSize);
   RegisterCommands();
 
+  exec_cid_ = FindCmd("EXEC");
+
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
@@ -647,8 +658,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("requirepass");
   config_registry.Register("masterauth");
   config_registry.Register("tcp_keepalive");
-
-  pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
+  acl::UserRegistry* reg = &user_registry_;
+  pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0) {
@@ -871,7 +882,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ServerState& etl = *ServerState::tlocal();
 
   ToUpper(&args[0]);
-  const CommandId* cid = FindCmd(args);
+  const auto [cid, args_no_cmd] = FindCmd(args);
 
   if (cid == nullptr) {
     return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
@@ -890,13 +901,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  auto args_no_cmd = args.subspan(1);
-
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
-    (*dfly_cntx)->SendError(move(*err));
+    (*dfly_cntx)->SendError(std::move(*err));
     return;
   }
 
@@ -907,14 +916,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
     return (*cntx)->SendSimpleString("QUEUED");
-  }
-
-  // We are not sending any admin command in the monitor, and we do not want to
-  // do any processing if we don't have any waiting connections with monitor
-  // enabled on them - see https://redis.io/commands/monitor/
-  const MonitorsRepo& monitors = etl.Monitors();
-  if (!monitors.Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
-    DispatchMonitor(dfly_cntx, args);
   }
 
   uint64_t start_ns = absl::GetCurrentTimeNanos();
@@ -986,8 +987,17 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(!cid->Validate(tail_args));
 
   if (auto err = VerifyCommandExecution(cid); err) {
-    (*cntx)->SendError(move(*err));
+    (*cntx)->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
+  }
+
+  // We are not sending any admin command in the monitor, and we do not want to
+  // do any processing if we don't have any waiting connections with monitor
+  // enabled on them - see https://redis.io/commands/monitor/
+  ServerState& etl = *ServerState::tlocal();
+  const MonitorsRepo& monitors = etl.Monitors();
+  if (!monitors.Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
+    DispatchMonitor(cntx, cid, tail_args);
   }
 
   try {
@@ -999,7 +1009,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   if (record_stats) {
     DCHECK(cntx->transaction);
-    ServerState& etl = *ServerState::tlocal();
     bool is_ooo = cntx->transaction->IsOOO();
 
     cntx->last_command_debug.clock = cntx->transaction->txid();
@@ -1008,6 +1017,57 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   }
 
   return true;
+}
+
+void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                   facade::ConnectionContext* cntx) {
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
+
+  vector<StoredCmd> stored_cmds;
+  intrusive_ptr<Transaction> dist_trans;
+
+  auto perform_squash = [&] {
+    if (stored_cmds.empty())
+      return;
+
+    if (!dist_trans) {
+      dist_trans.reset(new Transaction{exec_cid_});
+      dist_trans->StartMultiNonAtomic();
+    }
+
+    dfly_cntx->transaction = dist_trans.get();
+    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds), dfly_cntx, this, true, false);
+    dfly_cntx->transaction = nullptr;
+    stored_cmds.clear();
+  };
+
+  for (auto args : args_list) {
+    ToUpper(&args[0]);
+    const auto [cid, tail_args] = FindCmd(args);
+
+    // MULTI...EXEC commands need to be collected into a single context, so squashing is not
+    // possible
+    const bool is_multi =
+        dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
+
+    if (!is_multi && cid != nullptr) {
+      stored_cmds.reserve(args_list.size());
+      stored_cmds.emplace_back(cid, tail_args);
+      continue;
+    }
+
+    // Squash accumulated commands
+    perform_squash();
+
+    // Dispatch non squashed command only after all squshed commands were executed and replied
+    DispatchCommand(args, cntx);
+  }
+
+  perform_squash();
+
+  if (dist_trans)
+    dist_trans->UnlockMulti();
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -1146,6 +1206,10 @@ facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
   return ServerState::tl_connection_stats();
 }
 
+const CommandId* Service::FindCmd(std::string_view cmd) const {
+  return registry_.Find(cmd);
+}
+
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
   ShardId sid = Shard(key, shard_count());
   bool is_open = pp_.at(sid)->AwaitBrief([db_index, key] {
@@ -1254,7 +1318,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   info->async_cmds.clear();
 
   auto reply = crb.Take();
-  return CapturingReplyBuilder::GetError(reply) ? make_optional(move(reply)) : nullopt;
+  return CapturingReplyBuilder::GetError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
@@ -1273,7 +1337,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
       auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
-      info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1), replies);
+      info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
     } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ArgS(ca.args, 0));
@@ -1281,13 +1345,13 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   }
 
   if (auto err = FlushEvalAsyncCmds(cntx, !ca.async || findcmd_err.has_value()); err) {
-    CapturingReplyBuilder::Apply(move(*err), &replier);  // forward error to lua
+    CapturingReplyBuilder::Apply(std::move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
     return;
   }
 
   if (findcmd_err.has_value()) {
-    replier.RedisReplyBuilder::SendError(move(*findcmd_err));
+    replier.RedisReplyBuilder::SendError(std::move(*findcmd_err));
     *ca.requested_abort |= ca.error_abort;
   }
 
@@ -1312,7 +1376,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   if (!res)
     return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
 
-  string sha{move(res.value())};
+  string sha{std::move(res.value())};
 
   CallSHA(args, sha, interpreter, cntx);
 }
@@ -1408,10 +1472,24 @@ bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams param
   return false;
 }
 
-const CommandId* Service::FindCmd(CmdArgList args) const {
+static std::string FullAclCommandFromArgs(CmdArgList args) {
+  ToUpper(&args[1]);
+  // Guranteed SSO no dynamic allocations here
+  return std::string("ACL ") + std::string(args[1].begin(), args[1].end());
+}
+
+std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
+  const std::string_view command = facade::ToSV(args[0]);
+  if (command == "ACL") {
+    if (args.size() == 1) {
+      return {registry_.Find(ArgS(args, 0)), args};
+    }
+    return {registry_.Find(FullAclCommandFromArgs(args)), args.subspan(2)};
+  }
+
   const CommandId* res = registry_.Find(ArgS(args, 0));
   if (!res)
-    return nullptr;
+    return {nullptr, args};
 
   // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
   if (args.size() == 2 && res->name() == "XGROUP") {
@@ -1419,7 +1497,7 @@ const CommandId* Service::FindCmd(CmdArgList args) const {
       res = registry_.Find("_XGROUP_HELP");
     }
   }
-  return res;
+  return {res, args.subspan(1)};
 }
 
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
@@ -1708,7 +1786,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     for (auto& sub : subscribers)
       sub.conn_cntx->owner()->EnsureAsyncMemoryBudget();
 
-    auto subscribers_ptr = make_shared<decltype(subscribers)>(move(subscribers));
+    auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
     auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
     memcpy(buf.get(), channel.data(), channel.size());
     memcpy(buf.get() + channel.size(), msg.data(), msg.size());
@@ -1720,7 +1798,8 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
       while (it != subscribers_ptr->end() && it->thread_id == idx) {
         facade::Connection* conn = it->conn_cntx->owner();
         DCHECK(conn);
-        conn->SendPubMessageAsync({move(it->pattern), move(buf), channel.size(), msg.size()});
+        conn->SendPubMessageAsync(
+            {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
         it->borrow_token.Dec();
         it++;
       }
@@ -1962,29 +2041,55 @@ using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 #define MFUNC(x) \
   SetHandler([this](CmdArgList sp, ConnectionContext* cntx) { this->x(std::move(sp), cntx); })
 
+namespace acl {
+constexpr uint32_t kQuit = FAST | CONNECTION;
+constexpr uint32_t kMulti = FAST | TRANSACTION;
+constexpr uint32_t kWatch = FAST | TRANSACTION;
+constexpr uint32_t kUnwatch = FAST | TRANSACTION;
+constexpr uint32_t kDiscard = FAST | TRANSACTION;
+constexpr uint32_t kEval = SLOW | SCRIPTING;
+constexpr uint32_t kEvalSha = SLOW | SCRIPTING;
+constexpr uint32_t kExec = SLOW | TRANSACTION;
+constexpr uint32_t kPublish = PUBSUB | FAST;
+constexpr uint32_t kSubscribe = PUBSUB | SLOW;
+constexpr uint32_t kUnsubscribe = PUBSUB | SLOW;
+constexpr uint32_t kPSubscribe = PUBSUB | SLOW;
+constexpr uint32_t kPUnsubsribe = PUBSUB | SLOW;
+constexpr uint32_t kFunction = SLOW;
+constexpr uint32_t kMonitor = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kPubSub = SLOW;
+constexpr uint32_t kCommand = SLOW | CONNECTION;
+}  // namespace acl
+
 void Service::RegisterCommands() {
   using CI = CommandId;
 
   registry_
-      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
-      << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
-      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1}.HFUNC(Watch)
-      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0}.HFUNC(Unwatch)
-      << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
-      << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(Eval).SetValidator(
-             &EvalValidator)
-      << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(EvalSha).SetValidator(
-             &EvalValidator)
-      << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, 1}.MFUNC(Exec)
-      << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
-      << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
-      << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
-      << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
-      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
-      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
-      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub)
-      << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0}.MFUNC(Command);
+      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0, acl::kQuit}.HFUNC(Quit)
+      << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kMulti}.HFUNC(Multi)
+      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1, acl::kWatch}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
+      << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kDiscard}.MFUNC(
+             Discard)
+      << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, acl::kEval}
+             .MFUNC(Eval)
+             .SetValidator(&EvalValidator)
+      << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1, acl::kEvalSha}
+             .MFUNC(EvalSha)
+             .SetValidator(&EvalValidator)
+      << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, 1, acl::kExec}.MFUNC(Exec)
+      << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0, acl::kPublish}.MFUNC(Publish)
+      << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
+      << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kUnsubscribe}.MFUNC(
+             Unsubscribe)
+      << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kPSubscribe}.MFUNC(
+             PSubscribe)
+      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kPUnsubsribe}.MFUNC(
+             PUnsubscribe)
+      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0, acl::kFunction}.MFUNC(Function)
+      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0, acl::kMonitor}.MFUNC(Monitor)
+      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
+      << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0, acl::kCommand}.MFUNC(Command);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
@@ -1997,6 +2102,7 @@ void Service::RegisterCommands() {
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
   SearchFamily::Register(&registry_);
+  acl::AclFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
