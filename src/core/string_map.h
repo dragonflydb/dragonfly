@@ -63,10 +63,13 @@ class StringMap : public DenseSet {
     }
 
     void ReallocIfNeeded(float ratio) {
-      if (curr_entry_->IsObject()) {
-        auto* obj = curr_entry_->GetObject();
-        curr_entry_->SetObject(static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio));
-      }
+      // Unwrap all links to correctly call SetObject()
+      auto* ptr = curr_entry_;
+      while (ptr->IsLink())
+        ptr = ptr->AsLink();
+
+      auto* obj = ptr->GetObject();
+      ptr->SetObject(static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio));
     }
 
     iterator& operator++() {
