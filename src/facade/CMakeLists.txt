@@ -1,6 +1,6 @@
 add_library(dfly_facade dragonfly_listener.cc dragonfly_connection.cc facade.cc
             memcache_parser.cc redis_parser.cc reply_builder.cc op_status.cc
-            reply_capture.cc)
+            reply_capture.cc resp_expr.cc)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)

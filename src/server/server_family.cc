@@ -28,6 +28,7 @@ extern "C" {
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
+#include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -328,7 +329,7 @@ class RdbSnapshot {
   RdbSnapshot(FiberQueueThreadPool* fq_tp, cloud::AWS* aws) : fq_tp_{fq_tp}, aws_{aws} {
   }
 
-  GenericError Start(SaveMode save_mode, const string& path, const StringVec& lua_scripts);
+  GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -365,7 +366,7 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
 }
 
 GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
-                                const StringVec& lua_scripts) {
+                                const RdbSaver::GlobalData& glob_data) {
   bool is_direct = false;
   VLOG(1) << "Saving RDB " << path;
 
@@ -409,7 +410,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 
   saver_.reset(new RdbSaver(io_sink_.get(), save_mode, is_direct));
 
-  return saver_->SaveHeader(lua_scripts);
+  return saver_->SaveHeader(move(glob_data));
 }
 
 error_code RdbSnapshot::SaveBody() {
@@ -600,9 +601,9 @@ struct SaveStagesController : public SaveStagesInputs {
     auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
 
     SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-    auto scripts = shard == nullptr ? GetLuaScripts() : StringVec{};
+    auto glob_data = shard == nullptr ? GetGlobalData() : RdbSaver::GlobalData{};
 
-    if (auto err = snapshot->Start(mode, filename, scripts); err) {
+    if (auto err = snapshot->Start(mode, filename, glob_data); err) {
       shared_err_ = err;
       snapshot.reset();
       return;
@@ -622,7 +623,7 @@ struct SaveStagesController : public SaveStagesInputs {
     if (!is_cloud_)
       filename += ".tmp";
 
-    if (auto err = snapshot->Start(SaveMode::RDB, filename, GetLuaScripts()); err) {
+    if (auto err = snapshot->Start(SaveMode::RDB, filename, GetGlobalData()); err) {
       snapshot.reset();
       return;
     }
@@ -742,13 +743,28 @@ struct SaveStagesController : public SaveStagesInputs {
     }
   }
 
-  StringVec GetLuaScripts() const {
-    auto scripts = service_->script_mgr()->GetAll();
-    StringVec script_bodies;
-    script_bodies.reserve(scripts.size());
-    for (auto& [sha, data] : scripts)
-      script_bodies.push_back(move(data.body));
-    return script_bodies;
+  RdbSaver::GlobalData GetGlobalData() const {
+    StringVec script_bodies, search_indices;
+
+    {
+      auto scripts = service_->script_mgr()->GetAll();
+      script_bodies.reserve(scripts.size());
+      for (auto& [sha, data] : scripts)
+        script_bodies.push_back(move(data.body));
+    }
+
+    {
+      shard_set->Await(0, [&] {
+        auto* indices = EngineShard::tlocal()->search_indices();
+        for (auto index_name : indices->GetIndexNames()) {
+          auto index_info = indices->GetIndex(index_name)->GetInfo();
+          search_indices.emplace_back(
+              absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
+        }
+      });
+    }
+
+    return RdbSaver::GlobalData{move(script_bodies), move(search_indices)};
   }
 
  private:

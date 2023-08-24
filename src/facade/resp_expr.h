@@ -12,6 +12,8 @@
 #include <variant>
 #include <vector>
 
+#include "facade/facade_types.h"
+
 namespace facade {
 
 class RespExpr {
@@ -52,13 +54,15 @@ class RespExpr {
   }
 
   static const char* TypeName(Type t);
+
+  static void VecToArgList(const Vec& src, CmdArgVec* dest);
 };
 
 using RespVec = RespExpr::Vec;
 using RespSpan = absl::Span<const RespExpr>;
 
-inline std::string_view ToSV(const absl::Span<uint8_t>& s) {
-  return std::string_view{reinterpret_cast<char*>(s.data()), s.size()};
+inline std::string_view ToSV(RespExpr::Buffer buf) {
+  return std::string_view{reinterpret_cast<char*>(buf.data()), buf.size()};
 }
 
 }  // namespace facade
