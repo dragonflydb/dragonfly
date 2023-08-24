@@ -104,7 +104,7 @@ jobs:
         submodules: true
     - name: Configure
       run: |
-          apt update && apt install -y debhelper moreutils
+          apt update && apt install -y debhelper moreutils pip jq
     - name: Build artifacts
       run: |
           # Work around https://github.com/actions/checkout/issues/766
@@ -113,6 +113,13 @@ jobs:
           ./tools/release.sh
           # once the build is over, we want to generate a Debian package
           ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
+    - name: Run regression tests
+      uses: ./.github/actions/regression-tests
+      with:
+        dfly-executable: dragonfly-x86_64
+        gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+        run-only-on-ubuntu-latest: false
+        build-folder-name: build-opt
     - name: Save artifacts
       run: |
           # place all artifacts at the same location
