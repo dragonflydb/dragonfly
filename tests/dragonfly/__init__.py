@@ -48,7 +48,9 @@ class DflyInstance:
         elif "port" in self.args:
             self._port = int(self.args["port"])
         else:
-            self.args["random_port"] = None
+            # Tell DF to choose a random open port.
+            # We'll find out what port it is using lsof.
+            self.args["port"] = -1
             self._port = None
             self.dynamic_port = True
 

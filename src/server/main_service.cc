@@ -65,8 +65,7 @@ struct MaxMemoryFlag {
 static bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err);
 static std::string AbslUnparseFlag(const MaxMemoryFlag& flag);
 
-ABSL_FLAG(uint32_t, port, 6379, "Redis port");
-ABSL_FLAG(bool, random_port, false, "Use a random available port");
+ABSL_FLAG(int32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");

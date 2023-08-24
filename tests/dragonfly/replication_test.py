@@ -1378,7 +1378,6 @@ async def wait_for_replica_status(replica: aioredis.Redis, status: str, wait_for
 async def test_replicaof_flag(df_local_factory):
     # tests --replicaof works under normal conditions
     master = df_local_factory.create(
-        port=BASE_PORT,
         proactor_threads=2,
     )
 
@@ -1390,9 +1389,8 @@ async def test_replicaof_flag(df_local_factory):
     assert 1 == db_size
 
     replica = df_local_factory.create(
-        port=BASE_PORT + 1,
         proactor_threads=2,
-        replicaof=f"localhost:{BASE_PORT}",  # start to replicate master
+        replicaof=f"localhost:{master.port}",  # start to replicate master
     )
 
     # set up replica. check that it is replicating
@@ -1401,6 +1399,7 @@ async def test_replicaof_flag(df_local_factory):
 
     await wait_available_async(c_replica)  # give it time to startup
     await wait_for_replica_status(c_replica, status="up")  # wait until we have a connection
+    await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
     assert 1 == dbsize
@@ -1412,8 +1411,8 @@ async def test_replicaof_flag(df_local_factory):
 @pytest.mark.asyncio
 async def test_replicaof_flag_replication_waits(df_local_factory):
     # tests --replicaof works when we launch replication before the master
+    BASE_PORT = 1111
     replica = df_local_factory.create(
-        port=BASE_PORT + 1,
         proactor_threads=2,
         replicaof=f"localhost:{BASE_PORT}",  # start to replicate master
     )
@@ -1444,6 +1443,7 @@ async def test_replicaof_flag_replication_waits(df_local_factory):
 
     # check that replication works now
     await wait_for_replica_status(c_replica, status="up")
+    await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
     assert 1 == dbsize
@@ -1456,7 +1456,6 @@ async def test_replicaof_flag_replication_waits(df_local_factory):
 async def test_replicaof_flag_disconnect(df_local_factory):
     # test stopping replication when started using --replicaof
     master = df_local_factory.create(
-        port=BASE_PORT,
         proactor_threads=2,
     )
 
@@ -1470,9 +1469,8 @@ async def test_replicaof_flag_disconnect(df_local_factory):
     assert 1 == db_size
 
     replica = df_local_factory.create(
-        port=BASE_PORT + 1,
         proactor_threads=2,
-        replicaof=f"localhost:{BASE_PORT}",  # start to replicate master
+        replicaof=f"localhost:{master.port}",  # start to replicate master
     )
 
     # set up replica. check that it is replicating
@@ -1481,6 +1479,7 @@ async def test_replicaof_flag_disconnect(df_local_factory):
     c_replica = aioredis.Redis(port=replica.port)
     await wait_available_async(c_replica)
     await wait_for_replica_status(c_replica, status="up")
+    await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
     assert 1 == dbsize
