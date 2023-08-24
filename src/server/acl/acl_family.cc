@@ -7,7 +7,9 @@
 #include <optional>
 #include <variant>
 
+#include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "core/overloaded.h"
 #include "facade/facade_types.h"
@@ -96,7 +98,7 @@ using OptCat = std::optional<uint32_t>;
 // bool == true if +
 // bool == false if -
 std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
-  if (command[0] == '+' && command[1] == '@') {
+  if (absl::StartsWith(command, "+@")) {
     auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
@@ -104,7 +106,7 @@ std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
     return {res->second, true};
   }
 
-  if (command[0] == '-' && command[1] == '@') {
+  if (absl::StartsWith(command, "-@")) {
     auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
