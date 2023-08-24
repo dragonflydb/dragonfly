@@ -3,10 +3,12 @@
 
 #include "server/acl/acl_family.h"
 
+#include <cctype>
 #include <optional>
 #include <variant>
 
 #include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "core/overloaded.h"
@@ -50,12 +52,16 @@ void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
 void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = ServerState::tlocal()->user_registry->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-
   (*cntx)->StartArray(registry.size());
+
+  auto pretty_print_sha = [](std::string_view pass) {
+    return absl::BytesToHexString(pass.substr(15)).substr(15);
+  };
+
   for (const auto& [username, user] : registry) {
     std::string buffer = "user ";
     const std::string_view pass = user.Password();
-    const std::string password = pass == "nopass" ? "nopass" : std::string(pass.substr(0, 15));
+    const std::string password = pass == "nopass" ? "nopass" : pretty_print_sha(pass);
     const std::string acl_cat = AclToString(user.AclCategory());
 
     using namespace std::string_view_literals;
