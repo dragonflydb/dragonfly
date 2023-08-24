@@ -110,7 +110,7 @@ sds StringMap::ReallocIfNeeded(void* obj, float ratio) {
   sds value = (sds)(uint64_t(value_tag) & kValMask);
 
   // If the allocated value is underutilized, re-allocate it and update the pointer inside the key
-  if (ratio >= 1.0 || zmalloc_page_is_underutilized(value, ratio)) {
+  if (zmalloc_page_is_underutilized(value, ratio)) {
     size_t value_len = sdslen(value);
     sds new_value = sdsnewlen(value, value_len);
     memcpy(new_value, value, value_len);
@@ -119,7 +119,7 @@ sds StringMap::ReallocIfNeeded(void* obj, float ratio) {
     sdsfree(value);
   }
 
-  if (ratio < 1.0 && !zmalloc_page_is_underutilized(key, ratio))
+  if (!zmalloc_page_is_underutilized(key, ratio))
     return key;
 
   size_t space_size = 8 /* value ptr */ + ((value_tag & kValTtlBit) ? 4 : 0) /* optional expiry */;

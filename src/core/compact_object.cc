@@ -148,7 +148,7 @@ void* DefragHash(MemoryResource* mr, unsigned encoding, void* ptr, float ratio) 
     // Listpack is stored as a single contiguous array
     case kEncodingListPack: {
       uint8_t* lp = (uint8_t*)ptr;
-      if (ratio < 1.0 && !zmalloc_page_is_underutilized(lp, ratio))
+      if (!zmalloc_page_is_underutilized(lp, ratio))
         return lp;
 
       size_t lp_bytes = lpBytes(lp);
