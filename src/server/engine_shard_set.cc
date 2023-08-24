@@ -48,7 +48,6 @@ using absl::GetFlag;
 
 namespace {
 
-constexpr DbIndex kDefaultDbIndex = 0;
 constexpr uint64_t kCursorDoneState = 0u;
 
 vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
@@ -91,6 +90,11 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 
 void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
   cursor = cursor_val;
+  underutilized_found = false;
+}
+
+void EngineShard::DefragTaskState::ResetScanState() {
+  dbid = cursor = 0u;
   underutilized_found = false;
 }
 
@@ -137,8 +141,8 @@ bool EngineShard::DoDefrag() {
   const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   auto& slice = db_slice();
-  DCHECK(slice.IsDbValid(kDefaultDbIndex));
-  auto [prime_table, expire_table] = slice.GetTables(kDefaultDbIndex);
+  DCHECK(slice.IsDbValid(defrag_state_.dbid));
+  auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur = defrag_state_.cursor;
   uint64_t reallocations = 0;
   unsigned traverses_count = 0;
@@ -158,6 +162,15 @@ bool EngineShard::DoDefrag() {
   } while (traverses_count < kMaxTraverses && cur);
 
   defrag_state_.UpdateScanState(cur.value());
+
+  // Once we're done with a db, jump to the next
+  if (defrag_state_.cursor == kCursorDoneState) {
+    defrag_state_.dbid++;
+    // Skip null dbs that still take up slots in the array
+    while (defrag_state_.dbid < slice.db_array_size() && !slice.IsDbValid(defrag_state_.dbid))
+      defrag_state_.dbid++;
+  }
+
   if (reallocations > 0) {
     VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
@@ -168,10 +181,15 @@ bool EngineShard::DoDefrag() {
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
             << " but no location for defrag were found";
   }
+
   stats_.defrag_realloc_total += reallocations;
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
-  return defrag_state_.cursor > kCursorDoneState;
+
+  bool items_left = slice.IsDbValid(defrag_state_.dbid);
+  if (!items_left)
+    defrag_state_.ResetScanState();
+  return items_left;
 }
 
 // the memory defragmentation task is as follow:
