@@ -19,6 +19,7 @@ class AclFamily {
  private:
   static void Acl(CmdArgList args, ConnectionContext* cntx);
   static void List(CmdArgList args, ConnectionContext* cntx);
+  static void SetUser(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace acl
