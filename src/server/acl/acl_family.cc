@@ -7,6 +7,7 @@
 #include <optional>
 #include <variant>
 
+#include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "core/overloaded.h"
 #include "facade/facade_types.h"
@@ -52,13 +53,7 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->StartArray(registry.size());
 
   auto pretty_print_sha = [](std::string_view pass) {
-    std::string result;
-    for (size_t i = 0; i < 15; ++i) {
-      absl::StrAppend(&result, absl::Hex(pass[i]));
-    }
-
-    result.resize(15);
-    return result;
+    return absl::BytesToHexString(pass.substr(15)).substr(15);
   };
 
   for (const auto& [username, user] : registry) {
