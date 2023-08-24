@@ -90,7 +90,7 @@ using OptCat = std::optional<uint32_t>;
 // bool == true if +
 // bool == false if -
 std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
-  if (command[0] == '+' && command[1] == '@') {
+  if (command.starts_with("+@")) {
     auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
@@ -98,7 +98,7 @@ std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
     return {res->second, true};
   }
 
-  if (command[0] == '-' && command[1] == '@') {
+  if (command.starts_with("-@")) {
     auto res = CATEGORY_INDEX_TABLE.find(command.substr(2));
     if (res == CATEGORY_INDEX_TABLE.end()) {
       return {};
