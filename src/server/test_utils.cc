@@ -544,7 +544,7 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
 Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
   TransactionSuspension tx;
   tx.Start();
-  auto fb = pp_->at(1)->LaunchFiber([condition, tx = std::move(tx)]() mutable {
+  auto fb = pp_->at(0)->LaunchFiber([condition, tx = std::move(tx)]() mutable {
     ExpectConditionWithinTimeout(condition);
     tx.Terminate();
   });
