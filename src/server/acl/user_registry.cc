@@ -53,7 +53,7 @@ std::pair<bool, const std::string_view> UserRegistry::AuthUser(std::string_view 
     return {false, {}};
   }
 
-  return {user->second.HasPassword(password) && user->second.IsActive(), user->first};
+  return {user->second.IsActive() && user->second.HasPassword(password), user->first};
 }
 
 UserRegistry::RegistryViewWithLock::RegistryViewWithLock(std::shared_lock<util::SharedMutex> mu,

@@ -138,7 +138,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
 
     auto [cat, add] = MaybeParseAclCategory(command);
     if (!cat) {
-      return ErrorReply(absl::StrCat("Unrecognized paramter", command));
+      return ErrorReply(absl::StrCat("Unrecognized parameter", command));
     }
 
     auto* acl_field = add ? &req.plus_acl_categories : &req.minus_acl_categories;
