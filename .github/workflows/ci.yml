@@ -88,11 +88,14 @@ jobs:
             -L
           cd ${{github.workspace}}/build && pwd
           du -hcs _deps/
-      - name: Build & Test
+      - name: Build
         run: |
           cd ${{github.workspace}}/build
           ninja src/all
           ccache --show-stats
+
+      - name: Test
+        run: |
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
