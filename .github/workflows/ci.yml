@@ -96,6 +96,7 @@ jobs:
 
       - name: Test
         run: |
+          cd ${{github.workspace}}/build
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
