@@ -263,6 +263,4 @@ class Connection : public util::Connection {
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
 };
 
-void RespToArgList(const RespVec& src, CmdArgVec* dest);
-
 }  // namespace facade

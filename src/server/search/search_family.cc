@@ -33,12 +33,6 @@ using namespace facade;
 
 namespace {
 
-const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTypes = {
-    {"TAG"sv, search::SchemaField::TAG},
-    {"TEXT"sv, search::SchemaField::TEXT},
-    {"NUMERIC"sv, search::SchemaField::NUMERIC},
-    {"VECTOR"sv, search::SchemaField::VECTOR}};
-
 static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", "DIM",
                                                  "DISTANCE_METRIC"};
 
@@ -72,15 +66,15 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
 
     // Determine type
     ToUpper(&args[i]);
-    string_view type_str = ArgS(args, i);
-    auto it = kSchemaTypes.find(type_str);
-    if (it == kSchemaTypes.end()) {
+    auto type_str = ArgS(args, i);
+    auto type = ParseSearchFieldType(type_str);
+    if (!type) {
       (*cntx)->SendError("Invalid field type: " + string{type_str});
       return nullopt;
     }
 
     // Skip {algorithm} {dim} flags
-    if (it->second == search::SchemaField::VECTOR)
+    if (*type == search::SchemaField::VECTOR)
       i += 2;
 
     // Skip all trailing ignored parameters
@@ -88,7 +82,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
       i += 2;
     }
 
-    schema.fields[field_alias] = {string{field}, it->second};
+    schema.fields[field_alias] = {string{field}, *type};
   }
 
   return schema;
@@ -196,14 +190,6 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
   }
 }
 
-string_view GetSchemaTypeName(search::SchemaField::FieldType type) {
-  for (const auto& [iname, itype] : kSchemaTypes) {
-    if (itype == type)
-      return iname;
-  }
-  return ""sv;
-}
-
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
@@ -300,7 +286,8 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   if (num_notfound > 0u)
     return (*cntx)->SendError("Unknown index name");
 
-  DCHECK_EQ(infos.front().schema.fields.size(), infos.back().schema.fields.size());
+  DCHECK(infos.front().base_index.schema.fields.size() ==
+         infos.back().base_index.schema.fields.size());
 
   size_t total_num_docs = 0;
   for (const auto& info : infos)
@@ -312,12 +299,12 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendSimpleString(idx_name);
 
   (*cntx)->SendSimpleString("fields");
-  const auto& fields = infos.front().schema.fields;
+  const auto& fields = infos.front().base_index.schema.fields;
   (*cntx)->StartArray(fields.size());
   for (const auto& [field_name, field_info] : fields) {
     string_view reply[6] = {"identifier", string_view{field_info.identifier},
                             "attribute",  string_view{field_name},
-                            "type"sv,     GetSchemaTypeName(field_info.type)};
+                            "type"sv,     SearchFieldTypeToString(field_info.type)};
     (*cntx)->SendSimpleStrArr(reply);
   }
 

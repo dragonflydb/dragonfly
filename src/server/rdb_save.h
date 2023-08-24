@@ -69,6 +69,12 @@ enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_L
 
 class RdbSaver {
  public:
+  // Global data which doesn't belong to shards and is serialized in header
+  struct GlobalData {
+    const StringVec lua_scripts;     // bodies of lua scripts
+    const StringVec search_indices;  // ft.create commands to re-create search indices
+  };
+
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
   // to snapshot all the datastore shards.
   // single_shard - false, means we capture all the data using a single RdbSaver instance
@@ -85,8 +91,8 @@ class RdbSaver {
   // Stops serialization in journal streaming mode in the shard's thread.
   void StopSnapshotInShard(EngineShard* shard);
 
-  // Stores auxiliary (meta) values and lua scripts.
-  std::error_code SaveHeader(const StringVec& lua_scripts);
+  // Stores auxiliary (meta) values and header_info
+  std::error_code SaveHeader(const GlobalData& header_info);
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Fills freq_map with the histogram of rdb types.
@@ -104,7 +110,7 @@ class RdbSaver {
 
   std::error_code SaveEpilog();
 
-  std::error_code SaveAux(const StringVec& lua_scripts);
+  std::error_code SaveAux(const GlobalData&);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
   std::unique_ptr<Impl> impl_;

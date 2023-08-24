@@ -532,7 +532,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
       string& body = data.orig_body.empty() ? data.body : data.orig_body;
       script_bodies.push_back(move(body));
     }
-    ec = saver->SaveHeader(script_bodies);
+    ec = saver->SaveHeader({script_bodies, {}});
   } else {
     ec = saver->SaveHeader({});
   }
