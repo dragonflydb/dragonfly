@@ -54,8 +54,7 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   auto pretty_print_sha = [](std::string_view pass) {
     std::string result;
     for (size_t i = 0; i < 15; ++i) {
-      char c = pass[i];
-      isdigit(c) ? result.push_back(c) : absl::StrAppend(&result, absl::Hex(c));
+      absl::StrAppend(&result, absl::Hex(pass[i]));
     }
 
     result.resize(15);
