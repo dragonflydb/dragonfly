@@ -27,9 +27,9 @@ static std::string AclToString(uint32_t acl_category) {
   const std::string prefix = "+@";
   const std::string postfix = " ";
 
-  for (uint32_t step = 0, cat = 0; cat != JSON; cat = 1ULL << ++step) {
+  for (const auto& [cat_name, cat] : CATEGORY_INDEX_TABLE) {
     if (acl_category & cat) {
-      absl::StrAppend(&tmp, prefix, REVERSE_CATEGORY_INDEX_TABLE[step], postfix);
+      absl::StrAppend(&tmp, prefix, cat_name, postfix);
     }
   }
   tmp.erase(tmp.size());
