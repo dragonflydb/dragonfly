@@ -117,4 +117,50 @@ TEST_F(StringMapTest, Ttl) {
   EXPECT_TRUE(it == sm_->end());
 }
 
+unsigned total_wasted_memory = 0;
+
+TEST_F(StringMapTest, ReallocIfNeeded) {
+  auto build_str = [](size_t i) { return to_string(i) + string(131, 'a'); };
+
+  auto count_waste = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                        size_t block_size, void* arg) {
+    size_t used = block_size * area->used;
+    total_wasted_memory += area->committed - used;
+    return true;
+  };
+
+  for (size_t i = 0; i < 10'000; i++)
+    sm_->AddOrUpdate(build_str(i), build_str(i + 1), i * 10 + 1);
+
+  for (size_t i = 0; i < 10'000; i++) {
+    if (i % 10 == 0)
+      continue;
+    sm_->Erase(build_str(i));
+  }
+
+  mi_heap_collect(mi_heap_get_backing(), true);
+  mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
+  size_t wasted_before = total_wasted_memory;
+
+  size_t underutilized = 0;
+  for (auto it = sm_->begin(); it != sm_->end(); ++it) {
+    underutilized += zmalloc_page_is_underutilized(it->first, 0.9);
+    it.ReallocIfNeeded(0.9);
+  }
+  // Check there are underutilized pages
+  CHECK_GT(underutilized, 0u);
+
+  total_wasted_memory = 0;
+  mi_heap_collect(mi_heap_get_backing(), true);
+  mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
+  size_t wasted_after = total_wasted_memory;
+
+  // Check we waste significanlty less now
+  EXPECT_GT(wasted_before, wasted_after * 2);
+
+  EXPECT_EQ(sm_->Size(), 1000);
+  for (size_t i = 0; i < 1000; i++)
+    EXPECT_EQ(sm_->Find(build_str(i * 10)), build_str(i * 10 + 1));
+}
+
 }  // namespace dfly
