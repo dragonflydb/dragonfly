@@ -117,15 +117,16 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
   User::UpdateRequest req;
 
   for (auto arg : args) {
-    ToUpper(&arg);
-    const auto command = facade::ToSV(arg);
-    if (auto pass = MaybeParsePassword(command); pass) {
+    if (auto pass = MaybeParsePassword(facade::ToSV(arg)); pass) {
       if (req.password) {
         return ErrorReply("Only one password is allowed");
       }
       req.password = std::move(pass);
       continue;
     }
+
+    ToUpper(&arg);
+    const auto command = facade::ToSV(arg);
 
     if (auto status = MaybeParseStatus(command); status) {
       if (req.is_active) {

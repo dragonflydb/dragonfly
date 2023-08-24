@@ -196,6 +196,8 @@ class ConnectionContext : public facade::ConnectionContext {
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow;
 
+  std::optional<std::string_view> authed_username;
+
  private:
   void EnableMonitoring(bool enable) {
     subscriptions++;  // required to support the monitoring
