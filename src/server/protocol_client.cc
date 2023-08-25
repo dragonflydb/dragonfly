@@ -315,6 +315,7 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
   while (!ec) {
     uint32_t consumed;
     if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
+      DCHECK_GT(buffer->AppendLen(), 0u);
       io::MutableBytes buf = buffer->AppendBuffer();
       io::Result<size_t> size_res = sock_->Recv(buf);
       if (!size_res) {
@@ -343,6 +344,11 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
     if (result != RedisParser::INPUT_PENDING) {
       LOG(ERROR) << "Invalid parser status " << result << " for response " << last_resp_;
       return nonstd::make_unexpected(std::make_error_code(std::errc::bad_message));
+    }
+
+    // We need to read more data. Check that we have enough space.
+    if (buffer->AppendLen() < 64u) {
+      buffer->EnsureCapacity(buffer->Capacity() * 2);
     }
   }
 
