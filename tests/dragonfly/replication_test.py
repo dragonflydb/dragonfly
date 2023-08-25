@@ -1506,3 +1506,37 @@ async def test_replicaof_flag_disconnect(df_local_factory):
 
     role = await c_replica.role()
     assert role[0] == b"master"
+
+
+@pytest.mark.asyncio
+async def test_df_crash_on_memcached_error(df_local_factory):
+    master = df_local_factory.create(
+        port=BASE_PORT,
+        memcached_port=11211,
+        proactor_threads=2,
+    )
+
+    replica = df_local_factory.create(
+        port=master.port + 1,
+        memcached_port=master.mc_port + 1,
+        proactor_threads=2,
+    )
+
+    master.start()
+    replica.start()
+
+    c_master = aioredis.Redis(port=master.port)
+    await wait_available_async(c_master)
+
+    c_replica = aioredis.Redis(port=replica.port)
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+    await wait_for_replica_status(c_replica, status="up")
+    await c_replica.close()
+
+    memcached_client = pymemcache.Client(f"localhost:{replica.mc_port}")
+
+    with pytest.raises(pymemcache.exceptions.MemcacheClientError):
+        memcached_client.set(b"key", b"data", noreply=False)
+
+    await c_master.close()
