@@ -234,7 +234,7 @@ NUM_POINTS = 100
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
 async def test_multidim_knn(async_client: aioredis.Redis, index_type):
-    vector_field = VectorField > (
+    vector_field = VectorField(
         "pos",
         "FLAT",
         {

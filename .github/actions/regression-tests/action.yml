@@ -1,0 +1,83 @@
+name: Regression Tests
+description: "Run regression tests"
+
+inputs:
+  dfly-executable:
+    required: true
+    type: string
+  gspace-secret:
+    required: true
+    type: string
+  run-only-on-ubuntu-latest:
+    # 'true' or 'false' cause boolean
+    # is not supported in composite actions
+    required: true
+    type: string
+  build-folder-name:
+    required: true
+    type: string
+
+
+runs:
+  using: "composite"
+  # bring back timeouts once composite actions start supporting them
+  # timeout-minutes: 20
+  steps:
+    - name: Run PyTests
+      shell: bash
+      run: |
+        ls -l ${GITHUB_WORKSPACE}/
+        cd ${GITHUB_WORKSPACE}/tests
+        echo "Current commit is ${{github.sha}}"
+        pip install -r dragonfly/requirements.txt
+        # used by PyTests
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
+
+        pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
+
+
+
+    - name: Run PyTests replication test
+      if: ${{ inputs.run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
+      shell: bash
+      run: |
+        echo "Running PyTests replication test with flag: ${{ inputs.run-only-on-ubuntu-latest }}"
+        cd ${GITHUB_WORKSPACE}/tests
+        # used by PyTests
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+
+        pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
+        pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
+
+
+
+    - name: Send notification on failure
+      if: failure()
+      shell: bash
+      run: |
+        get_failed_tests() {
+          local report_file=$1
+          echo $(jq -r '.tests[] | select(.outcome == "failed") | .nodeid' "$report_file")
+        }
+        cd ${GITHUB_WORKSPACE}/tests
+        failed_tests=""
+        # The order in of if is important, and expected to be the oposite order of the pytest run.
+        # As github runner will not run the next step if the pytest failed, we start from the last
+        # report file and if exist we get the failed test from the pytest run, if there are any.
+        if [ -f rep2_report.json ]; then
+          failed_tests=$(get_failed_tests rep2_report.json)
+        elif [ -f rep1_report.json ]; then
+          failed_tests=$(get_failed_tests rep1_report.json)
+        elif [ -f report.json ]; then
+          failed_tests=$(get_failed_tests report.json)
+        fi
+
+        job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n $failed_tests \\n Job Link: ${job_link}\\n"
+
+        curl -s \
+          -X POST \
+          -H 'Content-Type: application/json' \
+          '${{ inputs.gspace-secret }}' \
+          -d '{"text": "'"${message}"'"}'
