@@ -27,6 +27,7 @@ extern "C" {
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/acl/validator.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
 #include "server/conn_context.h"
@@ -985,6 +986,12 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
                         bool record_stats) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
+
+  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
+    (*cntx)->SendError(absl::StrCat("User: ", cntx->authed_username,
+                                    " does not have the credentials to execute this command"));
+    return true;
+  }
 
   if (auto err = VerifyCommandExecution(cid); err) {
     (*cntx)->SendError(std::move(*err));

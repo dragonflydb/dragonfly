@@ -25,7 +25,8 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
-            cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc)
+            cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
+            acl/validator.cc)
 
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
