@@ -42,6 +42,8 @@ class SinkReplyBuilder {
   }
 
   virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
+  virtual void SendError(ErrorReply error) = 0;
+  virtual void SendError(OpStatus status) = 0;
 
   virtual void SendStored() = 0;  // Reply for set commands.
   virtual void SendSetSkipped() = 0;
@@ -56,6 +58,10 @@ class SinkReplyBuilder {
   }
 
   virtual void SendProtocolError(std::string_view str) = 0;
+
+  // You normally should not call this - maps the status
+  // into the string that would be sent
+  static std::string_view StatusToMsg(OpStatus status);
 
   // In order to reduce interrupt rate we allow coalescing responses together using
   // Batch mode. It is controlled by Connection state machine because it makes sense only
@@ -148,6 +154,8 @@ class MCReplyBuilder : public SinkReplyBuilder {
   using SinkReplyBuilder::SendRaw;
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+  void SendError(ErrorReply error) final;
+  void SendError(OpStatus status) final;
 
   // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
   void SendMGetResponse(absl::Span<const OptResp>) final;
@@ -177,13 +185,13 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SetResp3(bool is_resp3);
 
   void SendError(std::string_view str, std::string_view type = {}) override;
-  virtual void SendError(ErrorReply error);
+  void SendError(ErrorReply error) override;
 
   void SendMGetResponse(absl::Span<const OptResp>) override;
 
   void SendStored() override;
   void SendSetSkipped() override;
-  virtual void SendError(OpStatus status);
+  void SendError(OpStatus status) override;
   void SendProtocolError(std::string_view str) override;
 
   virtual void SendNullArray();   // Send *-1
@@ -205,10 +213,6 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void StartCollection(unsigned len, CollectionType type);
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
-
-  // You normally should not call this - maps the status
-  // into the string that would be sent
-  static std::string_view StatusToMsg(OpStatus status);
 
  protected:
   struct WrappedStrSpan : public StrSpan {

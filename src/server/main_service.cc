@@ -885,7 +885,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   const auto [cid, args_no_cmd] = FindCmd(args);
 
   if (cid == nullptr) {
-    return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
+    return cntx->SendError(ReportUnknownCmd(ArgS(args, 0)));
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -905,7 +905,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
-    (*dfly_cntx)->SendError(std::move(*err));
+    dfly_cntx->SendError(std::move(*err));
     return;
   }
 
@@ -915,16 +915,16 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
-    return (*cntx)->SendSimpleString("QUEUED");
+    return cntx->SendSimpleString("QUEUED");
   }
 
   uint64_t start_ns = absl::GetCurrentTimeNanos();
 
   if (cid->opt_mask() & CO::DENYOOM) {
-    int64_t used_memory = etl.GetUsedMemory(start_ns);
+    uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
-      return (*cntx)->SendError(kOutOfMemory);
+      return cntx->SendError(kOutOfMemory);
     }
   }
 
@@ -941,7 +941,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
           dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
 
       if (status != OpStatus::OK)
-        return (*cntx)->SendError(status);
+        return cntx->SendError(status);
     }
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
@@ -952,7 +952,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
             st != OpStatus::OK)
-          return (*cntx)->SendError(st);
+          return cntx->SendError(st);
       }
 
       dfly_cntx->transaction = dist_trans.get();

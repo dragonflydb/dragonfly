@@ -161,8 +161,20 @@ void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
   SendSimpleString("END");
 }
 
-void MCReplyBuilder::SendError(string_view str, std::string_view type) {
-  SendSimpleString("ERROR");
+void MCReplyBuilder::SendError(string_view str, [[maybe_unused]] std::string_view type) {
+  SendClientError(str);
+}
+
+void MCReplyBuilder::SendError(ErrorReply error) {
+  if (error.status)
+    return SendError(*error.status);
+
+  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
+  SendError(message_sv, error.kind);
+}
+
+void MCReplyBuilder::SendError(OpStatus status) {
+  SendError(StatusToMsg(status));
 }
 
 void MCReplyBuilder::SendProtocolError(std::string_view str) {
@@ -277,7 +289,7 @@ void RedisReplyBuilder::SendBulkString(std::string_view str) {
   return Send(v, ABSL_ARRAYSIZE(v));
 }
 
-std::string_view RedisReplyBuilder::StatusToMsg(OpStatus status) {
+std::string_view SinkReplyBuilder::StatusToMsg(OpStatus status) {
   switch (status) {
     case OpStatus::OK:
       return "OK";
