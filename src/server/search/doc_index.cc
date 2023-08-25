@@ -11,6 +11,7 @@
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
+#include "server/server_state.h"
 
 extern "C" {
 #include "redis/object.h"
@@ -150,10 +151,13 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
-    : base_{index}, indices_{index->schema}, key_index_{} {
+    : base_{std::move(index)}, indices_{{}}, key_index_{} {
 }
 
-void ShardDocIndex::Init(const OpArgs& op_args) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args) {
+  key_index_ = DocKeyIndex{};
+  indices_ = search::FieldIndices{base_->schema};
+
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
 }
@@ -213,7 +217,11 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
                                 shared_ptr<DocIndex> index_ptr) {
   auto shard_index = make_unique<ShardDocIndex>(index_ptr);
   auto [it, _] = indices_.emplace(name, move(shard_index));
-  it->second->Init(op_args);
+
+  // Don't build while loading, shutting down, etc.
+  // After loading, indices are rebuilt separately
+  if (ServerState::tlocal()->gstate() == GlobalState::ACTIVE)
+    it->second->Rebuild(op_args);
 
   op_args.shard->db_slice().SetDocDeletionCallback(
       [this](string_view key, const DbContext& cntx, const PrimeValue& pv) {
@@ -233,6 +241,11 @@ bool ShardDocIndices::DropIndex(string_view name) {
 
   indices_.erase(it);
   return true;
+}
+
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
+  for (auto& [_, ptr] : indices_)
+    ptr->Rebuild(op_args);
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {

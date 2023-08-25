@@ -75,6 +75,7 @@ class ShardDocIndex {
   struct DocKeyIndex {
     DocId Add(std::string_view key);
     DocId Remove(std::string_view key);
+
     std::string_view Get(DocId id) const;
     size_t Size() const;
 
@@ -86,14 +87,15 @@ class ShardDocIndex {
   };
 
  public:
+  // Index must be rebuilt at least once after intialization
   ShardDocIndex(std::shared_ptr<DocIndex> index);
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
                       search::SearchAlgorithm* search_algo) const;
 
-  // Initialize index. Traverses all matching documents and assigns ids.
-  void Init(const OpArgs& op_args);
+  // Clears internal data. Traverses all matching documents and assigns ids.
+  void Rebuild(const OpArgs& op_args);
 
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
@@ -114,10 +116,16 @@ class ShardDocIndices {
  public:
   // Get sharded document index by its name or nullptr if not found
   ShardDocIndex* GetIndex(std::string_view name);
-  // Init index: create shard local state for given index with given name
+
+  // Init index: create shard local state for given index with given name.
+  // Build if instance is in active state.
   void InitIndex(const OpArgs& op_args, std::string_view name, std::shared_ptr<DocIndex> index);
+
   // Drop index, return true if it existed and was dropped
   bool DropIndex(std::string_view name);
+
+  // Rebuild all indices
+  void RebuildAllIndices(const OpArgs& op_args);
 
   std::vector<std::string> GetIndexNames() const;
 
