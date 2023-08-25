@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/match.h>
 
 #include <atomic>
 #include <jsoncons/json.hpp>
@@ -39,6 +40,7 @@ static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", 
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList args,
                                             ConnectionContext* cntx) {
   search::Schema schema;
+
   for (size_t i = 0; i < args.size(); i++) {
     string_view field = ArgS(args, i++);
 
@@ -82,8 +84,12 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
       i += 2;
     }
 
-    schema.fields[field_alias] = {string{field}, *type};
+    schema.fields[field] = {*type, string{field_alias}};
   }
+
+  // Build field name mapping table
+  for (const auto& [field_ident, field_info] : schema.fields)
+    schema.field_names[field_info.short_name] = field_ident;
 
   return schema;
 }
@@ -91,6 +97,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionContext* cntx) {
   size_t limit_offset = 0, limit_total = 10;
   search::FtVector knn_vector;
+  optional<SearchParams::FieldAliasList> alias_list;
 
   for (size_t i = 0; i < args.size(); i++) {
     ToUpper(&args[i]);
@@ -110,6 +117,47 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionConte
       continue;
     }
 
+    // RETURN {num} [{ident} AS {name}...]
+    if (ArgS(args, i) == "RETURN") {
+      if (i + 1 >= args.size()) {
+        (*cntx)->SendError(kSyntaxErr);
+        return nullopt;
+      }
+
+      uint64_t num_fields = args.size();
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &num_fields)) {
+        (*cntx)->SendError(kSyntaxErr);
+        return nullopt;
+      }
+
+      i += 1;
+
+      alias_list = SearchParams::FieldAliasList{};
+      while (alias_list->size() < num_fields) {
+        if (i++ >= args.size()) {
+          (*cntx)->SendError(kSyntaxErr);
+          return nullopt;
+        }
+
+        string_view ident = ArgS(args, i);
+        string_view alias = ident;
+
+        if (i + 2 < args.size() && absl::EqualsIgnoreCase(ArgS(args, i + 1), "AS")) {
+          alias = ArgS(args, i + 2);
+          i += 2;
+        }
+
+        alias_list->emplace_back(ident, alias);
+      }
+      continue;
+    }
+
+    // NOCONTENT
+    if (ArgS(args, i) == "NOCONTENT") {
+      alias_list = SearchParams::FieldAliasList{};
+      continue;
+    }
+
     // [PARAMS num(ignored) name(ignored) knn_vector]
     if (ArgS(args, i) == "PARAMS") {
       if (i + 3 >= args.size()) {
@@ -122,7 +170,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionConte
     }
   }
 
-  return SearchParams{limit_offset, limit_total, move(knn_vector)};
+  return SearchParams{limit_offset, limit_total, std::move(alias_list), std::move(knn_vector)};
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
@@ -140,12 +188,15 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
   for (const auto& shard_docs : results)
     total_count += shard_docs.total_hits;
 
-  size_t response_count =
+  size_t result_count =
       min(total_count - min(total_count, params.limit_offset), params.limit_total);
 
   facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
 
-  (*cntx)->StartArray(response_count * 2 + 1);
+  bool ids_only = params.IdsOnly();
+  size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
+
+  (*cntx)->StartArray(reply_size);
   (*cntx)->SendLong(total_count);
 
   size_t sent = 0;
@@ -158,10 +209,13 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
         continue;
       }
 
-      if (sent++ >= response_count)
+      if (sent++ >= result_count)
         return;
 
-      SendSerializedDoc(serialized_doc, cntx);
+      if (ids_only)
+        (*cntx)->SendBulkString(serialized_doc.key);
+      else
+        SendSerializedDoc(serialized_doc, cntx);
     }
   }
 }
@@ -180,13 +234,21 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
                [](const auto* l, const auto* r) { return l->knn_distance < r->knn_distance; });
   docs.resize(min(docs.size(), knn_limit));
 
-  size_t response_count =
+  size_t result_count =
       min(docs.size() - min(docs.size(), params.limit_offset), params.limit_total);
 
-  (*cntx)->StartArray(response_count * 2 + 1);
+  bool ids_only = params.IdsOnly();
+  size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
+
+  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
+
+  (*cntx)->StartArray(reply_size);
   (*cntx)->SendLong(docs.size());
-  for (auto* doc : absl::MakeSpan(docs).subspan(params.limit_offset, response_count)) {
-    SendSerializedDoc(*doc, cntx);
+  for (auto* doc : absl::MakeSpan(docs).subspan(params.limit_offset, result_count)) {
+    if (ids_only)
+      (*cntx)->SendBulkString(doc->key);
+    else
+      SendSerializedDoc(*doc, cntx);
   }
 }
 
@@ -293,17 +355,18 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   for (const auto& info : infos)
     total_num_docs += info.num_docs;
 
+  const auto& schema = infos.front().base_index.schema;
+
   (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
 
   (*cntx)->SendSimpleString("index_name");
   (*cntx)->SendSimpleString(idx_name);
 
   (*cntx)->SendSimpleString("fields");
-  const auto& fields = infos.front().base_index.schema.fields;
-  (*cntx)->StartArray(fields.size());
-  for (const auto& [field_name, field_info] : fields) {
-    string_view reply[6] = {"identifier", string_view{field_info.identifier},
-                            "attribute",  string_view{field_name},
+  (*cntx)->StartArray(schema.fields.size());
+  for (const auto& [field_ident, field_info] : schema.fields) {
+    string_view reply[6] = {"identifier", string_view{field_ident},
+                            "attribute",  field_info.short_name,
                             "type"sv,     SearchFieldTypeToString(field_info.type)};
     (*cntx)->SendSimpleStrArr(reply);
   }

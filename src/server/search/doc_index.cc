@@ -93,8 +93,8 @@ string DocIndexInfo::BuildRestoreCommand() const {
     absl::StrAppend(&out, " PREFIX", " 1 ", base_index.prefix);
 
   absl::StrAppend(&out, " SCHEMA");
-  for (const auto& [fname, finfo] : base_index.schema.fields) {
-    absl::StrAppend(&out, " ", finfo.identifier, " AS ", fname, " ",
+  for (const auto& [fident, finfo] : base_index.schema.fields) {
+    absl::StrAppend(&out, " ", fident, " AS ", finfo.short_name, " ",
                     SearchFieldTypeToString(finfo.type));
   }
 
@@ -192,7 +192,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       continue;
     }
 
-    auto doc_data = GetAccessor(op_args.db_cntx, (*it)->second)->Serialize(base_->schema);
+    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+    auto doc_data = params.return_fields ? accessor->Serialize(base_->schema, *params.return_fields)
+                                         : accessor->Serialize(base_->schema);
+
     float score = search_results.knn_distances.empty() ? 0 : search_results.knn_distances[i];
     out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), score});
   }
@@ -228,8 +231,8 @@ bool ShardDocIndices::DropIndex(string_view name) {
 
   // Clean caches that might have data from this index
   auto info = it->second->GetInfo();
-  for (const auto& [_, field] : info.base_index.schema.fields)
-    JsonAccessor::RemoveFieldFromCache(field.identifier);
+  for (const auto& [fident, field] : info.base_index.schema.fields)
+    JsonAccessor::RemoveFieldFromCache(fident);
 
   indices_.erase(it);
   return true;

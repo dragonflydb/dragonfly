@@ -264,19 +264,19 @@ struct BasicSearch {
 }  // namespace
 
 FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, indices_{} {
-  for (const auto& [field_name, field_info] : schema_.fields) {
+  for (const auto& [field_ident, field_info] : schema_.fields) {
     switch (field_info.type) {
       case SchemaField::TAG:
-        indices_[field_name] = make_unique<TagIndex>();
+        indices_[field_ident] = make_unique<TagIndex>();
         break;
       case SchemaField::TEXT:
-        indices_[field_name] = make_unique<TextIndex>();
+        indices_[field_ident] = make_unique<TextIndex>();
         break;
       case SchemaField::NUMERIC:
-        indices_[field_name] = make_unique<NumericIndex>();
+        indices_[field_ident] = make_unique<NumericIndex>();
         break;
       case SchemaField::VECTOR:
-        indices_[field_name] = make_unique<VectorIndex>();
+        indices_[field_ident] = make_unique<VectorIndex>();
         break;
     }
   }
@@ -284,14 +284,14 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
 
 void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Add(doc, access, schema_.fields[field].identifier);
+    index->Add(doc, access, field);
   }
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
 }
 
 void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Remove(doc, access, schema_.fields[field].identifier);
+    index->Remove(doc, access, field);
   }
   auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
   CHECK(it != all_ids_.end() && *it == doc);
@@ -299,6 +299,10 @@ void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
+  // Replace short field name with full ident
+  if (auto it = schema_.field_names.find(field); it != schema_.field_names.end())
+    field = it->second;
+
   auto it = indices_.find(field);
   return it != indices_.end() ? it->second.get() : nullptr;
 }

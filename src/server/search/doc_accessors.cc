@@ -30,11 +30,33 @@ string_view SdsToSafeSv(sds str) {
   return str != nullptr ? string_view{str, sdslen(str)} : ""sv;
 }
 
-string FtVectorToString(const search::FtVector& vec) {
-  return absl::StrCat("[", absl::StrJoin(vec, ","), "]");
+string PrintField(search::SchemaField::FieldType type, string_view value) {
+  if (type == search::SchemaField::VECTOR)
+    return absl::StrCat("[", absl::StrJoin(BytesToFtVector(value), ","), "]");
+  else
+    return string{value};
+}
+
+string ExtractValue(const search::Schema& schema, string_view key, string_view value) {
+  auto it = schema.fields.find(key);
+  if (it == schema.fields.end())
+    return string{value};
+
+  return PrintField(it->second.type, value);
 }
 
 }  // namespace
+
+SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
+                                      const SearchParams::FieldAliasList& fields) const {
+  SearchDocData out{};
+  for (const auto& [fident, fname] : fields) {
+    auto it = schema.fields.find(fident);
+    auto type = it != schema.fields.end() ? it->second.type : search::SchemaField::TEXT;
+    out[fname] = PrintField(type, GetString(fident));
+  }
+  return out;
+}
 
 string_view ListPackAccessor::GetString(string_view active_field) const {
   return container_utils::LpFind(lp_, active_field, intbuf_[0].data()).value_or(""sv);
@@ -44,7 +66,7 @@ search::FtVector ListPackAccessor::GetVector(string_view active_field) const {
   return BytesToFtVector(GetString(active_field));
 }
 
-SearchDocData ListPackAccessor::Serialize(search::Schema schema) const {
+SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
 
   uint8_t* fptr = lpFirst(lp_);
@@ -56,10 +78,7 @@ SearchDocData ListPackAccessor::Serialize(search::Schema schema) const {
     string_view v = container_utils::LpGetView(fptr, intbuf_[1].data());
     fptr = lpNext(lp_, fptr);
 
-    if (schema.fields.at(k).type == search::SchemaField::VECTOR)
-      out[k] = FtVectorToString(GetVector(k));
-    else
-      out[k] = v;
+    out[k] = ExtractValue(schema, k, v);
   }
 
   return out;
@@ -73,17 +92,10 @@ search::FtVector StringMapAccessor::GetVector(string_view active_field) const {
   return BytesToFtVector(GetString(active_field));
 }
 
-SearchDocData StringMapAccessor::Serialize(search::Schema schema) const {
+SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
-  for (const auto& [kptr, vptr] : *hset_) {
-    string_view k = SdsToSafeSv(kptr);
-    string_view v = SdsToSafeSv(vptr);
-
-    if (schema.fields.at(k).type == search::SchemaField::VECTOR)
-      out[k] = FtVectorToString(GetVector(k));
-    else
-      out[k] = v;
-  }
+  for (const auto& [kptr, vptr] : *hset_)
+    out[SdsToSafeSv(kptr)] = ExtractValue(schema, SdsToSafeSv(kptr), SdsToSafeSv(vptr));
 
   return out;
 }
@@ -129,11 +141,19 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   return path;
 }
 
-SearchDocData JsonAccessor::Serialize(search::Schema schema) const {
+SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
-  for (const auto& member : json_.object_range()) {
+  // TODO: use short names by checking current path
+  for (const auto& member : json_.object_range())
     out[member.key()] = member.value().as_string();
-  }
+  return out;
+}
+
+SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
+                                      const SearchParams::FieldAliasList& fields) const {
+  SearchDocData out{};
+  for (const auto& [ident, name] : fields)
+    out[name] = GetString(ident);
   return out;
 }
 

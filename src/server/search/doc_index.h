@@ -41,7 +41,15 @@ struct SearchParams {
   size_t limit_offset;
   size_t limit_total;
 
+  using FieldAliasList =
+      std::vector<std::pair<std::string /*identifier*/, std::string /*short name*/>>;
+  std::optional<FieldAliasList> return_fields;
+
   search::FtVector knn_vector;
+
+  bool IdsOnly() const {
+    return return_fields && return_fields->empty();
+  }
 };
 
 // Stores basic info about a document index.
