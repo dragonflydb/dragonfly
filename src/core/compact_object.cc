@@ -141,7 +141,7 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
   }
 }
 
-// Iterates over allocations of internal hash data structes and re-allocates
+// Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
 pair<void*, bool> DefragHash(MemoryResource* mr, unsigned encoding, void* ptr, float ratio) {
