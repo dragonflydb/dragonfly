@@ -232,25 +232,22 @@ TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
       OpStatus::OUT_OF_MEMORY, OpStatus::INVALID_FLOAT, OpStatus::INVALID_INT,
       OpStatus::SYNTAX_ERR,    OpStatus::BUSY_GROUP,    OpStatus::INVALID_NUMERIC_RESULT};
   for (const auto& err : error_codes) {
-    const std::string_view error_code_name = DebugString(err);
     const std::string_view error_name = RedisReplyBuilder::StatusToMsg(err);
     const std::string_view error_type = GetErrorType(error_name);
 
     sink_.Clear();
     builder_->SendError(err);
-    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart))
-        << " invalid start char for " << error_code_name;
-    ASSERT_TRUE(absl::EndsWith(str(), kCRLF))
-        << " failed to find correct termination at " << error_code_name;
+    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart)) << " invalid start char for " << err;
+    ASSERT_TRUE(absl::EndsWith(str(), kCRLF)) << " failed to find correct termination at " << err;
     ASSERT_EQ(builder_->err_count().at(error_type), 1)
-        << " number of error count is invalid for " << error_code_name;
+        << " number of error count is invalid for " << err;
     ASSERT_EQ(str(), BuildExpectedErrorString(error_name))
         << " error different from expected - '" << str() << "'";
 
     auto parsing_output = Parse();
     ASSERT_TRUE(parsing_output.Verify(SinkSize()))
-        << " verify for the result is invalid for " << error_code_name;
-    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << error_code_name;
+        << " verify for the result is invalid for " << err;
+    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << err;
   }
 }
 
@@ -261,24 +258,21 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
                                   OpStatus::TIMED_OUT,           OpStatus::STREAM_ID_SMALL};
   uint64_t error_count = 0;
   for (const auto& err : none_unique_codes) {
-    const std::string_view error_code_name = DebugString(err);
     const std::string_view error_name = RedisReplyBuilder::StatusToMsg(err);
     const std::string_view error_type = GetErrorType(error_name);
 
     sink_.Clear();
     builder_->SendError(err);
-    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart))
-        << " invalid start char for " << error_code_name;
+    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart)) << " invalid start char for " << err;
     ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
     auto current_error_count = builder_->err_count().at(error_type);
     error_count++;
-    ASSERT_EQ(current_error_count, error_count)
-        << " number of error count is invalid for " << error_code_name;
+    ASSERT_EQ(current_error_count, error_count) << " number of error count is invalid for " << err;
     auto parsing_output = Parse();
     ASSERT_TRUE(parsing_output.Verify(SinkSize()))
-        << " verify for the result is invalid for " << error_code_name;
+        << " verify for the result is invalid for " << err;
 
-    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << error_code_name;
+    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << err;
   }
 }
 
