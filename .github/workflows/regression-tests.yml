@@ -5,11 +5,8 @@ on:
     - cron: '0 0/3 * * *'
   workflow_dispatch:
 
-
-
-
 jobs:
-  build-n-test:
+  build:
     strategy:
       matrix:
         # Test of these containers
@@ -39,57 +36,10 @@ jobs:
           pwd
           ls -l ..
 
-      - name: Run PyTests
-        timeout-minutes: 20
-        run: |
-          ls -l ${GITHUB_WORKSPACE}/
-          cd ${GITHUB_WORKSPACE}/tests
-          echo "Current commit is ${{github.sha}}"
-          pip install -r dragonfly/requirements.txt
-          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
-          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-
-          pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
-
-
-
-      - name: Run PyTests replication test
-        if: ${{ matrix.runner  == 'ubuntu-latest' }}
-        timeout-minutes: 20
-        run: |
-          cd ${GITHUB_WORKSPACE}/tests
-          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
-
-          pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
-          pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
-
-
-
-      - name: Send notification on failure
-        if: failure()
-        run: |
-          get_failed_tests() {
-            local report_file=$1
-            echo $(jq -r '.tests[] | select(.outcome == "failed") | .nodeid' "$report_file")
-          }
-          cd ${GITHUB_WORKSPACE}/tests
-          failed_tests=""
-          # The order in of if is important, and expected to be the oposite order of the pytest run.
-          # As github runner will not run the next step if the pytest failed, we start from the last
-          # report file and if exist we get the failed test from the pytest run, if there are any.
-          if [ -f rep2_report.json ]; then
-            failed_tests=$(get_failed_tests rep2_report.json)
-          elif [ -f rep1_report.json ]; then
-            failed_tests=$(get_failed_tests rep1_report.json)
-          elif [ -f report.json ]; then
-            failed_tests=$(get_failed_tests report.json)
-          fi
-
-          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n $failed_tests \\n Job Link: ${job_link}\\n"
-
-          curl -s \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
-            -d '{"text": "'"${message}"'"}'
+      - name: Run regression tests action
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          run-only-on-ubuntu-latest: true
+          build-folder-name: build
