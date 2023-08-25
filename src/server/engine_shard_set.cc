@@ -91,6 +91,10 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
   cursor = cursor_val;
   underutilized_found = false;
+  // Once we're done with a db, jump to the next
+  if (cursor == kCursorDoneState) {
+    dbid++;
+  }
 }
 
 void EngineShard::DefragTaskState::ResetScanState() {
@@ -141,6 +145,17 @@ bool EngineShard::DoDefrag() {
   const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   auto& slice = db_slice();
+
+  // If we moved to an invalid db, skip as long as it's not the last one
+  if (!slice.IsDbValid(defrag_state_.dbid) && defrag_state_.dbid + 1 < slice.db_array_size())
+    defrag_state_.dbid++;
+
+  // If we found no valid db, we finished traversing and start from scratch next time
+  if (!slice.IsDbValid(defrag_state_.dbid)) {
+    defrag_state_.ResetScanState();
+    return false;
+  }
+
   DCHECK(slice.IsDbValid(defrag_state_.dbid));
   auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur = defrag_state_.cursor;
@@ -163,14 +178,6 @@ bool EngineShard::DoDefrag() {
 
   defrag_state_.UpdateScanState(cur.value());
 
-  // Once we're done with a db, jump to the next
-  if (defrag_state_.cursor == kCursorDoneState) {
-    defrag_state_.dbid++;
-    // Skip null dbs that still take up slots in the array
-    while (defrag_state_.dbid < slice.db_array_size() && !slice.IsDbValid(defrag_state_.dbid))
-      defrag_state_.dbid++;
-  }
-
   if (reallocations > 0) {
     VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
@@ -186,10 +193,7 @@ bool EngineShard::DoDefrag() {
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
 
-  bool items_left = slice.IsDbValid(defrag_state_.dbid);
-  if (!items_left)
-    defrag_state_.ResetScanState();
-  return items_left;
+  return true;
 }
 
 // the memory defragmentation task is as follow:
