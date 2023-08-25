@@ -1514,8 +1514,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  if (args.size() == 3) {
-    return (*cntx)->SendError("ACL is not supported yet");
+  if (args.size() == 2) {
+    const auto* registry = ServerState::tlocal()->user_registry;
+    std::string_view username = facade::ToSV(args[0]);
+    std::string_view password = facade::ToSV(args[1]);
+    auto is_authorized = registry->AuthUser(username, password);
+    if (is_authorized) {
+      cntx->authed_username = username;
+      return (*cntx)->SendOk();
+    }
+    return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
   }
 
   if (!cntx->req_auth) {

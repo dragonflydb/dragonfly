@@ -50,7 +50,6 @@ class UserRegistry {
   bool IsUserActive(std::string_view username) const;
 
   // Acquires a read lock
-  // Used by Auth
   bool AuthUser(std::string_view username, std::string_view password) const;
 
   // Helper class for accessing the registry with a ReadLock outside the scope of UserRegistry

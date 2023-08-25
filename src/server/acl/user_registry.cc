@@ -5,6 +5,7 @@
 #include "server/acl/user_registry.h"
 
 #include "core/fibers.h"
+#include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
 
 namespace dfly::acl {
@@ -51,7 +52,7 @@ bool UserRegistry::AuthUser(std::string_view username, std::string_view password
     return false;
   }
 
-  return user->second.HasPassword(password);
+  return user->second.IsActive() && user->second.HasPassword(password);
 }
 
 UserRegistry::RegistryViewWithLock::RegistryViewWithLock(std::shared_lock<util::SharedMutex> mu,
