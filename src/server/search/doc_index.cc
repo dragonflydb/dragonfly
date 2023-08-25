@@ -151,7 +151,7 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
-    : base_{index}, indices_{{}}, key_index_{} {
+    : base_{std::move(index)}, indices_{{}}, key_index_{} {
 }
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args) {
