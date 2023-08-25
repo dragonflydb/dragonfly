@@ -45,15 +45,14 @@ bool UserRegistry::IsUserActive(std::string_view username) const {
   return it->second.IsActive();
 }
 
-std::pair<bool, const std::string_view> UserRegistry::AuthUser(std::string_view username,
-                                                               std::string_view password) const {
+bool UserRegistry::AuthUser(std::string_view username, std::string_view password) const {
   std::shared_lock<util::SharedMutex> lock(mu_);
   const auto& user = registry_.find(username);
   if (user == registry_.end()) {
-    return {false, {}};
+    return false;
   }
 
-  return {user->second.IsActive() && user->second.HasPassword(password), user->first};
+  return user->second.IsActive() && user->second.HasPassword(password);
 }
 
 UserRegistry::RegistryViewWithLock::RegistryViewWithLock(std::shared_lock<util::SharedMutex> mu,
