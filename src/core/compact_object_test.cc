@@ -634,7 +634,7 @@ TEST_F(CompactObjectTest, DefragHash) {
 
   // Trigger re-allocation
   cobj_.InitRobj(OBJ_HASH, kEncodingListPack, target_lp);
-  cobj_.DefragIfNeeded(0.8);
+  CHECK(cobj_.DefragIfNeeded(0.8));
 
   // Check the pointer changes as the listpack needed defragmentation
   auto lp = (uint8_t*)cobj_.RObjPtr();

@@ -141,31 +141,34 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
   }
 }
 
-// Iterates over allocations of internal hash data structed and re-allocates
+// Iterates over allocations of internal hash data structes and re-allocates
 // them if their pages are underutilized.
-void* DefragHash(MemoryResource* mr, unsigned encoding, void* ptr, float ratio) {
+// Returns pointer to new object ptr and whether any re-allocations happened.
+pair<void*, bool> DefragHash(MemoryResource* mr, unsigned encoding, void* ptr, float ratio) {
   switch (encoding) {
     // Listpack is stored as a single contiguous array
     case kEncodingListPack: {
       uint8_t* lp = (uint8_t*)ptr;
       if (!zmalloc_page_is_underutilized(lp, ratio))
-        return lp;
+        return {lp, false};
 
       size_t lp_bytes = lpBytes(lp);
       uint8_t* replacement = lpNew(lpBytes(lp));
       memcpy(replacement, lp, lp_bytes);
       lpFree(lp);
 
-      return replacement;
+      return {replacement, true};
     };
 
     // StringMap supports re-allocation of it's internal nodes
     case kEncodingStrMap2: {
+      bool realloced = false;
+
       StringMap* sm = (StringMap*)ptr;
       for (auto it = sm->begin(); it != sm->end(); ++it)
-        it.ReallocIfNeeded(ratio);
+        realloced |= it.ReallocIfNeeded(ratio);
 
-      return sm;
+      return {sm, realloced};
     }
 
     default:
@@ -394,10 +397,13 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
 bool RobjWrapper::DefragIfNeeded(float ratio) {
   if (type() == OBJ_STRING) {
     if (zmalloc_page_is_underutilized(inner_obj(), ratio)) {
-      return Reallocate(tl.local_mr);
+      ReallocateString(tl.local_mr);
+      return true;
     }
   } else if (type() == OBJ_HASH) {
-    inner_obj_ = DefragHash(tl.local_mr, encoding_, inner_obj_, ratio);
+    auto [new_ptr, realloced] = DefragHash(tl.local_mr, encoding_, inner_obj_, ratio);
+    inner_obj_ = new_ptr;
+    return realloced;
   }
   return false;
 }
@@ -487,12 +493,12 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
   return ss->Add(score, ele, in_flags, out_flags, newscore);
 }
 
-bool RobjWrapper::Reallocate(MemoryResource* mr) {
+void RobjWrapper::ReallocateString(MemoryResource* mr) {
+  DCHECK_EQ(type(), OBJ_STRING);
   void* old_ptr = inner_obj_;
   inner_obj_ = mr->allocate(sz_, kAlignSize);
   memcpy(inner_obj_, old_ptr, sz_);
   mr->deallocate(old_ptr, 0, kAlignSize);
-  return true;
 }
 
 void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
