@@ -17,6 +17,7 @@
 #include "base/logging.h"
 #include "core/json_object.h"
 #include "core/search/search.h"
+#include "facade/arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
@@ -95,25 +96,16 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
 }
 
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionContext* cntx) {
+  ArgumentParser parser{args};
   size_t limit_offset = 0, limit_total = 10;
   search::FtVector knn_vector;
   optional<SearchParams::FieldAliasList> alias_list;
 
-  for (size_t i = 0; i < args.size(); i++) {
-    ToUpper(&args[i]);
-
+  while (parser.ToUpper().Ok()) {
     // [LIMIT offset total]
-    if (ArgS(args, i) == "LIMIT") {
-      if (i + 2 >= args.size()) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &limit_offset) ||
-          !absl::SimpleAtoi(ArgS(args, i + 2), &limit_total)) {
-        (*cntx)->SendError(kInvalidIntErr);
-        return nullopt;
-      }
-      i += 2;
+    if (parser.Check("LIMIT").ExpectTail(2)) {
+      limit_offset = parser.Next();
+      limit_total = parser.Next();
       continue;
     }
 
@@ -159,18 +151,19 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionConte
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (ArgS(args, i) == "PARAMS") {
-      if (i + 3 >= args.size()) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      knn_vector = BytesToFtVector(ArgS(args, i + 3));
-      i += 3;
+    if (parser.Check("PARAMS").ExpectTail(3)) {
+      parser.Skip(2);
+      knn_vector = BytesToFtVector(parser.Next());
       continue;
     }
   }
 
-  return SearchParams{limit_offset, limit_total, std::move(alias_list), std::move(knn_vector)};
+  if (auto err = parser.Error(); err) {
+    (*cntx)->SendError(err->MakeReply());
+    return nullopt;
+  }
+
+  return SearchParams{limit_offset, limit_total, move(knn_vector)};
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
