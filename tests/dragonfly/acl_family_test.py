@@ -55,3 +55,25 @@ async def test_acl_setuser(async_client):
     await async_client.execute_command("ACL SETUSER kostas +@all")
     result = await async_client.execute_command("ACL LIST")
     assert "user kostas on nopass +@ALL" in result
+
+
+@pytest.mark.asyncio
+async def test_acl_auth(async_client):
+    await async_client.execute_command("ACL SETUSER kostas >mypass")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("AUTH kostas wrong_pass")
+
+    # This should fail because user is inactive
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("AUTH kostas mypass")
+
+    # Activate user
+    await async_client.execute_command("ACL SETUSER kostas ON")
+
+    result = await async_client.execute_command("AUTH kostas mypass")
+    result == "ok"
+
+    # Let's also try default
+    result = await async_client.execute_command("AUTH default nopass")
+    result == "ok"

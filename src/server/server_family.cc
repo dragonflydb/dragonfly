@@ -779,6 +779,15 @@ struct SaveStagesController : public SaveStagesInputs {
   Mutex rdb_name_map_mu_;
 };
 
+void RebuildAllSearchIndices(Service* service) {
+  boost::intrusive_ptr<Transaction> trans{new Transaction{service->FindCmd("FT.CREATE")}};
+  trans->InitByArgs(0, {});
+  trans->ScheduleSingleHop([](auto* trans, auto* es) {
+    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
+    return OpStatus::OK;
+  });
+}
+
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -1072,6 +1081,8 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
+
+    RebuildAllSearchIndices(&service_);
 
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -1514,8 +1525,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  if (args.size() == 3) {
-    return (*cntx)->SendError("ACL is not supported yet");
+  if (args.size() == 2) {
+    const auto* registry = ServerState::tlocal()->user_registry;
+    std::string_view username = facade::ToSV(args[0]);
+    std::string_view password = facade::ToSV(args[1]);
+    auto is_authorized = registry->AuthUser(username, password);
+    if (is_authorized) {
+      cntx->authed_username = username;
+      return (*cntx)->SendOk();
+    }
+    return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
   }
 
   if (!cntx->req_auth) {
