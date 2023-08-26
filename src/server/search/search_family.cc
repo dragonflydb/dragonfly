@@ -38,38 +38,35 @@ namespace {
 static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", "DIM",
                                                  "DISTANCE_METRIC"};
 
+bool IsValidJsonPath(string_view path) {
+  error_code ec;
+  jsoncons::jsonpath::make_expression<JsonType>(path, ec);
+  return !ec;
+}
+
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList args,
                                             ConnectionContext* cntx) {
+  ArgumentParser parser{args};
   search::Schema schema;
 
-  for (size_t i = 0; i < args.size(); i++) {
-    string_view field = ArgS(args, i++);
+  while (parser.Ok()) {
+    string_view field = parser.Next();
+    string_view field_alias = field;
 
     // Verify json path is correct
-    if (type == DocIndex::JSON) {
-      error_code ec;
-      jsoncons::jsonpath::make_expression<JsonType>(field, ec);
-      if (ec) {
-        (*cntx)->SendError("Bad json path: " + string{field});
-        return nullopt;
-      }
-    }
-
-    // Check optional AS [alias]
-    string_view field_alias = field;  // by default "alias" is same as identifier
-    if (i + 1 < args.size() && absl::AsciiStrToUpper(ArgS(args, i)) == "AS") {
-      field_alias = ArgS(args, i + 1);
-      i += 2;
-    }
-
-    if (i >= args.size()) {
-      (*cntx)->SendError("No field type for field: " + string{field});
+    if (type == DocIndex::JSON && !IsValidJsonPath(field)) {
+      (*cntx)->SendError("Bad json path: " + string{field});
       return nullopt;
     }
 
+    parser.ToUpper();
+
+    // AS [alias]
+    if (parser.Check("AS").ExpectTail(1).NextUpper())
+      field_alias = parser.Next();
+
     // Determine type
-    ToUpper(&args[i]);
-    auto type_str = ArgS(args, i);
+    string_view type_str = parser.Next();
     auto type = ParseSearchFieldType(type_str);
     if (!type) {
       (*cntx)->SendError("Invalid field type: " + string{type_str});
@@ -78,12 +75,11 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
 
     // Skip {algorithm} {dim} flags
     if (*type == search::SchemaField::VECTOR)
-      i += 2;
+      parser.Skip(2);
 
     // Skip all trailing ignored parameters
-    while (i + 2 < args.size() && kIgnoredOptions.count(ArgS(args, i + 1)) > 0) {
-      i += 2;
-    }
+    while (kIgnoredOptions.count(parser.Peek()) > 0)
+      parser.Skip(2);
 
     schema.fields[field] = {*type, string{field_alias}};
   }
@@ -91,6 +87,11 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
   // Build field name mapping table
   for (const auto& [field_ident, field_info] : schema.fields)
     schema.field_names[field_info.short_name] = field_ident;
+
+  if (auto err = parser.Error(); err) {
+    (*cntx)->SendError(err->MakeReply());
+    return nullopt;
+  }
 
   return schema;
 }

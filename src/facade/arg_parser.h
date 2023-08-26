@@ -36,19 +36,19 @@ struct ArgumentParser {
     }
 
     template <typename T> operator T() {
-      T out = 0;
-      if (!absl::SimpleAtoi(operator std::string_view(), &out))
-        parser_->Report(INVALID_INT, idx_);
-      return out;
+      T out;
+      if (absl::SimpleAtoi(operator std::string_view(), &out))
+        return out;
+      parser_->Report(INVALID_INT, idx_);
+      return T{0};
     }
 
-    template <typename T> T Cases(const std::vector<std::pair<std::string_view, T>>& values) {
+    template <typename T> T Cases(std::initializer_list<std::pair<std::string_view, T>> values) {
       std::string_view arg = operator std::string_view();
       for (const auto& [tag, value] : values) {
         if (absl::EqualsIgnoreCase(tag, arg))
           return value;
       }
-
       parser_->Report(INVALID_CASES, idx_);
       return T{};
     }
@@ -65,8 +65,6 @@ struct ArgumentParser {
 
   struct CheckProxy {
     operator bool() {
-      DCHECK(next_upper_ == false || expect_tail_ == 0);
-
       if (idx_ >= parser_->args_.size())
         return false;
 
@@ -82,7 +80,7 @@ struct ArgumentParser {
       parser_->cur_i_++;
 
       if (next_upper_)
-        parser_->ToUpper();
+        parser_->ToUpper(idx_ + expect_tail_ + 1);
 
       return true;
     }
@@ -124,10 +122,15 @@ struct ArgumentParser {
   ArgumentParser(CmdArgList args) : args_{args} {
   }
 
-  NextProxy Next() {
+  NextProxy Peek() {
+    return Next(0);
+  }
+
+  NextProxy Next(size_t step = 1) {
     if (cur_i_ >= args_.size())
       Report(OUT_OF_BOUNDS, cur_i_);
-    return NextProxy{this, cur_i_++};
+    cur_i_ += step;
+    return NextProxy{this, cur_i_ - step};
   }
 
   CheckProxy Check(std::string_view tag) {
@@ -139,12 +142,8 @@ struct ArgumentParser {
   }
 
   ArgumentParser& ToUpper() {
-    if (cur_i_ >= args_.size())
-      return *this;
-
-    for (auto& c : args_[cur_i_])
-      c = absl::ascii_toupper(c);
-
+    if (cur_i_ < args_.size())
+      ToUpper(cur_i_);
     return *this;
   }
 
@@ -158,9 +157,13 @@ struct ArgumentParser {
 
  private:
   void Report(ErrorType type, size_t idx) {
-    if (error_)
-      return;
-    error_ = {type, idx};
+    if (!error_)
+      error_ = {type, idx};
+  }
+
+  void ToUpper(size_t i) {
+    for (auto& c : args_[i])
+      c = absl::ascii_toupper(c);
   }
 
  private:
