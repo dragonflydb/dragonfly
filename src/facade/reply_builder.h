@@ -43,7 +43,6 @@ class SinkReplyBuilder {
 
   virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
   virtual void SendError(ErrorReply error) = 0;
-  virtual void SendError(OpStatus status) = 0;
 
   virtual void SendStored() = 0;  // Reply for set commands.
   virtual void SendSetSkipped() = 0;
@@ -155,7 +154,6 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
   void SendError(ErrorReply error) final;
-  void SendError(OpStatus status) final;
 
   // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
   void SendMGetResponse(absl::Span<const OptResp>) final;
@@ -191,7 +189,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   void SendStored() override;
   void SendSetSkipped() override;
-  void SendError(OpStatus status) override;
+  virtual void SendError(OpStatus status);
   void SendProtocolError(std::string_view str) override;
 
   virtual void SendNullArray();   // Send *-1

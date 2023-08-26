@@ -941,7 +941,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
           dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
 
       if (status != OpStatus::OK)
-        return cntx->SendError(status);
+        return (*cntx)->SendError(status);
     }
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
@@ -952,7 +952,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
             st != OpStatus::OK)
-          return cntx->SendError(st);
+          return (*cntx)->SendError(st);
       }
 
       dfly_cntx->transaction = dist_trans.get();

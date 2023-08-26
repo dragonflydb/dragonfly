@@ -60,10 +60,6 @@ class ConnectionContext {
     rbuilder_->SendError(std::move(error));
   }
 
-  void SendError(OpStatus status) {
-    rbuilder_->SendError(status);
-  }
-
   void SendSimpleString(std::string_view str) {
     rbuilder_->SendSimpleString(str);
   }

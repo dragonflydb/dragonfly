@@ -162,19 +162,15 @@ void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
 }
 
 void MCReplyBuilder::SendError(string_view str, [[maybe_unused]] std::string_view type) {
+  DCHECK(type.empty());
   SendClientError(str);
 }
 
 void MCReplyBuilder::SendError(ErrorReply error) {
-  if (error.status)
-    return SendError(*error.status);
+  DCHECK(!error.status);
 
   string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
   SendError(message_sv, error.kind);
-}
-
-void MCReplyBuilder::SendError(OpStatus status) {
-  SendError(StatusToMsg(status));
 }
 
 void MCReplyBuilder::SendProtocolError(std::string_view str) {
