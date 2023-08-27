@@ -2268,9 +2268,13 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
       continue;
 
-    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
-    if (!added) {
-      LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+    try {
+      auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+      if (!added) {
+        LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+      }
+    } catch (const std::bad_alloc&) {
+      LOG(WARNING) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
     }
   }
 
