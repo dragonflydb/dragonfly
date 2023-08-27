@@ -79,12 +79,14 @@ const char kInvalidDbIndErr[] = "invalid DB index";
 const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
 const char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
 const char kExpiryOutOfRange[] = "expiry is out of range";
-const char kSyntaxErrType[] = "syntax_error";
-const char kScriptErrType[] = "script_error";
 const char kIndexOutOfRange[] = "index out of range";
 const char kOutOfMemory[] = "Out of memory";
 const char kInvalidNumericResult[] = "result is not a number";
 const char kClusterNotConfigured[] = "Cluster is not yet configured";
+
+const char kSyntaxErrType[] = "syntax_error";
+const char kScriptErrType[] = "script_error";
+const char kConfigErrType[] = "config_error";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {

@@ -637,7 +637,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                    const InitOpts& opts) {
   InitRedisTables();
 
-  config_registry.Register("maxmemory", [](const absl::CommandLineFlag& flag) {
+  config_registry.Register("maxmemory", true, [](const absl::CommandLineFlag& flag) {
     auto res = flag.TryGet<MaxMemoryFlag>();
     if (!res)
       return false;
@@ -646,10 +646,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
-  config_registry.Register("dir");
-  config_registry.Register("requirepass");
-  config_registry.Register("masterauth");
-  config_registry.Register("tcp_keepalive");
+  config_registry.Register("dbnum", false);  // equivalent to databases in redis.
+  config_registry.Register("dir", true);     // TODO: to add validation for dir
+  config_registry.Register("requirepass", true);
+  config_registry.Register("masterauth", true);
+  config_registry.Register("tcp_keepalive", true);
+
   acl::UserRegistry* reg = &user_registry_;
   pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
 

@@ -1624,29 +1624,47 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     }
 
     ToLower(&args[1]);
-    string_view config_name = ArgS(args, 1);
-    bool success = config_registry.Set(config_name, ArgS(args, 2));
-    if (success) {
-      return (*cntx)->SendOk();
-    } else {
-      return (*cntx)->SendError(ConfigSetFailed(config_name), kSyntaxErrType);
+    string_view param = ArgS(args, 1);
+
+    ConfigRegistry::SetResult result = config_registry.Set(param, ArgS(args, 2));
+
+    const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
+    switch (result) {
+      case ConfigRegistry::SetResult::OK:
+        return (*cntx)->SendOk();
+      case ConfigRegistry::SetResult::UNKNOWN:
+        return (*cntx)->SendError(
+            absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
+            kConfigErrType);
+
+      case ConfigRegistry::SetResult::READONLY:
+        return (*cntx)->SendError(
+            absl::StrCat(kErrPrefix, param, "') - can't set immutable config"), kConfigErrType);
+
+      case ConfigRegistry::SetResult::INVALID:
+        return (*cntx)->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                                  kConfigErrType);
     }
-  } else if (sub_cmd == "GET" && args.size() == 2) {
+    ABSL_UNREACHABLE();
+  }
+
+  if (sub_cmd == "GET" && args.size() == 2) {
     // Send empty response, like Redis does, unless the param is supported
-    std::vector<std::string> res;
 
     string_view param = ArgS(args, 1);
-    if (param == "databases") {
-      res.emplace_back(param);
-      res.push_back(absl::StrCat(absl::GetFlag(FLAGS_dbnum)));
-    } else if (auto value_from_registry = config_registry.Get(param);
-               value_from_registry.has_value()) {
-      res.emplace_back(param);
-      res.push_back(*value_from_registry);
+    vector<string> names = config_registry.List(param);
+    vector<string> res;
+
+    for (const auto& name : names) {
+      absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
+      res.push_back(name);
+      res.push_back(flag->CurrentValue());
     }
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
-  } else if (sub_cmd == "RESETSTAT") {
+  }
+
+  if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([registry = service_.mutable_registry()](unsigned index, auto*) {
       registry->ResetCallStats(index);
       auto& sstate = *ServerState::tlocal();
