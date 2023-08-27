@@ -14,8 +14,15 @@ class ConfigRegistry {
   // Accepts the new value as argument. Return true if config was successfully updated.
   using WriteCb = std::function<bool(const absl::CommandLineFlag&)>;
 
-  ConfigRegistry& Register(std::string_view name, bool is_mutable, WriteCb cb);
-  ConfigRegistry& Register(std::string_view name, bool is_mutable);
+  ConfigRegistry& Register(std::string_view name) {
+    RegisterInternal(name, false, {});
+    return *this;
+  }
+
+  ConfigRegistry& RegisterMutable(std::string_view name, WriteCb cb = {}) {
+    RegisterInternal(name, true, std::move(cb));
+    return *this;
+  }
 
   enum class SetResult : uint8_t {
     OK,
@@ -34,6 +41,8 @@ class ConfigRegistry {
   std::vector<std::string> List(std::string_view glob) const;
 
  private:
+  void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb);
+
   mutable util::fb2::Mutex mu_;
 
   struct Entry {
