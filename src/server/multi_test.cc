@@ -654,6 +654,26 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
+TEST_F(MultiTest, MultiEvalModeConflict) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::GLOBAL) {
+    GTEST_SKIP() << "Skipped MultiEvalModeConflict test because multi_exec_mode is global";
+    return;
+  }
+
+  const char* s1 = R"(
+  #!lua flags=allow-undeclared-keys
+  return redis.call('GET', 'random-key');
+)";
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  // Check eval finds script flags.
+  EXPECT_EQ(Run({"set", "random-key", "works"}), "QUEUED");
+  EXPECT_EQ(Run({"eval", s1, "0"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}),
+              RespArray(ElementsAre(
+                  "OK", ErrArg("Multi mode conflict when running eval in multi transaction"))));
+}
+
 // Run multi-exec transactions that move values from a source list
 // to destination list through two contended channels.
 TEST_F(MultiTest, ContendedList) {
@@ -812,24 +832,16 @@ TEST_F(MultiTest, TestLockedKeys) {
     GTEST_SKIP() << "Skipped TestLockedKeys test because multi_exec_mode is not lock ahead";
     return;
   }
+  auto condition = [&]() { return service_->IsLocked(0, "key1") && service_->IsLocked(0, "key2"); };
+  auto fb = ExpectConditionWithSuspension(condition);
 
-  TransactionSuspension tx;
-  tx.Start();
-
-  auto fb0 = pp_->at(0)->LaunchFiber([&] {
-    EXPECT_EQ(Run({"multi"}), "OK");
-    EXPECT_EQ(Run({"set", "key1", "val1"}), "QUEUED");
-    EXPECT_EQ(Run({"set", "key2", "val2"}), "QUEUED");
-    EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
-  });
-
-  ExpectConditionWithinTimeout(
-      [&]() { return service_->IsLocked(0, "key1") && service_->IsLocked(0, "key2"); });
-
-  tx.Terminate();
-  fb0.Join();
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"set", "key1", "val1"}), "QUEUED");
+  EXPECT_EQ(Run({"set", "key2", "val2"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
+  fb.Join();
   EXPECT_FALSE(service_->IsLocked(0, "key1"));
-  EXPECT_FALSE(service_->IsLocked(0, "key1"));
+  EXPECT_FALSE(service_->IsLocked(0, "key2"));
 }
 
 class MultiEvalTest : public BaseFamilyTest {
