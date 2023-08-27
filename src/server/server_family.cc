@@ -1099,9 +1099,11 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
-
+    if (aggregated_result->first_error) {
+      LOG(ERROR) << "Rdb load failed. " << (*aggregated_result->first_error).message();
+      exit(1);
+    }
     RebuildAllSearchIndices(&service_);
-
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     ec_promise.set_value(*(aggregated_result->first_error));
