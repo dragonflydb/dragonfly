@@ -231,7 +231,7 @@ TEST_F(RedisParserTest, ArgParser) {
     parser.ToUpper();
 
     if (parser.Check("ON").ExpectTail(1))
-      on_hash = parser.Next().Cases<bool>({{"HASH"sv, true}, {"JSON"sv, false}});
+      on_hash = parser.Next().Case("HASH"sv, true).Case("JSON"sv, false);
 
     if (parser.Check("PREFIX").ExpectTail(1)) {
       int num_prefixes = parser.Next();

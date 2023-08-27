@@ -44,9 +44,8 @@ bool IsValidJsonPath(string_view path) {
   return !ec;
 }
 
-optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList args,
+optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, ArgumentParser parser,
                                             ConnectionContext* cntx) {
-  ArgumentParser parser{args};
   search::Schema schema;
 
   while (parser.Ok()) {
@@ -89,6 +88,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
     schema.field_names[field_info.short_name] = field_ident;
 
   if (auto err = parser.Error(); err) {
+    VLOG(0) << "ParseSchemaErr " << err->type << " at " << err->index;
     (*cntx)->SendError(err->MakeReply());
     return nullopt;
   }
@@ -96,18 +96,16 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
   return schema;
 }
 
-optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionContext* cntx) {
-  ArgumentParser parser{args};
+optional<SearchParams> ParseSearchParamsOrReply(ArgumentParser parser, ConnectionContext* cntx) {
   size_t limit_offset = 0, limit_total = 10;
   search::FtVector knn_vector;
   optional<SearchParams::FieldAliasList> alias_list;
 
   while (parser.ToUpper().Ok()) {
     // [LIMIT offset total]
-    if (parser.Check("LIMIT").ExpectTail(2)) {
-      limit_offset = parser.Next();
-      limit_total = parser.Next();
-      continue;
+    if (parser.Check("LIMIT").ExpectTail(2).NextUpper()) {
+      limit_offset = parser.Next().Int<size_t>();
+      limit_total = parser.Next().Int<size_t>();
     }
 
     // RETURN {num} [{ident} AS {name}...]
@@ -152,11 +150,8 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionConte
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (parser.Check("PARAMS").ExpectTail(3)) {
-      parser.Skip(2);
-      knn_vector = BytesToFtVector(parser.Next());
-      continue;
-    }
+    if (parser.Check("PARAMS").ExpectTail(3).NextUpper())
+      knn_vector = BytesToFtVector(parser.Skip(2).Next());
   }
 
   if (auto err = parser.Error(); err) {
@@ -249,53 +244,42 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
-  string_view idx_name = ArgS(args, 0);
-
   DocIndex index{};
 
-  for (size_t i = 1; i < args.size(); i++) {
-    ToUpper(&args[i]);
+  ArgumentParser parser{args};
+  string_view idx_name = parser.Next();
 
-    // [ON HASH | JSON]
-    if (ArgS(args, i) == "ON") {
-      if (++i >= args.size())
-        return (*cntx)->SendError(kSyntaxErr);
-
-      ToUpper(&args[i]);
-      string_view type = ArgS(args, i);
-      if (type == "HASH")
-        index.type = DocIndex::HASH;
-      else if (type == "JSON")
-        index.type = DocIndex::JSON;
-      else
-        return (*cntx)->SendError("Invalid rule type: " + string{type});
+  while (parser.ToUpper().Ok()) {
+    // ON HASH | JSON
+    if (parser.Check("ON").ExpectTail(1)) {
+      index.type =
+          parser.ToUpper().Next().Case("HASH"sv, DocIndex::HASH).Case("JSON"sv, DocIndex::JSON);
       continue;
     }
 
-    // [PREFIX count prefix [prefix ...]]
-    if (ArgS(args, i) == "PREFIX") {
-      if (i + 2 >= args.size())
-        return (*cntx)->SendError(kSyntaxErr);
-
-      if (ArgS(args, ++i) != "1")
+    // PREFIX count prefix [prefix ...]
+    if (parser.Check("PREFIX").ExpectTail(2)) {
+      if (size_t num = parser.Next().Int<size_t>(); num != 1)
         return (*cntx)->SendError("Multiple prefixes are not supported");
-
-      index.prefix = ArgS(args, ++i);
+      index.prefix = string(parser.Next());
       continue;
     }
 
-    // [SCHEMA]
-    if (ArgS(args, i) == "SCHEMA") {
-      if (i++ >= args.size())
-        return (*cntx)->SendError("Empty schema");
-
-      auto schema = ParseSchemaOrReply(index.type, args.subspan(i), cntx);
+    // SCHEMA
+    if (parser.Check("SCHEMA")) {
+      auto schema = ParseSchemaOrReply(index.type, parser.Tail(), cntx);
       if (!schema)
         return;
       index.schema = move(*schema);
       break;  // SCHEMA always comes last
     }
+
+    // unknown argument
+    return (*cntx)->SendError(kSyntaxErr);
   }
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
   auto idx_ptr = make_shared<DocIndex>(move(index));
   cntx->transaction->ScheduleSingleHop([idx_name, idx_ptr](auto* tx, auto* es) {
