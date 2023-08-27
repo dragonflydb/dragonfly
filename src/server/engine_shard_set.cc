@@ -147,7 +147,7 @@ bool EngineShard::DoDefrag() {
   auto& slice = db_slice();
 
   // If we moved to an invalid db, skip as long as it's not the last one
-  if (!slice.IsDbValid(defrag_state_.dbid) && defrag_state_.dbid + 1 < slice.db_array_size())
+  while (!slice.IsDbValid(defrag_state_.dbid) && defrag_state_.dbid + 1 < slice.db_array_size())
     defrag_state_.dbid++;
 
   // If we found no valid db, we finished traversing and start from scratch next time
