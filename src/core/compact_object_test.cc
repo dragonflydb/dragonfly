@@ -634,11 +634,11 @@ TEST_F(CompactObjectTest, DefragHash) {
 
   // Trigger re-allocation
   cobj_.InitRobj(OBJ_HASH, kEncodingListPack, target_lp);
-  cobj_.DefragIfNeeded(0.8);
+  ASSERT_TRUE(cobj_.DefragIfNeeded(0.8));
 
   // Check the pointer changes as the listpack needed defragmentation
   auto lp = (uint8_t*)cobj_.RObjPtr();
-  CHECK_NE(lp, target_lp);
+  EXPECT_NE(lp, target_lp) << "must have changed due to realloc";
 
   uint8_t* fptr = lpFirst(lp);
   for (size_t i = 0; i < 100; i++) {
