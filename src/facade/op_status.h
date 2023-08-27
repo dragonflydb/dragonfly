@@ -29,8 +29,6 @@ enum class OpStatus : uint16_t {
   CANCELLED,
 };
 
-const char* DebugString(OpStatus op);
-
 class OpResultBase {
  public:
   OpResultBase(OpStatus st = OpStatus::OK) : st_(st) {

@@ -4,7 +4,7 @@ import asyncio
 from redis import asyncio as aioredis
 from redis.exceptions import ConnectionError as redis_conn_error
 import async_timeout
-
+import pymemcache
 from dataclasses import dataclass
 
 from . import DflyInstance, dfly_args
@@ -516,3 +516,18 @@ async def test_squashed_pipeline(async_client: aioredis.Redis):
 async def test_squashed_pipeline_seeder(df_server, df_seeder_factory):
     seeder = df_seeder_factory.create(port=df_server.port, keys=10_000)
     await seeder.run(target_deviation=0.1)
+
+
+@pytest.mark.asyncio
+async def test_memcached_large_request(df_local_factory):
+    server = df_local_factory.create(
+        port=BASE_PORT,
+        memcached_port=11211,
+        proactor_threads=2,
+    )
+
+    server.start()
+
+    memcached_client = pymemcache.Client(("localhost", server.mc_port), default_noreply=False)
+
+    assert memcached_client.set(b"key", b"d" * 4096, noreply=False)
