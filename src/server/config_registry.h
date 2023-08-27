@@ -20,6 +20,8 @@ class ConfigRegistry {
   // Returns true if the value was updated.
   bool Set(std::string_view config_name, std::string_view value);
 
+  std::optional<std::string> Get(std::string_view config_name);
+
   void Reset();
 
  private:
