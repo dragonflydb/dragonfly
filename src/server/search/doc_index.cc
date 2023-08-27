@@ -4,11 +4,14 @@
 
 #include "server/search/doc_index.h"
 
+#include <absl/strings/str_join.h>
+
 #include <memory>
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
+#include "server/server_state.h"
 
 extern "C" {
 #include "redis/object.h"
@@ -46,6 +49,12 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   } while (cursor);
 }
 
+const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTypes = {
+    {"TAG"sv, search::SchemaField::TAG},
+    {"TEXT"sv, search::SchemaField::TEXT},
+    {"NUMERIC"sv, search::SchemaField::NUMERIC},
+    {"VECTOR"sv, search::SchemaField::VECTOR}};
+
 }  // namespace
 
 search::FtVector BytesToFtVector(string_view value) {
@@ -58,6 +67,38 @@ search::FtVector BytesToFtVector(string_view value) {
 
   for (size_t i = 0; i < out.size(); i++)
     out[i] = float_ptr[i];
+  return out;
+}
+
+optional<search::SchemaField::FieldType> ParseSearchFieldType(string_view name) {
+  auto it = kSchemaTypes.find(name);
+  return it != kSchemaTypes.end() ? make_optional(it->second) : nullopt;
+}
+
+string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
+  for (auto [it_name, it_type] : kSchemaTypes)
+    if (it_type == type)
+      return it_name;
+  ABSL_UNREACHABLE();
+  return "";
+}
+
+string DocIndexInfo::BuildRestoreCommand() const {
+  std::string out;
+
+  // ON HASH/JSON
+  absl::StrAppend(&out, "ON", " ", base_index.type == DocIndex::HASH ? "HASH" : "JSON");
+
+  // optional PREFIX 1 *prefix*
+  if (!base_index.prefix.empty())
+    absl::StrAppend(&out, " PREFIX", " 1 ", base_index.prefix);
+
+  absl::StrAppend(&out, " SCHEMA");
+  for (const auto& [fname, finfo] : base_index.schema.fields) {
+    absl::StrAppend(&out, " ", finfo.identifier, " AS ", fname, " ",
+                    SearchFieldTypeToString(finfo.type));
+  }
+
   return out;
 }
 
@@ -110,10 +151,13 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
-    : base_{index}, indices_{index->schema}, key_index_{} {
+    : base_{std::move(index)}, indices_{{}}, key_index_{} {
 }
 
-void ShardDocIndex::Init(const OpArgs& op_args) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args) {
+  key_index_ = DocKeyIndex{};
+  indices_ = search::FieldIndices{base_->schema};
+
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
 }
@@ -161,7 +205,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
-  return {base_->schema, key_index_.Size()};
+  return {*base_, key_index_.Size()};
 }
 
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
@@ -173,7 +217,11 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
                                 shared_ptr<DocIndex> index_ptr) {
   auto shard_index = make_unique<ShardDocIndex>(index_ptr);
   auto [it, _] = indices_.emplace(name, move(shard_index));
-  it->second->Init(op_args);
+
+  // Don't build while loading, shutting down, etc.
+  // After loading, indices are rebuilt separately
+  if (ServerState::tlocal()->gstate() == GlobalState::ACTIVE)
+    it->second->Rebuild(op_args);
 
   op_args.shard->db_slice().SetDocDeletionCallback(
       [this](string_view key, const DbContext& cntx, const PrimeValue& pv) {
@@ -188,11 +236,16 @@ bool ShardDocIndices::DropIndex(string_view name) {
 
   // Clean caches that might have data from this index
   auto info = it->second->GetInfo();
-  for (const auto& [_, field] : info.schema.fields)
+  for (const auto& [_, field] : info.base_index.schema.fields)
     JsonAccessor::RemoveFieldFromCache(field.identifier);
 
   indices_.erase(it);
   return true;
+}
+
+void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
+  for (auto& [_, ptr] : indices_)
+    ptr->Rebuild(op_args);
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {

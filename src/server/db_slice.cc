@@ -38,6 +38,13 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     table->expire.Erase(exp_it);
   }
 
+  if (del_it->second.HasFlag()) {
+    if (table->mcflag.Erase(del_it->first) == 0) {
+      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+                 << del_it->first.ToString();
+    }
+  }
+
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
   if (pv.IsExternal()) {
@@ -442,6 +449,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       SlotId sid = ClusterConfig::KeySlot(key);
       db.slots_stats[sid].key_count += 1;
     }
+
     return make_tuple(it, ExpireIterator{}, true);
   }
 
@@ -464,7 +472,11 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       db.expire.Erase(expire_it);
 
       if (existing->second.HasFlag()) {
-        db.mcflag.Erase(existing->first);
+        if (db.mcflag.Erase(existing->first) == 0) {
+          LOG(ERROR)
+              << "Internal error, inconsistent state, mcflag should be present but not found "
+              << existing->first.ToString();
+        }
       }
 
       // Keep the entry but reset the object.
@@ -493,9 +505,6 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   }
 
   auto& db = db_arr_[db_ind];
-  if (it->second.HasFlag()) {
-    CHECK_EQ(1u, db->mcflag.Erase(it->first));
-  }
 
   auto obj_type = it->second.ObjType();
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
@@ -638,7 +647,10 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
 void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
   auto& db = *db_arr_[db_ind];
   if (flag == 0) {
-    db.mcflag.Erase(key);
+    if (db.mcflag.Erase(key) == 0) {
+      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+                 << key.ToString();
+    }
   } else {
     auto [it, inserted] = db.mcflag.Insert(std::move(key), flag);
     if (!inserted)
@@ -649,7 +661,12 @@ void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
 uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   auto& db = *db_arr_[db_ind];
   auto it = db.mcflag.Find(key);
-  return it.is_done() ? 0 : it->second;
+  if (it.is_done()) {
+    LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+               << key.ToString();
+    return 0;
+  }
+  return it->second;
 }
 
 PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
@@ -804,7 +821,6 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
     ReleaseNormalized(mode, lock_args.db_index, key, 1);
-    uniq_keys_ = {key};
   } else {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
@@ -820,6 +836,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
       }
     }
   }
+  uniq_keys_.clear();
 }
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) const {
@@ -831,11 +848,9 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) co
 }
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
-  uniq_keys_.clear();
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
     auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-    uniq_keys_.insert(s);
     auto it = lt.find(s);
     if (it != lt.end() && !it->second.Check(mode)) {
       return false;

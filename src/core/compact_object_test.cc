@@ -601,6 +601,62 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
   }
 }
 
+// Test listpack defragmentation.
+// StringMap has built-in defragmantation that is tested in its own test suite.
+TEST_F(CompactObjectTest, DefragHash) {
+  auto build_str = [](size_t i) { return string(111, 'v') + to_string(i); };
+
+  vector<uint8_t*> lps(10'00);
+
+  for (size_t i = 0; i < lps.size(); i++) {
+    uint8_t* lp = lpNew(100);
+    for (size_t j = 0; j < 100; j++) {
+      auto s = build_str(j);
+      lp = lpAppend(lp, reinterpret_cast<const unsigned char*>(s.data()), s.length());
+    }
+    DCHECK_EQ(lpLength(lp), 100u);
+    lps[i] = lp;
+  }
+
+  for (size_t i = 0; i < lps.size(); i++) {
+    if (i % 10 == 0)
+      continue;
+    lpFree(lps[i]);
+  }
+
+  // Find a listpack that is located on a underutilized page
+  uint8_t* target_lp = nullptr;
+  for (size_t i = 0; i < lps.size(); i += 10) {
+    if (zmalloc_page_is_underutilized(lps[i], 0.8))
+      target_lp = lps[i];
+  }
+  CHECK_NE(target_lp, nullptr);
+
+  // Trigger re-allocation
+  cobj_.InitRobj(OBJ_HASH, kEncodingListPack, target_lp);
+  cobj_.DefragIfNeeded(0.8);
+
+  // Check the pointer changes as the listpack needed defragmentation
+  auto lp = (uint8_t*)cobj_.RObjPtr();
+  CHECK_NE(lp, target_lp);
+
+  uint8_t* fptr = lpFirst(lp);
+  for (size_t i = 0; i < 100; i++) {
+    int64_t len;
+    auto* s = lpGet(fptr, &len, nullptr);
+
+    string_view sv{reinterpret_cast<const char*>(s), static_cast<uint64_t>(len)};
+    EXPECT_EQ(sv, build_str(i));
+
+    fptr = lpNext(lp, fptr);
+  }
+
+  for (size_t i = 0; i < lps.size(); i += 10) {
+    if (lps[i] != target_lp)
+      lpFree(lps[i]);
+  }
+}
+
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 

@@ -280,3 +280,84 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type):
         assert set(expected_ids) == set(got_ids)
 
     await i3.dropindex()
+
+
+@dfly_args({"proactor_threads": 4, "dbfilename": "search-data"})
+async def test_index_persistence(df_server):
+    client = aioredis.Redis(port=df_server.port)
+
+    # Build two indices and fill them with data
+
+    SCHEMA_1 = [TextField("title"), NumericField("views"), TagField("topic")]
+    SCHEMA_2 = [TextField("name"), NumericField("age"), TagField("job")]
+
+    i1 = client.ft("i1")
+    await i1.create_index(
+        fix_schema_naming(IndexType.JSON, SCHEMA_1),
+        definition=IndexDefinition(index_type=IndexType.JSON, prefix=["blog-"]),
+    )
+
+    i2 = client.ft("i2")
+    await i2.create_index(
+        fix_schema_naming(IndexType.HASH, SCHEMA_2),
+        definition=IndexDefinition(index_type=IndexType.HASH, prefix=["people-"]),
+    )
+
+    for i in range(150):
+        await client.json().set(
+            f"blog-{i}",
+            ".",
+            {"title": f"Post {i}", "views": i * 10, "topic": "even" if i % 2 == 0 else "odd"},
+        )
+
+    for i in range(200):
+        await client.hset(
+            f"people-{i}",
+            mapping={"name": f"Name {i}", "age": i, "job": "newsagent" if i % 2 == 0 else "writer"},
+        )
+
+    info_1 = await i1.info()
+    info_2 = await i2.info()
+    assert info_1["num_docs"] == 150
+    assert info_2["num_docs"] == 200
+
+    # stop & start server
+
+    df_server.stop()
+    df_server.start()
+
+    client = aioredis.Redis(port=df_server.port)
+    await wait_available_async(client)
+
+    # Check indices were loaded
+
+    assert {i.decode() for i in await client.execute_command("FT._LIST")} == {"i1", "i2"}
+
+    i1 = client.ft("i1")
+    i2 = client.ft("i2")
+
+    info_1_new = await i1.info()
+    info_2_new = await i2.info()
+
+    def build_fields_set(info):
+        fields = set()
+        for field in info["fields"]:
+            fields.add(tuple(field))
+        return fields
+
+    assert build_fields_set(info_1) == build_fields_set(info_1_new)
+    assert build_fields_set(info_2) == build_fields_set(info_2_new)
+
+    assert info_1["num_docs"] == info_1_new["num_docs"]
+    assert info_2["num_docs"] == info_2_new["num_docs"]
+
+    # Check basic queries run
+
+    assert (await i1.search("@views:[0 90]")).total == 10
+    assert (await i1.search("@views:[100 190] @topic:{even}")).total == 5
+
+    assert (await i2.search("@job:{writer}")).total == 100
+    assert (await i2.search("@job:{writer} @age:[100 200]")).total == 50
+
+    await i1.dropindex()
+    await i2.dropindex()

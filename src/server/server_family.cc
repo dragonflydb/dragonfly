@@ -28,6 +28,7 @@ extern "C" {
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
+#include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -325,10 +326,10 @@ class LinuxWriteWrapper : public io::Sink {
 
 class RdbSnapshot {
  public:
-  RdbSnapshot(FiberQueueThreadPool* fq_tp) : fq_tp_(fq_tp) {
+  RdbSnapshot(FiberQueueThreadPool* fq_tp, cloud::AWS* aws) : fq_tp_{fq_tp}, aws_{aws} {
   }
 
-  GenericError Start(SaveMode save_mode, const string& path, const StringVec& lua_scripts);
+  GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -340,12 +341,6 @@ class RdbSnapshot {
 
   bool HasStarted() const {
     return started_ || (saver_ && saver_->Mode() == SaveMode::SUMMARY);
-  }
-
-  // Sets a pointer to global aws object that provides an auth key.
-  // The ownership stays with the caller.
-  void SetAWS(cloud::AWS* aws) {
-    aws_ = aws;
   }
 
  private:
@@ -371,7 +366,7 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
 }
 
 GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
-                                const StringVec& lua_scripts) {
+                                const RdbSaver::GlobalData& glob_data) {
   bool is_direct = false;
   VLOG(1) << "Saving RDB " << path;
 
@@ -415,7 +410,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 
   saver_.reset(new RdbSaver(io_sink_.get(), save_mode, is_direct));
 
-  return saver_->SaveHeader(lua_scripts);
+  return saver_->SaveHeader(move(glob_data));
 }
 
 error_code RdbSnapshot::SaveBody() {
@@ -521,6 +516,276 @@ void ValidateServerTlsFlags() {
 
 bool IsReplicatingNoOne(string_view host, string_view port) {
   return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
+}
+
+struct SaveStagesInputs {
+  bool use_dfs_format_;
+  string_view basename_;
+  Transaction* trans_;
+  Service* service_;
+  atomic_bool* is_saving_;
+  FiberQueueThreadPool* fq_threadpool_;
+  shared_ptr<LastSaveInfo>* last_save_info_;
+  Mutex* save_mu_;
+  unique_ptr<cloud::AWS>* aws_;
+};
+
+struct SaveStagesController : public SaveStagesInputs {
+  SaveStagesController(SaveStagesInputs&& inputs) : SaveStagesInputs{move(inputs)} {
+    start_time_ = absl::Now();
+  }
+
+  ~SaveStagesController() {
+    service_->SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  }
+
+  GenericError Save() {
+    if (auto err = BuildFullPath(); err)
+      return err;
+
+    if (auto err = SwitchState(); err)
+      return err;
+
+    if (auto err = InitResources(); err)
+      return err;
+
+    // The stages below report errors to shared_err_
+    if (use_dfs_format_)
+      SaveDfs();
+    else
+      SaveRdb();
+
+    is_saving_->store(true, memory_order_relaxed);
+    RunStage(&SaveStagesController::SaveCb);
+    is_saving_->store(false, memory_order_relaxed);
+
+    RunStage(&SaveStagesController::CloseCb);
+
+    FinalizeFileMovement();
+
+    if (!shared_err_)
+      UpdateSaveInfo();
+
+    return *shared_err_;
+  }
+
+ private:
+  // In the new version (.dfs) we store a file for every shard and one more summary file.
+  // Summary file is always last in snapshots array.
+  void SaveDfs() {
+    // Extend all filenames with -{sid} or -summary and append .dfs.tmp
+    const string_view ext = is_cloud_ ? ".dfs" : ".dfs.tmp";
+    ShardId sid = 0;
+    for (auto& [_, filename] : snapshots_) {
+      filename = full_path_;
+      if (sid < shard_set->size())
+        ExtendDfsFilenameWithShard(sid++, ext, &filename);
+      else
+        SetExtension("summary", ext, &filename);
+    }
+
+    // Save summary file.
+    SaveDfsSingle(nullptr);
+
+    // Save shard files.
+    auto cb = [this](Transaction* t, EngineShard* shard) {
+      SaveDfsSingle(shard);
+      return OpStatus::OK;
+    };
+    trans_->ScheduleSingleHop(std::move(cb));
+  }
+
+  // Start saving a dfs file on shard
+  void SaveDfsSingle(EngineShard* shard) {
+    // for summary file, shard=null and index=shard_set->size(), see SaveDfs() above
+    auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
+
+    SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
+    auto glob_data = shard == nullptr ? GetGlobalData() : RdbSaver::GlobalData{};
+
+    if (auto err = snapshot->Start(mode, filename, glob_data); err) {
+      shared_err_ = err;
+      snapshot.reset();
+      return;
+    }
+
+    if (mode == SaveMode::SINGLE_SHARD)
+      snapshot->StartInShard(shard);
+  }
+
+  // Save a single rdb file
+  void SaveRdb() {
+    auto& [snapshot, filename] = snapshots_.front();
+
+    filename = full_path_;
+    if (!filename.has_extension())
+      filename += ".rdb";
+    if (!is_cloud_)
+      filename += ".tmp";
+
+    if (auto err = snapshot->Start(SaveMode::RDB, filename, GetGlobalData()); err) {
+      snapshot.reset();
+      return;
+    }
+
+    auto cb = [snapshot = snapshot.get()](Transaction* t, EngineShard* shard) {
+      snapshot->StartInShard(shard);
+      return OpStatus::OK;
+    };
+    trans_->ScheduleSingleHop(std::move(cb));
+  }
+
+  void UpdateSaveInfo() {
+    fs::path resulting_path = full_path_;
+    if (use_dfs_format_)
+      SetExtension("summary", ".dfs", &resulting_path);
+    else
+      resulting_path.replace_extension();  // remove .tmp
+
+    double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time_)) / 1000;
+    LOG(INFO) << "Saving " << resulting_path << " finished after "
+              << strings::HumanReadableElapsedTime(seconds);
+
+    auto save_info = make_shared<LastSaveInfo>();
+    for (const auto& k_v : rdb_name_map_) {
+      save_info->freq_map.emplace_back(k_v);
+    }
+    save_info->save_time = absl::ToUnixSeconds(start_time_);
+    save_info->file_name = resulting_path.generic_string();
+    save_info->duration_sec = uint32_t(seconds);
+
+    lock_guard lk{*save_mu_};
+    last_save_info_->swap(save_info);  // swap - to deallocate the old version outstide of the lock.
+  }
+
+  GenericError InitResources() {
+    if (is_cloud_ && !aws_) {
+      *aws_ = make_unique<cloud::AWS>("s3");
+      if (auto ec = aws_->get()->Init(); ec) {
+        aws_->reset();
+        return {ec, "Couldn't initialize AWS"};
+      }
+    }
+
+    snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
+    for (auto& [snapshot, _] : snapshots_)
+      snapshot = make_unique<RdbSnapshot>(fq_threadpool_, aws_->get());
+    return {};
+  }
+
+  // Remove .tmp extension or delete files in case of error
+  void FinalizeFileMovement() {
+    if (is_cloud_)
+      return;
+
+    // If the shared_err is set, the snapshot saving failed
+    bool has_error = bool(shared_err_);
+
+    for (const auto& [_, filename] : snapshots_) {
+      if (has_error)
+        filesystem::remove(filename);
+      else
+        filesystem::rename(filename, fs::path{filename}.replace_extension(""));
+    }
+  }
+
+  // Build full path: get dir, try creating dirs, get filename with placeholder
+  GenericError BuildFullPath() {
+    fs::path dir_path = GetFlag(FLAGS_dir);
+    if (!dir_path.empty()) {
+      if (auto ec = CreateDirs(dir_path); ec)
+        return {ec, "Failed to create directories"};
+    }
+
+    fs::path filename = basename_.empty() ? GetFlag(FLAGS_dbfilename) : basename_;
+    if (auto err = ValidateFilename(filename, use_dfs_format_); err)
+      return err;
+
+    SubstituteFilenameTsPlaceholder(&filename, FormatTs(start_time_));
+    full_path_ = dir_path / filename;
+    is_cloud_ = IsCloudPath(full_path_.string());
+    return {};
+  }
+
+  // Switch to saving state if in active state
+  GenericError SwitchState() {
+    GlobalState new_state = service_->SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
+    if (new_state != GlobalState::SAVING && new_state != GlobalState::TAKEN_OVER)
+      return {make_error_code(errc::operation_in_progress),
+              StrCat(GlobalStateName(new_state), " - can not save database")};
+    return {};
+  }
+
+  void SaveCb(unsigned index) {
+    if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted())
+      shared_err_ = snapshot->SaveBody();
+  }
+
+  void CloseCb(unsigned index) {
+    if (auto& snapshot = snapshots_[index].first; snapshot) {
+      shared_err_ = snapshot->Close();
+
+      lock_guard lk{rdb_name_map_mu_};
+      for (const auto& k_v : snapshot->freq_map())
+        rdb_name_map_[RdbTypeName(k_v.first)] += k_v.second;
+    }
+
+    if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)
+      es->db_slice().ResetUpdateEvents();
+  }
+
+  void RunStage(void (SaveStagesController::*cb)(unsigned)) {
+    if (use_dfs_format_) {
+      shard_set->RunBlockingInParallel([&](EngineShard* es) { (this->*cb)(es->shard_id()); });
+      (this->*cb)(shard_set->size());
+    } else {
+      (this->*cb)(0);
+    }
+  }
+
+  RdbSaver::GlobalData GetGlobalData() const {
+    StringVec script_bodies, search_indices;
+
+    {
+      auto scripts = service_->script_mgr()->GetAll();
+      script_bodies.reserve(scripts.size());
+      for (auto& [sha, data] : scripts)
+        script_bodies.push_back(move(data.body));
+    }
+
+    {
+      shard_set->Await(0, [&] {
+        auto* indices = EngineShard::tlocal()->search_indices();
+        for (auto index_name : indices->GetIndexNames()) {
+          auto index_info = indices->GetIndex(index_name)->GetInfo();
+          search_indices.emplace_back(
+              absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
+        }
+      });
+    }
+
+    return RdbSaver::GlobalData{move(script_bodies), move(search_indices)};
+  }
+
+ private:
+  absl::Time start_time_;
+  fs::path full_path_;
+  bool is_cloud_;
+
+  AggregateGenericError shared_err_;
+  vector<pair<unique_ptr<RdbSnapshot>, fs::path>> snapshots_;
+
+  absl::flat_hash_map<string_view, size_t> rdb_name_map_;
+  Mutex rdb_name_map_mu_;
+};
+
+void RebuildAllSearchIndices(Service* service) {
+  boost::intrusive_ptr<Transaction> trans{new Transaction{service->FindCmd("FT.CREATE")}};
+  trans->InitByArgs(0, {});
+  trans->ScheduleSingleHop([](auto* trans, auto* es) {
+    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
+    return OpStatus::OK;
+  });
 }
 
 }  // namespace
@@ -816,6 +1081,8 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
+
+    RebuildAllSearchIndices(&service_);
 
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
@@ -1143,38 +1410,6 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
-// Run callback for all active RdbSnapshots (passed as index).
-// .dfs format contains always `shard_set->size() + 1` snapshots (for every shard and summary
-// file).
-static void RunStage(
-    bool new_version, std::function<void(unsigned)> cb,
-    std::function<void(EngineShard*)> maybe_reset_events = []([[maybe_unused]] auto*) {}) {
-  if (new_version) {
-    shard_set->RunBlockingInParallel([&](EngineShard* es) {
-      cb(es->shard_id());
-      maybe_reset_events(es);
-    });
-    cb(shard_set->size());
-  } else {
-    cb(0);
-  }
-};
-
-// Start saving a single snapshot of a multi-file dfly snapshot.
-// If shard is null, then this is the summary file.
-GenericError DoPartialSave(const fs::path& full_filename, const dfly::StringVec& scripts,
-                           RdbSnapshot* snapshot, EngineShard* shard) {
-  // Start rdb saving.
-  SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  GenericError local_ec = snapshot->Start(mode, full_filename.string(), scripts);
-
-  if (!local_ec && mode == SaveMode::SINGLE_SHARD) {
-    snapshot->StartInShard(shard);
-  }
-
-  return local_ec;
-}
-
 GenericError ServerFamily::DoSave() {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
@@ -1184,217 +1419,10 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  fs::path dir_path(GetFlag(FLAGS_dir));
-  AggregateGenericError ec;
-
-  // Check directory.
-  if (!dir_path.empty()) {
-    if (auto local_ec = CreateDirs(dir_path); local_ec) {
-      return {local_ec, "create-dir"};
-    }
-  }
-
-  // Manage global state.
-  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-  if (new_state != GlobalState::SAVING && new_state != GlobalState::TAKEN_OVER) {
-    return {make_error_code(errc::operation_in_progress),
-            StrCat(GlobalStateName(new_state), " - can not save database")};
-  }
-  absl::Cleanup rev_state = [this, new_state] {
-    if (new_state == GlobalState::SAVING)
-      service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
-  };
-
-  absl::Time start = absl::Now();
-
-  fs::path filename;
-
-  if (basename.empty())
-    filename = GetFlag(FLAGS_dbfilename);
-  else
-    filename = basename;
-
-  if (auto ec = ValidateFilename(filename, new_version); ec) {
-    return ec;
-  }
-  SubstituteFilenameTsPlaceholder(&filename, FormatTs(start));
-  fs::path fpath = dir_path;
-
-  shared_ptr<LastSaveInfo> save_info;
-
-  vector<pair<unique_ptr<RdbSnapshot>, fs::path>> snapshots;
-  absl::flat_hash_map<string_view, size_t> rdb_name_map;
-  Mutex mu;  // guards rdb_name_map
-
-  auto save_cb = [&](unsigned index) {
-    auto& snapshot = snapshots[index].first;
-    if (snapshot && snapshot->HasStarted()) {
-      ec = snapshot->SaveBody();
-    }
-  };
-
-  auto close_cb = [&](unsigned index) {
-    auto& snapshot = snapshots[index].first;
-    if (snapshot) {
-      ec = snapshot->Close();
-
-      lock_guard lk(mu);
-      for (const auto& k_v : snapshot->freq_map()) {
-        rdb_name_map[RdbTypeName(k_v.first)] += k_v.second;
-      }
-    }
-  };
-
-  auto get_scripts = [this] {
-    auto scripts = script_mgr_->GetAll();
-    StringVec script_bodies;
-    for (auto& [sha, data] : scripts) {
-      script_bodies.push_back(move(data.body));
-    }
-    return script_bodies;
-  };
-
-  fpath /= filename;
-
-  const bool is_cloud = IsCloudPath(fpath.string());
-
-  if (is_cloud) {
-    if (!aws_) {
-      aws_ = make_unique<cloud::AWS>("s3");
-      if (auto ec = aws_->Init(); ec) {
-        LOG(ERROR) << "Failed to initialize AWS " << ec;
-        aws_.reset();
-        return GenericError(ec, "Couldn't initialize AWS");
-      }
-    }
-  }
-
-  // Start snapshots.
-  if (new_version) {
-    // In the new version (.dfs) we store a file for every shard and one more summary file.
-    // Summary file is always last in snapshots array.
-    const size_t sz = shard_set->size();
-    constexpr string_view ext = ".dfs.tmp"sv;
-    snapshots.resize(sz + 1);
-
-    // Set file names for shards
-    for (auto sid = 0u; sid < sz; ++sid) {
-      auto& filename = snapshots[sid].second;
-      filename = fpath;                                 // starts with fpath
-      ExtendDfsFilenameWithShard(sid, ext, &filename);  // later append -<shard id>.dfs.tmp
-    }
-
-    // Set summary file name
-    snapshots.back().second = fpath;
-    SetExtension("summary", ext, &snapshots.back().second);
-
-    // Save summary file.
-    {
-      auto scripts = get_scripts();
-      auto& [snapshot, filename] = snapshots[sz];
-      snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-
-      snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(filename, scripts, snapshot.get(), nullptr); local_ec) {
-        ec = local_ec;
-        snapshot.reset();
-      }
-    }
-
-    // Save shard files.
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto& [snapshot, filename] = snapshots[shard->shard_id()];
-      snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-      snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(filename, {}, snapshot.get(), shard); local_ec) {
-        ec = local_ec;
-        snapshot.reset();
-      }
-      return OpStatus::OK;
-    };
-
-    trans->ScheduleSingleHop(std::move(cb));
-  } else {
-    snapshots.resize(1);
-    auto& [snapshot, filename] = snapshots[0];
-
-    if (!fpath.has_extension()) {
-      fpath += ".rdb";
-    }
-
-    // begin by saving as temp, and later rename to the actual target
-    fpath += ".tmp";
-
-    filename = fpath;
-
-    snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-    auto lua_scripts = get_scripts();
-
-    snapshot->SetAWS(aws_.get());
-    ec = snapshot->Start(SaveMode::RDB, filename,
-                         lua_scripts);  // filename == fpath, for consistency use filename
-
-    if (!ec) {
-      auto cb = [&](Transaction* t, EngineShard* shard) {
-        snapshot->StartInShard(shard);
-        return OpStatus::OK;
-      };
-
-      trans->ScheduleSingleHop(std::move(cb));
-    } else {
-      snapshot.reset();
-    }
-  }
-
-  is_saving_.store(true, memory_order_relaxed);
-
-  // Perform snapshot serialization, block the current fiber until it completes.
-  // TODO: Add cancellation in case of error.
-  RunStage(new_version, save_cb);
-
-  is_saving_.store(false, memory_order_relaxed);
-
-  auto reset_event_cb = [](EngineShard* es) { es->db_slice().ResetUpdateEvents(); };
-
-  RunStage(new_version, close_cb, reset_event_cb);
-
-  if (new_version) {
-    SetExtension("summary", ".dfs", &fpath);
-  } else
-    fpath.replace_extension();  // remove .tmp
-
-  absl::Duration dur = absl::Now() - start;
-  double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
-
-  // Populate LastSaveInfo.
-  if (!ec) {
-    LOG(INFO) << "Saving " << fpath << " finished after "
-              << strings::HumanReadableElapsedTime(seconds);
-
-    if (!is_cloud)
-      for (const auto& [_, filename] : snapshots) {
-        auto copy = filename;
-        copy.replace_extension();
-
-        VLOG(1) << "snapshotting: rename " << filename.string() << " -> " << copy.string();
-        filesystem::rename(filename, copy);
-      }
-
-    save_info = make_shared<LastSaveInfo>();
-    for (const auto& k_v : rdb_name_map) {
-      save_info->freq_map.emplace_back(k_v);
-    }
-
-    save_info->save_time = absl::ToUnixSeconds(start);
-    save_info->file_name = fpath.generic_string();
-    save_info->duration_sec = uint32_t(seconds);
-
-    lock_guard lk(save_mu_);
-    // swap - to deallocate the old version outstide of the lock.
-    last_save_info_.swap(save_info);
-  }
-
-  return *ec;
+  SaveStagesController sc{SaveStagesInputs{new_version, basename, trans, &service_, &is_saving_,
+                                           fq_threadpool_.get(), &last_save_info_, &save_mu_,
+                                           &aws_}};
+  return sc.Save();
 }
 
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
@@ -1497,8 +1525,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  if (args.size() == 3) {
-    return (*cntx)->SendError("ACL is not supported yet");
+  if (args.size() == 2) {
+    const auto* registry = ServerState::tlocal()->user_registry;
+    std::string_view username = facade::ToSV(args[0]);
+    std::string_view password = facade::ToSV(args[1]);
+    auto is_authorized = registry->AuthUser(username, password);
+    if (is_authorized) {
+      cntx->authed_username = username;
+      return (*cntx)->SendOk();
+    }
+    return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
   }
 
   if (!cntx->req_auth) {

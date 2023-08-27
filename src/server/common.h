@@ -9,6 +9,8 @@
 #include <absl/types/span.h>
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <string_view>
 #include <vector>
 

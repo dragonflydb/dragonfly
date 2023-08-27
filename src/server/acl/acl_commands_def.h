@@ -89,5 +89,21 @@ inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABL
     {"DANGEROUS", DANGEROUS},
     {"CONNECTION", CONNECTION},
     {"TRANSACTION", TRANSACTION},
-    {"SCRIPTING", SCRIPTING}};
+    {"SCRIPTING", SCRIPTING},
+    {"FT_SEARCH", FT_SEARCH},
+    {"THROTTLE", THROTTLE},
+    {"JSON", JSON},
+    {"ALL", ALL},
+    {"NONE", NONE}};
+
+// bit 0 at index 0
+// bit 1 at index 1
+// bit n at index n
+inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
+    "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTED_SET", "LIST",        "HASH",
+    "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",     "PUBSUB",      "ADMIN",
+    "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
+    "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
+    "_RESERVED", "FT_SEARCH", "THROTTLE",  "JSON"};
+
 }  // namespace dfly::acl

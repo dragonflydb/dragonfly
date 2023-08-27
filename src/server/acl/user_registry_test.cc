@@ -23,10 +23,10 @@ TEST_F(UserRegistryTest, BasicOp) {
   const std::string username = "kostas";
   const std::string pass = "mypass";
 
-  User::UpdateRequest req{pass, {}, {}, {}};
+  User::UpdateRequest req{pass, {}, {}, true};
   registry.MaybeAddAndUpdate(username, std::move(req));
   CHECK_EQ(registry.AuthUser(username, pass), true);
-  CHECK_EQ(registry.IsUserActive(username), false);
+  CHECK_EQ(registry.IsUserActive(username), true);
 
   CHECK_EQ(registry.GetCredentials(username).acl_categories, NONE);
 
