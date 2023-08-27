@@ -11,6 +11,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
@@ -403,8 +404,7 @@ uint32_t Connection::GetClientId() const {
 }
 
 bool Connection::IsAdmin() const {
-  uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
-  return socket_->LocalEndpoint().port() == admin_port;
+  return static_cast<Listener*>(owner())->IsAdminInterface();
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {

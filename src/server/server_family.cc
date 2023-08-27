@@ -74,6 +74,8 @@ ABSL_FLAG(string, dbfilename, "dump-{timestamp}", "the filename to save/load the
 ABSL_FLAG(string, requirepass, "",
           "password for AUTH authentication. "
           "If empty can also be set with DFLY_PASSWORD environment variable.");
+ABSL_FLAG(uint32_t, maxclients, 64000, "Maximum number of concurrent clients allowed.");
+
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 ABSL_FLAG(string, snapshot_cron, "",
@@ -898,11 +900,27 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
+void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients) {
+  for (auto* listener : listeners) {
+    if (!listener->IsAdminInterface()) {
+      listener->SetMaxClients(maxclients);
+    }
+  }
+}
+
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
+
+  SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
+  config_registry.Register("maxclients", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<uint32_t>();
+    if (res.has_value())
+      SetMaxClients(listeners_, res.value());
+    return res.has_value();
+  });
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1621,9 +1639,10 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     if (param == "databases") {
       res.emplace_back(param);
       res.push_back(absl::StrCat(absl::GetFlag(FLAGS_dbnum)));
-    } else if (param == "maxmemory") {
+    } else if (auto value_from_registry = config_registry.Get(param);
+               value_from_registry.has_value()) {
       res.emplace_back(param);
-      res.push_back(absl::StrCat(max_memory_limit));
+      res.push_back(*value_from_registry);
     }
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
