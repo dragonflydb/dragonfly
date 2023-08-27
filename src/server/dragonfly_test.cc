@@ -601,6 +601,8 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
 
   std::vector<std::string_view> keys(keys2delete.begin(), keys2delete.end());
 
+  Run({"SELECT", "2"});
+
   RespExpr resp = Run(
       {"DEBUG", "POPULATE", std::to_string(kNumberOfKeys), "key-name", std::to_string(kKeySize)});
   ASSERT_EQ(resp, "OK");
