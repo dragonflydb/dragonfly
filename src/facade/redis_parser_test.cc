@@ -10,7 +10,6 @@
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
-#include "facade/arg_parser.h"
 #include "facade/facade_test.h"
 
 using namespace testing;
@@ -208,52 +207,6 @@ TEST_F(RedisParserTest, NestedArray) {
   ASSERT_THAT(args_, ElementsAre(ArrArg(2), ArrArg(1)));
   ASSERT_THAT(args_[0].GetVec(), ElementsAre(ArrArg(1), ArrArg(1)));
   ASSERT_THAT(args_[1].GetVec(), ElementsAre("car"));
-}
-
-TEST_F(RedisParserTest, ArgParser) {
-  vector<string> args = {"i1",     "ON",   "HASH", "PREFIX", "1",   "doc", "skipinitialscan",
-                         "SCHEMA", "name", "AS",   "n",      "TEXT"};
-
-  CmdArgVec slice_vec;
-  for (auto& s : args)
-    slice_vec.push_back(MutableSlice{s.data(), s.size()});
-
-  ArgumentParser parser{absl::MakeSpan(slice_vec)};
-
-  string index_name = parser.Next();
-  vector<string_view> prefixes;
-  bool on_hash = true;
-
-  bool skip_scan = false;
-  bool no_offsets = false;
-
-  while (parser.Ok()) {
-    parser.ToUpper();
-
-    if (parser.Check("ON").ExpectTail(1))
-      on_hash = parser.Next().Case("HASH"sv, true).Case("JSON"sv, false);
-
-    if (parser.Check("PREFIX").ExpectTail(1)) {
-      int num_prefixes = parser.Next();
-      while (num_prefixes--)
-        prefixes.emplace_back(parser.Next());
-    }
-
-    if (parser.Check("SCHEMA")) {
-      while (parser.Ok()) {
-        string_view field_ident = parser.Next();
-        string_view short_name = field_ident;
-
-        if (parser.Check("AS").ExpectTail(1))
-          short_name = parser.Next();
-
-        string_view type = parser.Next();
-      }
-    }
-
-    skip_scan |= parser.Check("SKIPINITIALSCAN").NextUpper();
-    no_offsets |= parser.Check("NOOFFSETS").NextUpper();
-  }
 }
 
 }  // namespace facade

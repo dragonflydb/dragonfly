@@ -14,7 +14,8 @@
 
 namespace facade {
 
-struct ArgumentParser {
+// Utility class for easily parsing command options from argument lists.
+struct CmdArgParser {
   enum ErrorType {
     OUT_OF_BOUNDS,
     SHORT_OPT_TAIL,
@@ -41,10 +42,10 @@ struct ArgumentParser {
    private:
     friend struct NextProxy;
 
-    CaseProxy(ArgumentParser* parser, size_t idx) : parser_{parser}, idx_{idx} {
+    CaseProxy(CmdArgParser* parser, size_t idx) : parser_{parser}, idx_{idx} {
     }
 
-    ArgumentParser* parser_;
+    CmdArgParser* parser_;
     size_t idx_;
     std::optional<T> value_;
   };
@@ -74,17 +75,17 @@ struct ArgumentParser {
     }
 
    private:
-    friend struct ArgumentParser;
+    friend struct CmdArgParser;
 
-    NextProxy(ArgumentParser* parser, size_t idx) : parser_{parser}, idx_{idx} {
+    NextProxy(CmdArgParser* parser, size_t idx) : parser_{parser}, idx_{idx} {
     }
 
-    ArgumentParser* parser_;
+    CmdArgParser* parser_;
     size_t idx_;
   };
 
   struct CheckProxy {
-    operator bool() {
+    explicit operator bool() {
       if (idx_ >= parser_->args_.size())
         return false;
 
@@ -119,13 +120,13 @@ struct ArgumentParser {
     }
 
    private:
-    friend struct ArgumentParser;
+    friend struct CmdArgParser;
 
-    CheckProxy(ArgumentParser* parser, std::string_view tag, size_t idx)
+    CheckProxy(CmdArgParser* parser, std::string_view tag, size_t idx)
         : parser_{parser}, tag_{tag}, idx_{idx} {
     }
 
-    ArgumentParser* parser_;
+    CmdArgParser* parser_;
     std::string_view tag_;
     size_t idx_;
     size_t expect_tail_ = 0;
@@ -148,7 +149,7 @@ struct ArgumentParser {
   };
 
  public:
-  ArgumentParser(CmdArgList args) : args_{args} {
+  CmdArgParser(CmdArgList args) : args_{args} {
   }
 
   // Get next value without consuming it
@@ -169,13 +170,13 @@ struct ArgumentParser {
   }
 
   // Skip specified number of arguments
-  ArgumentParser& Skip(size_t n) {
+  CmdArgParser& Skip(size_t n) {
     cur_i_ += n;
     return *this;
   }
 
   // In-place convert the next argument to uppercase
-  ArgumentParser& ToUpper() {
+  CmdArgParser& ToUpper() {
     if (cur_i_ < args_.size())
       ToUpper(cur_i_);
     return *this;

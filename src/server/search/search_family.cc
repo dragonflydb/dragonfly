@@ -17,7 +17,7 @@
 #include "base/logging.h"
 #include "core/json_object.h"
 #include "core/search/search.h"
-#include "facade/arg_parser.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
@@ -44,7 +44,7 @@ bool IsValidJsonPath(string_view path) {
   return !ec;
 }
 
-optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, ArgumentParser parser,
+optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
                                             ConnectionContext* cntx) {
   search::Schema schema;
 
@@ -88,7 +88,6 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, ArgumentPar
     schema.field_names[field_info.short_name] = field_ident;
 
   if (auto err = parser.Error(); err) {
-    VLOG(0) << "ParseSchemaErr " << err->type << " at " << err->index;
     (*cntx)->SendError(err->MakeReply());
     return nullopt;
   }
@@ -96,16 +95,17 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, ArgumentPar
   return schema;
 }
 
-optional<SearchParams> ParseSearchParamsOrReply(ArgumentParser parser, ConnectionContext* cntx) {
+optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
   size_t limit_offset = 0, limit_total = 10;
   search::FtVector knn_vector;
   optional<SearchParams::FieldAliasList> alias_list;
 
   while (parser.ToUpper().Ok()) {
     // [LIMIT offset total]
-    if (parser.Check("LIMIT").ExpectTail(2).NextUpper()) {
+    if (parser.Check("LIMIT").ExpectTail(2)) {
       limit_offset = parser.Next().Int<size_t>();
       limit_total = parser.Next().Int<size_t>();
+      continue;
     }
 
     // RETURN {num} [{ident} AS {name}...]
@@ -150,8 +150,13 @@ optional<SearchParams> ParseSearchParamsOrReply(ArgumentParser parser, Connectio
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (parser.Check("PARAMS").ExpectTail(3).NextUpper())
+    if (parser.Check("PARAMS").ExpectTail(3)) {
       knn_vector = BytesToFtVector(parser.Skip(2).Next());
+      continue;
+    }
+
+    // Unsupported parameters are ignored for now
+    parser.Skip(1);
   }
 
   if (auto err = parser.Error(); err) {
@@ -246,7 +251,7 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   DocIndex index{};
 
-  ArgumentParser parser{args};
+  CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
   while (parser.ToUpper().Ok()) {
@@ -274,8 +279,8 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
       break;  // SCHEMA always comes last
     }
 
-    // unknown argument
-    return (*cntx)->SendError(kSyntaxErr);
+    // Unsupported parameters are ignored for now
+    parser.Skip(1);
   }
 
   if (auto err = parser.Error(); err)
