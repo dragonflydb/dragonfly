@@ -1182,7 +1182,6 @@ void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
              << result.value().size();
     (*cntx)->SendBulkString(*result);
   } else {
-    DVLOG(1) << "Dump failed: " << result.DebugFormat() << key << " nil";
     (*cntx)->SendNull();
   }
 }
