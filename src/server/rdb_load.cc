@@ -2274,7 +2274,10 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
         LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
       }
     } catch (const std::bad_alloc&) {
-      LOG(WARNING) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
+      LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
+      ec_ = RdbError(errc::out_of_memory);
+      stop_early_ = true;
+      break;
     }
   }
 
