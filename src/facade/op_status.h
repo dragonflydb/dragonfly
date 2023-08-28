@@ -124,6 +124,8 @@ inline bool operator==(OpStatus st, const OpResultBase& ob) {
   return ob.operator==(st);
 }
 
+std::string_view StatusToMsg(OpStatus status);
+
 }  // namespace facade
 
 namespace std {
