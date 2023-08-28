@@ -158,7 +158,7 @@ class RdbSerializer {
   }
 
   // Write journal entry as an embedded journal blob.
-  std::error_code WriteJournalEntry(const journal::Entry& entry);
+  std::error_code WriteJournalEntry(std::string_view entry);
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
 
