@@ -2,6 +2,7 @@ import time
 import pytest
 import os
 import glob
+import asyncio
 from redis import asyncio as aioredis
 from pathlib import Path
 
@@ -26,6 +27,13 @@ class SnapshotTestBase:
         assert len(possible_mains) == 1, possible_mains
         return possible_mains[0]
 
+    async def wait_for_save(self, pattern):
+        while True:
+            files = glob.glob(str(self.tmp_dir.absolute()) + "/" + pattern)
+            if not len(files) == 0:
+                break
+            await asyncio.sleep(1)
+
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-rdb-{{timestamp}}"})
 class TestRdbSnapshot(SnapshotTestBase):
@@ -36,6 +44,7 @@ class TestRdbSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, async_client, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
@@ -59,6 +68,7 @@ class TestRdbSnapshotExactFilename(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, async_client, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
@@ -83,6 +93,7 @@ class TestDflySnapshot(SnapshotTestBase):
         self.tmp_dir = tmp_dir
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, async_client, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
@@ -124,7 +135,7 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
     async def test_snapshot(self, df_local_factory, save_type, dbfilename):
         df_args = {"dbfilename": dbfilename, **BASIC_ARGS, "port": 1111}
         if save_type == "rdb":
-            df_args["nodf_snapshot_format"] = ""
+            df_args["nodf_snapshot_format"] = None
         df_server = df_local_factory.create(**df_args)
         df_server.start()
 
@@ -149,15 +160,38 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(
             port=df_server.port, keys=10, multi_transaction_probability=0
         )
         await seeder.run(target_deviation=0.5)
 
-        time.sleep(60)
+        await super().wait_for_save("test-periodic-summary.dfs")
 
         assert super().get_main_file("test-periodic-summary.dfs")
+
+
+# save every 1 minute
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
+class TestCronPeriodicSnapshot(SnapshotTestBase):
+    """Test periodic snapshotting"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        super().setup(tmp_dir)
+
+    @pytest.mark.asyncio
+    @pytest.mark.slow
+    async def test_snapshot(self, df_seeder_factory, df_server):
+        seeder = df_seeder_factory.create(
+            port=df_server.port, keys=10, multi_transaction_probability=0
+        )
+        await seeder.run(target_deviation=0.5)
+
+        await super().wait_for_save("test-cron-summary.dfs")
+
+        assert super().get_main_file("test-cron-summary.dfs")
 
 
 @dfly_args({**BASIC_ARGS})
@@ -188,6 +222,7 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         self.tmp_dir = tmp_dir
 
     @pytest.mark.asyncio
+    @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)

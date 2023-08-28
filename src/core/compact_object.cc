@@ -36,6 +36,7 @@ using namespace std;
 using absl::GetFlag;
 using detail::binpacked_len;
 using MemoryResource = detail::RobjWrapper::MemoryResource;
+
 namespace {
 
 constexpr XXH64_hash_t kHashSeed = 24061983;
@@ -140,6 +141,41 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
   }
 }
 
+// Iterates over allocations of internal hash data structures and re-allocates
+// them if their pages are underutilized.
+// Returns pointer to new object ptr and whether any re-allocations happened.
+pair<void*, bool> DefragHash(MemoryResource* mr, unsigned encoding, void* ptr, float ratio) {
+  switch (encoding) {
+    // Listpack is stored as a single contiguous array
+    case kEncodingListPack: {
+      uint8_t* lp = (uint8_t*)ptr;
+      if (!zmalloc_page_is_underutilized(lp, ratio))
+        return {lp, false};
+
+      size_t lp_bytes = lpBytes(lp);
+      uint8_t* replacement = lpNew(lpBytes(lp));
+      memcpy(replacement, lp, lp_bytes);
+      lpFree(lp);
+
+      return {replacement, true};
+    };
+
+    // StringMap supports re-allocation of it's internal nodes
+    case kEncodingStrMap2: {
+      bool realloced = false;
+
+      StringMap* sm = (StringMap*)ptr;
+      for (auto it = sm->begin(); it != sm->end(); ++it)
+        realloced |= it.ReallocIfNeeded(ratio);
+
+      return {sm, realloced};
+    }
+
+    default:
+      ABSL_UNREACHABLE();
+  };
+}
+
 inline void FreeObjStream(void* ptr) {
   freeStream((stream*)ptr);
 }
@@ -198,7 +234,6 @@ size_t RobjWrapper::MallocUsed() const {
 
   switch (type_) {
     case OBJ_STRING:
-      DVLOG(2) << "Freeing string object";
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
@@ -256,6 +291,18 @@ size_t RobjWrapper::Size() const {
         default:
           LOG(FATAL) << "Unexpected encoding " << encoding_;
       };
+    case OBJ_HASH:
+      switch (encoding_) {
+        case kEncodingListPack: {
+          uint8_t* lp = (uint8_t*)inner_obj_;
+          return lpLength(lp) / 2;
+        } break;
+
+        case kEncodingStrMap2: {
+          StringMap* sm = (StringMap*)inner_obj_;
+          return sm->Size();
+        }
+      }
     default:;
   }
   return 0;
@@ -348,10 +395,15 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
 }
 
 bool RobjWrapper::DefragIfNeeded(float ratio) {
-  if (type() == OBJ_STRING) {  // only applicable to strings
+  if (type() == OBJ_STRING) {
     if (zmalloc_page_is_underutilized(inner_obj(), ratio)) {
-      return Reallocate(tl.local_mr);
+      ReallocateString(tl.local_mr);
+      return true;
     }
+  } else if (type() == OBJ_HASH) {
+    auto [new_ptr, realloced] = DefragHash(tl.local_mr, encoding_, inner_obj_, ratio);
+    inner_obj_ = new_ptr;
+    return realloced;
   }
   return false;
 }
@@ -419,7 +471,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
        * becomes too long *before* executing zzlInsert. */
       if (zl_len + 1 > server.zset_max_listpack_entries ||
           sdslen(ele) > server.zset_max_listpack_value || !lpSafeToAdd(lp, sdslen(ele))) {
-        unique_ptr<SortedMap> ss = SortedMap::FromListPack(lp);
+        unique_ptr<SortedMap> ss = SortedMap::FromListPack(tl.local_mr, lp);
         lpFree(lp);
         inner_obj_ = ss.release();
         encoding_ = OBJ_ENCODING_SKIPLIST;
@@ -441,12 +493,12 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
   return ss->Add(score, ele, in_flags, out_flags, newscore);
 }
 
-bool RobjWrapper::Reallocate(MemoryResource* mr) {
+void RobjWrapper::ReallocateString(MemoryResource* mr) {
+  DCHECK_EQ(type(), OBJ_STRING);
   void* old_ptr = inner_obj_;
   inner_obj_ = mr->allocate(sz_, kAlignSize);
   memcpy(inner_obj_, old_ptr, sz_);
   mr->deallocate(old_ptr, 0, kAlignSize);
-  return true;
 }
 
 void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {

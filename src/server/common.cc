@@ -16,6 +16,7 @@ extern "C" {
 #include "redis/util.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "server/engine_shard_set.h"
@@ -24,10 +25,42 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/transaction.h"
 
+ABSL_FLAG(bool, lock_on_hashtags, false,
+          "When true, locks are done in the {hashtag} level instead of key level. "
+          "Only use this with --cluster_mode=emulated|yes.");
+
 namespace dfly {
 
 using namespace std;
 using namespace util;
+
+namespace {
+// Thread-local cache with static linkage.
+thread_local std::optional<bool> is_enabled_flag_cache;
+}  // namespace
+
+void TEST_InvalidateLockHashTag() {
+  is_enabled_flag_cache = nullopt;
+  CHECK(shard_set != nullptr);
+  shard_set->pool()->Await(
+      [](ShardId shard, ProactorBase* proactor) { is_enabled_flag_cache = nullopt; });
+}
+
+bool KeyLockArgs::IsLockHashTagEnabled() {
+  if (!is_enabled_flag_cache.has_value()) {
+    is_enabled_flag_cache = absl::GetFlag(FLAGS_lock_on_hashtags);
+  }
+
+  return *is_enabled_flag_cache;
+}
+
+string_view KeyLockArgs::GetLockKey(string_view key) {
+  if (IsLockHashTagEnabled()) {
+    return ClusterConfig::KeyTag(key);
+  }
+
+  return key;
+}
 
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);
@@ -101,6 +134,9 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   }
   char* end;
   double d = strtod(cstr, &end);
+
+  if (end == cstr)  // did not succeed to advance
+    return false;
 
   int64 scale = 1;
   switch (*end) {
@@ -315,7 +351,7 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
   CHECK(!err_handler_fb_.IsJoinable());
 
   if (err_handler_)
-    err_handler_fb_ = MakeFiber(err_handler_, err_);
+    err_handler_fb_ = fb2::Fiber("report_internal_error", err_handler_, err_);
 
   Cancellation::Cancel();
   return err_;

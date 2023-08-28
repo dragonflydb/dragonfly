@@ -16,12 +16,18 @@ namespace facade {
 using namespace std;
 
 #define ADD(x) (x) += o.x
+#define ADD_M(m)                  \
+  do {                            \
+    for (const auto& k_v : o.m) { \
+      m[k_v.first] += k_v.second; \
+    }                             \
+  } while (0)
 
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 176);
+  static_assert(kSizeConnStats == 136u);
 
   ADD(read_buf_capacity);
   ADD(pipeline_cache_capacity);
@@ -37,13 +43,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(num_replicas);
   ADD(num_blocked_clients);
 
-  for (const auto& k_v : o.err_count_map) {
-    err_count_map[k_v.first] += k_v.second;
-  }
-
-  for (const auto& k_v : o.cmd_count_map) {
-    cmd_count_map[k_v.first] += k_v.second;
-  }
+  ADD_M(err_count_map);
 
   return *this;
 }
@@ -63,6 +63,10 @@ string UnknownSubCmd(string_view subcmd, string_view cmd) {
                       cmd, " HELP.");
 }
 
+string ConfigSetFailed(string_view config_name) {
+  return absl::StrCat("CONFIG SET failed (possibly related to argument '", config_name, "').");
+}
+
 const char kSyntaxErr[] = "syntax error";
 const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
 const char kKeyNotFoundErr[] = "no such key";
@@ -75,12 +79,14 @@ const char kInvalidDbIndErr[] = "invalid DB index";
 const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
 const char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
 const char kExpiryOutOfRange[] = "expiry is out of range";
-const char kSyntaxErrType[] = "syntax_error";
-const char kScriptErrType[] = "script_error";
 const char kIndexOutOfRange[] = "index out of range";
 const char kOutOfMemory[] = "Out of memory";
 const char kInvalidNumericResult[] = "result is not a number";
 const char kClusterNotConfigured[] = "Cluster is not yet configured";
+
+const char kSyntaxErrType[] = "syntax_error";
+const char kScriptErrType[] = "script_error";
+const char kConfigErrType[] = "config_error";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {
@@ -106,13 +112,16 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   if (owner) {
     protocol_ = owner->protocol();
   }
-  switch (protocol_) {
-    case Protocol::REDIS:
-      rbuilder_.reset(new RedisReplyBuilder(stream));
-      break;
-    case Protocol::MEMCACHE:
-      rbuilder_.reset(new MCReplyBuilder(stream));
-      break;
+
+  if (stream) {
+    switch (protocol_) {
+      case Protocol::REDIS:
+        rbuilder_.reset(new RedisReplyBuilder(stream));
+        break;
+      case Protocol::MEMCACHE:
+        rbuilder_.reset(new MCReplyBuilder(stream));
+        break;
+    }
   }
 
   conn_closing = false;
@@ -133,9 +142,9 @@ RedisReplyBuilder* ConnectionContext::operator->() {
 }
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
-                     int8_t last_key, int8_t step)
+                     int8_t last_key, int8_t step, uint32_t acl_categories)
     : name_(name), opt_mask_(mask), arity_(arity), first_key_(first_key), last_key_(last_key),
-      step_key_(step) {
+      step_key_(step), acl_categories_(acl_categories) {
 }
 
 uint32_t CommandId::OptCount(uint32_t mask) {

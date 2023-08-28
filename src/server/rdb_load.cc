@@ -19,9 +19,11 @@ extern "C" {
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 #include <lz4frame.h>
 #include <zstd.h>
 
+#include <cstring>
 #include <jsoncons/json.hpp>
 
 #include "base/endian.h"
@@ -644,7 +646,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
     if (rdb_type_ == RDB_TYPE_LIST_QUICKLIST_2) {
       uint8_t* src = (uint8_t*)sv.data();
-      if (!lpValidateIntegrity(src, sv.size(), 0, NULL, NULL)) {
+      if (!lpValidateIntegrity(src, sv.size(), 0, nullptr, nullptr)) {
         LOG(ERROR) << "Listpack integrity check failed.";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return false;
@@ -695,7 +697,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t zsetlen = ltrace->blob_count();
-  detail::SortedMap* zs = new detail::SortedMap;
+  detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
   unsigned encoding = OBJ_ENCODING_SKIPLIST;
   auto cleanup = absl::MakeCleanup([&] { delete zs; });
 
@@ -893,13 +895,72 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       res->encoding = OBJ_ENCODING_INTSET;
     }
     pv_->ImportRObj(res);
-  } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST) {
-    unsigned char* lp = lpNew(blob.size());
-    if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
-      LOG(ERROR) << "Zset ziplist integrity check failed.";
-      zfree(lp);
+  } else if (rdb_type_ == RDB_TYPE_SET_LISTPACK) {
+    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+      LOG(ERROR) << "ListPack integrity check failed.";
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
+    }
+    unsigned char* lp = (unsigned char*)blob.data();
+    auto iterate_and_apply_f = [lp](auto f) {
+      for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
+        unsigned int slen = 0;
+        long long lval = 0;
+        unsigned char* res = lpGetValue(cur, &slen, &lval);
+        f(res, slen, lval);
+      }
+    };
+    const bool use_set2 = GetFlag(FLAGS_use_set2);
+    robj* res = nullptr;
+    if (use_set2) {
+      StringSet* set = new StringSet{CompactObj::memory_resource()};
+      res = createObject(OBJ_SET, set);
+      res->encoding = OBJ_ENCODING_HT;
+      auto f = [this, res](unsigned char* val, unsigned int slen, long long lval) {
+        sds sdsele = (val) ? sdsnewlen(val, slen) : sdsfromlonglong(lval);
+        if (!((StringSet*)res->ptr)->AddSds(sdsele)) {
+          LOG(ERROR) << "Error adding to member set2";
+          ec_ = RdbError(errc::duplicate_key);
+        }
+      };
+      iterate_and_apply_f(f);
+    } else {
+      res = createSetObject();
+      auto f = [this, res](unsigned char* val, unsigned int slen, long long lval) {
+        sds sdsele = (val) ? sdsnewlen(val, slen) : sdsfromlonglong(lval);
+        if (!dictAdd((dict*)res->ptr, sdsele, nullptr)) {
+          LOG(ERROR) << "Error adding to member set";
+          ec_ = RdbError(errc::duplicate_key);
+        }
+      };
+      iterate_and_apply_f(f);
+    }
+    if (ec_) {
+      decrRefCount(res);
+      return;
+    }
+    pv_->ImportRObj(res);
+  } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
+    unsigned char* lp = lpNew(blob.size());
+    switch (rdb_type_) {
+      case RDB_TYPE_HASH_ZIPLIST:
+        if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(),
+                                                     &lp)) {
+          LOG(ERROR) << "Zset ziplist integrity check failed.";
+          zfree(lp);
+          ec_ = RdbError(errc::rdb_file_corrupted);
+          return;
+        }
+        break;
+      case RDB_TYPE_HASH_LISTPACK:
+        if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+          LOG(ERROR) << "ListPack integrity check failed.";
+          zfree(lp);
+          ec_ = RdbError(errc::rdb_file_corrupted);
+          return;
+        }
+        std::memcpy(lp, blob.data(), blob.size());
+        break;
     }
 
     if (lpLength(lp) == 0) {
@@ -935,7 +996,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned encoding = OBJ_ENCODING_LISTPACK;
     void* inner;
     if (lpBytes(lp) > server.zset_max_listpack_entries) {
-      inner = detail::SortedMap::FromListPack(lp).release();
+      inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp).release();
       lpFree(lp);
       encoding = OBJ_ENCODING_SKIPLIST;
     } else {
@@ -944,6 +1005,17 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     }
     pv_->InitRobj(OBJ_ZSET, encoding, inner);
     return;
+  } else if (rdb_type_ == RDB_TYPE_ZSET_LISTPACK) {
+    if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), 0, nullptr, nullptr)) {
+      LOG(ERROR) << "ListPack integrity check failed.";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
+    }
+    unsigned char* src_lp = (unsigned char*)blob.data();
+    unsigned long long bytes = lpBytes(src_lp);
+    unsigned char* lp = (uint8_t*)zmalloc(bytes);
+    std::memcpy(lp, src_lp, bytes);
+    pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
@@ -1165,20 +1237,14 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
 }
 
 auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
-  long long val;
+  io::Result<long long> val = ReadIntObj(enctype);
 
-  if (enctype == RDB_ENC_INT8) {
-    SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
-  } else if (enctype == RDB_ENC_INT16) {
-    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
-  } else if (enctype == RDB_ENC_INT32) {
-    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
-  } else {
-    return Unexpected(errc::invalid_encoding);
+  if (!val.has_value()) {
+    return val.get_unexpected();
   }
 
   char buf[32];
-  absl::numbers_internal::FastIntToBuffer(val, buf);
+  absl::numbers_internal::FastIntToBuffer(*val, buf);
 
   return string(buf);
 }
@@ -1246,7 +1312,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadIntSet();
       break;
     case RDB_TYPE_HASH_ZIPLIST:
-      iores = ReadHZiplist();
+    case RDB_TYPE_HASH_LISTPACK:
+    case RDB_TYPE_ZSET_LISTPACK:
+      iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
       iores = ReadHMap();
@@ -1266,7 +1334,20 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadStreams();
       break;
     case RDB_TYPE_JSON:
-      iores = ReadJson();
+    case RDB_TYPE_SET_LISTPACK:
+      // We need to deal with protocol versions 9 and older because in these
+      // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
+      // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
+      if (rdb_version_ < 10 && rdbtype == RDB_TYPE_JSON_OLD) {
+        iores = ReadJson();
+        break;
+      }
+      if (rdbtype == RDB_TYPE_JSON) {
+        iores = ReadJson();
+        break;
+      }
+
+      iores = ReadGeneric(rdbtype);
       break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
@@ -1323,9 +1404,9 @@ io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
   if (enctype == RDB_ENC_INT8) {
     SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
   } else if (enctype == RDB_ENC_INT16) {
-    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
+    SET_OR_UNEXPECT(FetchInt<int16_t>(), val);
   } else if (enctype == RDB_ENC_INT32) {
-    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
+    SET_OR_UNEXPECT(FetchInt<int32_t>(), val);
   } else {
     return Unexpected(errc::invalid_encoding);
   }
@@ -1400,7 +1481,7 @@ auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(obj), RDB_TYPE_SET_INTSET};
 }
 
-auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
   RdbVariant str_obj;
   error_code ec = ReadStringObj(&str_obj);
   if (ec)
@@ -1410,7 +1491,7 @@ auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
-  return OpaqueObj{std::move(str_obj), RDB_TYPE_HASH_ZIPLIST};
+  return OpaqueObj{std::move(str_obj), rdbtype};
 }
 
 auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
@@ -1766,9 +1847,9 @@ error_code RdbLoader::Load(io::Source* src) {
     char buf[64] = {0};
     ::memcpy(buf, cb.data() + 5, 4);
 
-    int rdbver = atoi(buf);
-    if (rdbver < 5 || rdbver > RDB_VERSION) {  // We accept starting from 5.
-      LOG(ERROR) << "RDB Version " << rdbver << " is not supported";
+    rdb_version_ = atoi(buf);
+    if (rdb_version_ < 5 || rdb_version_ > RDB_VERSION) {  // We accept starting from 5.
+      LOG(ERROR) << "RDB Version " << rdb_version_ << " is not supported";
       return RdbError(errc::bad_version);
     }
 
@@ -2108,16 +2189,7 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "repl-offset") {
     // TODO
   } else if (auxkey == "lua") {
-    ServerState* ss = ServerState::tlocal();
-    auto interpreter = ss->BorrowInterpreter();
-    absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
-
-    string_view body{auxval};
-    if (script_mgr_) {
-      auto res = script_mgr_->Insert(body, interpreter);
-      if (!res)
-        LOG(ERROR) << "Error compiling script";
-    }
+    LoadScriptFromAux(move(auxval));
   } else if (auxkey == "redis-ver") {
     VLOG(1) << "Loading RDB produced by version " << auxval;
   } else if (auxkey == "ctime") {
@@ -2140,6 +2212,8 @@ error_code RdbLoader::HandleAux() {
     }
   } else if (auxkey == "redis-bits") {
     /* Just ignored. */
+  } else if (auxkey == "search-index") {
+    LoadSearchIndexDefFromAux(move(auxval));
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
@@ -2194,9 +2268,16 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
       continue;
 
-    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
-    if (!added) {
-      LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+    try {
+      auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+      if (!added) {
+        LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+      }
+    } catch (const std::bad_alloc&) {
+      LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
+      ec_ = RdbError(errc::out_of_memory);
+      stop_early_ = true;
+      break;
     }
   }
 
@@ -2257,6 +2338,52 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   }
 
   return kOk;
+}
+
+void RdbLoader::LoadScriptFromAux(string&& body) {
+  ServerState* ss = ServerState::tlocal();
+  auto interpreter = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
+
+  if (script_mgr_) {
+    auto res = script_mgr_->Insert(body, interpreter);
+    if (!res)
+      LOG(ERROR) << "Error compiling script";
+  }
+}
+
+void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
+  facade::CapturingReplyBuilder crb{};
+  ConnectionContext cntx{nullptr, nullptr, &crb};
+  cntx.journal_emulated = true;
+
+  absl::Cleanup cntx_clean = [&cntx] { cntx.Inject(nullptr); };
+
+  uint32_t consumed = 0;
+  facade::RespVec resp_vec;
+  facade::RedisParser parser;
+
+  def += "\r\n";  // RESP terminator
+  absl::Span<uint8_t> buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
+  auto res = parser.Parse(buffer, &consumed, &resp_vec);
+
+  if (res != facade::RedisParser::Result::OK) {
+    LOG(ERROR) << "Bad index definition: " << def;
+    return;
+  }
+
+  CmdArgVec arg_vec;
+  facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
+
+  string ft_create = "FT.CREATE";
+  arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
+
+  service_->DispatchCommand(absl::MakeSpan(arg_vec), &cntx);
+
+  auto response = crb.Take();
+  if (auto err = facade::CapturingReplyBuilder::GetError(response); err) {
+    LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
+  }
 }
 
 }  // namespace dfly

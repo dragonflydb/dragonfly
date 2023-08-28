@@ -4,10 +4,12 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
 
 #include <atomic>
 #include <jsoncons/json.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <variant>
 #include <vector>
 
@@ -16,6 +18,7 @@
 #include "core/search/search.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -30,34 +33,48 @@ using namespace facade;
 
 namespace {
 
-unordered_map<string_view, search::Schema::FieldType> kSchemaTypes = {
-    {"TAG"sv, search::Schema::TAG},
-    {"TEXT"sv, search::Schema::TEXT},
-    {"NUMERIC"sv, search::Schema::NUMERIC},
-    {"VECTOR"sv, search::Schema::VECTOR}};
-
 static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", "DIM",
                                                  "DISTANCE_METRIC"};
 
-optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* cntx) {
+optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList args,
+                                            ConnectionContext* cntx) {
   search::Schema schema;
   for (size_t i = 0; i < args.size(); i++) {
-    string_view field = ArgS(args, i);
-    if (i++ >= args.size()) {
+    string_view field = ArgS(args, i++);
+
+    // Verify json path is correct
+    if (type == DocIndex::JSON) {
+      error_code ec;
+      jsoncons::jsonpath::make_expression<JsonType>(field, ec);
+      if (ec) {
+        (*cntx)->SendError("Bad json path: " + string{field});
+        return nullopt;
+      }
+    }
+
+    // Check optional AS [alias]
+    string_view field_alias = field;  // by default "alias" is same as identifier
+    if (i + 1 < args.size() && absl::AsciiStrToUpper(ArgS(args, i)) == "AS") {
+      field_alias = ArgS(args, i + 1);
+      i += 2;
+    }
+
+    if (i >= args.size()) {
       (*cntx)->SendError("No field type for field: " + string{field});
       return nullopt;
     }
 
+    // Determine type
     ToUpper(&args[i]);
-    string_view type_str = ArgS(args, i);
-    auto it = kSchemaTypes.find(type_str);
-    if (it == kSchemaTypes.end()) {
+    auto type_str = ArgS(args, i);
+    auto type = ParseSearchFieldType(type_str);
+    if (!type) {
       (*cntx)->SendError("Invalid field type: " + string{type_str});
       return nullopt;
     }
 
     // Skip {algorithm} {dim} flags
-    if (it->second == search::Schema::VECTOR)
+    if (*type == search::SchemaField::VECTOR)
       i += 2;
 
     // Skip all trailing ignored parameters
@@ -65,7 +82,7 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
       i += 2;
     }
 
-    schema.fields[field] = it->second;
+    schema.fields[field_alias] = {string{field}, *type};
   }
 
   return schema;
@@ -216,7 +233,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
       if (i++ >= args.size())
         return (*cntx)->SendError("Empty schema");
 
-      auto schema = ParseSchemaOrReply(args.subspan(i), cntx);
+      auto schema = ParseSchemaOrReply(index.type, args.subspan(i), cntx);
       if (!schema)
         return;
       index.schema = move(*schema);
@@ -231,6 +248,82 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   });
 
   (*cntx)->SendOk();
+}
+
+void SearchFamily::FtDropIndex(CmdArgList args, ConnectionContext* cntx) {
+  string_view idx_name = ArgS(args, 0);
+  // TODO: Handle optional DD param
+
+  atomic_uint num_deleted{0};
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    if (es->search_indices()->DropIndex(idx_name))
+      num_deleted.fetch_add(1);
+    return OpStatus::OK;
+  });
+
+  DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
+  if (num_deleted == shard_set->size())
+    return (*cntx)->SendOk();
+  (*cntx)->SendError("Unknown Index name");
+}
+
+void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
+  string_view idx_name = ArgS(args, 0);
+
+  atomic_uint num_notfound{0};
+  vector<DocIndexInfo> infos(shard_set->size());
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(idx_name);
+    if (index == nullptr)
+      num_notfound.fetch_add(1);
+    else
+      infos[es->shard_id()] = index->GetInfo();
+    return OpStatus::OK;
+  });
+
+  DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
+
+  if (num_notfound > 0u)
+    return (*cntx)->SendError("Unknown index name");
+
+  DCHECK(infos.front().base_index.schema.fields.size() ==
+         infos.back().base_index.schema.fields.size());
+
+  size_t total_num_docs = 0;
+  for (const auto& info : infos)
+    total_num_docs += info.num_docs;
+
+  (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
+
+  (*cntx)->SendSimpleString("index_name");
+  (*cntx)->SendSimpleString(idx_name);
+
+  (*cntx)->SendSimpleString("fields");
+  const auto& fields = infos.front().base_index.schema.fields;
+  (*cntx)->StartArray(fields.size());
+  for (const auto& [field_name, field_info] : fields) {
+    string_view reply[6] = {"identifier", string_view{field_info.identifier},
+                            "attribute",  string_view{field_name},
+                            "type"sv,     SearchFieldTypeToString(field_info.type)};
+    (*cntx)->SendSimpleStrArr(reply);
+  }
+
+  (*cntx)->SendSimpleString("num_docs");
+  (*cntx)->SendLong(total_num_docs);
+}
+
+void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
+  atomic_int first{0};
+  vector<string> names;
+
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    // Using `first` to assign `names` only once without a race
+    if (first.fetch_add(1) == 0)
+      names = es->search_indices()->GetIndexNames();
+    return OpStatus::OK;
+  });
+
+  (*cntx)->SendStringArr(names);
 }
 
 void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
@@ -268,11 +361,19 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
 
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
+// Redis search is a module. Therefore we introduce dragonfly extension search
+// to set as the default for the search family of commands. More sensible defaults,
+// should also be considered in the future
+
 void SearchFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
-  *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(FtCreate)
-            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0}.HFUNC(FtSearch);
+  *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
+            << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtDropIndex)
+            << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+            // Underscore same as in RediSearch because it's "temporary" (long time already)
+            << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
+            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch);
 }
 
 }  // namespace dfly

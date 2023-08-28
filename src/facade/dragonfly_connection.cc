@@ -11,9 +11,11 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
@@ -38,6 +40,9 @@ ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
+ABSL_FLAG(std::uint64_t, pipeline_squash, 0,
+          "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
+
 using namespace util;
 using namespace std;
 using nonstd::make_unexpected;
@@ -46,12 +51,13 @@ namespace facade {
 namespace {
 
 void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
-  string res("-ERR Protocol error: ");
+  constexpr string_view res = "-ERR Protocol error: "sv;
   if (pres == RedisParser::BAD_BULKLEN) {
-    builder->SendProtocolError("invalid bulk length");
+    builder->SendProtocolError(absl::StrCat(res, "invalid bulk length"));
+  } else if (pres == RedisParser::BAD_ARRAYLEN) {
+    builder->SendProtocolError(absl::StrCat(res, "invalid multibulk length"));
   } else {
-    CHECK_EQ(RedisParser::BAD_ARRAYLEN, pres);
-    builder->SendProtocolError("invalid multibulk length");
+    builder->SendProtocolError(absl::StrCat(res, "parse error"));
   }
 }
 
@@ -73,7 +79,7 @@ bool MatchHttp11Line(string_view line) {
 }
 
 constexpr size_t kMinReadSize = 256;
-constexpr size_t kMaxReadSize = 32_KB;
+constexpr size_t kMaxReadSize = 64_KB;
 
 constexpr size_t kMaxDispatchQMemory = 5_MB;
 
@@ -258,8 +264,7 @@ void Connection::OnShutdown() {
 void Connection::OnPreMigrateThread() {
   // If we migrating to another io_uring we should cancel any pending requests we have.
   if (break_poll_id_ != UINT32_MAX) {
-    auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
-    ls->CancelPoll(break_poll_id_);
+    socket_->CancelPoll(break_poll_id_);
     break_poll_id_ = UINT32_MAX;
   }
 }
@@ -269,9 +274,8 @@ void Connection::OnPostMigrateThread() {
   if (breaker_cb_) {
     DCHECK_EQ(UINT32_MAX, break_poll_id_);
 
-    auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
     break_poll_id_ =
-        ls->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+        socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
   }
 }
 
@@ -293,30 +297,28 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 void Connection::HandleRequests() {
   ThisFiber::SetName("DflyConnection");
 
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-
   if (absl::GetFlag(FLAGS_tcp_nodelay)) {
     int val = 1;
-    CHECK_EQ(0, setsockopt(lsb->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)));
+    CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)));
   }
 
-  auto remote_ep = lsb->RemoteEndpoint();
+  auto remote_ep = socket_->RemoteEndpoint();
 
   FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
-  unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
     const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
     if (!(IsAdmin() && no_tls_on_admin_port)) {
-      tls_sock.reset(new tls::TlsSocket(socket_.get()));
+      unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
       tls_sock->InitSSL(ctx_);
       FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
+      SetSocket(tls_sock.release());
 
       if (!aresult) {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
         return;
       }
-      peer = tls_sock.get();
+      peer = socket_.get();
       VLOG(1) << "TLS handshake succeeded";
     }
   }
@@ -339,16 +341,15 @@ void Connection::HandleRequests() {
       http_conn.ReleaseSocket();
     } else {
       cc_.reset(service_->CreateContext(peer, this));
-      auto* us = static_cast<LinuxSocketBase*>(socket_.get());
       if (breaker_cb_) {
         break_poll_id_ =
-            us->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+            socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
       }
 
       ConnectionFlow(peer);
 
       if (break_poll_id_ != UINT32_MAX) {
-        us->CancelPoll(break_poll_id_);
+        socket_->CancelPoll(break_poll_id_);
       }
 
       cc_.reset();
@@ -363,22 +364,19 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
 }
 
 std::string Connection::LocalBindAddress() const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  auto le = lsb->LocalEndpoint();
+  auto le = socket_->LocalEndpoint();
   return le.address().to_string();
 }
 
 string Connection::GetClientInfo(unsigned thread_id) const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-
   string res;
-  auto le = lsb->LocalEndpoint();
-  auto re = lsb->RemoteEndpoint();
+  auto le = socket_->LocalEndpoint();
+  auto re = socket_->RemoteEndpoint();
   time_t now = time(nullptr);
 
   int cpu = 0;
   socklen_t len = sizeof(cpu);
-  getsockopt(lsb->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
+  getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
   int my_cpu_id = sched_getcpu();
 
   static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
@@ -386,7 +384,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
 
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
   absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
-  absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
+  absl::StrAppend(&res, " fd=", socket_->native_handle(), " name=", name_);
   absl::StrAppend(&res, " tid=", thread_id, " irqmatch=", int(cpu == my_cpu_id));
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
   absl::StrAppend(&res, " phase=", PHASE_NAMES[phase_]);
@@ -406,9 +404,7 @@ uint32_t Connection::GetClientId() const {
 }
 
 bool Connection::IsAdmin() const {
-  auto* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
-  return lsb->LocalEndpoint().port() == admin_port;
+  return static_cast<Listener*>(owner())->IsAdminInterface();
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
@@ -448,8 +444,6 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_ = service_->GetThreadLocalConnectionStats();
 
-  auto dispatch_fb = MakeFiber(dfly::Launch::dispatch, [&] { DispatchFiber(peer); });
-
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
@@ -473,6 +467,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
+    if (io_buf_.AppendLen() < 64) {
+      io_buf_.EnsureCapacity(io_buf_.Capacity() * 2);
+    }
     auto res = IoLoop(peer, orig_builder);
 
     if (holds_alternative<error_code>(res)) {
@@ -486,7 +483,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   VLOG(1) << "Before dispatch_fb.join()";
-  dispatch_fb.Join();
+  if (dispatch_fb_.IsJoinable())
+    dispatch_fb_.Join();
   VLOG(1) << "After dispatch_fb.join()";
   service_->OnClose(cc_.get());
 
@@ -555,7 +553,7 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   if (can_dispatch_sync) {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
 
-    RespToArgList(tmp_parse_args_, &tmp_cmd_vec_);
+    RespExpr::VecToArgList(tmp_parse_args_, &tmp_cmd_vec_);
 
     {
       cc_->sync_dispatch = true;
@@ -570,6 +568,7 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
       evc_.notify();
 
   } else {
+    dispatch_q_cmds_count_++;
     SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), heap)});
     if (dispatch_q_.size() > 10)
       ThisFiber::Yield();
@@ -650,8 +649,8 @@ auto Connection::ParseMemcache() -> ParserStatus {
     return NEED_MORE;
   }
 
-  if (result == MemcacheParser::PARSE_ERROR) {
-    builder->SendError("");  // ERROR.
+  if (result == MemcacheParser::PARSE_ERROR || result == MemcacheParser::UNKNOWN_CMD) {
+    builder->SendSimpleString("ERROR");
   } else if (result == MemcacheParser::BAD_DELTA) {
     builder->SendClientError("invalid numeric delta argument");
   } else if (result != MemcacheParser::OK) {
@@ -683,6 +682,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     FetchBuilderStats(stats_, orig_builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
+    DCHECK(!append_buf.empty());
+
     phase_ = READ_SOCKET;
 
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
@@ -717,7 +718,9 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
         if (parser_hint > capacity) {
           io_buf_.Reserve(std::min(kMaxReadSize, parser_hint));
-        } else if (append_buf.size() == *recv_sz && append_buf.size() > capacity / 2) {
+        }
+
+        if (io_buf_.AppendLen() < 64u) {
           // Last io used most of the io_buf to the end.
           io_buf_.Reserve(capacity * 2);  // Valid growth range.
         }
@@ -726,6 +729,13 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
           VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
           stats_->read_buf_capacity += (io_buf_.Capacity() - capacity);
         }
+        DCHECK_GT(io_buf_.AppendLen(), 0U);
+      } else if (io_buf_.AppendLen() == 0) {
+        // We have a full buffer and we can not progress with parsing.
+        // This means that we have request too large.
+        LOG(ERROR) << "Request is too large, closing connection";
+        parse_status = ERROR;
+        break;
       }
     } else if (parse_status != OK) {
       break;
@@ -753,33 +763,71 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   DispatchOperations dispatch_op{builder, this};
   uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
 
+  size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
+
   while (!builder->GetError()) {
     evc_.await(
         [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)
       break;
 
-    MessageHandle msg = move(dispatch_q_.front());
-    dispatch_q_.pop_front();
+    auto recycle = [this, request_cache_limit](MessageHandle msg) {
+      dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
 
-    builder->SetBatchMode(dispatch_q_.size() > 0);
+      // Retain pipeline message in pool.
+      if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
+        dispatch_q_cmds_count_--;
+        if (stats_->pipeline_cache_capacity < request_cache_limit) {
+          stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
+          pipeline_req_pool_.push_back(move(*pipe));
+        }
+      }
+    };
 
-    {
+    builder->SetBatchMode(dispatch_q_.size() > 1);
+
+    // Special case: if the dispatch queue accumulated a big number of commands,
+    // we can try to squash them
+    // It is only enabled if the threshold is reached and the whole dispatch queue
+    // consists only of commands (no pubsub or monitor messages)
+    bool squashing_enabled = squashing_threshold > 0;
+    bool threshold_reached = dispatch_q_cmds_count_ > squashing_threshold;
+    bool are_all_plain_cmds = dispatch_q_cmds_count_ == dispatch_q_.size();
+    if (squashing_enabled && threshold_reached && are_all_plain_cmds) {
+      vector<CmdArgList> args;
+      args.reserve(dispatch_q_.size());
+      for (auto& msg : dispatch_q_) {
+        CHECK(holds_alternative<PipelineMessagePtr>(msg.handle));
+        auto& pipe_msg = get<PipelineMessagePtr>(msg.handle);
+        args.push_back(absl::MakeSpan(pipe_msg->args));
+      }
+
+      cc_->async_dispatch = true;
+      service_->DispatchManyCommands(absl::MakeSpan(args), cc_.get());
+      cc_->async_dispatch = false;
+
+      // Dispatch queue could have grown, so handle strictly as many as we executed
+      for (size_t i = 0; i < args.size(); i++) {
+        recycle(move(dispatch_q_.front()));
+        dispatch_q_.pop_front();
+      }
+
+      if (dispatch_q_.empty()) {
+        builder->FlushBatch();
+        builder->SetBatchMode(false);  // in case the next dispatch is sync
+      }
+    } else {
+      MessageHandle msg = move(dispatch_q_.front());
+      dispatch_q_.pop_front();
+
       cc_->async_dispatch = true;
       std::visit(dispatch_op, msg.handle);
       cc_->async_dispatch = false;
+
+      recycle(move(msg));
     }
 
-    dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
     evc_bp_.notify();
-
-    // Retain pipeline message in pool.
-    if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
-      if (stats_->pipeline_cache_capacity < request_cache_limit) {
-        stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
-        pipeline_req_pool_.push_back(move(*pipe));
-      }
-    }
   }
 
   cc_->conn_closing = true;
@@ -847,6 +895,12 @@ void Connection::ShutdownSelf() {
 }
 
 void Connection::Migrate(util::fb2::ProactorBase* dest) {
+  // Migrate is used only by replication, so it doesn't have properties of full-fledged
+  // connections
+  CHECK(!cc_->async_dispatch);
+  CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
+  CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
+
   owner()->Migrate(this, dest);
 }
 
@@ -860,15 +914,6 @@ bool Connection::IsCurrentlyDispatching() const {
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
 
-void RespToArgList(const RespVec& src, CmdArgVec* dest) {
-  dest->resize(src.size());
-  for (size_t i = 0; i < src.size(); ++i) {
-    DCHECK(src[i].type == RespExpr::STRING);
-
-    (*dest)[i] = ToMSS(src[i].GetBuf());
-  }
-}
-
 void Connection::SendPubMessageAsync(PubMessage msg) {
   void* ptr = mi_malloc(sizeof(PubMessage));
   SendAsync({PubMessagePtr{new (ptr) PubMessage{move(msg)}, MessageDeleter{}}});
@@ -880,12 +925,20 @@ void Connection::SendMonitorMessageAsync(string msg) {
 
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
+  DCHECK(owner());
+  DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
   if (cc_->conn_closing)
     return;
 
-  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+  if (!dispatch_fb_.IsJoinable()) {
+    DCHECK_EQ(dispatch_q_.size(), 0u);
+    auto* peer = socket_.get();
+    dispatch_fb_ =
+        fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
+  }
 
+  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   dispatch_q_.push_back(move(msg));
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.
@@ -903,18 +956,16 @@ void Connection::EnsureAsyncMemoryBudget() {
 }
 
 std::string Connection::RemoteEndpointStr() const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  bool unix_socket = lsb->IsUDS();
+  const bool unix_socket = socket_->IsUDS();
   std::string connection_str = unix_socket ? "unix:" : std::string{};
 
-  auto re = lsb->RemoteEndpoint();
+  auto re = socket_->RemoteEndpoint();
   absl::StrAppend(&connection_str, re.address().to_string(), ":", re.port());
   return connection_str;
 }
 
 std::string Connection::RemoteEndpointAddress() const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  auto re = lsb->RemoteEndpoint();
+  auto re = socket_->RemoteEndpoint();
   return re.address().to_string();
 }
 

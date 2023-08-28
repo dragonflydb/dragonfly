@@ -110,9 +110,12 @@ void SinkReplyBuilder::StopAggregate() {
   if (should_batch_ || batch_.empty())
     return;
 
+  FlushBatch();
+}
+
+void SinkReplyBuilder::FlushBatch() {
   error_code ec = sink_->Write(io::Buffer(batch_));
   batch_.clear();
-
   if (ec)
     ec_ = ec;
 }
@@ -159,7 +162,7 @@ void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
 }
 
 void MCReplyBuilder::SendError(string_view str, std::string_view type) {
-  SendSimpleString("ERROR");
+  SendSimpleString(absl::StrCat("SERVER_ERROR ", str));
 }
 
 void MCReplyBuilder::SendProtocolError(std::string_view str) {
@@ -218,6 +221,14 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
     iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
     Send(v, ABSL_ARRAYSIZE(v));
   }
+}
+
+void RedisReplyBuilder::SendError(ErrorReply error) {
+  if (error.status)
+    return SendError(*error.status);
+
+  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
+  SendError(message_sv, error.kind);
 }
 
 void RedisReplyBuilder::SendProtocolError(std::string_view str) {

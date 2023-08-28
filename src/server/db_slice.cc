@@ -38,6 +38,13 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     table->expire.Erase(exp_it);
   }
 
+  if (del_it->second.HasFlag()) {
+    if (table->mcflag.Erase(del_it->first) == 0) {
+      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+                 << del_it->first.ToString();
+    }
+  }
+
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
   if (pv.IsExternal()) {
@@ -55,7 +62,7 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   if (pv.ObjType() == OBJ_STRING)
     stats.strval_memory_usage -= value_heap_size;
 
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabled()) {
     string tmp;
     string_view key = del_it->first.GetSlice(&tmp);
     SlotId sid = ClusterConfig::KeySlot(key);
@@ -340,7 +347,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
   events_.hits++;
   db.top_keys.Touch(key);
 
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabled()) {
     db.slots_stats[ClusterConfig::KeySlot(key)].total_reads += 1;
   }
 
@@ -438,10 +445,11 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
-    if (ClusterConfig::IsClusterEnabled()) {
+    if (ClusterConfig::IsEnabled()) {
       SlotId sid = ClusterConfig::KeySlot(key);
       db.slots_stats[sid].key_count += 1;
     }
+
     return make_tuple(it, ExpireIterator{}, true);
   }
 
@@ -464,7 +472,11 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       db.expire.Erase(expire_it);
 
       if (existing->second.HasFlag()) {
-        db.mcflag.Erase(existing->first);
+        if (db.mcflag.Erase(existing->first) == 0) {
+          LOG(ERROR)
+              << "Internal error, inconsistent state, mcflag should be present but not found "
+              << existing->first.ToString();
+        }
       }
 
       // Keep the entry but reset the object.
@@ -493,9 +505,6 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   }
 
   auto& db = db_arr_[db_ind];
-  if (it->second.HasFlag()) {
-    CHECK_EQ(1u, db->mcflag.Erase(it->first));
-  }
 
   auto obj_type = it->second.ObjType();
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
@@ -544,7 +553,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
 
 void DbSlice::FlushSlots(SlotSet slot_ids) {
   InvalidateSlotWatches(slot_ids);
-  util::MakeFiber([this, slot_ids = std::move(slot_ids)]() mutable {
+  fb2::Fiber("flush_slots", [this, slot_ids = std::move(slot_ids)]() mutable {
     FlushSlotsFb(slot_ids);
   }).Detach();
 }
@@ -578,7 +587,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
       mi_heap_collect(ServerState::tlocal()->data_heap(), true);
     };
 
-    util::MakeFiber(std::move(cb)).Detach();
+    fb2::Fiber("flush_db", std::move(cb)).Detach();
 
     return;
   }
@@ -598,7 +607,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  MakeFiber([all_dbs = std::move(all_dbs)]() mutable {
+  fb2::Fiber("flush_all", [all_dbs = std::move(all_dbs)]() mutable {
     for (auto& db : all_dbs) {
       db.reset();
     }
@@ -638,7 +647,10 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
 void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
   auto& db = *db_arr_[db_ind];
   if (flag == 0) {
-    db.mcflag.Erase(key);
+    if (db.mcflag.Erase(key) == 0) {
+      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+                 << key.ToString();
+    }
   } else {
     auto [it, inserted] = db.mcflag.Insert(std::move(key), flag);
     if (!inserted)
@@ -649,7 +661,12 @@ void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
 uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   auto& db = *db_arr_[db_ind];
   auto it = db.mcflag.Find(key);
-  return it.is_done() ? 0 : it->second;
+  if (it.is_done()) {
+    LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+               << key.ToString();
+    return 0;
+  }
+  return it->second;
 }
 
 PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
@@ -755,12 +772,14 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   bool lock_acquired = true;
 
   if (lock_args.args.size() == 1) {
-    lock_acquired = lt[lock_args.args.front()].Acquire(mode);
+    string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
+    lock_acquired = lt[key].Acquire(mode);
+    uniq_keys_ = {key};
   } else {
     uniq_keys_.clear();
 
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      auto s = lock_args.args[i];
+      auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
         bool res = lt[s].Acquire(mode);
         lock_acquired &= res;
@@ -774,18 +793,39 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   return lock_acquired;
 }
 
+void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
+                      unsigned count) {
+  return ReleaseNormalized(mode, db_index, KeyLockArgs::GetLockKey(key), count);
+}
+
+void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
+                                unsigned count) {
+  DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));
+  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
+
+  auto& lt = db_arr_[db_index]->trans_locks;
+  auto it = lt.find(KeyLockArgs::GetLockKey(key));
+  CHECK(it != lt.end()) << key;
+  it->second.Release(mode, count);
+  if (it->second.IsFree()) {
+    lt.erase(it);
+  }
+}
+
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.empty()) {
     return;
   }
+
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
-    Release(mode, lock_args.db_index, lock_args.args.front(), 1);
+    string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
+    ReleaseNormalized(mode, lock_args.db_index, key, 1);
   } else {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      auto s = lock_args.args[i];
+      auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
         auto it = lt.find(s);
         CHECK(it != lt.end());
@@ -796,6 +836,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
       }
     }
   }
+  uniq_keys_.clear();
 }
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) const {
@@ -809,7 +850,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) co
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    auto s = lock_args.args[i];
+    auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
     auto it = lt.find(s);
     if (it != lt.end() && !it->second.Check(mode)) {
       return false;
@@ -877,7 +918,7 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
 
   ++events_.update;
 
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabled()) {
     db.slots_stats[ClusterConfig::KeySlot(key)].total_writes += 1;
   }
 }
@@ -898,11 +939,20 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
     return make_pair(it, expire_it);
 
+  string tmp_key_buf;
+  string_view tmp_key;
+
   // Replicate expiry
   if (auto journal = EngineShard::tlocal()->journal(); journal) {
-    std::string stash;
-    it->first.GetString(&stash);
-    RecordExpiry(cntx.db_index, stash);
+    tmp_key = it->first.GetSlice(&tmp_key_buf);
+    RecordExpiry(cntx.db_index, tmp_key);
+  }
+
+  auto obj_type = it->second.ObjType();
+  if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
+    if (tmp_key.empty())
+      tmp_key = it->first.GetSlice(&tmp_key_buf);
+    doc_del_cb_(tmp_key, cntx, it->second);
   }
 
   PerformDeletion(it, expire_it, shard_owner(), db.get());

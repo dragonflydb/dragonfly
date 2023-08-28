@@ -9,6 +9,8 @@
 #include <absl/types/span.h>
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -50,6 +52,11 @@ class Transaction;
 class EngineShard;
 
 struct KeyLockArgs {
+  static bool IsLockHashTagEnabled();
+
+  // Before acquiring and releasing keys, one must "normalize" them via GetLockKey().
+  static std::string_view GetLockKey(std::string_view key);
+
   DbIndex db_index = 0;
   ArgSlice args;
   unsigned key_step = 1;

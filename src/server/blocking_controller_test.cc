@@ -7,6 +7,7 @@
 #include <gmock/gmock.h>
 
 #include "base/logging.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
@@ -22,7 +23,7 @@ using namespace testing;
 
 class BlockingControllerTest : public Test {
  protected:
-  BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, 1) {
+  BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, 1, acl::NONE) {
   }
   void SetUp() override;
   void TearDown() override;
@@ -39,13 +40,13 @@ constexpr size_t kNumThreads = 3;
 void BlockingControllerTest::SetUp() {
   pp_.reset(fb2::Pool::IOUring(16, kNumThreads));
   pp_->Run();
-  pp_->Await([](unsigned index, ProactorBase* p) { ServerState::Init(index); });
-  ServerState::Init(kNumThreads);
+  pp_->Await([](unsigned index, ProactorBase* p) { ServerState::Init(index, nullptr); });
+  ServerState::Init(kNumThreads, nullptr);
 
   shard_set = new EngineShardSet(pp_.get());
   shard_set->Init(kNumThreads, false);
 
-  trans_.reset(new Transaction{&cid_, 0});
+  trans_.reset(new Transaction{&cid_});
 
   str_vec_.assign({"blpop", "x", "z", "0"});
   for (auto& s : str_vec_) {

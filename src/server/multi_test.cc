@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 
@@ -17,6 +18,7 @@
 
 ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(std::string, default_lua_flags);
 
 namespace dfly {
@@ -56,33 +58,6 @@ class MultiTest : public BaseFamilyTest {
 TEST_F(MultiTest, VerifyConstants) {
   Run({"mget", kKeySid0, kKeySid1, kKeySid2});
   ASSERT_EQ(3, GetDebugInfo().shards_count);
-}
-
-TEST_F(MultiTest, MultiAndEval) {
-  GTEST_SKIP() << "Eval is allowed in multi experimentally";
-
-  ShardId sid1 = Shard(kKey1, num_threads_ - 1);
-  ShardId sid2 = Shard(kKey2, num_threads_ - 1);
-  ShardId sid3 = Shard(kKey3, num_threads_ - 1);
-  ShardId sid4 = Shard(kKey4, num_threads_ - 1);
-  EXPECT_EQ(0, sid1);
-  EXPECT_EQ(2, sid2);
-  EXPECT_EQ(1, sid3);
-  EXPECT_EQ(0, sid4);
-
-  RespExpr resp = Run({"multi"});
-  ASSERT_EQ(resp, "OK");
-
-  resp = Run({"get", kKey1});
-  ASSERT_EQ(resp, "QUEUED");
-
-  resp = Run({"get", kKey4});
-  ASSERT_EQ(resp, "QUEUED");
-  resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
-  ASSERT_EQ(resp, "QUEUED");
-
-  resp = Run({"exec"});
-  ASSERT_THAT(resp, ErrArg("ERR Dragonfly does not allow execution of a server-side Lua"));
 }
 
 TEST_F(MultiTest, MultiAndFlush) {
@@ -197,9 +172,10 @@ TEST_F(MultiTest, MultiSeq) {
 }
 
 TEST_F(MultiTest, MultiConsistent) {
-  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
-  if (multi_mode == Transaction::NON_ATOMIC)
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped MultiConsistent test because multi_exec_mode is non atomic";
     return;
+  }
 
   Run({"mset", kKey1, "base", kKey4, "base"});
 
@@ -243,16 +219,6 @@ TEST_F(MultiTest, MultiConsistent) {
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
-}
-
-TEST_F(MultiTest, MultiAllEval) {
-  Run({"multi"});
-  EXPECT_EQ(Run({"eval", "return 42", "0"}), "QUEUED");
-  EXPECT_EQ(Run({"eval", "return 77", "0"}), "QUEUED");
-  auto resp = Run({"exec"});
-  ASSERT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], IntArg(42));
-  EXPECT_THAT(resp.GetVec()[1], IntArg(77));
 }
 
 TEST_F(MultiTest, MultiRename) {
@@ -341,7 +307,7 @@ TEST_F(MultiTest, FlushDb) {
 
 TEST_F(MultiTest, Eval) {
   if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_lua_flags is set";
+    GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
     return;
   }
 
@@ -523,7 +489,7 @@ TEST_F(MultiTest, MultiOOO) {
 // Lua scripts lock their keys ahead and thus can run out of order.
 TEST_F(MultiTest, EvalOOO) {
   if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_lua_flags is set";
+    GTEST_SKIP() << "Skipped EvalOOO test because default_lua_flags is set";
     return;
   }
 
@@ -615,6 +581,7 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
 }
 
 TEST_F(MultiTest, ExecGlobalFallback) {
+  absl::FlagSaver fs;
   // Check global command MOVE falls back to global mode from lock ahead.
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
   Run({"multi"});
@@ -635,7 +602,7 @@ TEST_F(MultiTest, ExecGlobalFallback) {
 
 TEST_F(MultiTest, ScriptFlagsCommand) {
   if (auto flags = absl::GetFlag(FLAGS_default_lua_flags); flags != "") {
-    LOG(WARNING) << "Skipped Eval test because default_lua_flags is set";
+    GTEST_SKIP() << "Skipped ScriptFlagsCommand test because default_lua_flags is set";
     return;
   }
 
@@ -687,11 +654,33 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
+TEST_F(MultiTest, MultiEvalModeConflict) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::GLOBAL) {
+    GTEST_SKIP() << "Skipped MultiEvalModeConflict test because multi_exec_mode is global";
+    return;
+  }
+
+  const char* s1 = R"(
+  #!lua flags=allow-undeclared-keys
+  return redis.call('GET', 'random-key');
+)";
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  // Check eval finds script flags.
+  EXPECT_EQ(Run({"set", "random-key", "works"}), "QUEUED");
+  EXPECT_EQ(Run({"eval", s1, "0"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}),
+              RespArray(ElementsAre(
+                  "OK", ErrArg("Multi mode conflict when running eval in multi transaction"))));
+}
+
 // Run multi-exec transactions that move values from a source list
 // to destination list through two contended channels.
 TEST_F(MultiTest, ContendedList) {
-  if (absl::GetFlag(FLAGS_multi_exec_mode) == Transaction::NON_ATOMIC)
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped ContendedList test because multi_exec_mode is non atomic";
     return;
+  }
 
   constexpr int listSize = 50;
   constexpr int stepSize = 5;
@@ -720,16 +709,18 @@ TEST_F(MultiTest, ContendedList) {
   f2.Join();
 
   for (int i = 0; i < listSize; i++) {
-    EXPECT_EQ(Run({"lpop", "l1"}), "a");
-    EXPECT_EQ(Run({"lpop", "l2"}), "b");
+    EXPECT_EQ(Run({"lpop", "l1-out"}), "a");
+    EXPECT_EQ(Run({"lpop", "l2-out"}), "b");
   }
-  EXPECT_EQ(Run({"llen", "chan-1"}), "0");
-  EXPECT_EQ(Run({"llen", "chan-2"}), "0");
+
+  EXPECT_THAT(Run({"llen", "chan-1"}), IntArg(0));
+  EXPECT_THAT(Run({"llen", "chan-2"}), IntArg(0));
 }
 
 // Test that squashing makes single-key ops atomic withing a non-atomic tx
 // because it runs them within one hop.
 TEST_F(MultiTest, TestSquashing) {
+  absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_multi_exec_squash, true);
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
 
@@ -754,6 +745,177 @@ TEST_F(MultiTest, TestSquashing) {
 
   done.store(true);
   f1.Join();
+}
+
+TEST_F(MultiTest, MultiLeavesTxQueue) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped MultiLeavesTxQueue test because multi_exec_mode is non atomic";
+    return;
+  }
+
+  // Tests the scenario, where the OOO multi-tx is scheduled into tx queue and there is another
+  // tx (mget) after it that runs and tests for atomicity.
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, false);
+
+  for (unsigned i = 0; i < 20; ++i) {
+    string key = StrCat("x", i);
+    LOG(INFO) << key << ": shard " << Shard(key, shard_set->size());
+  }
+
+  Run({"mget", "x5", "x8", "x9", "x13", "x16", "x17"});
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+
+  auto fb1 = pp_->at(1)->LaunchFiber(Launch::post, [&] {
+    // Runs multi on shard0 1000 times.
+    for (unsigned j = 0; j < 1000; ++j) {
+      Run({"multi"});
+      Run({"incrby", "x13", "1"});
+      Run({"incrby", "x16", "1"});
+      Run({"incrby", "x17", "1"});
+      Run({"exec"});
+    }
+  });
+
+  auto fb2 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+    // Runs multi on shard0 1000 times.
+    for (unsigned j = 0; j < 1000; ++j) {
+      Run({"multi"});
+      Run({"incrby", "x5", "1"});
+      Run({"incrby", "x8", "1"});
+      Run({"incrby", "x9", "1"});
+      Run({"exec"});
+    }
+  });
+
+  auto check_triple = [](const RespExpr::Vec& arr, unsigned start) {
+    if (arr[start].type != arr[start + 1].type || arr[start + 1].type != arr[start + 2].type) {
+      return false;
+    }
+
+    if (arr[0].type == RespExpr::STRING) {
+      string s0 = arr[start].GetString();
+      string s1 = arr[start + 1].GetString();
+      string s2 = arr[start + 2].GetString();
+      if (s0 != s1 || s1 != s2) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  bool success = pp_->at(0)->Await([&]() -> bool {
+    for (unsigned j = 0; j < 1000; ++j) {
+      auto resp = Run({"mget", "x5", "x8", "x9", "x13", "x16", "x17"});
+      const RespExpr::Vec& arr = resp.GetVec();
+      CHECK_EQ(6u, arr.size());
+
+      if (!check_triple(arr, 0)) {
+        LOG(ERROR) << "inconsistent " << arr[0] << " " << arr[1] << " " << arr[2];
+        return false;
+      }
+      if (!check_triple(arr, 3)) {
+        LOG(ERROR) << "inconsistent " << arr[3] << " " << arr[4] << " " << arr[5];
+        return false;
+      }
+    }
+    return true;
+  });
+
+  fb1.Join();
+  fb2.Join();
+  ASSERT_TRUE(success);
+}
+
+TEST_F(MultiTest, TestLockedKeys) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode != Transaction::LOCK_AHEAD) {
+    GTEST_SKIP() << "Skipped TestLockedKeys test because multi_exec_mode is not lock ahead";
+    return;
+  }
+  auto condition = [&]() { return service_->IsLocked(0, "key1") && service_->IsLocked(0, "key2"); };
+  auto fb = ExpectConditionWithSuspension(condition);
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"set", "key1", "val1"}), "QUEUED");
+  EXPECT_EQ(Run({"set", "key2", "val2"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
+  fb.Join();
+  EXPECT_FALSE(service_->IsLocked(0, "key1"));
+  EXPECT_FALSE(service_->IsLocked(0, "key2"));
+}
+
+class MultiEvalTest : public BaseFamilyTest {
+ protected:
+  MultiEvalTest() : BaseFamilyTest() {
+    num_threads_ = kPoolThreadCount;
+    absl::SetFlag(&FLAGS_default_lua_flags, "allow-undeclared-keys");
+  }
+
+  absl::FlagSaver fs_;
+};
+
+TEST_F(MultiEvalTest, MultiAllEval) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped MultiAllEval test because multi_exec_mode is non atomic";
+    return;
+  }
+
+  RespExpr brpop_resp;
+
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    brpop_resp = Run({"brpop", "x", "1"});
+  });
+  Run({"multi"});
+  Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
+  Run({"eval", "return redis.call('lpop', 'x')", "0"});
+  RespExpr exec_resp = Run({"exec"});
+  fb0.Join();
+
+  EXPECT_THAT(exec_resp.GetVec(), ElementsAre(IntArg(1), "y"));
+
+  EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
+}
+
+TEST_F(MultiEvalTest, MultiSomeEval) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped MultiAllEval test because multi_exec_mode is non atomic";
+    return;
+  }
+  RespExpr brpop_resp;
+
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    brpop_resp = Run({"brpop", "x", "1"});
+  });
+  Run({"multi"});
+  Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
+  Run({"lpop", "x"});
+  RespExpr exec_resp = Run({"exec"});
+  fb0.Join();
+
+  EXPECT_THAT(exec_resp.GetVec(), ElementsAre(IntArg(1), "y"));
+
+  EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
+}
+
+TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_lua_auto_async, true);
+
+  // The script below contains two commands for which execution can't even be prepared
+  // (FIRST/SECOND WRONG). The first is issued with pcall, so its error should be completely
+  // ignored, the second one should cause an abort and no further commands should be executed
+  string_view s = R"(
+    redis.pcall('INCR', 'A')
+    redis.pcall('FIRST WRONG')
+    redis.pcall('INCR', 'A')
+    redis.call('SECOND WRONG')
+    redis.pcall('INCR', 'A')
+  )";
+
+  EXPECT_THAT(Run({"EVAL", s, "1", "A"}), ErrArg("unknown command `SECOND WRONG`"));
+  EXPECT_EQ(Run({"get", "A"}), "2");
 }
 
 }  // namespace dfly

@@ -50,6 +50,8 @@ securityContext: {}
 service:
   # -- Service type to provision. Can be NodePort, ClusterIP or LoadBalancer
   type: ClusterIP
+  # -- Load balancer static ip to use when service type is set to LoadBalancer
+  loadBalancerIP: ""
   # -- Dragonfly service port
   port: 6379
   # -- Extra annotations for the service

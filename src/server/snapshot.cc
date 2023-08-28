@@ -50,7 +50,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  snapshot_fb_ = MakeFiber([this, stream_journal, cll] {
+  snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
     IterateBucketsFb(cll);
     db_slice_->UnregisterOnChange(snapshot_version_);
     if (cll->IsCancelled()) {

@@ -52,17 +52,19 @@ std::string MallocStats(bool backing, unsigned tid) {
   mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
   uint64_t reserved = 0, committed = 0, used = 0;
   for (const auto& k_v : block_map) {
-    absl::StrAppend(&str, k_v.second, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
+    uint64_t count = k_v.second;
+    absl::StrAppend(&str, count, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
                     get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
-    reserved += k_v.second * get<1>(k_v.first);
-    committed += k_v.second * get<2>(k_v.first);
-    used += k_v.second * get<3>(k_v.first);
+    reserved += count * get<1>(k_v.first);
+    committed += count * get<2>(k_v.first);
+    used += count * get<3>(k_v.first);
   }
 
   uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
   absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
   absl::StrAppend(&str, "total reserved: ", reserved, ", comitted: ", committed, ", used: ", used,
-                  "\n");
+                  "fragmentation waste: ", (100.0 * (committed - used)) / std::max(1UL, committed),
+                  "%\n");
 
   return str;
 }

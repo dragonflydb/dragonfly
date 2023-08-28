@@ -27,6 +27,11 @@ class OkService : public ServiceInterface {
     (*cntx)->SendOk();
   }
 
+  void DispatchManyCommands(absl::Span<CmdArgList> args_lists, ConnectionContext* cntx) final {
+    for (auto args : args_lists)
+      DispatchCommand(args, cntx);
+  }
+
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   ConnectionContext* cntx) final {
     cntx->reply_builder()->SendError("");

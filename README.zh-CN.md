@@ -90,38 +90,50 @@ Dragonfly 支持 Redis 的常见参数。
 
 目前，Dragonfly 支持以下 Redis 特定参数：
 
-* `port`：Redis 连接端口，默认为 6379。
+* `port`：Redis 连接端口，默认为 `6379`。
 * `bind`：使用本地主机名仅允许本地连接，使用公共 IP 地址允许外部连接到**该 IP 地址**。
-* `requirepass`：AUTH 认证密码，默认为空`""`。
-* `maxmemory`：限制数据库使用的最大内存（以字节为单位）。0 表示程序将自动确定其最大内存使用量。默认为 0。
-* `dir`：默认情况下，dragonfly docker 使用 `/data` 文件夹进行快照。CLI 使用的是 ""。你可以使用 `-v` docker 选项将其映射到主机文件夹。
-* `dbfilename`：保存/加载数据库的文件名。默认为 "dump"；
+* `requirepass`：AUTH 认证密码，默认为空 `""`。
+* `maxmemory`：限制数据库使用的最大内存（以字节为单位）。`0` 表示程序将自动确定其最大内存使用量。默认为 `0`。
+* `dir`：默认情况下，dragonfly docker 使用 `/data` 文件夹进行快照。CLI 使用的是 `""`。你可以使用 `-v` docker 选项将其映射到主机文件夹。
+* `dbfilename`：保存/加载数据库的文件名。默认为 `dump`；
 
 此外，还有 Dragonfly 特定的参数选项：
 
 * `memcached_port`：在此端口上启用 memcached 兼容的 API。默认禁用。
 
-* `keys_output_limit`：在`keys` 命令中返回的最大键数。默认为 8192。
+* `keys_output_limit`：在`keys` 命令中返回的最大键数。默认为 `8192`。
 
-  `keys` 命令是危险命令。我们会截断结果以避免在获取太多key时内存溢出。
+  `keys` 命令是危险命令。我们会截断结果以避免在获取太多键时内存溢出。
 
 * `dbnum`：`select` 支持的最大数据库数。
 
 * `cache_mode`：请参见下面的 [缓存](#全新的缓存设计) 部分。
 
-* `hz`：键到期评估频率。默认为 100。空闲时，使用较低的频率可以占用较少的 CPU资源，但这会导致清理过期键的速度下降。
+* `hz`：键到期评估频率。默认为 `100`。空闲时，使用较低的频率可以占用较少的 CPU资源，但这会导致清理过期键的速度下降。
 
-* `save_schedule`：以UTC 时间规范保存快照，格式： HH:MM（24 小时制时间）。默认为空`""`。
+* `snapshot_cron`：定时自动备份快照的 cron 表达式，使用标准的、精确到分钟的 cron 语法。默认为空 `""`。
 
-* `primary_port_http_enabled`：如果为 true，则允许在主 TCP 端口上访问 http 控制台。默认为 true。
+  下面是一些 cron 表达式的示例，更多关于此参数的细节请参见[文档](https://www.dragonflydb.io/docs/managing-dragonfly/backups#the-snapshot_cron-flag)。
+
+  | Cron 表达式      | 描述                               |
+  |---------------|----------------------------------|
+  | `* * * * *`   | 每分钟                              |
+  | `*/5 * * * *` | 每隔 5 分钟 (00:00, 00:05, 00:10...) |
+  | `5 */2 * * *` | 每隔 2 小时的第 5 分钟                   |
+  | `0 0 * * *`   | 每天的 00:00 午夜                     |
+  | `0 6 * * 1-5` | 从星期一到星期五的每天 06:00 黎明             |
+
+* `save_schedule`：以 UTC 时间规范保存快照，格式： HH:MM（24 小时制时间）。默认为空 `""`。该参数被标记为弃用，新版本中推荐使用 `snapshot_cron` 参数替代。
+
+* `primary_port_http_enabled`：如果为 true，则允许在主 TCP 端口上访问 HTTP 控制台。默认为 `true`。
 
 * `admin_port`：如果设置，将在指定的端口上启用对控制台的管理访问。支持 HTTP 和 RESP 协议。默认禁用。
 
-* `admin_bind`：如果设置，将管理控制台 TCP 连接绑定到给定地址。支持 HTTP 和 RESP 协议。默认为any。
+* `admin_bind`：如果设置，将管理控制台 TCP 连接绑定到给定地址。支持 HTTP 和 RESP 协议。默认为 `any`。
 
-* `admin_nopass`: 将管理控制台 TCP 连接绑定到给定地址。同时支持 HTTP 和 RESP 协议。
+* `admin_nopass`: 如果设置，允许在不提供任何认证令牌的情况下，通过指定的端口访问管理控制台。同时支持 HTTP 和 RESP 协议。 默认为 `false`。
 
-* `cluster_mode`：支持集群模式。目前仅支持 `emulated`。默认为空`""`。
+* `cluster_mode`：支持集群模式。目前仅支持 `emulated`。默认为空 `""`。
 
 * `cluster_announce_ip`：集群模式下向客户端公开的 IP。
 
@@ -131,11 +143,11 @@ Dragonfly 支持 Redis 的常见参数。
 ./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
 
-要获取更多选项，如日志管理或TLS支持，请运行`dragonfly --help`。
+要获取更多选项，如日志管理或TLS支持，请运行 `dragonfly --help`。
 
 ## <a name="开发路线和开发现状"><a/>开发路线和开发现状
 
-目前，Dragonfly支持约185个Redis命令以及除`cas`之外的所有memcache命令。
+目前，Dragonfly支持约185个Redis命令以及除 `cas` 之外的所有 Memcached 命令。
 我们几乎达到了Redis 5 API的水平。我们的下一个里程碑更新将会稳定基本功能并实现复刻API。
 如果您发现您需要的命令尚未实现，请提出一个Issue。
 
@@ -150,7 +162,7 @@ Dragonfly 支持 Redis 的常见参数。
 ### 全新的缓存设计
 
 Dragonfly采用单一的自适应缓存算法，该算法非常简单且具备高内存效率。
-你可以通过使用`--cache_mode=true`参数来启用缓存模式。一旦启用了此模式，Dragonfly将会删除最低概率可能被使用的内容，但这只会在接近最大内存限制时发生。
+你可以通过使用 `--cache_mode=true` 参数来启用缓存模式。一旦启用了此模式，Dragonfly将会删除最低概率可能被使用的内容，但这只会在接近最大内存限制时发生。
 
 ### 相对准确的过期期限
 

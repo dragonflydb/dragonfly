@@ -15,6 +15,7 @@ extern "C" {
 #include "core/json_object.h"
 #include "core/mpsc_intrusive_queue.h"
 #include "io/io.h"
+#include "redis/rdb.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 
@@ -125,7 +126,7 @@ class RdbLoaderBase {
 
   ::io::Result<OpaqueObj> ReadSet();
   ::io::Result<OpaqueObj> ReadIntSet();
-  ::io::Result<OpaqueObj> ReadHZiplist();
+  ::io::Result<OpaqueObj> ReadGeneric(int rdbtype);
   ::io::Result<OpaqueObj> ReadHMap();
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSetZL();
@@ -155,6 +156,7 @@ class RdbLoaderBase {
   std::unique_ptr<DecompressImpl> decompress_impl_;
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
+  int rdb_version_ = RDB_VERSION;
 };
 
 class RdbLoader : protected RdbLoaderBase {
@@ -229,6 +231,10 @@ class RdbLoader : protected RdbLoaderBase {
   void FlushShardAsync(ShardId sid);
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
+  void LoadScriptFromAux(std::string&& value);
+  void LoadSearchIndexDefFromAux(std::string&& value);
+
+ private:
   Service* service_;
   ScriptMgr* script_mgr_;
   std::unique_ptr<ItemsBuf[]> shard_buf_;
@@ -243,6 +249,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;
+
   detail::MPSCIntrusiveQueue<Item> item_queue_;
 };
 

@@ -691,4 +691,105 @@ TEST_F(StringFamilyTest, SetWithGetParam) {
   EXPECT_EQ(Run({"get", "key2"}), "val3");
 }
 
+TEST_F(StringFamilyTest, SetWithHashtagsNoCluster) {
+  SetTestFlag("cluster_mode", "");
+  SetTestFlag("lock_on_hashtags", "false");
+  ResetService();
+
+  auto fb = ExpectConditionWithSuspension(
+      [&]() { return GetLastUsedKeys() == absl::flat_hash_set<string>{"{key}1"}; });
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  fb.Join();
+  EXPECT_FALSE(service_->IsLocked(0, "{key}1"));
+
+  fb = ExpectConditionWithSuspension(
+      [&]() { return GetLastUsedKeys() == absl::flat_hash_set<string>{"{key}2"}; });
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  fb.Join();
+
+  fb = ExpectConditionWithSuspension([&]() {
+    return GetLastUsedKeys() == absl::flat_hash_set<string>{"{key}1", "{key}2"};
+  });
+  EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+  fb.Join();
+  EXPECT_NE(1, GetDebugInfo().shards_count);
+}
+
+TEST_F(StringFamilyTest, SetWithHashtagsWithEmulatedCluster) {
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("lock_on_hashtags", "false");
+  ResetService();
+
+  auto fb = ExpectConditionWithSuspension(
+      [&]() { return GetLastUsedKeys() == absl::flat_hash_set<string>{"{key}1"}; });
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  fb.Join();
+
+  fb = ExpectConditionWithSuspension(
+      [&]() { return GetLastUsedKeys() == absl::flat_hash_set<string>{"{key}2"}; });
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  fb.Join();
+
+  fb = ExpectConditionWithSuspension([&]() {
+    return GetLastUsedKeys() == absl::flat_hash_set<string>{"{key}1", "{key}2"};
+  });
+  EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+  fb.Join();
+  EXPECT_EQ(1, GetDebugInfo().shards_count);
+}
+
+TEST_F(StringFamilyTest, SetWithHashtagsWithHashtagLock) {
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("lock_on_hashtags", "true");
+  ResetService();
+
+  auto condition = [&]() { return GetLastUsedKeys() == absl::flat_hash_set<string>{"key"}; };
+  auto fb = ExpectConditionWithSuspension(condition);
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
+  fb.Join();
+
+  fb = ExpectConditionWithSuspension(condition);
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
+  fb.Join();
+
+  fb = ExpectConditionWithSuspension(condition);
+  EXPECT_THAT(Run({"mget", "{key}1", "{key}2"}), RespArray(ElementsAre("val1", "val2")));
+  fb.Join();
+  EXPECT_EQ(1, GetDebugInfo().shards_count);
+}
+
+TEST_F(StringFamilyTest, MultiSetWithHashtagsDontLockHashtags) {
+  SetTestFlag("cluster_mode", "");
+  SetTestFlag("lock_on_hashtags", "false");
+  ResetService();
+
+  auto condition = [&]() {
+    return GetLastUsedKeys() == absl::flat_hash_set<string>{"{key}1", "{key}2", "{key}3"};
+  };
+  auto fb = ExpectConditionWithSuspension(condition);
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "QUEUED");
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "QUEUED");
+  EXPECT_EQ(Run({"eval", "return redis.call('set', KEYS[1], 'val3')", "1", "{key}3"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK", "OK")));
+  fb.Join();
+}
+
+TEST_F(StringFamilyTest, MultiSetWithHashtagsLockHashtags) {
+  SetTestFlag("cluster_mode", "emulated");
+  SetTestFlag("lock_on_hashtags", "true");
+  ResetService();
+
+  auto condition = [&]() { return GetLastUsedKeys() == absl::flat_hash_set<string>{"key"}; };
+  auto fb = ExpectConditionWithSuspension(condition);
+
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"set", "{key}1", "val1"}), "QUEUED");
+  EXPECT_EQ(Run({"set", "{key}2", "val2"}), "QUEUED");
+  EXPECT_EQ(Run({"eval", "return redis.call('set', KEYS[1], 'val3')", "1", "{key}3"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK", "OK")));
+  fb.Join();
+}
+
 }  // namespace dfly

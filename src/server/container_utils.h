@@ -89,7 +89,12 @@ struct ShardFFResult {
 
 OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_type);
 
-using BlockingResultCb = std::function<void(Transaction*, EngineShard*, std::string_view)>;
+using BlockingResultCb =
+    std::function<void(Transaction*, EngineShard*, std::string_view /* key */)>;
+
+// Block until a any key of the transaction becomes non-empty and executes the callback.
+// If multiple keys are non-empty when this function is called, the callback is executed
+// immediately with the first key listed in the tx arguments.
 OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                                    BlockingResultCb cb, unsigned limit_ms);
 

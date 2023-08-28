@@ -230,9 +230,7 @@ class DbSlice {
 
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
-  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count) {
-    db_arr_[db_index]->Release(m, key, count);
-  }
+  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count);
 
   // Returns true if the key can be locked under m. Does not lock.
   bool CheckLock(IntentLock::Mode m, DbIndex dbid, std::string_view key) const;
@@ -313,6 +311,11 @@ class DbSlice {
     caching_mode_ = 1;
   }
 
+  // Test hook to inspect last locked keys.
+  absl::flat_hash_set<std::string_view> TEST_GetLastLockedKeys() const {
+    return uniq_keys_;
+  }
+
   void RegisterWatchedKey(DbIndex db_indx, std::string_view key,
                           ConnectionState::ExecInfo* exec_info);
 
@@ -329,6 +332,10 @@ class DbSlice {
   }
 
  private:
+  // Releases a single key. `key` must have been normalized by GetLockKey().
+  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
+                         unsigned count);
+
   std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                      PrimeValue obj, uint64_t expire_at_ms,
                                                      bool force_update) noexcept(false);
@@ -367,7 +374,7 @@ class DbSlice {
   DbTableArray db_arr_;
 
   // Used in temporary computations in Acquire/Release.
-  absl::flat_hash_set<std::string_view> uniq_keys_;
+  mutable absl::flat_hash_set<std::string_view> uniq_keys_;
 
   // ordered from the smallest to largest version.
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;

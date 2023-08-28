@@ -111,11 +111,20 @@ error_code Replica::Start(ConnectionContext* cntx) {
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
   // 4. Spawn main coordination fiber.
-  sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);
+  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
   return {};
 }  // namespace dfly
+
+void Replica::EnableReplication(ConnectionContext* cntx) {
+  VLOG(1) << "Enabling replication";
+
+  state_mask_.store(R_ENABLED);                             // set replica state to enabled
+  sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);  // call replication fiber
+
+  (*cntx)->SendOk();
+}
 
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
@@ -328,8 +337,6 @@ error_code Replica::InitiatePSync() {
 
   RETURN_ON_ERR(SendCommand(StrCat("PSYNC ", id, " ", offs)));
 
-  LOG(INFO) << "Starting full sync";
-
   // Master may delay sync response with "repl_diskless_sync_delay"
   PSyncResponse repl_header;
 
@@ -344,8 +351,9 @@ error_code Replica::InitiatePSync() {
 
   // we get token for diskless redis replication. For disk based replication
   // we get the snapshot size.
-  if (snapshot_size || token != nullptr) {  // full sync
-    // Start full sync
+  if (snapshot_size || token != nullptr) {
+    LOG(INFO) << "Starting full sync with Redis master";
+
     state_mask_.fetch_or(R_SYNCING);
 
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
@@ -385,6 +393,8 @@ error_code Replica::InitiatePSync() {
     CHECK(ps.UnusedPrefix().empty());
     io_buf.ConsumeInput(io_buf.InputLen());
     TouchIoTime();
+  } else {
+    LOG(INFO) << "Re-established sync with Redis master with ID=" << id;
   }
 
   state_mask_.fetch_and(~R_SYNCING);
@@ -511,7 +521,7 @@ error_code Replica::ConsumeRedisStream() {
   LOG(INFO) << "Transitioned into stable sync";
   facade::CmdArgVec args_vector;
 
-  acks_fb_ = MakeFiber(&Replica::RedisStreamAcksFb, this);
+  acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
 
   while (true) {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
@@ -531,7 +541,7 @@ error_code Replica::ConsumeRedisStream() {
         }
       }
 
-      facade::RespToArgList(LastResponseArgs(), &args_vector);
+      facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
       CmdArgList arg_list{args_vector.data(), args_vector.size()};
       service_.DispatchCommand(arg_list, &conn_context);
     }
@@ -645,7 +655,8 @@ error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = MakeFiber(&DflyShardReplica::FullSyncDflyFb, this, std::move(eof_token), sb, cntx);
+  sync_fb_ = fb2::Fiber("shard_full_sync", &DflyShardReplica::FullSyncDflyFb, this,
+                        std::move(eof_token), sb, cntx);
 
   return error_code{};
 }
@@ -656,9 +667,11 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   CHECK(mythread);
 
   CHECK(Sock()->IsOpen());
-  sync_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyReadFb, this, cntx);
+  sync_fb_ =
+      fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
-    execution_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyExecFb, this, cntx);
+    execution_fb_ =
+        fb2::Fiber("shard_stable_sync_exec", &DflyShardReplica::StableSyncDflyExecFb, this, cntx);
   }
 
   return std::error_code{};
@@ -723,7 +736,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   TransactionReader tx_reader{};
 
   if (master_context_.version > DflyVersion::VER0) {
-    acks_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
+    acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
   }
 
   while (!cntx->IsCancelled()) {
@@ -1007,9 +1020,7 @@ bad_header:
 }
 
 Replica::Info Replica::GetInfo() const {
-  CHECK(Sock());
-
-  return Proactor()->AwaitBrief([this] {
+  auto f = [this]() {
     auto last_io_time = LastIoTime();
     for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
       last_io_time = std::max(last_io_time, flow->LastIoTime());
@@ -1023,7 +1034,22 @@ Replica::Info Replica::GetInfo() const {
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     return res;
-  });
+  };
+
+  if (Sock())
+    return Proactor()->AwaitBrief(f);
+  else {
+    /**
+     * when this branch happens: there is a very short grace period
+     * where Sock() is not initialized, yet the server can
+     * receive ROLE/INFO commands. That period happens when launching
+     * an instance with '--replicaof' and then immediately
+     * sending a command.
+     *
+     * In that instance, we have to run f() on the current fiber.
+     */
+    return f();
+  }
 }
 
 std::vector<uint64_t> Replica::GetReplicaOffset() const {

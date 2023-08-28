@@ -65,20 +65,6 @@ CompressedSortedSet::ConstIterator CompressedSortedSet::end() const {
   return ConstIterator{};
 }
 
-CompressedSortedSet::SortedBackInserter::SortedBackInserter(CompressedSortedSet* list)
-    : last_{0}, list_{list} {
-}
-
-CompressedSortedSet::SortedBackInserter& CompressedSortedSet::SortedBackInserter::operator=(
-    IntType value) {
-  DCHECK_LE(last_, value);
-  if (value > last_) {
-    list_->PushBackDiff(value - last_);
-    last_ = value;
-  }
-  return *this;
-}
-
 // Simply encode difference and add to end of diffs array
 void CompressedSortedSet::PushBackDiff(IntType diff) {
   size_++;
@@ -109,6 +95,15 @@ CompressedSortedSet::EntryLocation CompressedSortedSet::LowerBound(IntType value
 // to be stored to encode the triple A V B. Those are stored where diff0 = B - A was previously
 // stored, possibly extending the vector
 void CompressedSortedSet::Insert(IntType value) {
+  if (tail_value_ && *tail_value_ == value)
+    return;
+
+  if (tail_value_ && value > *tail_value_) {
+    PushBackDiff(value - *tail_value_);
+    tail_value_ = value;
+    return;
+  }
+
   auto bound = LowerBound(value);
 
   // At least one element was read and it's equal to value: return to avoid duplicate
@@ -118,6 +113,7 @@ void CompressedSortedSet::Insert(IntType value) {
   // Value is bigger than any other (or list is empty): append required diff at the end
   if (value > bound.value || bound.diff_span.empty()) {
     PushBackDiff(value - bound.value);
+    tail_value_ = value;
     return;
   }
 
@@ -164,6 +160,9 @@ void CompressedSortedSet::Remove(IntType value) {
   // If it's stored at the end, simply truncate it away
   if (diffs_tail.empty()) {
     diffs_.resize(diffs_.size() - bound.diff_span.size());
+    tail_value_ = bound.prev_value;
+    if (diffs_.empty())
+      tail_value_ = nullopt;
     return;
   }
 

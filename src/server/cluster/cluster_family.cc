@@ -14,6 +14,7 @@
 #include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -24,9 +25,6 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 
-ABSL_FLAG(std::string, cluster_mode, "",
-          "Cluster mode supported."
-          "default: \"\"");
 ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
@@ -52,24 +50,11 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
-  string cluster_mode = absl::GetFlag(FLAGS_cluster_mode);
-
-  if (cluster_mode == "emulated") {
-    is_emulated_cluster_ = true;
-  } else if (cluster_mode == "yes") {
-    ClusterConfig::EnableCluster();
-  } else if (!cluster_mode.empty()) {
-    LOG(ERROR) << "invalid cluster_mode. Exiting...";
-    exit(1);
-  }
+  ClusterConfig::Initialize();
 }
 
 ClusterConfig* ClusterFamily::cluster_config() {
   return tl_cluster_config.get();
-}
-
-bool ClusterFamily::IsEnabledOrEmulated() const {
-  return is_emulated_cluster_ || ClusterConfig::IsClusterEnabled();
 }
 
 ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
@@ -170,7 +155,7 @@ void ClusterShardsImpl(const ClusterShards& config, ConnectionContext* cntx) {
 }  // namespace
 
 void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
-  if (is_emulated_cluster_) {
+  if (ClusterConfig::IsEmulated()) {
     return ClusterShardsImpl({GetEmulatedShardInfo(cntx)}, cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterShardsImpl(tl_cluster_config->GetConfig(), cntx);
@@ -213,7 +198,7 @@ void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
 }  // namespace
 
 void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
-  if (is_emulated_cluster_) {
+  if (ClusterConfig::IsEmulated()) {
     return ClusterSlotsImpl({GetEmulatedShardInfo(cntx)}, cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterSlotsImpl(tl_cluster_config->GetConfig(), cntx);
@@ -266,7 +251,7 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
 }  // namespace
 
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
-  if (is_emulated_cluster_) {
+  if (ClusterConfig::IsEmulated()) {
     return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, server_family_->master_id(), cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterNodesImpl(tl_cluster_config->GetConfig(), server_family_->master_id(), cntx);
@@ -328,7 +313,7 @@ void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
 }  // namespace
 
 void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
-  if (is_emulated_cluster_) {
+  if (ClusterConfig::IsEmulated()) {
     return ClusterInfoImpl({GetEmulatedShardInfo(cntx)}, cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterInfoImpl(tl_cluster_config->GetConfig(), cntx);
@@ -353,7 +338,7 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
-  if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
+  if (!ClusterConfig::IsEnabledOrEmulated()) {
     return (*cntx)->SendError(kClusterDisabled);
   }
 
@@ -375,21 +360,21 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::ReadOnly(CmdArgList args, ConnectionContext* cntx) {
-  if (!is_emulated_cluster_) {
+  if (!ClusterConfig::IsEmulated()) {
     return (*cntx)->SendError(kClusterDisabled);
   }
   (*cntx)->SendOk();
 }
 
 void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
-  if (!is_emulated_cluster_) {
+  if (!ClusterConfig::IsEmulated()) {
     return (*cntx)->SendError(kClusterDisabled);
   }
   (*cntx)->SendOk();
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
-  if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
+  if (!ClusterConfig::IsEnabledOrEmulated()) {
     return (*cntx)->SendError(kClusterDisabled);
   }
 
@@ -614,12 +599,21 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))
 
+namespace acl {
+constexpr uint32_t kCluster = SLOW;
+// Reconsider to maybe more sensible defaults
+constexpr uint32_t kDflyCluster = ADMIN | SLOW;
+constexpr uint32_t kReadOnly = FAST | CONNECTION;
+constexpr uint32_t kReadWrite = FAST | CONNECTION;
+}  // namespace acl
+
 void ClusterFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0}.HFUNC(Cluster)
-            << CI{"DFLYCLUSTER", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0}.HFUNC(
-                   DflyCluster)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadWrite);
+  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, acl::kCluster}.HFUNC(Cluster)
+            << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0,
+                  acl::kDflyCluster}
+                   .HFUNC(DflyCluster)
+            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
+            << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite);
 }
 
 }  // namespace dfly

@@ -4,6 +4,8 @@
 
 #include "server/test_utils.h"
 
+#include "server/acl/acl_commands_def.h"
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -66,6 +68,23 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
   messages.push_back(move(pmsg));
 }
 
+void TransactionSuspension::Start() {
+  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::NONE};
+
+  transaction_ = new dfly::Transaction{&cid};
+
+  auto st = transaction_->InitByArgs(0, {});
+  CHECK_EQ(st, OpStatus::OK);
+
+  transaction_->Schedule();
+  transaction_->Execute([](Transaction* t, EngineShard* shard) { return OpStatus::OK; }, false);
+}
+
+void TransactionSuspension::Terminate() {
+  transaction_->Conclude();
+  transaction_ = nullptr;
+}
+
 class BaseFamilyTest::TestConnWrapper {
  public:
   TestConnWrapper(Protocol proto);
@@ -125,20 +144,53 @@ void BaseFamilyTest::SetUpTestSuite() {
 
   absl::SetFlag(&FLAGS_dbfilename, "");
   init_zmalloc_threadlocal(mi_heap_get_backing());
+
+  // TODO: go over all env variables starting with FLAGS_ and make sure they are in the below list.
+  static constexpr const char* kEnvFlags[] = {
+      "cluster_mode",
+      "lock_on_hashtags",
+      "force_epoll",
+  };
+  for (string_view flag : kEnvFlags) {
+    const char* value = getenv(absl::StrCat("FLAGS_", flag).data());
+    if (value != nullptr) {
+      SetTestFlag(flag, value);
+    }
+  }
 }
 
 void BaseFamilyTest::SetUp() {
+  ResetService();
+}
+
+// Test hook defined in common.cc.
+void TEST_InvalidateLockHashTag();
+
+void BaseFamilyTest::ResetService() {
+  if (service_ != nullptr) {
+    TEST_InvalidateLockHashTag();
+
+    service_->Shutdown();
+    service_ = nullptr;
+
+    delete shard_set;
+    shard_set = nullptr;
+
+    pp_->Stop();
+  }
+
   if (absl::GetFlag(FLAGS_force_epoll)) {
     pp_.reset(fb2::Pool::Epoll(num_threads_));
   } else {
     pp_.reset(fb2::Pool::IOUring(16, num_threads_));
   }
   pp_->Run();
-  service_.reset(new Service{pp_.get()});
+  service_ = std::make_unique<Service>(pp_.get());
 
   Service::InitOpts opts;
   opts.disable_time_update = true;
   service_->Init(nullptr, {}, opts);
+  used_mem_current = 0;
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
   auto cb = [&](EngineShard* s) { s->db_slice().UpdateExpireBase(TEST_current_time_ms - 1000, 0); };
@@ -456,9 +508,56 @@ vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   return res;
 }
 
+absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
+  Mutex mu;
+  absl::flat_hash_set<string> result;
+
+  auto add_keys = [&](ProactorBase* proactor) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr) {
+      return;
+    }
+
+    lock_guard lk(mu);
+    for (string_view key : shard->db_slice().TEST_GetLastLockedKeys()) {
+      result.insert(string(key));
+    }
+  };
+  shard_set->pool()->AwaitFiberOnAll(add_keys);
+
+  return result;
+}
+
+void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& condition,
+                                                  absl::Duration timeout) {
+  absl::Time deadline = absl::Now() + timeout;
+
+  while (deadline > absl::Now()) {
+    if (condition()) {
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+
+  EXPECT_LE(absl::Now(), deadline)
+      << "Timeout of " << timeout << " reached when expecting condition";
+}
+
+Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
+  TransactionSuspension tx;
+  tx.Start();
+  auto fb = pp_->at(0)->LaunchFiber([condition, tx = std::move(tx)]() mutable {
+    ExpectConditionWithinTimeout(condition);
+    tx.Terminate();
+  });
+  return fb;
+}
+
 void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
   auto* flag = absl::FindCommandLineFlag(flag_name);
   CHECK_NE(flag, nullptr);
+  VLOG(1) << "Changing flag " << flag_name << " from " << flag->CurrentValue() << " to "
+          << new_value;
   string error;
   CHECK(flag->ParseFrom(new_value, &error)) << "Error: " << error;
 }

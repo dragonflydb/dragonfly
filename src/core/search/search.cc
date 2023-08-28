@@ -10,6 +10,7 @@
 
 #include "base/logging.h"
 #include "core/search/ast_expr.h"
+#include "core/search/compressed_sorted_set.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
 #include "core/search/vector.h"
@@ -35,21 +36,18 @@ struct IndexResult {
 
   IndexResult() : value_{DocVec{}} {};
 
-  IndexResult(const DocVec* dv) : value_{dv} {
-    if (dv == nullptr)
+  IndexResult(const CompressedSortedSet* css) : value_{css} {
+    if (css == nullptr)
       value_ = DocVec{};
   }
 
   IndexResult(DocVec&& dv) : value_{move(dv)} {
   }
 
-  // Transparent const access to underlying value
-  const DocVec* operator->() const {
-    return holds_alternative<DocVec>(value_) ? &get<DocVec>(value_) : get<const DocVec*>(value_);
-  }
-
-  const DocVec& operator*() const {
-    return holds_alternative<DocVec>(value_) ? get<DocVec>(value_) : *get<const DocVec*>(value_);
+  size_t Size() const {
+    if (holds_alternative<DocVec>(value_))
+      return get<DocVec>(value_).size();
+    return get<const CompressedSortedSet*>(value_)->Size();
   }
 
   IndexResult& operator=(DocVec&& entries) {
@@ -62,15 +60,23 @@ struct IndexResult {
     return *this;
   }
 
+  variant<const DocVec*, const CompressedSortedSet*> Borrowed() {
+    if (holds_alternative<DocVec>(value_))
+      return &get<DocVec>(value_);
+    return get<const CompressedSortedSet*>(value_);
+  }
+
   // Move out of owned or copy borrowed
   DocVec Take() {
     if (holds_alternative<DocVec>(value_))
       return move(get<DocVec>(value_));
-    return *get<const DocVec*>(value_);
+
+    const CompressedSortedSet* css = get<const CompressedSortedSet*>(value_);
+    return DocVec(css->begin(), css->end());
   }
 
  private:
-  variant<DocVec /*owned*/, const DocVec* /*pointer to borrowed*/> value_;
+  variant<DocVec /*owned*/, const CompressedSortedSet* /* borrowed */> value_;
 };
 
 struct BasicSearch {
@@ -103,13 +109,17 @@ struct BasicSearch {
     tmp_vec_.clear();
 
     if (op == LogicOp::AND) {
-      tmp_vec_.reserve(min(matched->size(), current->size()));
-      set_intersection(matched->begin(), matched->end(), current->begin(), current->end(),
-                       back_inserter(tmp_vec_));
+      tmp_vec_.reserve(min(matched.Size(), current.Size()));
+      auto cb = [this](auto* s1, auto* s2) {
+        set_intersection(s1->begin(), s1->end(), s2->begin(), s2->end(), back_inserter(tmp_vec_));
+      };
+      visit(cb, matched.Borrowed(), current.Borrowed());
     } else {
-      tmp_vec_.reserve(matched->size() + current->size());
-      set_union(matched->begin(), matched->end(), current->begin(), current->end(),
-                back_inserter(tmp_vec_));
+      tmp_vec_.reserve(matched.Size() + current.Size());
+      auto cb = [this](auto* s1, auto* s2) {
+        set_union(s1->begin(), s1->end(), s2->begin(), s2->end(), back_inserter(tmp_vec_));
+      };
+      visit(cb, matched.Borrowed(), current.Borrowed());
     }
 
     current = move(tmp_vec_);
@@ -124,7 +134,7 @@ struct BasicSearch {
     // AND: the result only shrinks, so starting with the smallest is most optimal.
     // OR: unifying smaller sets first reduces the number of element traversals on average.
     sort(sub_results.begin(), sub_results.end(),
-         [](const auto& l, const auto& r) { return l->size() < r->size(); });
+         [](const auto& l, const auto& r) { return l.Size() < r.Size(); });
 
     IndexResult out{move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
@@ -138,7 +148,7 @@ struct BasicSearch {
 
   IndexResult Search(const AstStarNode& node, string_view active_field) {
     DCHECK(active_field.empty());
-    return &indices_->GetAllDocs();
+    return vector<DocId>{indices_->GetAllDocs()};  // TODO FIX;
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set
@@ -201,11 +211,14 @@ struct BasicSearch {
 
     auto* vec_index = GetIndex<VectorIndex>(knn.field);
 
-    distances_.reserve(sub_results->size());
-    for (DocId matched_doc : *sub_results) {
-      float dist = VectorDistance(knn.vector, vec_index->Get(matched_doc));
-      distances_.emplace_back(dist, matched_doc);
-    }
+    distances_.reserve(sub_results.Size());
+    auto cb = [&](auto* set) {
+      for (DocId matched_doc : *set) {
+        float dist = VectorDistance(knn.vector, vec_index->Get(matched_doc));
+        distances_.emplace_back(dist, matched_doc);
+      }
+    };
+    visit(cb, sub_results.Borrowed());
 
     sort(distances_.begin(), distances_.end());
 
@@ -223,7 +236,8 @@ struct BasicSearch {
 
     // Top level results don't need to be sorted, because they will be scored, sorted by fields or
     // used by knn
-    DCHECK(top_level || is_sorted(result->begin(), result->end()));
+    DCHECK(top_level ||
+           visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
     return result;
   }
@@ -232,7 +246,7 @@ struct BasicSearch {
     IndexResult result = SearchGeneric(query, "", true);
 
     if (!distances_.empty()) {
-      vector<float> out_distances(result->size());
+      vector<float> out_distances(result.Size());
       for (size_t i = 0; i < out_distances.size(); i++)
         out_distances[i] = distances_[i].first;
 
@@ -250,19 +264,19 @@ struct BasicSearch {
 }  // namespace
 
 FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, indices_{} {
-  for (auto& [field, type] : schema_.fields) {
-    switch (type) {
-      case Schema::TAG:
-        indices_[field] = make_unique<TagIndex>();
+  for (const auto& [field_name, field_info] : schema_.fields) {
+    switch (field_info.type) {
+      case SchemaField::TAG:
+        indices_[field_name] = make_unique<TagIndex>();
         break;
-      case Schema::TEXT:
-        indices_[field] = make_unique<TextIndex>();
+      case SchemaField::TEXT:
+        indices_[field_name] = make_unique<TextIndex>();
         break;
-      case Schema::NUMERIC:
-        indices_[field] = make_unique<NumericIndex>();
+      case SchemaField::NUMERIC:
+        indices_[field_name] = make_unique<NumericIndex>();
         break;
-      case Schema::VECTOR:
-        indices_[field] = make_unique<VectorIndex>();
+      case SchemaField::VECTOR:
+        indices_[field_name] = make_unique<VectorIndex>();
         break;
     }
   }
@@ -270,14 +284,14 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
 
 void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Add(doc, access, field);
+    index->Add(doc, access, schema_.fields[field].identifier);
   }
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
 }
 
 void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Remove(doc, access, field);
+    index->Remove(doc, access, schema_.fields[field].identifier);
   }
   auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
   CHECK(it != all_ids_.end() && *it == doc);
@@ -291,10 +305,10 @@ BaseIndex* FieldIndices::GetIndex(string_view field) const {
 
 std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   vector<TextIndex*> out;
-  for (auto& [field, type] : schema_.fields) {
-    if (type != Schema::TEXT)
+  for (auto& [field_name, field_info] : schema_.fields) {
+    if (field_info.type != SchemaField::TEXT)
       continue;
-    auto* index = dynamic_cast<TextIndex*>(GetIndex(field));
+    auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));
     DCHECK(index);
     out.push_back(index);
   }

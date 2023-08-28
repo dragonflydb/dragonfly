@@ -6,6 +6,8 @@
 
 #include <mimalloc.h>
 
+#include "server/acl/user_registry.h"
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -60,15 +62,25 @@ ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_pe
 ServerState::~ServerState() {
 }
 
-void ServerState::Init(uint32_t thread_index) {
+void ServerState::Init(uint32_t thread_index, acl::UserRegistry* registry) {
   state_ = new ServerState();
   state_->gstate_ = GlobalState::ACTIVE;
   state_->thread_index_ = thread_index;
+  state_->user_registry = registry;
 }
 
 void ServerState::Destroy() {
   delete state_;
   state_ = nullptr;
+}
+
+uint64_t ServerState::GetUsedMemory(uint64_t now_ns) {
+  static constexpr uint64_t kCacheEveryNs = 1000;
+  if (now_ns > used_mem_last_update_ + kCacheEveryNs) {
+    used_mem_last_update_ = now_ns;
+    used_mem_cached_ = used_mem_current.load(std::memory_order_relaxed);
+  }
+  return used_mem_cached_;
 }
 
 bool ServerState::AllowInlineScheduling() const {

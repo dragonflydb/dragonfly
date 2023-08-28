@@ -7,6 +7,7 @@
 #include <absl/container/fixed_array.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/clock.h>
+#include <mimalloc.h>
 #include <openssl/evp.h>
 
 #include <cstring>
@@ -352,10 +353,21 @@ int RedisStatusReplyCommand(lua_State* lua) {
 
 // const char* kInstanceKey = "_INSTANCE";
 
+void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
+  (void)ud;
+  (void)osize; /* not used */
+  if (nsize == 0) {
+    mi_free(ptr);
+    return nullptr;
+  } else {
+    return mi_realloc(ptr, nsize);
+  }
+}
+
 }  // namespace
 
 Interpreter::Interpreter() {
-  lua_ = luaL_newstate();
+  lua_ = lua_newstate(mimalloc_glue, nullptr);
   InitLua(lua_);
   void** ptr = static_cast<void**>(lua_getextraspace(lua_));
   *ptr = this;

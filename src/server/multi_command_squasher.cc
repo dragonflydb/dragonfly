@@ -22,27 +22,45 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
     f(args[*keys.bonus]);
 }
 
+void CheckConnStateClean(const ConnectionState& state) {
+  DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
+  DCHECK(state.exec_info.body.empty());
+  DCHECK(!state.script_info);
+  DCHECK(!state.subscribe_info);
+}
+
 }  // namespace
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
-                                           bool error_abort)
-    : cmds_{cmds}, cntx_{cntx}, base_cid_{cntx->transaction->GetCId()}, error_abort_{error_abort} {
+                                           Service* service, bool verify_commands, bool error_abort)
+    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr},
+      verify_commands_{verify_commands}, error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
-  track_keys_ = mode == Transaction::NON_ATOMIC;
+  base_cid_ = cntx->transaction->GetCId();
+  atomic_ = mode != Transaction::NON_ATOMIC;
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
+  // See header top for atomic/non-atomic difference
   auto& sinfo = sharded_[sid];
-  if (!sinfo.local_tx)
-    sinfo.local_tx = new Transaction{cntx_->transaction};
+  if (!sinfo.local_tx) {
+    if (IsAtomic()) {
+      sinfo.local_tx = new Transaction{cntx_->transaction};
+    } else {
+      sinfo.local_tx = new Transaction{base_cid_};
+      sinfo.local_tx->StartMultiNonAtomic();
+    }
+  }
 
   return sinfo;
 }
 
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
+  DCHECK(cmd->Cid());
+
   if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
       (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
@@ -71,9 +89,6 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   if (found_more || last_sid == kInvalidSid)
     return SquashResult::NOT_SQUASHED;
 
-  if (track_keys_)
-    IterateKeys(args, *keys, [this](MutableSlice key) { collected_keys_.insert(key); });
-
   auto& sinfo = PrepareShardInfo(last_sid);
 
   sinfo.had_writes |= (cmd->Cid()->opt_mask() & CO::WRITE);
@@ -86,19 +101,28 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
+
+  cmd->Fill(&tmp_keylist_);
+  auto args = absl::MakeSpan(tmp_keylist_);
+
+  if (verify_commands_) {
+    if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
+      (*cntx_)->SendError(move(*err));
+      return !error_abort_;
+    }
+  }
 
   auto* tx = cntx_->transaction;
   tx->MultiSwitchCmd(cmd->Cid());
   cntx_->cid = cmd->Cid();
 
-  cmd->Fill(&tmp_keylist_);
-  auto args = absl::MakeSpan(tmp_keylist_);
-
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->conn_state.db_index, args);
-  cmd->Cid()->Invoke(args, cntx_);
+  service_->InvokeCmd(cmd->Cid(), args, cntx_);
+
+  return true;
 }
 
 OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
@@ -107,23 +131,36 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{local_tx, &crb};
-
+  ConnectionContext local_cntx{cntx_, local_tx, &crb};
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
   for (auto* cmd : sinfo.cmds) {
-    local_tx->MultiSwitchCmd(cmd->Cid());
-    local_cntx.cid = cmd->Cid();
-    crb.SetReplyMode(cmd->ReplyMode());
-
     arg_vec.resize(cmd->NumArgs());
     auto args = absl::MakeSpan(arg_vec);
     cmd->Fill(args);
 
-    local_tx->InitByArgs(parent_tx->GetDbIndex(), args);
-    cmd->Cid()->Invoke(args, &local_cntx);
+    if (verify_commands_) {
+      // The shared context is used for state verification, the local one is only for replies
+      if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
+        crb.SendError(*move(err));
+        sinfo.replies.emplace_back(crb.Take());
+        continue;
+      }
+    }
+
+    local_tx->MultiSwitchCmd(cmd->Cid());
+    local_cntx.cid = cmd->Cid();
+    crb.SetReplyMode(cmd->ReplyMode());
+
+    local_tx->InitByArgs(local_cntx.conn_state.db_index, args);
+    service_->InvokeCmd(cmd->Cid(), args, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
+
+    // Assert commands made no persistent state changes to stub context state
+    const auto& local_state = local_cntx.conn_state;
+    DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
+    CheckConnStateClean(local_state);
   }
 
   // ConnectionContext deletes the reply builder upon destruction, so
@@ -135,24 +172,27 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 }
 
 bool MultiCommandSquasher::ExecuteSquashed() {
+  DCHECK(!cntx_->conn_state.exec_info.IsCollecting());
+
   if (order_.empty())
-    return false;
-
-  Transaction* tx = cntx_->transaction;
-
-  if (track_keys_) {
-    tmp_keylist_.assign(collected_keys_.begin(), collected_keys_.end());
-    tx->PrepareSquashedMultiHop(base_cid_, CmdArgList{tmp_keylist_});
-  } else {
-    auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
-    tx->PrepareSquashedMultiHop(base_cid_, cb);
-  }
+    return true;
 
   for (auto& sd : sharded_)
     sd.replies.reserve(sd.cmds.size());
 
-  cntx_->cid = base_cid_;
-  tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
+  Transaction* tx = cntx_->transaction;
+
+  // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
+  // stubs, non-atomic ones just run the commands in parallel.
+  if (IsAtomic()) {
+    cntx_->cid = base_cid_;
+    auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
+    tx->PrepareSquashedMultiHop(base_cid_, cb);
+    tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
+  } else {
+    shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
+                                     [this](auto sid) { return !sharded_[sid].cmds.empty(); });
+  }
 
   bool aborted = false;
 
@@ -174,8 +214,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     sinfo.cmds.clear();
 
   order_.clear();
-  collected_keys_.clear();
-  return aborted;
+  return !aborted;
 }
 
 void MultiCommandSquasher::Run() {
@@ -186,12 +225,14 @@ void MultiCommandSquasher::Run() {
       break;
 
     if (res == SquashResult::NOT_SQUASHED || res == SquashResult::SQUASHED_FULL) {
-      if (ExecuteSquashed())
+      if (!ExecuteSquashed())
         break;
     }
 
-    if (res == SquashResult::NOT_SQUASHED)
-      ExecuteStandalone(&cmd);
+    if (res == SquashResult::NOT_SQUASHED) {
+      if (!ExecuteStandalone(&cmd))
+        break;
+    }
   }
 
   ExecuteSquashed();  // Flush leftover
@@ -202,6 +243,19 @@ void MultiCommandSquasher::Run() {
   if (!sharded_.empty())
     cntx_->transaction->ReportWritesSquashedMulti(
         [this](ShardId sid) { return sharded_[sid].had_writes; });
+
+  // UnlockMulti is a no-op for non-atomic multi transactions,
+  // still called for correctness and future changes
+  if (!IsAtomic()) {
+    for (auto& sd : sharded_) {
+      if (sd.local_tx)
+        sd.local_tx->UnlockMulti();
+    }
+  }
+}
+
+bool MultiCommandSquasher::IsAtomic() const {
+  return atomic_;
 }
 
 }  // namespace dfly

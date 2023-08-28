@@ -9,6 +9,7 @@
 
 #include "base/histogram.h"
 #include "core/interpreter.h"
+#include "server/acl/user_registry.h"
 #include "server/common.h"
 #include "server/script_mgr.h"
 #include "util/sliding_counter.h"
@@ -103,7 +104,7 @@ class ServerState {  // public struct - to allow initialization.
   ServerState();
   ~ServerState();
 
-  static void Init(uint32_t thread_index);
+  static void Init(uint32_t thread_index, acl::UserRegistry* registry);
   static void Destroy();
 
   void EnterLameDuck() {
@@ -129,6 +130,8 @@ class ServerState {  // public struct - to allow initialization.
   void set_gstate(GlobalState s) {
     gstate_ = s;
   }
+
+  uint64_t GetUsedMemory(uint64_t now_ns);
 
   bool AllowInlineScheduling() const;
 
@@ -195,13 +198,14 @@ class ServerState {  // public struct - to allow initialization.
     channel_store_ = replacement;
   }
 
- public:
   Stats stats;
 
   bool is_master = true;
   std::string remote_client_id_;  // for cluster support
 
   facade::ConnectionStats connection_stats;
+
+  acl::UserRegistry* user_registry;
 
  private:
   int64_t live_transactions_ = 0;
@@ -222,6 +226,8 @@ class ServerState {  // public struct - to allow initialization.
 
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
+  uint64_t used_mem_cached_ = 0;  // thread local cache of used_mem_current
+  uint64_t used_mem_last_update_ = 0;
 
   static __thread ServerState* state_;
 };

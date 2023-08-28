@@ -3,6 +3,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include "absl/container/inlined_vector.h"
+#include "absl/strings/numbers.h"
 #ifdef NDEBUG
 #include <mimalloc-new-delete.h>
 #endif
@@ -46,31 +48,6 @@
 
 using namespace std;
 
-struct MaxMemoryFlag {
-  MaxMemoryFlag() = default;
-  MaxMemoryFlag(const MaxMemoryFlag&) = default;
-  MaxMemoryFlag& operator=(const MaxMemoryFlag&) = default;
-  MaxMemoryFlag(uint64_t v) : value(v) {
-  }  // NOLINT
-
-  uint64_t value;
-};
-
-bool AbslParseFlag(absl::string_view in, MaxMemoryFlag* flag, std::string* err) {
-  int64_t val;
-  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
-    flag->value = val;
-    return true;
-  }
-
-  *err = "Use human-readable format, eg.: 1G, 1GB, 10GB";
-  return false;
-}
-
-std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
-  return strings::HumanReadableNumBytes(flag.value);
-}
-
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
@@ -87,10 +64,6 @@ ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal 
 ABSL_FLAG(bool, force_epoll, false,
           "If true - uses linux epoll engine underneath."
           "Can fit for kernels older than 5.10.");
-ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag(0),
-          "Limit on maximum-memory that is used by the database. "
-          "0 - means the program will automatically determine its maximum memory usage. "
-          "default: 0");
 
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
@@ -190,35 +163,78 @@ struct VersionMonitor {
   }
 
  private:
-  void RunTask(SSL_CTX* ssl_ctx);
+  struct SslDeleter {
+    void operator()(SSL_CTX* ssl) {
+      if (ssl) {
+        TlsClient::FreeContext(ssl);
+      }
+    }
+  };
+
+  using SslPtr = std::unique_ptr<SSL_CTX, SslDeleter>;
+  void RunTask(SslPtr);
+
+  bool IsVersionOutdated(std::string_view remote, std::string_view current) const;
 };
+
+bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
+                                       const std::string_view current) const {
+  const absl::InlinedVector<absl::string_view, 3> remote_xyz = absl::StrSplit(remote, ".");
+  const absl::InlinedVector<absl::string_view, 3> current_xyz = absl::StrSplit(current, ".");
+  if (remote_xyz.size() != current_xyz.size()) {
+    LOG(WARNING) << "Can't compare Dragonfly version " << current << " to latest version "
+                 << remote;
+    return false;
+  }
+  const auto print_to_log = [](const std::string_view version, const absl::string_view part) {
+    LOG(WARNING) << "Can't parse " << version << " part of version " << part << " as a number";
+  };
+  for (size_t i = 0; i < remote_xyz.size(); ++i) {
+    size_t remote_x = 0;
+    if (!absl::SimpleAtoi(remote_xyz[i], &remote_x)) {
+      print_to_log(remote, remote_xyz[i]);
+      return false;
+    }
+    size_t current_x = 0;
+    if (!absl::SimpleAtoi(current_xyz[i], &current_x)) {
+      print_to_log(current, current_xyz[i]);
+      return false;
+    }
+    if (remote_x > current_x) {
+      return true;
+    }
+
+    if (remote_x < current_x) {
+      return false;
+    }
+  }
+
+  return false;
+}
 
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
   // Avoid running dev environments.
-  bool is_dev_env = false;
-  const char* env_var = getenv("DFLY_DEV_ENV");
-  if (env_var) {
+  if (getenv("DFLY_DEV_ENV")) {
     LOG(WARNING) << "Running in dev environment (DFLY_DEV_ENV is set) - version monitoring is "
                     "disabled";
-    is_dev_env = true;
+    return;
   }
-  if (!GetFlag(FLAGS_version_check) || is_dev_env ||
-      // not a production release tag.
-      kGitTag[0] != 'v' || strchr(kGitTag, '-') != NULL) {
+  // not a production release tag.
+  if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v' || strchr(kGitTag, '-')) {
     return;
   }
 
-  SSL_CTX* ssl_ctx = TlsClient::CreateSslContext();
+  SslPtr ssl_ctx(TlsClient::CreateSslContext());
   if (!ssl_ctx) {
     VLOG(1) << "Remote version - failed to create SSL context - cannot run version monitoring";
     return;
   }
 
-  version_fiber_ =
-      proactor_pool->GetNextProactor()->LaunchFiber([ssl_ctx, this] { RunTask(ssl_ctx); });
+  version_fiber_ = proactor_pool->GetNextProactor()->LaunchFiber(
+      [ssl_ctx = std::move(ssl_ctx), this]() mutable { RunTask(std::move(ssl_ctx)); });
 }
 
-void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
+void VersionMonitor::RunTask(SslPtr ssl_ctx) {
   const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
 
   const std::string host_name = "version.dragonflydb.io";
@@ -232,17 +248,16 @@ void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
   ProactorBase* my_pb = ProactorBase::me();
   while (true) {
     const std::optional<std::string> remote_version =
-        GetRemoteVersion(my_pb, ssl_ctx, host_name, port, resource, version_header);
+        GetRemoteVersion(my_pb, ssl_ctx.get(), host_name, port, resource, version_header);
     if (remote_version) {
-      const std::string rv = remote_version.value();
-      if (rv != current_version) {
+      const std::string_view rv = remote_version.value();
+      if (IsVersionOutdated(rv, current_version)) {
         LOG_FIRST_N(INFO, 1) << "Your current version '" << current_version
                              << "' is not the latest version. A newer version '" << rv
                              << "' is now available. Please consider an update.";
       }
     }
     if (monitor_ver_done_.WaitFor(loop_sleep_time)) {
-      TlsClient::FreeContext(ssl_ctx);
       VLOG(1) << "finish running version monitor task";
       return;
     }
@@ -302,7 +317,7 @@ string NormalizePaths(std::string_view path) {
 }
 
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
-  auto maxmemory = GetFlag(FLAGS_maxmemory).value;
+  uint64_t maxmemory = GetMaxMemoryFlag();
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "There are " << pool->size() << " threads, so "
                << HumanReadableNumBytes(pool->size() * 256_MB) << " are required. Exiting...";
@@ -377,6 +392,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
     Listener* admin_listener = new Listener{Protocol::REDIS, &service};
+    admin_listener->SetAdminInterface();
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener);
 
     if (ec) {
@@ -478,7 +494,7 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
-error_code GetCGroupPath(string* memory_path, string* cpu_path) {
+void GetCGroupPath(string* memory_path, string* cpu_path) {
   CHECK(memory_path != nullptr) << "memory_path is null! (this shouldn't happen!)";
   CHECK(cpu_path != nullptr) << "cpu_path is null! (this shouldn't happen!)";
 
@@ -500,12 +516,15 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
   if (groups.size() == 1) {
     // for v2 we only read 0::<name>
     size_t pos = cgv.rfind(':');
-    if (pos == string::npos)
-      return make_error_code(errc::not_supported);
+    if (pos == string::npos) {
+      LOG(ERROR) << "Failed to parse cgroupv2 format, got: " << cgv;
+      exit(1);
+    }
 
-    string_view res = absl::StripTrailingAsciiWhitespace(cgv.substr(pos + 1));
+    auto cgroup = string_view(cgv.c_str() + pos + 1);
+    string_view cgroup_stripped = absl::StripTrailingAsciiWhitespace(cgroup);
 
-    *memory_path = absl::StrCat("/sys/fs/cgroup/", res);
+    *memory_path = absl::StrCat("/sys/fs/cgroup/", cgroup_stripped);
     *cpu_path = *memory_path;  // in v2 the path to the cgroup is singular
   } else {
     for (const auto& sv : groups) {
@@ -527,83 +546,125 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
         *cpu_path = absl::StrCat("/sys/fs/cgroup/cpu,cpuacct/", entry[2]);
     }
   }
-
-  return error_code{};
 }
 
 void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
-  using io::Exists;
+  using absl::StrCat;
+
+  // did we succeed in reading *something*? if not, exit.
+  // note that all processes in Linux are in some cgroup, so at the very
+  // least we should read something.
+  bool read_something = false;
+
+  auto read_mem = [&read_something](string_view path, size_t* output) {
+    auto file = io::ReadFileToString(path);
+    DVLOG(1) << "container limits: read " << path << ": " << file.value_or("N/A");
+
+    size_t temp = numeric_limits<size_t>::max();
+
+    if (file.has_value()) {
+      if (!absl::StartsWith(*file, "max"))
+        CHECK(absl::SimpleAtoi(*file, &temp))
+            << "Failed in parsing cgroup limits, path: " << path << " (read: " << *file << ")";
+      read_something = true;
+    }
+
+    *output = min(*output, temp);
+  };
 
   string mem_path, cpu_path;
-  auto err = GetCGroupPath(&mem_path, &cpu_path);
+  GetCGroupPath(&mem_path, &cpu_path);
 
   if (mem_path.empty() || cpu_path.empty()) {
-    VLOG(1) << "Failed to get cgroup path, error: " << err;
+    VLOG(1) << "Failed to get cgroup path, error";
     return;
   }
 
-  auto original_memory = mdata->mem_total;
+  VLOG(1) << "mem_path = " << mem_path;
+  VLOG(1) << "cpu_path = " << cpu_path;
 
   /* Update memory limits */
-  auto mlimit = io::ReadFileToString(mem_path + "/memory.limit_in_bytes");
-  DVLOG(1) << "memory/memory.limit_in_bytes: " << mlimit.value_or("N/A");
 
-  if (mlimit && !absl::StartsWith(*mlimit, "max")) {
-    CHECK(absl::SimpleAtoi(*mlimit, &mdata->mem_total));
-  }
+  // Start by reading global memory limits
+  constexpr auto base_mem = "/sys/fs/cgroup/memory"sv;
+  read_mem(StrCat(base_mem, "/memory.limit_in_bytes"), &mdata->mem_total);
+  read_mem(StrCat(base_mem, "/memory.max"), &mdata->mem_total);
 
-  auto mmax = io::ReadFileToString(mem_path + "/memory.max");
-  DVLOG(1) << "memory.max: " << mmax.value_or("N/A");
+  // Read cgroup-specific limits
+  read_mem(StrCat(mem_path, "/memory.limit_in_bytes"), &mdata->mem_total);
+  read_mem(StrCat(mem_path, "/memory.max"), &mdata->mem_total);
+  read_mem(StrCat(mem_path, "/memory.high"), &mdata->mem_avail);
 
-  if (mmax && !absl::StartsWith(*mmax, "max")) {
-    CHECK(absl::SimpleAtoi(*mmax, &mdata->mem_total));
-  }
-
-  mdata->mem_avail = mdata->mem_total;
-  auto mhigh = io::ReadFileToString(mem_path + "/memory.high");
-
-  if (mhigh && !absl::StartsWith(*mhigh, "max")) {
-    CHECK(absl::SimpleAtoi(*mhigh, &mdata->mem_avail));
-  }
-
-  if (numeric_limits<size_t>::max() == mdata->mem_total)
-    mdata->mem_avail = original_memory;
+  mdata->mem_avail = min(mdata->mem_avail, mdata->mem_total);
 
   /* Update thread limits */
 
-  double count = 0, timeshare = 1;
+  constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
+  auto read_cpu = [&read_something](string_view path, size_t* output) {
+    double count{0}, timeshare{1};
 
-  if (auto cpu = ReadFileToString(cpu_path + "/cpu.max"); cpu.has_value()) {
-    vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
+    /**
+     * Summarized: the function does one of the following:
+     *
+     * 1. read path/cpu.max -- for v2. The format of this file is:
+     *  $COUNT $PERIOD
+     * which indicates that we can use upto $COUNT shares in a $PERIOD of time.
+     * If $COUNT is max, then we can use as much CPU as the system has. Otherwise,
+     * this translates to $COUNT/$PERIOD threads.
+     *
+     * 2. read path/cpu.cfs_quota_us & path/cpu.cfs_period_us -- same idea, but for v1.
+     */
 
-    CHECK_EQ(res.size(), 2u);
+    if (auto cpu = ReadFileToString(StrCat(path, "/cpu.max")); cpu.has_value()) {
+      vector<string_view> res = absl::StrSplit(*cpu, ' ');
 
-    if (res[0] == "max")
-      *max_threads = 0u;
-    else {
-      CHECK(absl::SimpleAtod(res[0], &count));
-      CHECK(absl::SimpleAtod(res[1], &timeshare));
+      CHECK_EQ(res.size(), 2u);
 
-      *max_threads = static_cast<size_t>(ceil(count / timeshare));
+      if (res[0] == "max")
+        *output = 0u;
+      else {
+        CHECK(absl::SimpleAtod(res[0], &count))
+            << "Failed in parsing cgroupv2 cpu count, path = " << path << " (read: " << *cpu << ")";
+        CHECK(absl::SimpleAtod(res[1], &timeshare))
+            << "Failed in parsing cgroupv2 cpu timeshare, path = " << path << " (read: " << *cpu
+            << ")";
+
+        *output = static_cast<size_t>(ceil(count / timeshare));
+      }
+
+      read_something = true;
+
+    } else if (auto quota = ReadFileToString(StrCat(path, "/cpu.cfs_quota_us"));
+               quota.has_value()) {
+      auto period = ReadFileToString(StrCat(path, "/cpu.cfs_period_us"));
+
+      CHECK(period.has_value()) << "Failed to read cgroup cpu.cfs_period_us, but read "
+                                   "cpu.cfs_quota_us (this shouldn't happen!)";
+
+      CHECK(absl::SimpleAtod(quota.value(), &count))
+          << "Failed in parsing cgroupv1 cpu timeshare, quota = " << path << " (read: " << *quota
+          << ")";
+
+      if (count == -1)  // on -1 there is no limit.
+        count = 0;
+
+      CHECK(absl::SimpleAtod(period.value(), &timeshare))
+          << "Failed in parsing cgroupv1 cpu timeshare, path = " << path << " (read: " << *period
+          << ")";
+
+      *output = static_cast<size_t>(count / timeshare);
+      read_something = true;
     }
-  } else if (auto quota = ReadFileToString(cpu_path + "/cpu.cfs_quota_us"); quota.has_value()) {
-    auto period = ReadFileToString(cpu_path + "/cpu.cfs_period_us");
+  };
 
-    CHECK(period.has_value()) << "Failed to read cgroup cpu.cfs_period_us, but read cpu.cfs_quota "
-                                 "us (this shouldn't happen!)";
+  read_cpu(base_cpu, max_threads);  // global cpu limits
+  read_cpu(cpu_path, max_threads);  // cgroup-specific limits
 
-    CHECK(absl::SimpleAtod(quota.value(), &count));
-
-    if (count == -1)  // on -1 there is no limit.
-      count = 0;
-
-    CHECK(absl::SimpleAtod(period.value(), &timeshare));
-  } else {
-    *max_threads = 0u;  // cpuset, this is handled later.
-    return;
+  if (!read_something) {
+    LOG(ERROR) << "Failed in deducing any cgroup limits with paths " << mem_path << " and "
+               << cpu_path << ". Exiting.";
+    exit(1);
   }
-
-  *max_threads = static_cast<size_t>(ceil(count / timeshare));
 }
 
 }  // namespace
@@ -691,24 +752,25 @@ Usage: dragonfly [FLAGS]
   if (memory.swap_total != 0)
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
-  if (GetFlag(FLAGS_maxmemory).value == 0) {
+  dfly::max_memory_limit = dfly::GetMaxMemoryFlag();
+
+  if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
     size_t available = memory.mem_avail;
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
-    absl::SetFlag(&FLAGS_maxmemory, MaxMemoryFlag(maxmemory));
+
+    SetMaxMemoryFlag(maxmemory);
+    dfly::max_memory_limit = maxmemory;
   } else {
-    size_t limit = GetFlag(FLAGS_maxmemory).value;
-    string hr_limit = HumanReadableNumBytes(limit);
-    if (limit > memory.mem_avail)
+    string hr_limit = HumanReadableNumBytes(dfly::max_memory_limit);
+    if (dfly::max_memory_limit > memory.mem_avail)
       LOG(WARNING) << "Got memory limit " << hr_limit << ", however only "
                    << HumanReadableNumBytes(memory.mem_avail) << " was found.";
     LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
-
-  dfly::max_memory_limit = GetFlag(FLAGS_maxmemory).value;
 
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);

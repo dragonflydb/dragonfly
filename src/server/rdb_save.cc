@@ -138,7 +138,7 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
-      return RDB_TYPE_JSON;
+      return RDB_TYPE_JSON_OLD;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -348,6 +348,7 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   while (node) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
+
     if (QL_NODE_IS_PLAIN(node)) {
       if (quicklistNodeIsCompressed(node)) {
         void* data;
@@ -1148,13 +1149,15 @@ void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
   impl_->StopSnapshotting(shard);
 }
 
-error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
+error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   char magic[16];
-  size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
+  // We should use RDB_VERSION here from rdb.h when we ditch redis 6 support
+  // For now we serialize to an older version.
+  size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_SER_VERSION);
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
-  RETURN_ON_ERR(SaveAux(lua_scripts));
+  RETURN_ON_ERR(SaveAux(std::move(glob_state)));
 
   return error_code{};
 }
@@ -1183,7 +1186,7 @@ error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map)
   return error_code{};
 }
 
-error_code RdbSaver::SaveAux(const StringVec& lua_scripts) {
+error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   static_assert(sizeof(void*) == 8, "");
 
   int aof_preamble = false;
@@ -1194,15 +1197,22 @@ error_code RdbSaver::SaveAux(const StringVec& lua_scripts) {
   RETURN_ON_ERR(SaveAuxFieldStrInt("redis-bits", 64));
 
   RETURN_ON_ERR(SaveAuxFieldStrInt("ctime", time(NULL)));
-
   RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", used_mem_current.load(memory_order_relaxed)));
-
   RETURN_ON_ERR(SaveAuxFieldStrInt("aof-preamble", aof_preamble));
 
   // Save lua scripts only in rdb or summary file
-  DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || lua_scripts.empty());
-  for (const string& s : lua_scripts) {
+  DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.lua_scripts.empty());
+  for (const string& s : glob_state.lua_scripts)
     RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("lua", s));
+
+  if (save_mode_ == SaveMode::RDB) {
+    if (!glob_state.search_indices.empty())
+      LOG(WARNING) << "Dragonfly search index data is incompatible with the RDB format";
+  } else {
+    // Search index definitions are not tied to shards  and are saved in the summary file
+    DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
+    for (const string& s : glob_state.search_indices)
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
   }
 
   // TODO: "repl-stream-db", "repl-id", "repl-offset"

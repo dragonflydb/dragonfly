@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "facade/facade_types.h"
+#include "util/fiber_socket_base.h"
 #include "util/fibers/proactor_base.h"
 #include "util/http/http_handler.h"
 #include "util/listener_interface.h"
@@ -34,12 +35,16 @@ class Listener : public util::ListenerInterface {
   bool AwaitDispatches(absl::Duration timeout,
                        const std::function<bool(util::Connection*)>& filter);
 
+  bool IsAdminInterface() const;
+  void SetAdminInterface(bool is_admin = true);
+
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
-  ProactorBase* PickConnectionProactor(util::LinuxSocketBase* sock) final;
+  ProactorBase* PickConnectionProactor(util::FiberSocketBase* sock) final;
 
   void OnConnectionStart(util::Connection* conn) final;
   void OnConnectionClose(util::Connection* conn) final;
+  void OnMaxConnectionsReached(util::FiberSocketBase* sock) final;
   void PreAcceptLoop(ProactorBase* pb) final;
 
   void PreShutdown() final;
@@ -56,6 +61,8 @@ class Listener : public util::ListenerInterface {
   std::vector<PerThread> per_thread_;
 
   std::atomic_uint32_t next_id_{0};
+
+  bool is_admin_ = false;
 
   uint32_t conn_cnt_{0};
   uint32_t min_cnt_thread_id_{0};

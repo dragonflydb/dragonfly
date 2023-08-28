@@ -5,6 +5,7 @@
 #include "server/command_registry.h"
 
 #include <absl/strings/str_split.h>
+#include <absl/time/clock.h>
 
 #include "absl/strings/str_cat.h"
 #include "base/bits.h"
@@ -12,6 +13,7 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "server/conn_context.h"
+#include "server/server_state.h"
 
 using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
@@ -29,8 +31,8 @@ using absl::StrCat;
 using absl::StrSplit;
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
-                     int8_t last_key, int8_t step)
-    : facade::CommandId(name, mask, arity, first_key, last_key, step) {
+                     int8_t last_key, int8_t step, uint32_t acl_categories)
+    : facade::CommandId(name, mask, arity, first_key, last_key, step, acl_categories) {
   if (mask & CO::ADMIN)
     opt_mask_ |= CO::NOSCRIPT;
 
@@ -48,6 +50,30 @@ bool CommandId::IsTransactional() const {
   return false;
 }
 
+void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
+  uint64_t before = absl::GetCurrentTimeNanos();
+  handler_(std::move(args), cntx);
+  uint64_t after = absl::GetCurrentTimeNanos();
+  auto& ent = command_stats_[ServerState::tlocal()->thread_index()];
+  ++ent.first;
+  ent.second += (after - before) / 1000;
+}
+
+optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
+  if ((arity() > 0 && tail_args.size() + 1 != size_t(arity())) ||
+      (arity() < 0 && tail_args.size() + 1 < size_t(-arity()))) {
+    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  }
+
+  if (key_arg_step() == 2 && (tail_args.size() % 2) != 0) {
+    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  }
+
+  if (validator_)
+    return validator_(tail_args);
+  return nullopt;
+}
+
 CommandRegistry::CommandRegistry() {
   vector<string> rename_command = GetFlag(FLAGS_rename_command);
 
@@ -59,6 +85,12 @@ CommandRegistry::CommandRegistry() {
       LOG(ERROR) << "Invalid rename_command flag, trying to give 2 names to a command";
       exit(1);
     }
+  }
+}
+
+void CommandRegistry::Init(unsigned int thread_count) {
+  for (auto& [_, cmd] : cmd_map_) {
+    cmd.Init(thread_count);
   }
 }
 

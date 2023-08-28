@@ -10,7 +10,7 @@
 /* Input flags. */
 #define ZADD_IN_NONE 0
 #define ZADD_IN_INCR (1 << 0) /* Increment the score instead of setting it. */
-#define ZADD_IN_NX (1 << 1)   /* Don't touch elements not already existing. */
+#define ZADD_IN_NX (1 << 1)   /* Don't touch elements already existing. */
 #define ZADD_IN_XX (1 << 2)   /* Only touch elements already existing. */
 #define ZADD_IN_GT (1 << 3)   /* Only update existing when new scores are higher. */
 #define ZADD_IN_LT (1 << 4)   /* Only update existing when new scores are lower. */

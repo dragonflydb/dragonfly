@@ -6,16 +6,9 @@
 
 #include <absl/base/internal/endian.h>
 
-#ifdef __clang__
-#include <experimental/memory_resource>
-namespace PMR_NS = std::experimental::pmr;
-#else
-#include <memory_resource>
-namespace PMR_NS = std::pmr;
-#endif
-
 #include <optional>
 
+#include "base/pmr/memory_resource.h"
 #include "core/json_object.h"
 #include "core/small_string.h"
 
@@ -48,10 +41,6 @@ class RobjWrapper {
   void SetString(std::string_view s, MemoryResource* mr);
   void Init(unsigned type, unsigned encoding, void* inner);
 
-  // Equivalent to zsetAdd
-  int AddZsetMember(std::string_view member, double score, int in_flags, int* out_flags,
-                    double* newscore);
-
   unsigned type() const {
     return type_;
   }
@@ -70,13 +59,16 @@ class RobjWrapper {
     return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
   }
 
+  // Try reducing memory fragmentation by re-allocating values from underutilized pages.
+  // Returns true if re-allocated.
   bool DefragIfNeeded(float ratio);
 
   // as defined in zset.h
   int ZsetAdd(double score, char* ele, int in_flags, int* out_flags, double* newscore);
 
  private:
-  bool Reallocate(MemoryResource* mr);
+  void ReallocateString(MemoryResource* mr);
+
   size_t InnerObjMallocUsed() const;
   void MakeInnerRoom(size_t current_cap, size_t desired, MemoryResource* mr);
 

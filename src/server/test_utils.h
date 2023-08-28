@@ -12,6 +12,7 @@
 #include "io/io.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/transaction.h"
 #include "util/proactor_pool.h"
 
 namespace dfly {
@@ -35,6 +36,19 @@ class TestConnection : public facade::Connection {
  private:
   io::StringSink* sink_;
   bool is_admin_ = false;
+};
+
+// The TransactionSuspension class is designed to facilitate the temporary suspension of commands
+// executions. When the 'start' method is invoked, it enforces the suspension of other
+// transactions by acquiring a global shard lock. Conversely, invoking the 'terminate' method
+// releases the global shard lock, enabling all transactions in the queue to resume execution.
+class TransactionSuspension {
+ public:
+  void Start();
+  void Terminate();
+
+ private:
+  boost::intrusive_ptr<dfly::Transaction> transaction_;
 };
 
 class BaseFamilyTest : public ::testing::Test {
@@ -75,6 +89,8 @@ class BaseFamilyTest : public ::testing::Test {
   int64_t CheckedInt(ArgSlice list);
   std::string CheckedString(ArgSlice list);
 
+  void ResetService();
+
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
 
@@ -102,9 +118,14 @@ class BaseFamilyTest : public ::testing::Test {
   const facade::Connection::PubMessage& GetPublishedMessage(std::string_view conn_id,
                                                             size_t index) const;
 
+  static absl::flat_hash_set<std::string> GetLastUsedKeys();
+  static void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
+                                           absl::Duration timeout = absl::Seconds(10));
+  Fiber ExpectConditionWithSuspension(const std::function<bool()>& condition);
+
   static unsigned NumLocked();
 
-  void SetTestFlag(std::string_view flag_name, std::string_view new_value);
+  static void SetTestFlag(std::string_view flag_name, std::string_view new_value);
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;

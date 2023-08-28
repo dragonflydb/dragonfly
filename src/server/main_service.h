@@ -4,11 +4,15 @@
 
 #pragma once
 
+#include <utility>
+
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
+#include "server/acl/user_registry.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
+#include "server/config_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
 
@@ -19,11 +23,10 @@ class AcceptServer;
 namespace dfly {
 
 class Interpreter;
-class ObjectExplorer;  // for Interpreter
 using facade::MemcacheParser;
+
 class Service : public facade::ServiceInterface {
  public:
-  using error_code = std::error_code;
   struct InitOpts {
     bool disable_time_update;
 
@@ -39,10 +42,26 @@ class Service : public facade::ServiceInterface {
 
   void Shutdown();
 
+  // Prepare command execution, verify and execute, reply to context
   void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
 
-  // Returns true if command was executed successfully.
-  bool InvokeCmd(CmdArgList args, const CommandId* cid, ConnectionContext* cntx, bool record_stats);
+  // Execute multiple consecutive commands, possibly in parallel by squashing
+  void DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                            facade::ConnectionContext* cntx) final;
+
+  // Check VerifyCommandExecution and invoke command with args
+  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* reply_cntx,
+                 bool record_stats = false);
+
+  // Verify command can be executed now (check out of memory), always called immediately before
+  // execution
+  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandId* cid);
+
+  // Verify command prepares excution in correct state.
+  // It's usually called before command execution. Only for multi/exec transactions it's checked
+  // when the command is queued for execution, not before the execution itself.
+  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
+                                                       const ConnectionContext& cntx);
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   facade::ConnectionContext* cntx) final;
@@ -51,6 +70,27 @@ class Service : public facade::ServiceInterface {
                                            facade::Connection* owner) final;
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
+
+  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
+  const CommandId* FindCmd(std::string_view) const;
+
+  CommandRegistry* mutable_registry() {
+    return &registry_;
+  }
+
+  facade::ErrorReply ReportUnknownCmd(std::string_view cmd_name);
+
+  // Returns: the new state.
+  // if from equals the old state then the switch is performed "to" is returned.
+  // Otherwise, does not switch and returns the current state in the system.
+  // Upon switch, updates cached global state in threadlocal ServerState struct.
+  GlobalState SwitchState(GlobalState from, GlobalState to);
+
+  GlobalState GetGlobalState() const;
+
+  void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
+  void OnClose(facade::ConnectionContext* cntx) final;
+  std::string GetContextInfo(facade::ConnectionContext* cntx) final;
 
   uint32_t shard_count() const {
     return shard_set->size();
@@ -66,10 +106,6 @@ class Service : public facade::ServiceInterface {
 
   absl::flat_hash_map<std::string, unsigned> UknownCmdMap() const;
 
-  const CommandId* FindCmd(std::string_view cmd) const {
-    return registry_.Find(cmd);
-  }
-
   ScriptMgr* script_mgr() {
     return server_family_.script_mgr();
   }
@@ -77,18 +113,6 @@ class Service : public facade::ServiceInterface {
   ServerFamily& server_family() {
     return server_family_;
   }
-
-  // Returns: the new state.
-  // if from equals the old state then the switch is performed "to" is returned.
-  // Otherwise, does not switch and returns the current state in the system.
-  // Upon switch, updates cached global state in threadlocal ServerState struct.
-  GlobalState SwitchState(GlobalState from, GlobalState to);
-
-  GlobalState GetGlobalState() const;
-
-  void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
-  void OnClose(facade::ConnectionContext* cntx) final;
-  std::string GetContextInfo(facade::ConnectionContext* cntx) final;
 
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
@@ -119,16 +143,13 @@ class Service : public facade::ServiceInterface {
     CmdArgList keys, args;
   };
 
-  // Return false if command is invalid and reply with error.
-  bool VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionContext* cntx);
-
-  // Return false if not all keys are owned by the server when running in cluster mode.
-  // If false is returned error was sent to the client.
-  bool CheckKeysOwnership(const CommandId* cid, CmdArgList args, ConnectionContext* dfly_cntx);
-
-  const CommandId* FindCmd(CmdArgList args) const;
+  // Return error if not all keys are owned by the server when running in cluster mode
+  std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+                                                       const ConnectionContext& dfly_cntx);
 
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
+  void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
+               ConnectionContext* cntx);
 
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
@@ -142,13 +163,19 @@ class Service : public facade::ServiceInterface {
 
   util::ProactorPool& pp_;
 
+  acl::UserRegistry user_registry_;
   ServerFamily server_family_;
   ClusterFamily cluster_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 
+  const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
+
   mutable Mutex mu_;
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
 };
+
+uint64_t GetMaxMemoryFlag();
+void SetMaxMemoryFlag(uint64_t value);
 
 }  // namespace dfly

@@ -15,6 +15,7 @@ extern "C" {
 #include <absl/strings/strip.h>
 
 #include <boost/asio/ip/tcp.hpp>
+#include <string>
 
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
@@ -26,7 +27,17 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
 
+#ifdef DFLY_USE_SSL
+#include "util/tls/tls_socket.h"
+#endif
+
 ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
+ABSL_FLAG(bool, tls_replication, false, "Enable TLS on replication");
+
+ABSL_DECLARE_FLAG(std::string, tls_cert_file);
+ABSL_DECLARE_FLAG(std::string, tls_key_file);
+ABSL_DECLARE_FLAG(std::string, tls_ca_cert_file);
+ABSL_DECLARE_FLAG(std::string, tls_ca_cert_dir);
 
 namespace dfly {
 
@@ -38,6 +49,45 @@ using absl::GetFlag;
 using absl::StrCat;
 
 namespace {
+
+#ifdef DFLY_USE_SSL
+static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
+  ProtocolClient::SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+  const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
+  unsigned mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+
+  // Load client certificate if given.
+  if (!tls_key_file.empty()) {
+    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+    // We checked that the flag is non empty in ValidateClientTlsFlags.
+    const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
+
+    CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+  }
+
+  // Load custom certificate validation if given.
+  const auto& tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
+  const auto& tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
+
+  const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
+  const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
+  if (file || dir) {
+    CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+  } else {
+    CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
+  }
+
+  CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
+  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+
+  SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
+
+  SSL_CTX_set_verify(ctx, mask, NULL);
+
+  CHECK_EQ(1, SSL_CTX_set_dh_auto(ctx, 1));
+  return ctx;
+}
+#endif
 
 int ResolveDns(std::string_view host, char* dest) {
   struct addrinfo hints, *servinfo;
@@ -101,16 +151,62 @@ std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
+void ValidateClientTlsFlags() {
+  if (!absl::GetFlag(FLAGS_tls_replication)) {
+    return;
+  }
+
+  bool has_auth = false;
+
+  if (!absl::GetFlag(FLAGS_tls_key_file).empty()) {
+    if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
+      LOG(ERROR) << "tls_cert_file flag should be set";
+      exit(1);
+    }
+    has_auth = true;
+  }
+
+  if (!absl::GetFlag(FLAGS_masterauth).empty())
+    has_auth = true;
+
+  if (!has_auth) {
+    LOG(ERROR) << "No authentication method configured!";
+    exit(1);
+  }
+}
+
+void ProtocolClient::MaybeInitSslCtx() {
+  if (absl::GetFlag(FLAGS_tls_replication)) {
+    ssl_ctx_ = CreateSslClientCntx();
+  }
+}
+
 ProtocolClient::ProtocolClient(string host, uint16_t port) {
   server_context_.host = std::move(host);
   server_context_.port = port;
+#ifdef DFLY_USE_SSL
+  MaybeInitSslCtx();
+#endif
+}
+ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
+#ifdef DFLY_USE_SSL
+  MaybeInitSslCtx();
+#endif
 }
 
 ProtocolClient::~ProtocolClient() {
+  // FIXME: We should close the socket explictly outside of the destructor. This currently
+  // breaks test_cancel_replication_immediately.
   if (sock_) {
-    auto ec = sock_->Close();
+    std::error_code ec;
+    sock_->proactor()->Await([this, &ec]() { ec = sock_->Close(); });
     LOG_IF(ERROR, ec) << "Error closing socket " << ec;
   }
+#ifdef DFLY_USE_SSL
+  if (ssl_ctx_) {
+    SSL_CTX_free(ssl_ctx_);
+  }
+#endif
 }
 
 error_code ProtocolClient::ResolveMasterDns() {
@@ -136,8 +232,19 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
     if (!cntx->IsCancelled()) {
-      sock_.reset(mythread->CreateSocket());
-      serializer_.reset(new ReqSerializer(sock_.get()));
+      if (sock_) {
+        LOG_IF(WARNING, sock_->Close()) << "Error closing socket";
+        sock_.reset(nullptr);
+      }
+
+      if (ssl_ctx_) {
+        auto tls_sock = std::make_unique<tls::TlsSocket>(mythread->CreateSocket());
+        tls_sock->InitSSL(ssl_ctx_);
+        sock_ = std::move(tls_sock);
+      } else {
+        sock_.reset(mythread->CreateSocket());
+      }
+      serializer_ = std::make_unique<ReqSerializer>(sock_.get());
     } else {
       return cntx->GetError();
     }
@@ -208,6 +315,7 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
   while (!ec) {
     uint32_t consumed;
     if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
+      DCHECK_GT(buffer->AppendLen(), 0u);
       io::MutableBytes buf = buffer->AppendBuffer();
       io::Result<size_t> size_res = sock_->Recv(buf);
       if (!size_res) {
@@ -236,6 +344,11 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
     if (result != RedisParser::INPUT_PENDING) {
       LOG(ERROR) << "Invalid parser status " << result << " for response " << last_resp_;
       return nonstd::make_unexpected(std::make_error_code(std::errc::bad_message));
+    }
+
+    // We need to read more data. Check that we have enough space.
+    if (buffer->AppendLen() < 64u) {
+      buffer->EnsureCapacity(buffer->Capacity() * 2);
     }
   }
 

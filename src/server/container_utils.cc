@@ -237,53 +237,57 @@ OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_typ
   return OpResult<ShardFFResult>{std::move(shard_result)};
 }
 
-// If OK is returned then cb was called on the first non empty key and `out_key` is set to the key.
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms) {
-  auto limit_tp = limit_ms ? std::chrono::steady_clock::now() + std::chrono::milliseconds(limit_ms)
-                           : Transaction::time_point::max();
-  bool is_multi = trans->IsMulti();
   trans->Schedule();
 
-  ShardFFResult ff_result;
+  string result_key;
   OpResult<ShardFFResult> result = FindFirstNonEmptyKey(trans, req_obj_type);
 
+  // If a non-empty key exists, execute the callback immediately
   if (result.ok()) {
-    ff_result = std::move(result.value());
-  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    // Close transaction and return.
-    if (is_multi) {
-      auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      trans->Execute(std::move(cb), true);
-      return OpStatus::TIMED_OUT;
-    }
-
-    auto wcb = [](Transaction* t, EngineShard* shard) {
-      return t->GetShardArgs(shard->shard_id());
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == result->sid) {
+        result->key.GetString(&result_key);
+        func(t, shard, result_key);
+      }
+      return OpStatus::OK;
     };
-
-    VLOG(1) << "Blocking BLPOP " << trans->DebugId();
-
-    bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
-    if (!wait_succeeded)
-      return OpStatus::TIMED_OUT;
-  } else {
-    // Could be the wrong-type error.
-    // cleanups, locks removal etc.
-    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
     trans->Execute(std::move(cb), true);
 
-    DCHECK_NE(result.status(), OpStatus::KEY_NOTFOUND);
+    return result_key;
+  }
+
+  // Abort on possible errors: wrong type, etc
+  if (result.status() != OpStatus::KEY_NOTFOUND) {
+    trans->Conclude();
     return result.status();
   }
 
-  string result_key;
+  // Multi transactions are not allowed to block
+  if (trans->IsMulti()) {
+    trans->Conclude();
+    return OpStatus::TIMED_OUT;
+  }
+
+  VLOG(1) << "Blocking " << trans->DebugId();
+
+  // If timeout (limit_ms) is zero, block indefinitely
+  auto limit_tp = Transaction::time_point::max();
+  if (limit_ms > 0) {
+    using namespace std::chrono;
+    limit_tp = steady_clock::now() + milliseconds(limit_ms);
+  }
+
+  auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
+
+  bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
+  if (!wait_succeeded)
+    return OpStatus::TIMED_OUT;
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
       result_key = *wake_key;
-      func(t, shard, result_key);
-    } else if (shard->shard_id() == ff_result.sid) {
-      ff_result.key.GetString(&result_key);
       func(t, shard, result_key);
     }
     return OpStatus::OK;

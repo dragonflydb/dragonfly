@@ -7,7 +7,6 @@
 #ifdef DFLY_USE_SSL
 #include <openssl/ssl.h>
 #endif
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
@@ -27,6 +26,9 @@ ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
 ABSL_FLAG(string, tls_ca_cert_file, "", "ca signed certificate to validate tls connections");
 ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
+ABSL_FLAG(uint32_t, tcp_keepalive, 300,
+          "the period in seconds of inactivity after which keep-alives are triggerred,"
+          "the duration until an inactive connection is terminated is twice the specified time");
 
 #if 0
 enum TlsClientAuth {
@@ -56,44 +58,37 @@ using absl::GetFlag;
 namespace {
 
 #ifdef DFLY_USE_SSL
-// To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
-static SSL_CTX* CreateSslCntx() {
-  SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+// To connect: openssl s_client -state -crlf -connect 127.0.0.1:6380
+SSL_CTX* CreateSslServerCntx() {
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
-  unsigned mask = SSL_VERIFY_NONE;
   if (tls_key_file.empty()) {
-    // To connect - use openssl s_client -cipher with either:
-    // "AECDH:@SECLEVEL=0" or "ADH:@SECLEVEL=0" setting.
-    CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "aNULL"));
-
-    // To allow anonymous ciphers.
-    SSL_CTX_set_security_level(ctx, 0);
-
-    // you can still connect with redis-cli with :
-    // redis-cli --tls --insecure --tls-ciphers "ADH:@SECLEVEL=0"
-    LOG(WARNING) << "tls-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
-                 << "Do not use in production!";
-  } else {  // tls_key_file is set.
-    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
-    const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
-
-    if (!tls_cert_file.empty()) {
-      // TO connect with redis-cli you need both tls-key-file and tls-cert-file
-      // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
-      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
-    }
-
-    const auto tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
-    const auto tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
-    if (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()) {
-      const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
-      const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
-      CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
-      mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-    }
-
-    CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
+    LOG(ERROR) << "To use TLS, a server certificate must be provided with the --tls_key_file flag!";
+    exit(-1);
   }
+
+  SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+  unsigned mask = SSL_VERIFY_NONE;
+
+  CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+  const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
+
+  if (!tls_cert_file.empty()) {
+    // TO connect with redis-cli you need both tls-key-file and tls-cert-file
+    // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
+    CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+  }
+
+  const auto tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
+  const auto tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
+  if (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()) {
+    const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
+    const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
+    CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+    mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+  }
+
+  CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
+
   SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
   SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
@@ -106,21 +101,19 @@ static SSL_CTX* CreateSslCntx() {
 }
 #endif
 
-bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
-  DCHECK_GT(interval_sec, 3u);
-
+bool ConfigureKeepAlive(int fd) {
   int val = 1;
   if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) < 0)
     return false;
 
-  val = interval_sec;
+  val = absl::GetFlag(FLAGS_tcp_keepalive);
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0)
     return false;
 
   /* Send next probes after the specified interval. Note that we set the
    * delay as interval / 3, as we send three probes before detecting
    * an error (see the next setsockopt call). */
-  val = interval_sec / 3;
+  val = std::max(val / 3, 1);
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0)
     return false;
 
@@ -139,7 +132,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), prot
 #ifdef DFLY_USE_SSL
   if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
-    ctx_ = CreateSslCntx();
+    ctx_ = CreateSslServerCntx();
   }
 #endif
 
@@ -160,12 +153,11 @@ util::Connection* Listener::NewConnection(ProactorBase* proactor) {
 
 error_code Listener::ConfigureServerSocket(int fd) {
   int val = 1;
-  constexpr int kInterval = 300;  // 300 seconds is ok to start checking for liveness.
 
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
-  bool success = ConfigureKeepAlive(fd, kInterval);
+  bool success = ConfigureKeepAlive(fd);
 
   if (!success) {
     int myerr = errno;
@@ -207,6 +199,14 @@ bool Listener::AwaitDispatches(absl::Duration timeout,
     ThisFiber::SleepFor(100us);
   }
   return false;
+}
+
+bool Listener::IsAdminInterface() const {
+  return is_admin_;
+}
+
+void Listener::SetAdminInterface(bool is_admin) {
+  is_admin_ = is_admin;
 }
 
 void Listener::PreShutdown() {
@@ -274,8 +274,12 @@ void Listener::OnConnectionClose(util::Connection* conn) {
   }
 }
 
+void Listener::OnMaxConnectionsReached(util::FiberSocketBase* sock) {
+  sock->Write(io::Buffer("-ERR max number of clients reached\r\n"));
+}
+
 // We can limit number of threads handling dragonfly connections.
-ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
+ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
   util::ProactorPool* pp = pool();
 
   uint32_t res_id = kuint32max;

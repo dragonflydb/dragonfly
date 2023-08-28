@@ -3,6 +3,8 @@
 //
 #include "server/list_family.h"
 
+#include "server/acl/acl_commands_def.h"
+
 extern "C" {
 #include "redis/object.h"
 #include "redis/sds.h"
@@ -441,10 +443,8 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 
   if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
     result = find_res[0] ? find_res[1] : find_res[0];
-    if (conclude_on_error) {
-      auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      trans->Execute(move(cb), true);
-    }
+    if (conclude_on_error)
+      trans->Conclude();
   } else {
     // Everything is ok, lets proceed with the mutations.
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -880,8 +880,7 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
       op_res = OpStatus::TIMED_OUT;
     }
-    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-    t->Execute(std::move(cb), true);
+    t->Conclude();
     return op_res;
   }
 
@@ -1299,32 +1298,63 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&ListFamily::x)
 
+namespace acl {
+constexpr uint32_t kLPush = WRITE | LIST | FAST;
+constexpr uint32_t kLPushX = WRITE | LIST | FAST;
+constexpr uint32_t kLPop = WRITE | LIST | FAST;
+constexpr uint32_t kRPush = WRITE | LIST | FAST;
+constexpr uint32_t kRPushX = WRITE | LIST | FAST;
+constexpr uint32_t kRPop = WRITE | LIST | FAST;
+constexpr uint32_t kRPopLPush = WRITE | LIST | SLOW;
+constexpr uint32_t kBRPopLPush = WRITE | LIST | SLOW | BLOCKING;
+constexpr uint32_t kBLPop = WRITE | LIST | SLOW | BLOCKING;
+constexpr uint32_t kBRPop = WRITE | LIST | SLOW | BLOCKING;
+constexpr uint32_t kLLen = READ | LIST | FAST;
+constexpr uint32_t kLPos = READ | LIST | SLOW;
+constexpr uint32_t kLIndex = READ | LIST | SLOW;
+constexpr uint32_t kLInsert = READ | LIST | SLOW;
+constexpr uint32_t kLRange = READ | LIST | SLOW;
+constexpr uint32_t kLSet = WRITE | LIST | SLOW;
+constexpr uint32_t kLTrim = WRITE | LIST | SLOW;
+constexpr uint32_t kLRem = WRITE | LIST | SLOW;
+constexpr uint32_t kLMove = WRITE | LIST | SLOW;
+constexpr uint32_t kBLMove = READ | LIST | SLOW | BLOCKING;
+}  // namespace acl
+
 void ListFamily::Register(CommandRegistry* registry) {
   *registry
-      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(LPush)
-      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(LPushX)
-      << CI{"LPOP", CO::WRITE | CO::FAST | CO::DENYOOM, -2, 1, 1, 1}.HFUNC(LPop)
-      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPush)
-      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPushX)
-      << CI{"RPOP", CO::WRITE | CO::FAST | CO::DENYOOM, -2, 1, 1, 1}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}
+      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPush}.HFUNC(LPush)
+      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPushX}.HFUNC(LPushX)
+      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1, acl::kLPop}.HFUNC(LPop)
+      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kRPush}.HFUNC(RPush)
+      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kRPushX}.HFUNC(RPushX)
+      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1, acl::kRPop}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, acl::kRPopLPush}
              .SetHandler(RPopLPush)
-      << CI{"BRPOPLPUSH", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2, 1}
+      << CI{"BRPOPLPUSH",
+            CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+            4,
+            1,
+            2,
+            1,
+            acl::kBRPopLPush}
              .SetHandler(BRPopLPush)
-      << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1}
+      << CI{"BLPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1,
+            acl::kBLPop}
              .HFUNC(BLPop)
-      << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1}
+      << CI{"BRPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1,
+            acl::kBRPop}
              .HFUNC(BRPop)
-      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)
-      << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(LPos)
-      << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex)
-      << CI{"LINSERT", CO::WRITE, 5, 1, 1, 1}.HFUNC(LInsert)
-      << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(LRange)
-      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(LSet)
-      << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LTrim)
-      << CI{"LREM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LRem)
-      << CI{"LMOVE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 5, 1, 2, 1}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1}
+      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kLLen}.HFUNC(LLen)
+      << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, 1, acl::kLPos}.HFUNC(LPos)
+      << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1, acl::kLIndex}.HFUNC(LIndex)
+      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1, 1, acl::kLInsert}.HFUNC(LInsert)
+      << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1, acl::kLRange}.HFUNC(LRange)
+      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1, acl::kLSet}.HFUNC(LSet)
+      << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1, acl::kLTrim}.HFUNC(LTrim)
+      << CI{"LREM", CO::WRITE, 4, 1, 1, 1, acl::kLRem}.HFUNC(LRem)
+      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, 1, acl::kLMove}.HFUNC(LMove)
+      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1, acl::kBLMove}
              .SetHandler(BLMove);
 }
 

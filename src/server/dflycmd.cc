@@ -482,7 +482,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 
-  flow->full_sync_fb = MakeFiber(&DflyCmd::FullSyncFb, this, flow, cntx);
+  flow->full_sync_fb = fb2::Fiber("full_sync", &DflyCmd::FullSyncFb, this, flow, cntx);
   return OpStatus::OK;
 }
 
@@ -532,7 +532,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
       string& body = data.orig_body.empty() ? data.body : data.orig_body;
       script_bodies.push_back(move(body));
     }
-    ec = saver->SaveHeader(script_bodies);
+    ec = saver->SaveHeader({script_bodies, {}});
   } else {
     ec = saver->SaveHeader({});
   }
@@ -565,7 +565,7 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
 
     // Spawn external fiber to allow destructing the context from outside
     // and return from the handler immediately.
-    util::MakeFiber(&DflyCmd::StopReplication, this, sync_id).Detach();
+    fb2::Fiber("stop_replication", &DflyCmd::StopReplication, this, sync_id).Detach();
   };
 
   string address = cntx->owner()->RemoteEndpointAddress();

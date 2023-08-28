@@ -24,6 +24,10 @@ class DflyParams:
     env: any
 
 
+class DflyStartException(Exception):
+    pass
+
+
 class DflyInstance:
     """
     Represents a runnable and stoppable Dragonfly instance
@@ -36,8 +40,8 @@ class DflyInstance:
         self.proc = None
         self._client: Optional[RedisClient] = None
 
-    def client(self) -> RedisClient:
-        return RedisClient(port=self.port)
+    def client(self, *args, **kwargs) -> RedisClient:
+        return RedisClient(port=self.port, *args, **kwargs)
 
     def start(self):
         self._start()
@@ -61,9 +65,9 @@ class DflyInstance:
                 proc.terminate()
             proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
-            print("Unable to terminate DragonflyDB gracefully, it was killed")
             proc.kill()
             proc.communicate()
+            raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")
 
     def _start(self):
         if self.params.existing_port:
@@ -81,7 +85,7 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
-                raise Exception(f"Failed to start instance, return code {return_code}")
+                raise DflyStartException(f"Failed to start instance, return code {return_code}")
 
     def __getitem__(self, k):
         return self.args.get(k)
@@ -108,9 +112,10 @@ class DflyInstance:
     def format_args(args):
         out = []
         for k, v in args.items():
-            out.append(f"--{k}")
             if v is not None:
-                out.append(str(v))
+                out.append(f"--{k}={v}")
+            else:
+                out.append(f"--{k}")
         return out
 
     async def metrics(self):

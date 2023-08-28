@@ -15,6 +15,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/string_set.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -517,10 +518,6 @@ SvArray ToSvArray(const absl::flat_hash_set<std::string_view>& set) {
   return result;
 }
 
-OpStatus NoOpCb(Transaction* t, EngineShard* shard) {
-  return OpStatus::OK;
-};
-
 // if overwrite is true then OpAdd writes vals into the key and discards its previous value.
 OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice vals, bool overwrite,
                          bool journal_update) {
@@ -775,7 +772,7 @@ OpResult<unsigned> Mover::Commit(Transaction* t) {
   }
 
   if (noop) {
-    t->Execute(&NoOpCb, true);
+    t->Conclude();
   } else {
     t->Execute([this](Transaction* t, EngineShard* es) { return this->OpMutate(t, es); }, true);
   }
@@ -1284,7 +1281,7 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(diff_cb), false);
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
-    cntx->transaction->Execute(NoOpCb, true);
+    cntx->transaction->Conclude();
     (*cntx)->SendError(rsv.status());
     return;
   }
@@ -1364,7 +1361,7 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
   if (!result) {
-    cntx->transaction->Execute(NoOpCb, true);
+    cntx->transaction->Conclude();
     (*cntx)->SendError(result.status());
     return;
   }
@@ -1426,7 +1423,7 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
 
   ResultSetView unionset = UnionResultVec(result_set);
   if (!unionset) {
-    cntx->transaction->Execute(NoOpCb, true);
+    cntx->transaction->Conclude();
     (*cntx)->SendError(unionset.status());
     return;
   }
@@ -1564,28 +1561,52 @@ using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&x)
 
+namespace acl {
+constexpr uint32_t kSAdd = WRITE | SET | FAST;
+constexpr uint32_t kSDiff = READ | SET | SLOW;
+constexpr uint32_t kSDiffStore = WRITE | SET | SLOW;
+constexpr uint32_t kSInter = READ | SET | SLOW;
+constexpr uint32_t kSInterStore = WRITE | SET | SLOW;
+constexpr uint32_t kSMembers = READ | SET | SLOW;
+constexpr uint32_t kSIsMember = READ | SET | SLOW;
+constexpr uint32_t kSMIsMember = READ | SET | FAST;
+constexpr uint32_t kSMove = WRITE | SET | FAST;
+constexpr uint32_t kSRem = WRITE | SET | FAST;
+constexpr uint32_t kSCard = READ | SET | FAST;
+constexpr uint32_t kSPop = WRITE | SET | SLOW;
+constexpr uint32_t kSUnion = READ | SET | SLOW;
+constexpr uint32_t kSUnionStore = WRITE | SET | SLOW;
+constexpr uint32_t kSScan = READ | SET | SLOW;
+}  // namespace acl
+
 void SetFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(SAdd)
-            << CI{"SDIFF", CO::READONLY, -2, 1, -1, 1}.HFUNC(SDiff)
-            << CI{"SDIFFSTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1}.HFUNC(
-                   SDiffStore)
-            << CI{"SINTER", CO::READONLY, -2, 1, -1, 1}.HFUNC(SInter)
-            << CI{"SINTERSTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1}.HFUNC(
-                   SInterStore)
-            << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, 1}.HFUNC(SMembers)
-            << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, 1}.HFUNC(SIsMember)
-            << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, 1}.HFUNC(SMIsMember)
-            << CI{"SMOVE", CO::FAST | CO::WRITE | CO::NO_AUTOJOURNAL, 4, 1, 2, 1}.HFUNC(SMove)
-            << CI{"SREM", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(SRem)
-            << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(SCard)
-            << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1}.HFUNC(SPop)
-            << CI{"SUNION", CO::READONLY, -2, 1, -1, 1}.HFUNC(SUnion)
-            << CI{"SUNIONSTORE", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1}.HFUNC(
-                   SUnionStore)
-            << CI{"SSCAN", CO::READONLY, -3, 1, 1, 1}.HFUNC(SScan);
+  *registry
+      << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kSAdd}.HFUNC(SAdd)
+      << CI{"SDIFF", CO::READONLY, -2, 1, -1, 1, acl::kSDiff}.HFUNC(SDiff)
+      << CI{"SDIFFSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
+            acl::kSDiffStore}
+             .HFUNC(SDiffStore)
+      << CI{"SINTER", CO::READONLY, -2, 1, -1, 1, acl::kSInter}.HFUNC(SInter)
+      << CI{"SINTERSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
+            acl::kSInterStore}
+             .HFUNC(SInterStore)
+      << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, 1, acl::kSMembers}.HFUNC(SMembers)
+      << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kSIsMember}.HFUNC(SIsMember)
+      << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, 1, acl::kSMIsMember}.HFUNC(SMIsMember)
+      << CI{"SMOVE", CO::FAST | CO::WRITE | CO::NO_AUTOJOURNAL, 4, 1, 2, 1, acl::kSMove}.HFUNC(
+             SMove)
+      << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1, 1, acl::kSRem}.HFUNC(SRem)
+      << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kSCard}.HFUNC(SCard)
+      << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, acl::kSPop}.HFUNC(SPop)
+      << CI{"SUNION", CO::READONLY, -2, 1, -1, 1, acl::kSUnion}.HFUNC(SUnion)
+      << CI{"SUNIONSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
+            acl::kSUnionStore}
+             .HFUNC(SUnionStore)
+      << CI{"SSCAN", CO::READONLY, -3, 1, 1, 1, acl::kSScan}.HFUNC(SScan);
 
   if (absl::GetFlag(FLAGS_use_set2)) {
-    *registry << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(SAddEx);
+    *registry << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kSAdd}.HFUNC(
+        SAddEx);
   }
 }
 

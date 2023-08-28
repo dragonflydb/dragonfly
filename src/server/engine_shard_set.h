@@ -161,15 +161,17 @@ class EngineShard {
 
  private:
   struct DefragTaskState {
-    // we will add more data members later
+    size_t dbid = 0u;
     uint64_t cursor = 0u;
     bool underutilized_found = false;
 
     // check the current threshold and return true if
-    // we need to do the de-fermentation
+    // we need to do the defragmentation
     bool CheckRequired();
 
     void UpdateScanState(uint64_t cursor_val);
+
+    void ResetScanState();
   };
 
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
@@ -279,11 +281,17 @@ class EngineShardSet {
     RunBriefInParallel(std::forward<U>(func), [](auto i) { return true; });
   }
 
-  // Runs a brief function on selected shard thread. Waits for it to complete.
+  // Runs a brief function on selected shards. Waits for it to complete.
   // `func` must not preempt.
   template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred) const;
 
-  template <typename U> void RunBlockingInParallel(U&& func);
+  // Runs a possibly blocking function on all shards. Waits for it to complete.
+  template <typename U> void RunBlockingInParallel(U&& func) {
+    RunBlockingInParallel(std::forward<U>(func), [](auto i) { return true; });
+  }
+
+  // Runs a possibly blocking function on selected shards. Waits for it to complete.
+  template <typename U, typename P> void RunBlockingInParallel(U&& func, P&& pred);
 
   // Runs func on all shards via the same shard queue that's been used by transactions framework.
   // The functions running inside the shard queue run atomically (sequentially)
@@ -329,14 +337,18 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
   bc.Wait();
 }
 
-template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
-  BlockingCounter bc{size()};
+template <typename U, typename P> void EngineShardSet::RunBlockingInParallel(U&& func, P&& pred) {
+  BlockingCounter bc{0};
   static_assert(std::is_invocable_v<U, EngineShard*>,
                 "Argument must be invocable EngineShard* as argument.");
   static_assert(std::is_void_v<std::invoke_result_t<U, EngineShard*>>,
                 "Callable must not have a return value!");
 
   for (uint32_t i = 0; i < size(); ++i) {
+    if (!pred(i))
+      continue;
+
+    bc.Add(1);
     util::ProactorBase* dest = pp_->at(i);
 
     // the "Dispatch" call spawns a fiber underneath.
@@ -349,7 +361,7 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
 }
 
 inline ShardId Shard(std::string_view v, ShardId shard_num) {
-  if (ClusterConfig::IsClusterEnabled()) {
+  if (ClusterConfig::IsEnabledOrEmulated()) {
     v = ClusterConfig::KeyTag(v);
   }
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);

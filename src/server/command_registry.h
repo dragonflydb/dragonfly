@@ -8,6 +8,7 @@
 #include <absl/types/span.h>
 
 #include <functional>
+#include <optional>
 
 #include "base/function2.hpp"
 #include "facade/command_id.h"
@@ -53,10 +54,21 @@ static_assert(!IsEvalKind(""));
 
 };  // namespace CO
 
+// Per thread vector of command stats. Each entry is {cmd_calls, cmd_sum}.
+using CmdCallStats = std::pair<uint64_t, uint64_t>;
+
 class CommandId : public facade::CommandId {
  public:
+  // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
+  // server_state.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
-            int8_t step);
+            int8_t step, uint32_t acl_categories);
+
+  CommandId(CommandId&&) = default;
+
+  void Init(unsigned thread_count) {
+    command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
+  }
 
   using Handler =
       fu2::function_base<true /*owns*/, true /*copyable*/, fu2::capacity_default,
@@ -64,37 +76,41 @@ class CommandId : public facade::CommandId {
                          void(CmdArgList, ConnectionContext*) const>;
 
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
-                                          bool(CmdArgList, ConnectionContext*) const>;
+                                          std::optional<facade::ErrorReply>(CmdArgList) const>;
 
-  bool is_multi_key() const {
-    return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
-  }
+  void Invoke(CmdArgList args, ConnectionContext* cntx) const;
 
-  CommandId& SetHandler(Handler f) {
-    handler_ = std::move(f);
-    return *this;
-  }
-
-  CommandId& SetValidator(ArgValidator f) {
-    validator_ = std::move(f);
-
-    return *this;
-  }
-
-  void Invoke(CmdArgList args, ConnectionContext* cntx) const {
-    handler_(std::move(args), cntx);
-  }
-
-  // Returns true if validation succeeded.
-  bool Validate(CmdArgList args, ConnectionContext* cntx) const {
-    return !validator_ || validator_(std::move(args), cntx);
-  }
+  // Returns error if validation failed, otherwise nullopt
+  std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
 
   bool IsTransactional() const;
 
   static const char* OptName(CO::CommandOpt fl);
 
+  CommandId&& SetHandler(Handler f) && {
+    handler_ = std::move(f);
+    return std::move(*this);
+  }
+
+  CommandId&& SetValidator(ArgValidator f) && {
+    validator_ = std::move(f);
+    return std::move(*this);
+  }
+
+  bool is_multi_key() const {
+    return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
+  }
+
+  void ResetStats(unsigned thread_index) {
+    command_stats_[thread_index] = {0, 0};
+  }
+
+  CmdCallStats GetStats(unsigned thread_index) const {
+    return command_stats_[thread_index];
+  }
+
  private:
+  std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler handler_;
   ArgValidator validator_;
 };
@@ -105,6 +121,8 @@ class CommandRegistry {
 
  public:
   CommandRegistry();
+
+  void Init(unsigned thread_count);
 
   CommandRegistry& operator<<(CommandId cmd);
 
@@ -123,6 +141,22 @@ class CommandRegistry {
   void Traverse(TraverseCb cb) {
     for (const auto& k_v : cmd_map_) {
       cb(k_v.first, k_v.second);
+    }
+  }
+
+  void ResetCallStats(unsigned thread_index) {
+    for (auto& k_v : cmd_map_) {
+      k_v.second.ResetStats(thread_index);
+    }
+  }
+
+  void MergeCallStats(unsigned thread_index,
+                      std::function<void(std::string_view, const CmdCallStats&)> cb) const {
+    for (const auto& k_v : cmd_map_) {
+      auto src = k_v.second.GetStats(thread_index);
+      if (src.first == 0)
+        continue;
+      cb(k_v.first, src);
     }
   }
 };

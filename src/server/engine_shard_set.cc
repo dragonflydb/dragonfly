@@ -48,7 +48,6 @@ using absl::GetFlag;
 
 namespace {
 
-constexpr DbIndex kDefaultDbIndex = 0;
 constexpr uint64_t kCursorDoneState = 0u;
 
 vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
@@ -91,6 +90,15 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 
 void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
   cursor = cursor_val;
+  underutilized_found = false;
+  // Once we're done with a db, jump to the next
+  if (cursor == kCursorDoneState) {
+    dbid++;
+  }
+}
+
+void EngineShard::DefragTaskState::ResetScanState() {
+  dbid = cursor = 0u;
   underutilized_found = false;
 }
 
@@ -137,8 +145,19 @@ bool EngineShard::DoDefrag() {
   const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   auto& slice = db_slice();
-  DCHECK(slice.IsDbValid(kDefaultDbIndex));
-  auto [prime_table, expire_table] = slice.GetTables(kDefaultDbIndex);
+
+  // If we moved to an invalid db, skip as long as it's not the last one
+  while (!slice.IsDbValid(defrag_state_.dbid) && defrag_state_.dbid + 1 < slice.db_array_size())
+    defrag_state_.dbid++;
+
+  // If we found no valid db, we finished traversing and start from scratch next time
+  if (!slice.IsDbValid(defrag_state_.dbid)) {
+    defrag_state_.ResetScanState();
+    return false;
+  }
+
+  DCHECK(slice.IsDbValid(defrag_state_.dbid));
+  auto [prime_table, expire_table] = slice.GetTables(defrag_state_.dbid);
   PrimeTable::Cursor cur = defrag_state_.cursor;
   uint64_t reallocations = 0;
   unsigned traverses_count = 0;
@@ -158,6 +177,7 @@ bool EngineShard::DoDefrag() {
   } while (traverses_count < kMaxTraverses && cur);
 
   defrag_state_.UpdateScanState(cur.value());
+
   if (reallocations > 0) {
     VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
@@ -168,10 +188,12 @@ bool EngineShard::DoDefrag() {
             << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
             << " but no location for defrag were found";
   }
+
   stats_.defrag_realloc_total += reallocations;
   stats_.defrag_task_invocation_total++;
   stats_.defrag_attempt_total += attempts;
-  return defrag_state_.cursor > kCursorDoneState;
+
+  return true;
 }
 
 // the memory defragmentation task is as follow:
@@ -545,8 +567,7 @@ BlockingController* EngineShard::EnsureBlockingController() {
 }
 
 void EngineShard::TEST_EnableHeartbeat() {
-  fiber_periodic_ = MakeFiber([this, period_ms = 1] {
-    ThisFiber::SetName("shard_periodic_TEST");
+  fiber_periodic_ = fb2::Fiber("shard_periodic_TEST", [this, period_ms = 1] {
     RunPeriodic(std::chrono::milliseconds(period_ms));
   });
 }

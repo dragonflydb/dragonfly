@@ -8,6 +8,7 @@
 #include <optional>
 #include <string_view>
 
+#include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "io/io.h"
 
@@ -62,6 +63,8 @@ class SinkReplyBuilder {
   void SetBatchMode(bool batch) {
     should_batch_ = batch;
   }
+
+  void FlushBatch();
 
   // Used for QUIT - > should move to conn_context?
   void CloseConnection();
@@ -174,6 +177,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SetResp3(bool is_resp3);
 
   void SendError(std::string_view str, std::string_view type = {}) override;
+  virtual void SendError(ErrorReply error);
+
   void SendMGetResponse(absl::Span<const OptResp>) override;
 
   void SendStored() override;

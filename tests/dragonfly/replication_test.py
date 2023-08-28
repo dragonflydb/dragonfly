@@ -23,24 +23,32 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 # 1. Number of master threads
 # 2. Number of threads for each replica
 # 3. Seeder config
+# 4. Admin port
 replication_cases = [
-    (8, [8], dict(keys=10_000, dbcount=4)),
-    (6, [6, 6, 6], dict(keys=4_000, dbcount=4)),
-    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4)),
-    (4, [8, 8], dict(keys=4_000, dbcount=4)),
-    (4, [1] * 8, dict(keys=500, dbcount=2)),
-    (1, [1], dict(keys=100, dbcount=2)),
+    (8, [8], dict(keys=10_000, dbcount=4), False),
+    (6, [6, 6, 6], dict(keys=4_000, dbcount=4), False),
+    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4), False),
+    (4, [8, 8], dict(keys=4_000, dbcount=4), False),
+    (4, [1] * 8, dict(keys=500, dbcount=2), False),
+    (1, [1], dict(keys=100, dbcount=2), False),
+    (6, [6, 6, 6], dict(keys=500, dbcount=4), True),
+    (1, [1], dict(keys=100, dbcount=2), True),
 ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
+@pytest.mark.slow
+@pytest.mark.parametrize("t_master, t_replicas, seeder_config, from_admin_port", replication_cases)
 async def test_replication_all(
-    df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config
+    df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config, from_admin_port
 ):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
+    master = df_local_factory.create(
+        port=BASE_PORT, admin_port=ADMIN_PORT, proactor_threads=t_master
+    )
     replicas = [
-        df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t)
+        df_local_factory.create(
+            port=BASE_PORT + i + 1, admin_port=ADMIN_PORT + i + 1, proactor_threads=t
+        )
         for i, t in enumerate(t_replicas)
     ]
 
@@ -62,8 +70,10 @@ async def test_replication_all(
     await asyncio.sleep(0.0)
 
     # Start replication
+    master_port = master.port if not from_admin_port else master.admin_port
+
     async def run_replication(c_replica):
-        await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+        await c_replica.execute_command("REPLICAOF localhost " + str(master_port))
 
     await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
 
@@ -283,6 +293,7 @@ master_crash_cases = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
 async def test_disconnect_master(
     df_local_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys
@@ -355,6 +366,7 @@ rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 @pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
 async def test_rotating_masters(
     df_local_factory, df_seeder_factory, t_replica, t_masters, seeder_config
@@ -395,6 +407,7 @@ async def test_rotating_masters(
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_cancel_replication_immediately(df_local_factory, df_seeder_factory):
     """
     Issue 40 replication commands randomally distributed over 10 seconds. This
@@ -998,6 +1011,7 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=4, logtostdout=True)
     replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=2, logtostdout=True)
@@ -1015,15 +1029,16 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     c_replica = aioredis.Redis(port=replica.port)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
-    async def get_sync_mode(c_replica):
-        result = await c_replica.execute_command("role")
-        return result[3]
+    async def get_sync_mode(c_master):
+        result = await c_master.execute_command("role")
+        # result[1]->replicas info [0]->first replica info [2]->replication state
+        return result[1][0][2]
 
-    async def is_full_sync_mode(c_replica):
-        return await get_sync_mode(c_replica) == b"full_sync"
+    async def is_full_sync_mode(c_master):
+        return await get_sync_mode(c_master) == b"full_sync"
 
     # Wait for full sync to start
-    while not await is_full_sync_mode(c_replica):
+    while not await is_full_sync_mode(c_master):
         await asyncio.sleep(0.0)
 
     syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
@@ -1031,7 +1046,7 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     # Issue FLUSHALL and push some more entries
     await c_master.execute_command("FLUSHALL")
 
-    if not await is_full_sync_mode(c_replica):
+    if not await is_full_sync_mode(c_master):
         logging.error("!!! Full sync finished too fast. Adjust test parameters !!!")
         return
 
@@ -1259,31 +1274,32 @@ async def test_no_tls_on_admin_port(
     df_local_factory, df_seeder_factory, t_master, t_replica, with_tls_server_args
 ):
     # 1. Spin up dragonfly without tls, debug populate
-
     master = df_local_factory.create(
         no_tls_on_admin_port="true",
         admin_port=ADMIN_PORT,
         **with_tls_server_args,
         port=BASE_PORT,
+        requirepass="XXX",
         proactor_threads=t_master,
     )
     master.start()
-    c_master = aioredis.Redis(port=master.admin_port)
+    c_master = aioredis.Redis(port=master.admin_port, password="XXX")
     await c_master.execute_command("DEBUG POPULATE 100")
     db_size = await c_master.execute_command("DBSIZE")
     assert 100 == db_size
 
     # 2. Spin up a replica and initiate a REPLICAOF
-
     replica = df_local_factory.create(
         no_tls_on_admin_port="true",
         admin_port=ADMIN_PORT + 1,
         **with_tls_server_args,
         port=BASE_PORT + 1,
         proactor_threads=t_replica,
+        requirepass="XXX",
+        masterauth="XXX",
     )
     replica.start()
-    c_replica = aioredis.Redis(port=replica.admin_port)
+    c_replica = aioredis.Redis(port=replica.admin_port, password="XXX")
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
     assert b"OK" == res
     await check_all_replicas_finished([c_replica], c_master)
@@ -1293,3 +1309,200 @@ async def test_no_tls_on_admin_port(
     assert 100 == db_size
     await c_replica.close()
     await c_master.close()
+
+
+# 1. Number of master threads
+# 2. Number of threads for each replica
+# 3. Admin port
+replication_cases = [(8, 8, False), (8, 8, True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("t_master, t_replica, test_admin_port", replication_cases)
+async def test_tls_replication(
+    df_local_factory,
+    df_seeder_factory,
+    t_master,
+    t_replica,
+    test_admin_port,
+    with_ca_tls_server_args,
+    with_ca_tls_client_args,
+):
+    # 1. Spin up dragonfly tls enabled, debug populate
+    master = df_local_factory.create(
+        tls_replication="true",
+        **with_ca_tls_server_args,
+        port=BASE_PORT,
+        admin_port=ADMIN_PORT,
+        proactor_threads=t_master,
+    )
+    master.start()
+    c_master = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
+    await c_master.execute_command("DEBUG POPULATE 100")
+    db_size = await c_master.execute_command("DBSIZE")
+    assert 100 == db_size
+
+    # 2. Spin up a replica and initiate a REPLICAOF
+    replica = df_local_factory.create(
+        tls_replication="true",
+        **with_ca_tls_server_args,
+        port=BASE_PORT + 1,
+        proactor_threads=t_replica,
+    )
+    replica.start()
+    c_replica = aioredis.Redis(port=replica.port, **with_ca_tls_client_args)
+    port = master.port if not test_admin_port else master.admin_port
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(port))
+    assert b"OK" == res
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # 3. Verify that replica dbsize == debug populate key size -- replication works
+    db_size = await c_replica.execute_command("DBSIZE")
+    assert 100 == db_size
+
+    # 4. Kill master, spin it up and see if replica reconnects
+    master.stop(kill=True)
+    await asyncio.sleep(3)
+    master.start()
+    c_master = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
+    # Master doesn't load the snapshot, therefore dbsize should be 0
+    await c_master.execute_command("SET MY_KEY 1")
+    db_size = await c_master.execute_command("DBSIZE")
+    assert 1 == db_size
+
+    await check_all_replicas_finished([c_replica], c_master)
+    db_size = await c_replica.execute_command("DBSIZE")
+    assert 1 == db_size
+
+    await c_replica.close()
+    await c_master.close()
+
+
+# busy wait for 'replica' instance to have replication status 'status'
+async def wait_for_replica_status(replica: aioredis.Redis, status: str, wait_for_seconds=0.01):
+    while True:
+        await asyncio.sleep(wait_for_seconds)
+
+        info = await replica.info("replication")
+        if info["master_link_status"] == status:
+            return
+
+
+@pytest.mark.asyncio
+async def test_replicaof_flag(df_local_factory):
+    # tests --replicaof works under normal conditions
+    master = df_local_factory.create(
+        port=BASE_PORT,
+        proactor_threads=2,
+    )
+
+    # set up master
+    master.start()
+    c_master = aioredis.Redis(port=master.port)
+    await c_master.set("KEY", b"VALUE")
+    db_size = await c_master.dbsize()
+    assert 1 == db_size
+
+    replica = df_local_factory.create(
+        port=BASE_PORT + 1,
+        proactor_threads=2,
+        replicaof=f"localhost:{BASE_PORT}",  # start to replicate master
+    )
+
+    # set up replica. check that it is replicating
+    replica.start()
+    c_replica = aioredis.Redis(port=replica.port)
+
+    await wait_available_async(c_replica)  # give it time to startup
+    await wait_for_replica_status(c_replica, status="up")  # wait until we have a connection
+
+    dbsize = await c_replica.dbsize()
+    assert 1 == dbsize
+
+    val = await c_replica.get("KEY")
+    assert b"VALUE" == val
+
+
+@pytest.mark.asyncio
+async def test_replicaof_flag_replication_waits(df_local_factory):
+    # tests --replicaof works when we launch replication before the master
+    replica = df_local_factory.create(
+        port=BASE_PORT + 1,
+        proactor_threads=2,
+        replicaof=f"localhost:{BASE_PORT}",  # start to replicate master
+    )
+
+    # set up replica first
+    replica.start()
+    c_replica = aioredis.Redis(port=replica.port)
+    await wait_for_replica_status(c_replica, status="down")
+
+    # check that it is in replica mode, yet status is down
+    info = await c_replica.info("replication")
+    assert info["role"] == "replica"
+    assert info["master_host"] == "localhost"
+    assert info["master_port"] == BASE_PORT
+    assert info["master_link_status"] == "down"
+
+    # set up master
+    master = df_local_factory.create(
+        port=BASE_PORT,
+        proactor_threads=2,
+    )
+
+    master.start()
+    c_master = aioredis.Redis(port=master.port)
+    await c_master.set("KEY", b"VALUE")
+    db_size = await c_master.dbsize()
+    assert 1 == db_size
+
+    # check that replication works now
+    await wait_for_replica_status(c_replica, status="up")
+
+    dbsize = await c_replica.dbsize()
+    assert 1 == dbsize
+
+    val = await c_replica.get("KEY")
+    assert b"VALUE" == val
+
+
+@pytest.mark.asyncio
+async def test_replicaof_flag_disconnect(df_local_factory):
+    # test stopping replication when started using --replicaof
+    master = df_local_factory.create(
+        port=BASE_PORT,
+        proactor_threads=2,
+    )
+
+    # set up master
+    master.start()
+    c_master = aioredis.Redis(port=master.port)
+    await wait_available_async(c_master)
+
+    await c_master.set("KEY", b"VALUE")
+    db_size = await c_master.dbsize()
+    assert 1 == db_size
+
+    replica = df_local_factory.create(
+        port=BASE_PORT + 1,
+        proactor_threads=2,
+        replicaof=f"localhost:{BASE_PORT}",  # start to replicate master
+    )
+
+    # set up replica. check that it is replicating
+    replica.start()
+
+    c_replica = aioredis.Redis(port=replica.port)
+    await wait_available_async(c_replica)
+    await wait_for_replica_status(c_replica, status="up")
+
+    dbsize = await c_replica.dbsize()
+    assert 1 == dbsize
+
+    val = await c_replica.get("KEY")
+    assert b"VALUE" == val
+
+    await c_replica.replicaof("no", "one")  #  disconnect
+
+    role = await c_replica.role()
+    assert role[0] == b"master"
