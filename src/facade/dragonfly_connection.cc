@@ -649,8 +649,10 @@ auto Connection::ParseMemcache() -> ParserStatus {
     return NEED_MORE;
   }
 
-  if (result == MemcacheParser::PARSE_ERROR || result == MemcacheParser::UNKNOWN_CMD) {
-    builder->SendSimpleString("ERROR");
+  if (result == MemcacheParser::PARSE_ERROR) {
+    builder->SendSimpleString("parsing error");
+  } else if (result == MemcacheParser::UNKNOWN_CMD) {
+    builder->SendSimpleString("unknown command");
   } else if (result == MemcacheParser::BAD_DELTA) {
     builder->SendClientError("invalid numeric delta argument");
   } else if (result != MemcacheParser::OK) {
@@ -732,7 +734,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         DCHECK_GT(io_buf_.AppendLen(), 0U);
       } else if (io_buf_.AppendLen() == 0) {
         // We have a full buffer and we can not progress with parsing.
-        // This means that we have request too large.
+        // This means that we have a too large request.
         LOG(ERROR) << "Request is too large, closing connection";
         parse_status = ERROR;
         break;
