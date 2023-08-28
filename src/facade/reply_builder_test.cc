@@ -232,7 +232,7 @@ TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
       OpStatus::OUT_OF_MEMORY, OpStatus::INVALID_FLOAT, OpStatus::INVALID_INT,
       OpStatus::SYNTAX_ERR,    OpStatus::BUSY_GROUP,    OpStatus::INVALID_NUMERIC_RESULT};
   for (const auto& err : error_codes) {
-    const std::string_view error_name = RedisReplyBuilder::StatusToMsg(err);
+    const std::string_view error_name = StatusToMsg(err);
     const std::string_view error_type = GetErrorType(error_name);
 
     sink_.Clear();
@@ -258,7 +258,7 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
                                   OpStatus::TIMED_OUT,           OpStatus::STREAM_ID_SMALL};
   uint64_t error_count = 0;
   for (const auto& err : none_unique_codes) {
-    const std::string_view error_name = RedisReplyBuilder::StatusToMsg(err);
+    const std::string_view error_name = StatusToMsg(err);
     const std::string_view error_type = GetErrorType(error_name);
 
     sink_.Clear();
