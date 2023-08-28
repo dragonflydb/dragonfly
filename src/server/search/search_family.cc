@@ -134,7 +134,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionConte
 
       alias_list = SearchParams::FieldAliasList{};
       while (alias_list->size() < num_fields) {
-        if (i++ >= args.size()) {
+        if (++i >= args.size()) {
           (*cntx)->SendError(kSyntaxErr);
           return nullopt;
         }
