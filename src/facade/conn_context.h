@@ -37,6 +37,8 @@ class ConnectionContext {
   }
 
   // A convenient proxy for redis interface.
+  // Use with caution -- should only be used only
+  // in execution paths that are Redis *only*
   RedisReplyBuilder* operator->();
 
   SinkReplyBuilder* reply_builder() {
@@ -48,6 +50,18 @@ class ConnectionContext {
     SinkReplyBuilder* res = rbuilder_.release();
     rbuilder_.reset(new_i);
     return res;
+  }
+
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) {
+    rbuilder_->SendError(str, type);
+  }
+
+  void SendError(ErrorReply&& error) {
+    rbuilder_->SendError(std::move(error));
+  }
+
+  void SendSimpleString(std::string_view str) {
+    rbuilder_->SendSimpleString(str);
   }
 
   // connection state / properties.

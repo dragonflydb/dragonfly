@@ -106,7 +106,7 @@ class DflyInstance:
     def mc_port(self) -> int:
         if self.params.existing_mc_port:
             return self.params.existing_mc_port
-        return int(self.args.get("mc_port", "11211"))
+        return int(self.args.get("memcached_port", "11211"))
 
     @staticmethod
     def format_args(args):
