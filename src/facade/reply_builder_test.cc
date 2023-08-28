@@ -251,6 +251,31 @@ TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
   }
 }
 
+TEST_F(RedisReplyBuilderTest, ErrorReplyBuiltInMessage) {
+  ErrorReply err{OpStatus::OUT_OF_RANGE};
+  builder_->SendError(err);
+  ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
+  ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
+  ASSERT_EQ(builder_->err_count().at(kIndexOutOfRange), 1);
+  ASSERT_EQ(str(), BuildExpectedErrorString(kIndexOutOfRange));
+
+  auto parsing_output = Parse();
+  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
+  ASSERT_TRUE(parsing_output.IsError());
+  sink_.Clear();
+
+  err = ErrorReply{"e1", "e2"};
+  builder_->SendError(err);
+  ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
+  ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
+  ASSERT_EQ(builder_->err_count().at("e2"), 1);
+  ASSERT_EQ(str(), BuildExpectedErrorString("e1"));
+
+  parsing_output = Parse();
+  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
+  ASSERT_TRUE(parsing_output.IsError());
+}
+
 TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
   // All these op codes creating the same error message
   OpStatus none_unique_codes[] = {OpStatus::ENTRIES_ADDED_SMALL, OpStatus::SKIPPED,

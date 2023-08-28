@@ -43,6 +43,7 @@ class SinkReplyBuilder {
 
   virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
   virtual void SendError(ErrorReply error);
+  virtual void SendError(OpStatus status);
 
   virtual void SendStored() = 0;  // Reply for set commands.
   virtual void SendSetSkipped() = 0;
@@ -184,7 +185,6 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   void SendStored() override;
   void SendSetSkipped() override;
-  virtual void SendError(OpStatus status);
   void SendProtocolError(std::string_view str) override;
 
   virtual void SendNullArray();   // Send *-1

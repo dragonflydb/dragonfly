@@ -95,10 +95,19 @@ void SinkReplyBuilder::SendRaw(std::string_view raw) {
 }
 
 void SinkReplyBuilder::SendError(ErrorReply error) {
-  DCHECK(!error.status);
+  if (error.status)
+    return SendError(*error.status);
 
   string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
   SendError(message_sv, error.kind);
+}
+
+void SinkReplyBuilder::SendError(OpStatus status) {
+  if (status == OpStatus::OK) {
+    SendOk();
+  } else {
+    SendError(StatusToMsg(status));
+  }
 }
 
 void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
@@ -274,14 +283,6 @@ void RedisReplyBuilder::SendBulkString(std::string_view str) {
   iovec v[3] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
 
   return Send(v, ABSL_ARRAYSIZE(v));
-}
-
-void RedisReplyBuilder::SendError(OpStatus status) {
-  if (status == OpStatus::OK) {
-    SendOk();
-  } else {
-    SendError(StatusToMsg(status));
-  }
 }
 
 void RedisReplyBuilder::SendLong(long num) {
