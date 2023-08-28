@@ -161,16 +161,15 @@ void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
   SendSimpleString("END");
 }
 
-void MCReplyBuilder::SendError(string_view str, [[maybe_unused]] std::string_view type) {
-  DCHECK(type.empty());
-  SendClientError(str);
-}
-
 void MCReplyBuilder::SendError(ErrorReply error) {
   DCHECK(!error.status);
 
   string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
   SendError(message_sv, error.kind);
+}
+
+void MCReplyBuilder::SendError(string_view str, std::string_view type) {
+  SendSimpleString(absl::StrCat("SERVER_ERROR ", str));
 }
 
 void MCReplyBuilder::SendProtocolError(std::string_view str) {

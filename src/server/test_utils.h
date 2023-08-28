@@ -121,6 +121,7 @@ class BaseFamilyTest : public ::testing::Test {
   static absl::flat_hash_set<std::string> GetLastUsedKeys();
   static void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
                                            absl::Duration timeout = absl::Seconds(10));
+  Fiber ExpectConditionWithSuspension(const std::function<bool()>& condition);
 
   static unsigned NumLocked();
 

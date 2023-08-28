@@ -915,7 +915,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   dfly_cmd_ = make_unique<DflyCmd>(this);
 
   SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
-  config_registry.RegisterMutable("maxclients", [this](const absl::CommandLineFlag& flag) {
+  config_registry.Register("maxclients", [this](const absl::CommandLineFlag& flag) {
     auto res = flag.TryGet<uint32_t>();
     if (res.has_value())
       SetMaxClients(listeners_, res.value());
@@ -1652,6 +1652,15 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     // Send empty response, like Redis does, unless the param is supported
 
     string_view param = ArgS(args, 1);
+<<<<<<< HEAD
+    if (param == "databases") {
+      res.emplace_back(param);
+      res.push_back(absl::StrCat(absl::GetFlag(FLAGS_dbnum)));
+    } else if (auto value_from_registry = config_registry.Get(param);
+               value_from_registry.has_value()) {
+      res.emplace_back(param);
+      res.push_back(*value_from_registry);
+=======
     vector<string> names = config_registry.List(param);
     vector<string> res;
 
@@ -1659,6 +1668,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
       res.push_back(name);
       res.push_back(flag->CurrentValue());
+>>>>>>> 660af341 (feat: implement CONFIG GET command)
     }
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);

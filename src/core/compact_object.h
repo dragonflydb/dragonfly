@@ -59,13 +59,16 @@ class RobjWrapper {
     return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
   }
 
+  // Try reducing memory fragmentation by re-allocating values from underutilized pages.
+  // Returns true if re-allocated.
   bool DefragIfNeeded(float ratio);
 
   // as defined in zset.h
   int ZsetAdd(double score, char* ele, int in_flags, int* out_flags, double* newscore);
 
  private:
-  bool Reallocate(MemoryResource* mr);
+  void ReallocateString(MemoryResource* mr);
+
   size_t InnerObjMallocUsed() const;
   void MakeInnerRoom(size_t current_cap, size_t desired, MemoryResource* mr);
 

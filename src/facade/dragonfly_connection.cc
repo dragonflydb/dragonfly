@@ -11,6 +11,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
@@ -78,7 +79,7 @@ bool MatchHttp11Line(string_view line) {
 }
 
 constexpr size_t kMinReadSize = 256;
-constexpr size_t kMaxReadSize = 32_KB;
+constexpr size_t kMaxReadSize = 64_KB;
 
 constexpr size_t kMaxDispatchQMemory = 5_MB;
 
@@ -403,8 +404,7 @@ uint32_t Connection::GetClientId() const {
 }
 
 bool Connection::IsAdmin() const {
-  uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
-  return socket_->LocalEndpoint().port() == admin_port;
+  return static_cast<Listener*>(owner())->IsAdminInterface();
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
@@ -467,6 +467,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
+    if (io_buf_.AppendLen() < 64) {
+      io_buf_.EnsureCapacity(io_buf_.Capacity() * 2);
+    }
     auto res = IoLoop(peer, orig_builder);
 
     if (holds_alternative<error_code>(res)) {
@@ -646,8 +649,8 @@ auto Connection::ParseMemcache() -> ParserStatus {
     return NEED_MORE;
   }
 
-  if (result == MemcacheParser::PARSE_ERROR) {
-    builder->SendError("");  // ERROR.
+  if (result == MemcacheParser::PARSE_ERROR || result == MemcacheParser::UNKNOWN_CMD) {
+    builder->SendSimpleString("ERROR");
   } else if (result == MemcacheParser::BAD_DELTA) {
     builder->SendClientError("invalid numeric delta argument");
   } else if (result != MemcacheParser::OK) {
@@ -679,6 +682,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     FetchBuilderStats(stats_, orig_builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
+    DCHECK(!append_buf.empty());
+
     phase_ = READ_SOCKET;
 
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
@@ -713,7 +718,9 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
         if (parser_hint > capacity) {
           io_buf_.Reserve(std::min(kMaxReadSize, parser_hint));
-        } else if (append_buf.size() == *recv_sz && append_buf.size() > capacity / 2) {
+        }
+
+        if (io_buf_.AppendLen() < 64u) {
           // Last io used most of the io_buf to the end.
           io_buf_.Reserve(capacity * 2);  // Valid growth range.
         }
@@ -722,6 +729,13 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
           VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
           stats_->read_buf_capacity += (io_buf_.Capacity() - capacity);
         }
+        DCHECK_GT(io_buf_.AppendLen(), 0U);
+      } else if (io_buf_.AppendLen() == 0) {
+        // We have a full buffer and we can not progress with parsing.
+        // This means that we have request too large.
+        LOG(ERROR) << "Request is too large, closing connection";
+        parse_status = ERROR;
+        break;
       }
     } else if (parse_status != OK) {
       break;

@@ -101,13 +101,15 @@ sds StringMap::Find(std::string_view key) {
   return GetValue(str);
 }
 
-sds StringMap::ReallocIfNeeded(void* obj, float ratio) {
+pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
   auto* value_ptr = key + key_len + 1;
   uint64_t value_tag = absl::little_endian::Load64(value_ptr);
   sds value = (sds)(uint64_t(value_tag) & kValMask);
+
+  bool realloced_value = false;
 
   // If the allocated value is underutilized, re-allocate it and update the pointer inside the key
   if (zmalloc_page_is_underutilized(value, ratio)) {
@@ -117,10 +119,11 @@ sds StringMap::ReallocIfNeeded(void* obj, float ratio) {
     uint64_t new_value_tag = (uint64_t(new_value) & kValMask) | (value_tag & ~kValMask);
     absl::little_endian::Store64(value_ptr, new_value_tag);
     sdsfree(value);
+    realloced_value = true;
   }
 
   if (!zmalloc_page_is_underutilized(key, ratio))
-    return key;
+    return {key, realloced_value};
 
   size_t space_size = 8 /* value ptr */ + ((value_tag & kValTtlBit) ? 4 : 0) /* optional expiry */;
 
@@ -128,7 +131,7 @@ sds StringMap::ReallocIfNeeded(void* obj, float ratio) {
   memcpy(new_key, key, key_len + 1 /* \0 */ + space_size);
   sdsfree(key);
 
-  return new_key;
+  return {new_key, true};
 }
 
 uint64_t StringMap::Hash(const void* obj, uint32_t cookie) const {
