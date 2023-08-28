@@ -94,6 +94,13 @@ void SinkReplyBuilder::SendRaw(std::string_view raw) {
   Send(&v, 1);
 }
 
+void SinkReplyBuilder::SendError(ErrorReply error) {
+  DCHECK(!error.status);
+
+  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
+  SendError(message_sv, error.kind);
+}
+
 void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
   absl::FixedArray<iovec, 16> arr(msg_vec.size());
 
@@ -161,13 +168,6 @@ void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
   SendSimpleString("END");
 }
 
-void MCReplyBuilder::SendError(ErrorReply error) {
-  DCHECK(!error.status);
-
-  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
-  SendError(message_sv, error.kind);
-}
-
 void MCReplyBuilder::SendError(string_view str, std::string_view type) {
   SendSimpleString(absl::StrCat("SERVER_ERROR ", str));
 }
@@ -230,14 +230,6 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   }
 }
 
-void RedisReplyBuilder::SendError(ErrorReply error) {
-  if (error.status)
-    return SendError(*error.status);
-
-  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
-  SendError(message_sv, error.kind);
-}
-
 void RedisReplyBuilder::SendProtocolError(std::string_view str) {
   SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
 }
@@ -282,34 +274,6 @@ void RedisReplyBuilder::SendBulkString(std::string_view str) {
   iovec v[3] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
 
   return Send(v, ABSL_ARRAYSIZE(v));
-}
-
-std::string_view SinkReplyBuilder::StatusToMsg(OpStatus status) {
-  switch (status) {
-    case OpStatus::OK:
-      return "OK";
-    case OpStatus::KEY_NOTFOUND:
-      return kKeyNotFoundErr;
-    case OpStatus::WRONG_TYPE:
-      return kWrongTypeErr;
-    case OpStatus::OUT_OF_RANGE:
-      return kIndexOutOfRange;
-    case OpStatus::INVALID_FLOAT:
-      return kInvalidFloatErr;
-    case OpStatus::INVALID_INT:
-      return kInvalidIntErr;
-    case OpStatus::SYNTAX_ERR:
-      return kSyntaxErr;
-    case OpStatus::OUT_OF_MEMORY:
-      return kOutOfMemory;
-    case OpStatus::BUSY_GROUP:
-      return "-BUSYGROUP Consumer Group name already exists";
-    case OpStatus::INVALID_NUMERIC_RESULT:
-      return kInvalidNumericResult;
-    default:
-      LOG(ERROR) << "Unsupported status " << status;
-      return "Internal error";
-  }
 }
 
 void RedisReplyBuilder::SendError(OpStatus status) {

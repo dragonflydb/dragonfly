@@ -976,7 +976,7 @@ void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cntx->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kInvalidIntErr);
   }
   return IncrByGeneric(key, val, cntx);
 }
@@ -1016,10 +1016,10 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cntx->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return cntx->SendError(kIncrOverflow);
+    return (*cntx)->SendError(kIncrOverflow);
   }
 
   return IncrByGeneric(key, -val, cntx);
