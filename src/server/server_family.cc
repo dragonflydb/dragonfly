@@ -1226,6 +1226,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
   AppendMetricHeader("role", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("role", 1, {"role"}, {m.is_master ? "master" : "replica"}, &resp->body());
+  AppendMetricWithoutLabels("master", "1 if master 0 if replica", m.is_master ? 1 : 0,
+                            MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
 
   // Clients metrics
