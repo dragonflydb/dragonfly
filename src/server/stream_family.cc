@@ -84,6 +84,7 @@ struct ConsumerInfo {
   size_t seen_time;
   size_t pel_count;
   vector<NACKInfo> pending;
+  size_t idle;
 };
 
 struct GroupInfo {
@@ -1170,6 +1171,41 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
   return sinfo;
 }
 
+OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard* shard, string_view stream_name, string_view group_name) {
+  auto& db_slice = shard->db_slice();
+  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, stream_name, OBJ_STREAM);
+  if (!res_it)
+    return res_it.status();
+
+  vector<ConsumerInfo> result;
+  CompactObj& cobj = (*res_it)->second;
+  stream* s = (stream*)cobj.RObjPtr();
+
+  streamCG* cg = streamLookupCG(s, sdsnewlen(group_name.data(), group_name.length()));
+  if (cg == NULL) {
+    return OpStatus::INVALID_VALUE;
+  }
+  result.reserve(raxSize(s->cgroups));
+
+  raxIterator ri;
+  raxStart(&ri,cg->consumers);
+  raxSeek(&ri,"^",NULL,0);
+  mstime_t now = mstime();
+  while(raxNext(&ri)) {
+    ConsumerInfo consumer_info;
+    streamConsumer* consumer = (streamConsumer*)ri.data;
+    mstime_t idle = now - consumer->seen_time;
+    if (idle < 0) idle = 0;
+
+    consumer_info.name = consumer->name;
+    consumer_info.pel_count = raxSize(consumer->pel);
+    consumer_info.idle = idle;
+    result.push_back(std::move(consumer_info));
+  }
+  raxStop(&ri);
+  return result;
+}
+
 constexpr uint8_t kCreateOptMkstream = 1 << 0;
 
 struct CreateOpts {
@@ -1961,7 +1997,34 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         }
         return;
       }
-      // return (*cntx)->SendError(result.status());
+      return (*cntx)->SendError(sinfo.status());
+    } else if (sub_cmd == "CONSUMERS") {
+      string_view stream_name = ArgS(args, 1);
+      string_view group_name = ArgS(args, 2);
+      auto cb = [&]() {
+        EngineShard* shard = EngineShard::tlocal();
+        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
+        return OpConsumers(db_context, shard, stream_name, group_name);
+      };
+
+      OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));
+      if (result) {
+        (*cntx)->StartArray(result->size());
+        for (const auto& consumer_info : *result) {
+          (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
+          (*cntx)->SendBulkString("name");
+          (*cntx)->SendBulkString(consumer_info.name);
+          (*cntx)->SendBulkString("pending");
+          (*cntx)->SendLong(consumer_info.pel_count);
+          (*cntx)->SendBulkString("idle");
+          (*cntx)->SendLong(consumer_info.idle);
+        }
+        return;
+      }
+      if (result.status() == OpStatus::INVALID_VALUE) {
+        return (*cntx)->SendError(NoGroupError(stream_name, group_name));
+      }
+      return (*cntx)->SendError(result.status());
     }
   }
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
