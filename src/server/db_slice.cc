@@ -88,9 +88,9 @@ class PrimeEvictionPolicy {
   static constexpr bool can_gc = true;
 
   PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_budget, ssize_t soft_limit,
-                      DbSlice* db_slice)
+                      DbSlice* db_slice, bool apply_memory_limit)
       : db_slice_(db_slice), mem_budget_(mem_budget), soft_limit_(soft_limit), cntx_(cntx),
-        can_evict_(can_evict) {
+        can_evict_(can_evict), apply_memory_limit_(apply_memory_limit) {
   }
 
   // A hook function that is called every time a segment is full and requires splitting.
@@ -128,6 +128,7 @@ class PrimeEvictionPolicy {
   // unlike static constexpr can_evict, this parameter tells whether we can evict
   // items in runtime.
   const bool can_evict_;
+  const bool apply_memory_limit_;
 };
 
 class PrimeBumpPolicy {
@@ -139,7 +140,7 @@ class PrimeBumpPolicy {
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
-  if (mem_budget_ > soft_limit_)
+  if (!apply_memory_limit_ || mem_budget_ > soft_limit_)
     return true;
 
   DCHECK_LT(tbl.size(), tbl.capacity());
@@ -396,8 +397,23 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     }
   }
 
-  PrimeEvictionPolicy evp{cntx, (bool(caching_mode_) && !owner_->IsReplica()),
-                          int64_t(memory_budget_ - key.size()), ssize_t(soft_budget_limit_), this};
+  // In case we are loading from rdb file or replicating we want to disable conservative memory
+  // checks (inside PrimeEvictionPolicy::CanGrow) and reject insertions only after we pass max
+  // memory limit. When loading a snapshot created by the same server configuration (memory and
+  // number of shards) we will create a different dash table segment directory tree, because the
+  // tree shape is related to the order of entries insertion. Therefore when loading data from
+  // snapshot or from replication the conservative memory checks might fail as the new tree might
+  // have more segments. Because we dont want to fail loading a snapshot from the same server
+  // configuration we disable this checks on loading and replication.
+  bool apply_memory_limit =
+      !owner_->IsReplica() && !(ServerState::tlocal()->gstate() == GlobalState::LOADING);
+
+  PrimeEvictionPolicy evp{cntx,
+                          (bool(caching_mode_) && !owner_->IsReplica()),
+                          int64_t(memory_budget_ - key.size()),
+                          ssize_t(soft_budget_limit_),
+                          this,
+                          apply_memory_limit};
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (!caching_mode_ && evp.mem_budget() < 0) {
