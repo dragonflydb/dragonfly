@@ -608,7 +608,7 @@ optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
 }  // namespace
 
 Service::Service(ProactorPool* pp)
-    : pp_(*pp), server_family_(this), cluster_family_(&server_family_) {
+    : pp_(*pp), acl_family_(*pp), server_family_(this), cluster_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
