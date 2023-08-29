@@ -109,42 +109,19 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     }
 
     // RETURN {num} [{ident} AS {name}...]
-    if (ArgS(args, i) == "RETURN") {
-      if (i + 1 >= args.size()) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-
-      uint64_t num_fields = args.size();
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &num_fields)) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-
-      i += 1;
-
+    if (parser.Check("RETURN").ExpectTail(1)) {
+      size_t num_fields = parser.Next().Int<size_t>();
       alias_list = SearchParams::FieldAliasList{};
       while (alias_list->size() < num_fields) {
-        if (++i >= args.size()) {
-          (*cntx)->SendError(kSyntaxErr);
-          return nullopt;
-        }
-
-        string_view ident = ArgS(args, i);
-        string_view alias = ident;
-
-        if (i + 2 < args.size() && absl::EqualsIgnoreCase(ArgS(args, i + 1), "AS")) {
-          alias = ArgS(args, i + 2);
-          i += 2;
-        }
-
+        string_view ident = parser.Next();
+        string_view alias = parser.Check("AS").ExpectTail(1) ? parser.Next() : string_view{ident};
         alias_list->emplace_back(ident, alias);
       }
       continue;
     }
 
     // NOCONTENT
-    if (ArgS(args, i) == "NOCONTENT") {
+    if (parser.Check("NOCONTENT")) {
       alias_list = SearchParams::FieldAliasList{};
       continue;
     }
@@ -164,7 +141,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     return nullopt;
   }
 
-  return SearchParams{limit_offset, limit_total, move(knn_vector)};
+  return SearchParams{limit_offset, limit_total, std::move(alias_list), std::move(knn_vector)};
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
