@@ -785,9 +785,25 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid) {
-  // TODO: Move OOM check here
+static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
+                                                      const ConnectionContext* cntx,
+                                                      string_view error_msg) {
+  // If we are on a squashed context we need to use the owner, because the
+  // context we are operating on is a stub and the acl username is not copied
+  // See: MultiCommandSquasher::SquashedHopCb
+  if (cntx->conn_state.squashing_info)
+    cntx = cntx->conn_state.squashing_info->owner;
+
+  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
+    return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
+  }
   return nullopt;
+}
+
+optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
+                                                     const ConnectionContext* cntx) {
+  // TODO: Move OOM check here
+  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC");
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
@@ -867,7 +883,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{status};
   }
 
-  return nullopt;
+  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
@@ -981,13 +997,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
-    (*cntx)->SendError(absl::StrCat("User: ", cntx->authed_username,
-                                    " does not have the credentials to execute this command"));
-    return true;
-  }
-
-  if (auto err = VerifyCommandExecution(cid); err) {
+  if (auto err = VerifyCommandExecution(cid, cntx); err) {
     (*cntx)->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
