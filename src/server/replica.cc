@@ -666,7 +666,10 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  CHECK(Sock()->IsOpen());
+  if (!Sock()->IsOpen()) {
+    return std::make_error_code(errc::io_error);
+  }
+
   sync_fb_ =
       fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
