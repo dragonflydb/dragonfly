@@ -48,7 +48,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
                                             ConnectionContext* cntx) {
   search::Schema schema;
 
-  while (parser.Ok()) {
+  while (parser.HasNext()) {
     string_view field = parser.Next();
     string_view field_alias = field;
 
@@ -100,7 +100,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   search::FtVector knn_vector;
   optional<SearchParams::FieldAliasList> alias_list;
 
-  while (parser.ToUpper().Ok()) {
+  while (parser.ToUpper().HasNext()) {
     // [LIMIT offset total]
     if (parser.Check("LIMIT").ExpectTail(2)) {
       limit_offset = parser.Next().Int<size_t>();
@@ -254,7 +254,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
-  while (parser.ToUpper().Ok()) {
+  while (parser.ToUpper().HasNext()) {
     // ON HASH | JSON
     if (parser.Check("ON").ExpectTail(1)) {
       index.type =

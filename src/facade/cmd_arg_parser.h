@@ -4,11 +4,13 @@
 
 #pragma once
 
+#include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
 
 #include <optional>
 #include <string_view>
 
+#include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_types.h"
 
@@ -85,7 +87,7 @@ struct CmdArgParser {
   };
 
   struct CheckProxy {
-    explicit operator bool() {
+    explicit operator bool() const {
       if (idx_ >= parser_->args_.size())
         return false;
 
@@ -152,6 +154,10 @@ struct CmdArgParser {
   CmdArgParser(CmdArgList args) : args_{args} {
   }
 
+  ~CmdArgParser() {
+    DCHECK(!error_.has_value()) << "Parsing error occured but not checked";
+  }
+
   // Get next value without consuming it
   NextProxy Peek() {
     return NextProxy(this, cur_i_);
@@ -188,13 +194,15 @@ struct CmdArgParser {
   }
 
   // Return true if arguments are left and no errors occured
-  bool Ok() {
+  bool HasNext() {
     return cur_i_ < args_.size() && !error_;
   }
 
   // Get optional error if occured
   std::optional<ErrorInfo> Error() {
-    return std::move(error_);
+    auto out = std::move(error_);
+    error_.reset();
+    return out;
   }
 
  private:
