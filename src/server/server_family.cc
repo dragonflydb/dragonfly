@@ -74,6 +74,8 @@ ABSL_FLAG(string, dbfilename, "dump-{timestamp}", "the filename to save/load the
 ABSL_FLAG(string, requirepass, "",
           "password for AUTH authentication. "
           "If empty can also be set with DFLY_PASSWORD environment variable.");
+ABSL_FLAG(uint32_t, maxclients, 64000, "Maximum number of concurrent clients allowed.");
+
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 ABSL_FLAG(string, snapshot_cron, "",
@@ -898,11 +900,27 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
+void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients) {
+  for (auto* listener : listeners) {
+    if (!listener->IsAdminInterface()) {
+      listener->SetMaxClients(maxclients);
+    }
+  }
+}
+
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
+
+  SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
+  config_registry.RegisterMutable("maxclients", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<uint32_t>();
+    if (res.has_value())
+      SetMaxClients(listeners_, res.value());
+    return res.has_value();
+  });
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1081,9 +1099,11 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
-
+    if (aggregated_result->first_error) {
+      LOG(ERROR) << "Rdb load failed. " << (*aggregated_result->first_error).message();
+      exit(1);
+    }
     RebuildAllSearchIndices(&service_);
-
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     ec_promise.set_value(*(aggregated_result->first_error));
@@ -1208,6 +1228,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
   AppendMetricHeader("role", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("role", 1, {"role"}, {m.is_master ? "master" : "replica"}, &resp->body());
+  AppendMetricWithoutLabels("master", "1 if master 0 if replica", m.is_master ? 1 : 0,
+                            MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
 
   // Clients metrics
@@ -1606,28 +1628,47 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     }
 
     ToLower(&args[1]);
-    string_view config_name = ArgS(args, 1);
-    bool success = config_registry.Set(config_name, ArgS(args, 2));
-    if (success) {
-      return (*cntx)->SendOk();
-    } else {
-      return (*cntx)->SendError(ConfigSetFailed(config_name), kSyntaxErrType);
+    string_view param = ArgS(args, 1);
+
+    ConfigRegistry::SetResult result = config_registry.Set(param, ArgS(args, 2));
+
+    const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
+    switch (result) {
+      case ConfigRegistry::SetResult::OK:
+        return (*cntx)->SendOk();
+      case ConfigRegistry::SetResult::UNKNOWN:
+        return (*cntx)->SendError(
+            absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
+            kConfigErrType);
+
+      case ConfigRegistry::SetResult::READONLY:
+        return (*cntx)->SendError(
+            absl::StrCat(kErrPrefix, param, "') - can't set immutable config"), kConfigErrType);
+
+      case ConfigRegistry::SetResult::INVALID:
+        return (*cntx)->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                                  kConfigErrType);
     }
-  } else if (sub_cmd == "GET" && args.size() == 2) {
+    ABSL_UNREACHABLE();
+  }
+
+  if (sub_cmd == "GET" && args.size() == 2) {
     // Send empty response, like Redis does, unless the param is supported
-    std::vector<std::string> res;
 
     string_view param = ArgS(args, 1);
-    if (param == "databases") {
-      res.emplace_back(param);
-      res.push_back(absl::StrCat(absl::GetFlag(FLAGS_dbnum)));
-    } else if (param == "maxmemory") {
-      res.emplace_back(param);
-      res.push_back(absl::StrCat(max_memory_limit));
+    vector<string> names = config_registry.List(param);
+    vector<string> res;
+
+    for (const auto& name : names) {
+      absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
+      res.push_back(name);
+      res.push_back(flag->CurrentValue());
     }
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
-  } else if (sub_cmd == "RESETSTAT") {
+  }
+
+  if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([registry = service_.mutable_registry()](unsigned index, auto*) {
       registry->ResetCallStats(index);
       auto& sstate = *ServerState::tlocal();

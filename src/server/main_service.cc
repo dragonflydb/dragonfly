@@ -27,6 +27,7 @@ extern "C" {
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/acl/validator.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
 #include "server/conn_context.h"
@@ -548,8 +549,7 @@ ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
   return ExecEvalState::SOME;
 }
 
-// Returns nullopt if the EXEC transaction is malformed i.e. has incompatible EVAL statements
-// Otherwise returns the mult mode for that transaction. Returns NOT_DETERMINED if no scheduling
+// Returns the multi mode for that transaction. Returns NOT_DETERMINED if no scheduling
 // is required.
 optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
                                                 const ConnectionState::ExecInfo& exec_info,
@@ -561,13 +561,6 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
 
   if (state != ExecEvalState::NONE) {
     contains_global = script_mgr.AreGlobalByDefault();
-
-    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
-    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
-    // lock ahead and we run global script in the transaction then multi mode will be global.
-    if (!contains_global || (multi_mode == Transaction::NON_ATOMIC)) {
-      return nullopt;
-    }
   }
 
   bool transactional = contains_global;
@@ -645,7 +638,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                    const InitOpts& opts) {
   InitRedisTables();
 
-  config_registry.Register("maxmemory", [](const absl::CommandLineFlag& flag) {
+  config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
     auto res = flag.TryGet<MaxMemoryFlag>();
     if (!res)
       return false;
@@ -654,10 +647,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
-  config_registry.Register("dir");
-  config_registry.Register("requirepass");
-  config_registry.Register("masterauth");
-  config_registry.Register("tcp_keepalive");
+  config_registry.Register("dbnum");       // equivalent to databases in redis.
+  config_registry.RegisterMutable("dir");  // TODO: to add validation for dir
+  config_registry.RegisterMutable("requirepass");
+  config_registry.RegisterMutable("masterauth");
+  config_registry.RegisterMutable("tcp_keepalive");
+
   acl::UserRegistry* reg = &user_registry_;
   pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
 
@@ -790,9 +785,25 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid) {
-  // TODO: Move OOM check here
+static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
+                                                      const ConnectionContext* cntx,
+                                                      string_view error_msg) {
+  // If we are on a squashed context we need to use the owner, because the
+  // context we are operating on is a stub and the acl username is not copied
+  // See: MultiCommandSquasher::SquashedHopCb
+  if (cntx->conn_state.squashing_info)
+    cntx = cntx->conn_state.squashing_info->owner;
+
+  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
+    return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
+  }
   return nullopt;
+}
+
+optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
+                                                     const ConnectionContext* cntx) {
+  // TODO: Move OOM check here
+  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC");
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
@@ -872,7 +883,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{status};
   }
 
-  return nullopt;
+  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
@@ -885,7 +896,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   const auto [cid, args_no_cmd] = FindCmd(args);
 
   if (cid == nullptr) {
-    return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
+    return cntx->SendError(ReportUnknownCmd(ArgS(args, 0)));
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -905,7 +916,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
-    (*dfly_cntx)->SendError(std::move(*err));
+    dfly_cntx->SendError(std::move(*err));
     return;
   }
 
@@ -915,16 +926,16 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
-    return (*cntx)->SendSimpleString("QUEUED");
+    return cntx->SendSimpleString("QUEUED");
   }
 
   uint64_t start_ns = absl::GetCurrentTimeNanos();
 
   if (cid->opt_mask() & CO::DENYOOM) {
-    int64_t used_memory = etl.GetUsedMemory(start_ns);
+    uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
-      return (*cntx)->SendError(kOutOfMemory);
+      return cntx->reply_builder()->SendError(kOutOfMemory);
     }
   }
 
@@ -986,7 +997,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  if (auto err = VerifyCommandExecution(cid); err) {
+  if (auto err = VerifyCommandExecution(cid, cntx); err) {
     (*cntx)->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
@@ -1442,20 +1453,28 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 
 // Start multi transaction for eval. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams params,
-                    Transaction* trans) {
-  Transaction::MultiMode multi_mode = DetermineMultiMode(params);
-
+// Return nullopt if eval runs inside multi and conflicts with multi mode
+optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams params,
+                              ConnectionContext* cntx) {
+  Transaction* trans = cntx->transaction;
+  Transaction::MultiMode script_mode = DetermineMultiMode(params);
+  Transaction::MultiMode multi_mode = trans->GetMultiMode();
   // Check if eval is already part of a running multi transaction
-  if (trans->GetMultiMode() != Transaction::NOT_DETERMINED) {
-    DCHECK_LE(trans->GetMultiMode(), multi_mode);  // Check the transaction covers our requirements
+  if (multi_mode != Transaction::NOT_DETERMINED) {
+    if (multi_mode > script_mode) {
+      string err = StrCat(
+          "Multi mode conflict when running eval in multi transaction. Multi mode is: ", multi_mode,
+          " eval mode is: ", script_mode);
+      (*cntx)->SendError(err);
+      return nullopt;
+    }
     return false;
   }
 
-  if (keys.empty() && multi_mode == Transaction::LOCK_AHEAD)
+  if (keys.empty() && script_mode == Transaction::LOCK_AHEAD)
     return false;
 
-  switch (multi_mode) {
+  switch (script_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       return true;
@@ -1529,7 +1548,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   Transaction* tx = cntx->transaction;
   CHECK(tx != nullptr);
 
-  bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, tx);
+  optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
+  if (!scheduled) {
+    return;
+  }
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
@@ -1554,7 +1576,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   cntx->conn_state.script_info.reset();  // reset script_info
 
   // Conclude the transaction.
-  if (scheduled)
+  if (*scheduled)
     cntx->transaction->UnlockMulti();
 
   if (result == Interpreter::RUN_ERR) {
@@ -1705,6 +1727,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   const CommandId* const exec_cid = cntx->cid;
   CmdArgVec arg_vec;
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
+
+  // We adjust the atomicity level of multi transaction inside StartMultiExec. i.e if multi mode is
+  // lock ahead and we run global script in the transaction then multi mode will be global.
   optional<Transaction::MultiMode> multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
   if (!multi_mode)
     return rb->SendError(

@@ -14,17 +14,43 @@ class ConfigRegistry {
   // Accepts the new value as argument. Return true if config was successfully updated.
   using WriteCb = std::function<bool(const absl::CommandLineFlag&)>;
 
-  ConfigRegistry& Register(std::string_view name, WriteCb cb);
-  ConfigRegistry& Register(std::string_view name);
+  ConfigRegistry& Register(std::string_view name) {
+    RegisterInternal(name, false, {});
+    return *this;
+  }
+
+  ConfigRegistry& RegisterMutable(std::string_view name, WriteCb cb = {}) {
+    RegisterInternal(name, true, std::move(cb));
+    return *this;
+  }
+
+  enum class SetResult : uint8_t {
+    OK,
+    UNKNOWN,
+    READONLY,
+    INVALID,
+  };
 
   // Returns true if the value was updated.
-  bool Set(std::string_view config_name, std::string_view value);
+  SetResult Set(std::string_view config_name, std::string_view value);
+
+  std::optional<std::string> Get(std::string_view config_name);
 
   void Reset();
 
+  std::vector<std::string> List(std::string_view glob) const;
+
  private:
-  util::fb2::Mutex mu_;
-  absl::flat_hash_map<std::string, WriteCb> registry_ ABSL_GUARDED_BY(mu_);
+  void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb);
+
+  mutable util::fb2::Mutex mu_;
+
+  struct Entry {
+    WriteCb cb;
+    bool is_mutable;
+  };
+
+  absl::flat_hash_map<std::string, Entry> registry_ ABSL_GUARDED_BY(mu_);
 };
 
 extern ConfigRegistry config_registry;

@@ -251,6 +251,46 @@ TEST_F(SearchFamilyTest, TestLimit) {
   EXPECT_THAT(resp, ArrLen(3 * 2 + 1));
 }
 
+TEST_F(SearchFamilyTest, TestReturn) {
+  for (unsigned i = 0; i < 20; i++)
+    Run({"hset", "k"s + to_string(i), "longA", to_string(i), "longB", to_string(i + 1), "longC",
+         to_string(i + 2), "secret", to_string(i + 3)});
+
+  Run({"ft.create", "i1", "SCHEMA", "longA", "AS", "justA", "TEXT", "longB", "AS", "justB",
+       "NUMERIC", "longC", "AS", "justC", "NUMERIC"});
+
+  auto MatchEntry = [](string key, auto... fields) {
+    return RespArray(ElementsAre(IntArg(1), "k0", RespArray(UnorderedElementsAre(fields...))));
+  };
+
+  // Check all fields are returned
+  auto resp = Run({"ft.search", "i1", "@justA:0"});
+  EXPECT_THAT(resp, MatchEntry("k0", "longA", "0", "longB", "1", "longC", "2", "secret", "3"));
+
+  // Check no fields are returned
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+
+  resp = Run({"ft.search", "i1", "@justA:0", "nocontent"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+
+  // Check only one field is returned (and with original identifier)
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "longA"});
+  EXPECT_THAT(resp, MatchEntry("k0", "longA", "0"));
+
+  // Check only one field is returned with right alias
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "longB", "as", "madeupname"});
+  EXPECT_THAT(resp, MatchEntry("k0", "madeupname", "1"));
+
+  // Check two fields
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "2", "longB", "as", "madeupname", "longC"});
+  EXPECT_THAT(resp, MatchEntry("k0", "madeupname", "1", "longC", "2"));
+
+  // Check non-existing field
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "nothere"});
+  EXPECT_THAT(resp, MatchEntry("k0", "nothere", ""));
+}
+
 TEST_F(SearchFamilyTest, SimpleUpdates) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
 

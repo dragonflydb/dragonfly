@@ -16,10 +16,6 @@
 
 namespace dfly::acl {
 
-// TODO implement these
-//#bool CheckIfCommandAllowed(uint64_t command_id, const CommandId& command);
-//#bool CheckIfAclCategoryAllowed(uint64_t command_id, const CommandId& command);
-
 class User final {
  public:
   struct UpdateRequest {
