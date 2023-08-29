@@ -23,13 +23,17 @@ struct TextIndex;
 struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
-  std::string identifier;  // short alias name is stored only in schema
   FieldType type;
+  std::string short_name;  // equal to ident if none provided
 };
 
 // Describes the fields of an index
 struct Schema {
-  absl::flat_hash_map<std::string /*name*/, SchemaField> fields;
+  // List of fields by identifier.
+  absl::flat_hash_map<std::string /*identifier*/, SchemaField> fields;
+
+  // Mapping for short field names (aliases).
+  absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
 };
 
 // Collection of indices for all fields in schema
