@@ -92,7 +92,7 @@ struct CmdArgParser {
         return false;
 
       std::string_view arg = parser_->SafeSV(idx_);
-      if (arg != tag_)
+      if ((!ignore_case_ && arg != tag_) || (ignore_case_ && !absl::EqualsIgnoreCase(arg, tag_)))
         return false;
 
       if (idx_ + expect_tail_ >= parser_->args_.size()) {
@@ -121,6 +121,11 @@ struct CmdArgParser {
       return *this;
     }
 
+    CheckProxy& IgnoreCase() {
+      ignore_case_ = true;
+      return *this;
+    }
+
    private:
     friend struct CmdArgParser;
 
@@ -133,6 +138,7 @@ struct CmdArgParser {
     size_t idx_;
     size_t expect_tail_ = 0;
     bool next_upper_ = false;
+    bool ignore_case_ = false;
   };
 
   struct ErrorInfo {

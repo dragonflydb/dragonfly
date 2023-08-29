@@ -114,7 +114,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
       alias_list = SearchParams::FieldAliasList{};
       while (alias_list->size() < num_fields) {
         string_view ident = parser.Next();
-        string_view alias = parser.Check("AS").ExpectTail(1) ? parser.Next() : string_view{ident};
+        string_view alias = parser.Check("AS").IgnoreCase().ExpectTail(1) ? parser.Next() : ident;
         alias_list->emplace_back(ident, alias);
       }
       continue;
