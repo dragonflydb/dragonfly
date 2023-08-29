@@ -156,7 +156,7 @@ class CommandRegistry {
       auto src = k_v.second.GetStats(thread_index);
       if (src.first == 0)
         continue;
-      cb(k_v.first, src);
+      cb(k_v.second.name(), src);
     }
   }
 };
