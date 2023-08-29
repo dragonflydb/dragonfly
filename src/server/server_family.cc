@@ -1554,6 +1554,8 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     auto is_authorized = registry->AuthUser(username, password);
     if (is_authorized) {
       cntx->authed_username = username;
+      auto cred = registry->GetCredentials(username);
+      cntx->acl_categories = cred.acl_categories;
       return (*cntx)->SendOk();
     }
     return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));

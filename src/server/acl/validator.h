@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <string_view>
-
 #include "facade/command_id.h"
 #include "server/conn_context.h"
 

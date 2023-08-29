@@ -3,6 +3,8 @@
 
 #include "server/acl/acl_family.h"
 
+#include <glog/logging.h>
+
 #include <cctype>
 #include <optional>
 #include <variant>
@@ -12,6 +14,7 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "core/overloaded.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -44,6 +47,9 @@ static std::string AclToString(uint32_t acl_category) {
   tmp.pop_back();
 
   return tmp;
+}
+
+AclFamily::AclFamily(util::ProactorPool& pp) : pp_(pp) {
 }
 
 void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
@@ -157,12 +163,31 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
 
 }  // namespace
 
+void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uint32_t update_cat) {
+  auto update_cb = [user, update_cat]([[maybe_unused]] size_t id, util::Connection* conn) {
+    DCHECK(conn);
+    auto connection = static_cast<facade::Connection*>(conn);
+    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
+    if (ctx && user == ctx->authed_username) {
+      ctx->acl_categories = update_cat;
+    }
+  };
+
+  pp_.AwaitFiberOnAll([this, update_cb](util::ProactorBase* pb) {
+    for (auto& listener : listeners_) {
+      listener->TraverseConnections(update_cb);
+    }
+  });
+}
+
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
   auto req = ParseAclSetUser(args.subspan(1));
   auto error_case = [cntx](ErrorReply&& error) { (*cntx)->SendError(error); };
-  auto update_case = [username, cntx](User::UpdateRequest&& req) {
+  auto update_case = [username, cntx, this](User::UpdateRequest&& req) {
     ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
+    auto cred = ServerState::tlocal()->user_registry->GetCredentials(username);
+    StreamUpdatesToAllProactorConnections(username, cred.acl_categories);
     (*cntx)->SendOk();
   };
 
@@ -171,8 +196,15 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
 
 using CI = dfly::CommandId;
 
-#define HFUNC(x) SetHandler(&AclFamily::x)
+using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
+inline CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
+  return [=](CmdArgList args, ConnectionContext* cntx) { return (acl->*f)(args, cntx); };
+}
+
+#define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
+
+constexpr uint32_t kAcl = acl::CONNECTION;
 constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
@@ -184,7 +216,7 @@ constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 // easy to handle that case explicitly in `DispatchCommand`.
 
 void AclFamily::Register(dfly::CommandRegistry* registry) {
-  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kList}.HFUNC(Acl);
+  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
   *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kList}.HFUNC(
       List);
   *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSetUser}
@@ -192,5 +224,9 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
 }
 
 #undef HFUNC
+
+void AclFamily::Init(std::vector<facade::Listener*> listeners) {
+  listeners_ = std::move(listeners);
+}
 
 }  // namespace dfly::acl

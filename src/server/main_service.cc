@@ -608,7 +608,7 @@ optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
 }  // namespace
 
 Service::Service(ProactorPool* pp)
-    : pp_(*pp), server_family_(this), cluster_family_(&server_family_) {
+    : pp_(*pp), acl_family_(*pp), server_family_(this), cluster_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -665,6 +665,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   shard_set->Init(shard_num, !opts.disable_time_update);
 
+  acl_family_.Init(listeners);
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
@@ -2127,7 +2128,7 @@ void Service::RegisterCommands() {
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
   SearchFamily::Register(&registry_);
-  acl::AclFamily::Register(&registry_);
+  acl_family_.Register(&registry_);
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);

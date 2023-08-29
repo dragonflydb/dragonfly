@@ -7,6 +7,7 @@
 #include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_set.h>
 
+#include "acl/acl_commands_def.h"
 #include "core/fibers.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
@@ -197,6 +198,7 @@ class ConnectionContext : public facade::ConnectionContext {
   FlowInfo* replication_flow;
 
   std::string authed_username{"default"};
+  uint32_t acl_categories{acl::ALL};
 
  private:
   void EnableMonitoring(bool enable) {
