@@ -1,0 +1,48 @@
+# These tests are disabled until Dragonfly works well with BullMQ.
+name: bullmq-tests
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+  runs-on: ubuntu-latest
+    name: Build
+
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/romange/alpine-dev:latest
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install NodeJs
+        run: |
+          apk add --no-cache nodejs npm yarn
+          node --version
+          npm --version
+          yarn --version
+          mkdir -p ${{github.workspace}}/build
+      - name: Configure/Build
+        working-directory: ${{github.workspace}}/build
+        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
+        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+        run: |
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja
+          ninja dragonfly
+          ./dragonfly --alsologtostderr &
+
+      - name: Clone and build BullMQ
+        run: |
+          git clone https://github.com/taskforcesh/bullmq.git
+          cd bullmq
+          pwd
+          yarn install --ignore-engines --frozen-lockfile --non-interactive
+          yarn build
+      - name: Test BullMQ
+        working-directory: ${{github.workspace}}/bullmq
+        run: |
+          # yarn test -i -g "should process delayed jobs with several workers respecting delay"
