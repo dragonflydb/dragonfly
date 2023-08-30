@@ -18,6 +18,7 @@
 #include "base/logging.h"
 #include "core/json_object.h"
 #include "core/search/search.h"
+#include "core/search/vector.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
@@ -98,8 +99,9 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
   size_t limit_offset = 0, limit_total = 10;
-  search::FtVector knn_vector;
-  optional<SearchParams::FieldAliasList> alias_list;
+
+  optional<SearchParams::FieldReturnList> return_list;
+  search::QueryParams query_params;
 
   while (parser.ToUpper().HasNext()) {
     // [LIMIT offset total]
@@ -112,24 +114,29 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     // RETURN {num} [{ident} AS {name}...]
     if (parser.Check("RETURN").ExpectTail(1)) {
       size_t num_fields = parser.Next().Int<size_t>();
-      alias_list = SearchParams::FieldAliasList{};
-      while (alias_list->size() < num_fields) {
+      return_list = SearchParams::FieldReturnList{};
+      while (return_list->size() < num_fields) {
         string_view ident = parser.Next();
         string_view alias = parser.Check("AS").IgnoreCase().ExpectTail(1) ? parser.Next() : ident;
-        alias_list->emplace_back(ident, alias);
+        return_list->emplace_back(ident, alias);
       }
       continue;
     }
 
     // NOCONTENT
     if (parser.Check("NOCONTENT")) {
-      alias_list = SearchParams::FieldAliasList{};
+      return_list = SearchParams::FieldReturnList{};
       continue;
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (parser.Check("PARAMS").ExpectTail(3)) {
-      knn_vector = BytesToFtVector(parser.Skip(2).Next());
+    if (parser.Check("PARAMS").ExpectTail(1)) {
+      size_t num_args = parser.Next().Int<size_t>();
+      while (parser.HasNext() && query_params.Size() * 2 < num_args) {
+        string_view k = parser.Next();
+        string_view v = parser.Next();
+        query_params[k] = v;
+      }
       continue;
     }
 
@@ -142,7 +149,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     return nullopt;
   }
 
-  return SearchParams{limit_offset, limit_total, std::move(alias_list), std::move(knn_vector)};
+  return SearchParams{limit_offset, limit_total, std::move(return_list), std::move(query_params)};
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
@@ -359,7 +366,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, {move(params->knn_vector)}))
+  if (!search_algo.Init(query_str, params->query_params))
     return (*cntx)->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.

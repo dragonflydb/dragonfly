@@ -67,7 +67,7 @@ term_char [_]|\w
 
 {dq}{str_char}*{dq}  return make_StringLit(matched_view(1, 1), loc());
 
-"$"{term_char}+ return Parser::make_PARAM(str(), loc());
+"$"{term_char}+ return ParseParam(str(), loc());
 "@"{term_char}+ return Parser::make_FIELD(str(), loc());
 
 {term_char}+   return Parser::make_TERM(str(), loc());
@@ -75,9 +75,7 @@ term_char [_]|\w
 <<EOF>>    return Parser::make_YYEOF(loc());
 %%
 
-Parser::symbol_type
-make_INT64 (string_view str, const Parser::location_type& loc)
-{
+Parser::symbol_type make_INT64 (string_view str, const Parser::location_type& loc) {
   int64_t val = 0;
   if (!absl::SimpleAtoi(str, &val))
     throw Parser::syntax_error (loc, "not an integer or out of range: " + string(str));
@@ -87,8 +85,8 @@ make_INT64 (string_view str, const Parser::location_type& loc)
 
 Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc) {
   string res;
-  if (!absl::CUnescape(src, &res)) {
+  if (!absl::CUnescape(src, &res))
     throw Parser::syntax_error (loc, "bad escaped string: " + string(src));
-  }
+
   return Parser::make_TERM(res, loc);
 }

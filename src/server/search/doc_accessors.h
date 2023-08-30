@@ -29,7 +29,7 @@ struct BaseAccessor : public search::DocumentAccessor {
 
   // Serialize selected fields
   SearchDocData Serialize(const search::Schema& schema,
-                          const SearchParams::FieldAliasList& fields) const;
+                          const SearchParams::FieldReturnList& fields) const;
 };
 
 // Accessor for hashes stored with listpack
@@ -74,7 +74,7 @@ struct JsonAccessor : public BaseAccessor {
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(const search::Schema& schema,
-                          const SearchParams::FieldAliasList& fields) const;
+                          const SearchParams::FieldReturnList& fields) const;
 
   static void RemoveFieldFromCache(std::string_view field);
 

@@ -15,7 +15,9 @@ QueryDriver::~QueryDriver() {
 
 void QueryDriver::ResetScanner() {
   scanner_ = std::make_unique<Scanner>();
+  scanner_->SetParams(params_);
 }
+
 }  // namespace search
 
 }  // namespace dfly
