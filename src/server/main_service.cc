@@ -2045,6 +2045,8 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   unsigned index = 0;
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
 
+  string res = absl::StrCat("db=", server_cntx->db_index());
+
   if (server_cntx->async_dispatch)
     buf[index++] = 'a';
 
@@ -2057,7 +2059,10 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   if (server_cntx->conn_state.is_blocking)
     buf[index++] = 'b';
 
-  return index ? absl::StrCat("flags:", buf) : string();
+  if (index) {
+    absl::StrAppend(&res, " flags=", buf);
+  }
+  return res;
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
