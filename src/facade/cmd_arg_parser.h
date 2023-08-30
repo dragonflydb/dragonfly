@@ -4,14 +4,9 @@
 
 #pragma once
 
-#include <absl/strings/ascii.h>
-#include <absl/strings/match.h>
-
 #include <optional>
 #include <string_view>
 
-#include "base/logging.h"
-#include "facade/error.h"
 #include "facade/facade_types.h"
 
 namespace facade {
@@ -28,18 +23,9 @@ struct CmdArgParser {
   struct NextProxy;
 
   template <typename T> struct CaseProxy {
-    operator T() {
-      if (!value_)
-        parser_->Report(INVALID_CASES, idx_);
-      return value_.value_or(T{});
-    }
+    operator T();
 
-    CaseProxy Case(std::string_view tag, T value) {
-      std::string_view arg = parser_->SafeSV(idx_);
-      if (arg == tag)
-        value_ = std::move(value);
-      return *this;
-    }
+    CaseProxy Case(std::string_view tag, T value);
 
    private:
     friend struct NextProxy;
@@ -61,13 +47,7 @@ struct CmdArgParser {
       return std::string{operator std::string_view()};
     }
 
-    template <typename T> T Int() {
-      T out;
-      if (absl::SimpleAtoi(operator std::string_view(), &out))
-        return out;
-      parser_->Report(INVALID_INT, idx_);
-      return T{0};
-    }
+    template <typename T> T Int();
 
     // Detect value based on cases.
     // Returns default if the argument is not present among the cases list,
@@ -87,26 +67,7 @@ struct CmdArgParser {
   };
 
   struct CheckProxy {
-    explicit operator bool() const {
-      if (idx_ >= parser_->args_.size())
-        return false;
-
-      std::string_view arg = parser_->SafeSV(idx_);
-      if ((!ignore_case_ && arg != tag_) || (ignore_case_ && !absl::EqualsIgnoreCase(arg, tag_)))
-        return false;
-
-      if (idx_ + expect_tail_ >= parser_->args_.size()) {
-        parser_->Report(SHORT_OPT_TAIL, idx_);
-        return false;
-      }
-
-      parser_->cur_i_++;
-
-      if (size_t uidx = idx_ + expect_tail_ + 1; next_upper_ && uidx < parser_->args_.size())
-        parser_->ToUpper(uidx);
-
-      return true;
-    }
+    explicit operator bool() const;
 
     // Expect the tag to be followed by a number of arguments.
     // Reports an error if the tag is matched but the condition is not met.
@@ -145,24 +106,15 @@ struct CmdArgParser {
     ErrorType type;
     size_t index;
 
-    ErrorReply MakeReply() {
-      switch (type) {
-        case INVALID_INT:
-          return ErrorReply{kInvalidIntErr};
-        default:
-          return ErrorReply{kSyntaxErr};
-      };
-      return ErrorReply{kSyntaxErr};
-    }
+    ErrorReply MakeReply() const;
   };
 
  public:
   CmdArgParser(CmdArgList args) : args_{args} {
   }
 
-  ~CmdArgParser() {
-    DCHECK(!error_.has_value()) << "Parsing error occured but not checked";
-  }
+  // Debug asserts sure error was consumed
+  ~CmdArgParser();
 
   // Get next value without consuming it
   NextProxy Peek() {
@@ -223,10 +175,7 @@ struct CmdArgParser {
       error_ = {type, idx};
   }
 
-  void ToUpper(size_t i) {
-    for (auto& c : args_[i])
-      c = absl::ascii_toupper(c);
-  }
+  void ToUpper(size_t i);
 
  private:
   size_t cur_i_ = 0;
@@ -234,5 +183,19 @@ struct CmdArgParser {
 
   std::optional<ErrorInfo> error_;
 };
+
+template <typename T> CmdArgParser::CaseProxy<T>::operator T() {
+  if (!value_)
+    parser_->Report(INVALID_CASES, idx_);
+  return value_.value_or(T{});
+}
+
+template <typename T>
+CmdArgParser::CaseProxy<T> CmdArgParser::CaseProxy<T>::Case(std::string_view tag, T value) {
+  std::string_view arg = parser_->SafeSV(idx_);
+  if (arg == tag)
+    value_ = std::move(value);
+  return *this;
+}
 
 }  // namespace facade

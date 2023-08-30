@@ -36,8 +36,8 @@ TEST_F(CmdArgParserTest, BasicTypes) {
 
   EXPECT_EQ(absl::implicit_cast<string>(parser.Next()), "STRING"s);
   EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "VIEW"sv);
-  EXPECT_EQ(parser.Next().Int<int>(), 11);
-  EXPECT_EQ(parser.Next().Int<int>(), 22);
+  EXPECT_EQ(parser.Next().Int<size_t>(), 11u);
+  EXPECT_EQ(parser.Next().Int<size_t>(), 22u);
 
   EXPECT_FALSE(parser.HasNext());
   EXPECT_FALSE(parser.Error());
@@ -57,7 +57,7 @@ TEST_F(CmdArgParserTest, BoundError) {
 TEST_F(CmdArgParserTest, IntError) {
   auto parser = Make({"NOTANINT"});
 
-  EXPECT_EQ(parser.Next().Int<int>(), 0);
+  EXPECT_EQ(parser.Next().Int<size_t>(), 0u);
 
   auto err = parser.Error();
   EXPECT_TRUE(err);
