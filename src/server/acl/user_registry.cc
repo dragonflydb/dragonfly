@@ -21,10 +21,9 @@ void UserRegistry::MaybeAddAndUpdate(std::string_view username, User::UpdateRequ
   user.Update(std::move(req));
 }
 
-void UserRegistry::RemoveUser(std::string_view username) {
+bool UserRegistry::RemoveUser(std::string_view username) {
   std::unique_lock<util::SharedMutex> lock(mu_);
-  registry_.erase(username);
-  // TODO evict authed connections from user
+  return registry_.erase(username);
 }
 
 UserRegistry::UserCredentials UserRegistry::GetCredentials(std::string_view username) const {

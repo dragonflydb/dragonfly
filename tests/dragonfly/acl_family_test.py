@@ -189,3 +189,36 @@ async def test_acl_categories_multi_exec_squash(df_local_factory):
 
     await admin_client.close()
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_acl_deluser(df_local_factory):
+    df = df_local_factory.create(multi_exec_squash=True, port=1111)
+
+    df.start()
+
+    client = aioredis.Redis(port=df.port)
+
+    client = aioredis.Redis(port=df.port)
+
+    try:
+        res = await client.execute_command("ACL DELUSER adi")
+    except redis.exceptions.ResponseError as e:
+        assert e.args[0] == "User adi does not exist"
+
+    res = await client.execute_command("ACL SETUSER adi ON >pass +@transaction +@string")
+    assert res == b"OK"
+
+    res = await client.execute_command("AUTH adi pass")
+    assert res == b"OK"
+
+    await client.execute_command("MULTI")
+    await client.execute_command("SET key 44")
+
+    admin_client = aioredis.Redis(port=df.port)
+    await admin_client.execute_command("ACL DELUSER adi")
+
+    with pytest.raises(redis.exceptions.ConnectionError):
+        await client.execute_command("EXEC")
+
+    await admin_client.close()

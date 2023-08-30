@@ -188,10 +188,42 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
     ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
     auto cred = ServerState::tlocal()->user_registry->GetCredentials(username);
     StreamUpdatesToAllProactorConnections(username, cred.acl_categories);
-    (*cntx)->SendOk();
+    cntx->SendOk();
   };
 
   std::visit(Overloaded{error_case, update_case}, std::move(req));
+}
+
+void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
+  auto close_cb = [user]([[maybe_unused]] size_t id, util::Connection* conn) {
+    DCHECK(conn);
+    auto connection = static_cast<facade::Connection*>(conn);
+    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
+    if (ctx && ctx->authed_username == user) {
+      // ctx->CancelBlocking();
+      // what about nonblocking?
+      // I am pretty sure this is broken
+      connection->ShutdownSelf();
+    }
+  };
+
+  pp_.AwaitFiberOnAll([this, close_cb](util::ProactorBase* pb) {
+    for (auto& listener : listeners_) {
+      listener->TraverseConnections(close_cb);
+    }
+  });
+}
+
+void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view username = facade::ToSV(args[0]);
+  auto& registry = *ServerState::tlocal()->user_registry;
+  if (!registry.RemoveUser(username)) {
+    cntx->SendError(absl::StrCat("User ", username, " does not exist"));
+    return;
+  }
+
+  EvictOpenConnectionsOnAllProactors(username);
+  cntx->SendOk();
 }
 
 using CI = dfly::CommandId;
@@ -207,6 +239,7 @@ inline CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
 constexpr uint32_t kAcl = acl::CONNECTION;
 constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -221,6 +254,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
       List);
   *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSetUser}
                    .HFUNC(SetUser);
+  *registry << CI{"ACL DELUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 2, 0, 0, 0, acl::kDelUser}
+                   .HFUNC(DelUser);
 }
 
 #undef HFUNC
