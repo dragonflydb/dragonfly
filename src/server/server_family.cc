@@ -10,6 +10,7 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
+#include <croncpp.h>  // cron::cronexpr
 #include <sys/resource.h>
 
 #include <algorithm>
@@ -23,7 +24,6 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "croncpp.h"  // cron::cronexpr
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -33,6 +33,7 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
+#include "server/detail/save_stages_controller.h"
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -53,7 +54,6 @@ extern "C" {
 #include "util/cloud/aws.h"
 #include "util/cloud/s3.h"
 #include "util/fibers/fiber_file.h"
-#include "util/uring/uring_file.h"
 
 using namespace std;
 
@@ -153,6 +153,7 @@ using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
 using namespace util;
+using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
@@ -160,9 +161,6 @@ namespace {
 
 const auto kRedisVersion = "6.2.11";
 constexpr string_view kS3Prefix = "s3://"sv;
-
-const auto kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
-const size_t kBucketConnectMs = 2000;
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
@@ -172,116 +170,13 @@ inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
 
 using CI = CommandId;
 
-// Create a direc
-error_code CreateDirs(fs::path dir_path) {
-  error_code ec;
-  fs::file_status dir_status = fs::status(dir_path, ec);
-  if (ec == errc::no_such_file_or_directory) {
-    fs::create_directories(dir_path, ec);
-    if (!ec)
-      dir_status = fs::status(dir_path, ec);
-  }
-  return ec;
-}
-
 string UnknownCmd(string cmd, CmdArgList args) {
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement) {
-  *filename = absl::StrReplaceAll(filename->string(), {{"{timestamp}", replacement}});
-}
-
 bool IsCloudPath(string_view path) {
   return absl::StartsWith(path, kS3Prefix);
-}
-
-// Returns bucket_name, obj_path for an s3 path.
-optional<pair<string, string>> GetBucketPath(string_view path) {
-  string_view clean = absl::StripPrefix(path, kS3Prefix);
-
-  size_t pos = clean.find('/');
-  if (pos == string_view::npos)
-    return nullopt;
-
-  string bucket_name{clean.substr(0, pos)};
-  string obj_path{clean.substr(pos + 1)};
-  return make_pair(move(bucket_name), move(obj_path));
-}
-
-string InferLoadFile(string_view dir, cloud::AWS* aws) {
-  fs::path data_folder;
-  string bucket_name, obj_path;
-
-  if (dir.empty()) {
-    data_folder = fs::current_path();
-  } else {
-    if (IsCloudPath(dir)) {
-      CHECK(aws);
-      auto res = GetBucketPath(dir);
-      if (!res) {
-        LOG(ERROR) << "Invalid S3 path: " << dir;
-        return {};
-      }
-      data_folder = dir;
-      bucket_name = res->first;
-      obj_path = res->second;
-    } else {
-      error_code file_ec;
-      data_folder = fs::canonical(dir, file_ec);
-      if (file_ec) {
-        LOG(ERROR) << "Data directory error: " << file_ec.message() << " for dir " << dir;
-        return {};
-      }
-    }
-  }
-
-  LOG(INFO) << "Data directory is " << data_folder;
-
-  const auto& dbname = GetFlag(FLAGS_dbfilename);
-  if (dbname.empty())
-    return string{};
-
-  if (IsCloudPath(dir)) {
-    cloud::S3Bucket bucket(*aws, bucket_name);
-    ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-    auto ec = proactor->Await([&] { return bucket.Connect(kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Couldn't connect to S3 bucket: " << ec.message();
-      return {};
-    }
-
-    fs::path fl_path{obj_path};
-    fl_path.append(dbname);
-
-    LOG(INFO) << "Loading from s3 path s3://" << bucket_name << "/" << fl_path;
-    // TODO: to load from S3 file.
-    return {};
-  }
-
-  fs::path fl_path = data_folder.append(dbname);
-  if (fs::exists(fl_path))
-    return fl_path.generic_string();
-
-  SubstituteFilenameTsPlaceholder(&fl_path, "*");
-  if (!fl_path.has_extension()) {
-    fl_path += "*";
-  }
-  io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
-
-  if (short_vec) {
-    // io::StatFiles returns a list of sorted files. Because our timestamp format has the same
-    // time order and lexicographic order we iterate from the end to find the latest snapshot.
-    auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
-      return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
-    });
-    if (it != short_vec->rend())
-      return it->name;
-  } else {
-    LOG(WARNING) << "Could not stat " << fl_path << ", error " << short_vec.error().message();
-  }
-  return string{};
 }
 
 bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
@@ -307,172 +202,6 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
   }
 
   return min_match <= max;
-}
-
-// takes ownership over the file.
-class LinuxWriteWrapper : public io::Sink {
- public:
-  LinuxWriteWrapper(LinuxFile* lf) : lf_(lf) {
-  }
-
-  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final;
-
-  error_code Close() {
-    return lf_->Close();
-  }
-
- private:
-  unique_ptr<LinuxFile> lf_;
-  off_t offset_ = 0;
-};
-
-class RdbSnapshot {
- public:
-  RdbSnapshot(FiberQueueThreadPool* fq_tp, cloud::AWS* aws) : fq_tp_{fq_tp}, aws_{aws} {
-  }
-
-  GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data);
-  void StartInShard(EngineShard* shard);
-
-  error_code SaveBody();
-  error_code Close();
-
-  const RdbTypeFreqMap freq_map() const {
-    return freq_map_;
-  }
-
-  bool HasStarted() const {
-    return started_ || (saver_ && saver_->Mode() == SaveMode::SUMMARY);
-  }
-
- private:
-  bool started_ = false;
-  bool is_linux_file_ = false;
-  FiberQueueThreadPool* fq_tp_ = nullptr;
-  cloud::AWS* aws_ = nullptr;
-
-  unique_ptr<io::Sink> io_sink_;
-  unique_ptr<RdbSaver> saver_;
-  RdbTypeFreqMap freq_map_;
-
-  Cancellation cll_{};
-};
-
-io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
-  io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
-  if (res) {
-    offset_ += *res;
-  }
-
-  return res;
-}
-
-GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
-                                const RdbSaver::GlobalData& glob_data) {
-  bool is_direct = false;
-  VLOG(1) << "Saving RDB " << path;
-
-  if (IsCloudPath(path)) {
-    DCHECK(aws_);
-
-    optional<pair<string, string>> bucket_path = GetBucketPath(path);
-    if (!bucket_path) {
-      return GenericError("Invalid S3 path");
-    }
-    auto [bucket_name, obj_path] = *bucket_path;
-
-    cloud::S3Bucket bucket(*aws_, bucket_name);
-    error_code ec = bucket.Connect(kBucketConnectMs);
-    if (ec) {
-      return GenericError(ec, "Couldn't connect to S3 bucket");
-    }
-    auto res = bucket.OpenWriteFile(obj_path);
-    if (!res) {
-      return GenericError(res.error(), "Couldn't open file for writing");
-    }
-    io_sink_.reset(*res);
-  } else {
-    if (fq_tp_) {  // EPOLL
-      auto res = util::OpenFiberWriteFile(path, fq_tp_);
-      if (!res)
-        return GenericError(res.error(), "Couldn't open file for writing");
-      io_sink_.reset(*res);
-    } else {
-      auto res = OpenLinux(path, kRdbWriteFlags, 0666);
-      if (!res) {
-        return GenericError(
-            res.error(),
-            "Couldn't open file for writing (is direct I/O supported by the file system?)");
-      }
-      is_linux_file_ = true;
-      io_sink_.reset(new LinuxWriteWrapper(res->release()));
-      is_direct = kRdbWriteFlags & O_DIRECT;
-    }
-  }
-
-  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, is_direct));
-
-  return saver_->SaveHeader(move(glob_data));
-}
-
-error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(&cll_, &freq_map_);
-}
-
-error_code RdbSnapshot::Close() {
-  if (is_linux_file_) {
-    return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
-  }
-  return static_cast<io::WriteFile*>(io_sink_.get())->Close();
-}
-
-void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, &cll_, shard);
-  started_ = true;
-}
-
-string FormatTs(absl::Time now) {
-  return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
-}
-
-// modifies 'filename' to be "filename-postfix.extension"
-void SetExtension(absl::AlphaNum postfix, string_view extension, fs::path* filename) {
-  filename->replace_extension();  // clear if exists
-  *filename += StrCat("-", postfix, extension);
-}
-
-void ExtendDfsFilenameWithShard(int shard, string_view extension, fs::path* filename) {
-  // dragonfly snapshot.
-  SetExtension(absl::Dec(shard, absl::kZeroPad4), extension, filename);
-}
-
-GenericError ValidateFilename(const fs::path& filename, bool new_version) {
-  bool is_cloud_path = IsCloudPath(filename.string());
-
-  if (!filename.parent_path().empty() && !is_cloud_path) {
-    return {absl::StrCat("filename may not contain directory separators (Got \"", filename.c_str(),
-                         "\"). dbfilename should specify the filename without the directory")};
-  }
-
-  if (!filename.has_extension()) {
-    return {};
-  }
-
-  if (new_version) {
-    if (absl::EqualsIgnoreCase(filename.extension().c_str(), ".rdb")) {
-      return {absl::StrCat(
-          "DF snapshot format is used but '.rdb' extension was given. Use --nodf_snapshot_format "
-          "or remove the filename extension.")};
-    } else {
-      return {absl::StrCat("DF snapshot format requires no filename extension. Got \"",
-                           filename.extension().c_str(), "\"")};
-    }
-  }
-  if (!new_version && !absl::EqualsIgnoreCase(filename.extension().c_str(), ".rdb")) {
-    return {absl::StrCat("Bad filename extension \"", filename.extension().c_str(),
-                         "\" for SAVE with type RDB")};
-  }
-  return {};
 }
 
 void SlowLog(CmdArgList args, ConnectionContext* cntx) {
@@ -519,267 +248,6 @@ void ValidateServerTlsFlags() {
 bool IsReplicatingNoOne(string_view host, string_view port) {
   return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
 }
-
-struct SaveStagesInputs {
-  bool use_dfs_format_;
-  string_view basename_;
-  Transaction* trans_;
-  Service* service_;
-  atomic_bool* is_saving_;
-  FiberQueueThreadPool* fq_threadpool_;
-  shared_ptr<LastSaveInfo>* last_save_info_;
-  Mutex* save_mu_;
-  unique_ptr<cloud::AWS>* aws_;
-};
-
-struct SaveStagesController : public SaveStagesInputs {
-  SaveStagesController(SaveStagesInputs&& inputs) : SaveStagesInputs{move(inputs)} {
-    start_time_ = absl::Now();
-  }
-
-  ~SaveStagesController() {
-    service_->SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
-  }
-
-  GenericError Save() {
-    if (auto err = BuildFullPath(); err)
-      return err;
-
-    if (auto err = SwitchState(); err)
-      return err;
-
-    if (auto err = InitResources(); err)
-      return err;
-
-    // The stages below report errors to shared_err_
-    if (use_dfs_format_)
-      SaveDfs();
-    else
-      SaveRdb();
-
-    is_saving_->store(true, memory_order_relaxed);
-    RunStage(&SaveStagesController::SaveCb);
-    is_saving_->store(false, memory_order_relaxed);
-
-    RunStage(&SaveStagesController::CloseCb);
-
-    FinalizeFileMovement();
-
-    if (!shared_err_)
-      UpdateSaveInfo();
-
-    return *shared_err_;
-  }
-
- private:
-  // In the new version (.dfs) we store a file for every shard and one more summary file.
-  // Summary file is always last in snapshots array.
-  void SaveDfs() {
-    // Extend all filenames with -{sid} or -summary and append .dfs.tmp
-    const string_view ext = is_cloud_ ? ".dfs" : ".dfs.tmp";
-    ShardId sid = 0;
-    for (auto& [_, filename] : snapshots_) {
-      filename = full_path_;
-      if (sid < shard_set->size())
-        ExtendDfsFilenameWithShard(sid++, ext, &filename);
-      else
-        SetExtension("summary", ext, &filename);
-    }
-
-    // Save summary file.
-    SaveDfsSingle(nullptr);
-
-    // Save shard files.
-    auto cb = [this](Transaction* t, EngineShard* shard) {
-      SaveDfsSingle(shard);
-      return OpStatus::OK;
-    };
-    trans_->ScheduleSingleHop(std::move(cb));
-  }
-
-  // Start saving a dfs file on shard
-  void SaveDfsSingle(EngineShard* shard) {
-    // for summary file, shard=null and index=shard_set->size(), see SaveDfs() above
-    auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
-
-    SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-    auto glob_data = shard == nullptr ? GetGlobalData() : RdbSaver::GlobalData{};
-
-    if (auto err = snapshot->Start(mode, filename, glob_data); err) {
-      shared_err_ = err;
-      snapshot.reset();
-      return;
-    }
-
-    if (mode == SaveMode::SINGLE_SHARD)
-      snapshot->StartInShard(shard);
-  }
-
-  // Save a single rdb file
-  void SaveRdb() {
-    auto& [snapshot, filename] = snapshots_.front();
-
-    filename = full_path_;
-    if (!filename.has_extension())
-      filename += ".rdb";
-    if (!is_cloud_)
-      filename += ".tmp";
-
-    if (auto err = snapshot->Start(SaveMode::RDB, filename, GetGlobalData()); err) {
-      snapshot.reset();
-      return;
-    }
-
-    auto cb = [snapshot = snapshot.get()](Transaction* t, EngineShard* shard) {
-      snapshot->StartInShard(shard);
-      return OpStatus::OK;
-    };
-    trans_->ScheduleSingleHop(std::move(cb));
-  }
-
-  void UpdateSaveInfo() {
-    fs::path resulting_path = full_path_;
-    if (use_dfs_format_)
-      SetExtension("summary", ".dfs", &resulting_path);
-    else
-      resulting_path.replace_extension();  // remove .tmp
-
-    double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time_)) / 1000;
-    LOG(INFO) << "Saving " << resulting_path << " finished after "
-              << strings::HumanReadableElapsedTime(seconds);
-
-    auto save_info = make_shared<LastSaveInfo>();
-    for (const auto& k_v : rdb_name_map_) {
-      save_info->freq_map.emplace_back(k_v);
-    }
-    save_info->save_time = absl::ToUnixSeconds(start_time_);
-    save_info->file_name = resulting_path.generic_string();
-    save_info->duration_sec = uint32_t(seconds);
-
-    lock_guard lk{*save_mu_};
-    last_save_info_->swap(save_info);  // swap - to deallocate the old version outstide of the lock.
-  }
-
-  GenericError InitResources() {
-    if (is_cloud_ && !aws_) {
-      *aws_ = make_unique<cloud::AWS>("s3");
-      if (auto ec = aws_->get()->Init(); ec) {
-        aws_->reset();
-        return {ec, "Couldn't initialize AWS"};
-      }
-    }
-
-    snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
-    for (auto& [snapshot, _] : snapshots_)
-      snapshot = make_unique<RdbSnapshot>(fq_threadpool_, aws_->get());
-    return {};
-  }
-
-  // Remove .tmp extension or delete files in case of error
-  void FinalizeFileMovement() {
-    if (is_cloud_)
-      return;
-
-    // If the shared_err is set, the snapshot saving failed
-    bool has_error = bool(shared_err_);
-
-    for (const auto& [_, filename] : snapshots_) {
-      if (has_error)
-        filesystem::remove(filename);
-      else
-        filesystem::rename(filename, fs::path{filename}.replace_extension(""));
-    }
-  }
-
-  // Build full path: get dir, try creating dirs, get filename with placeholder
-  GenericError BuildFullPath() {
-    fs::path dir_path = GetFlag(FLAGS_dir);
-    if (!dir_path.empty()) {
-      if (auto ec = CreateDirs(dir_path); ec)
-        return {ec, "Failed to create directories"};
-    }
-
-    fs::path filename = basename_.empty() ? GetFlag(FLAGS_dbfilename) : basename_;
-    if (auto err = ValidateFilename(filename, use_dfs_format_); err)
-      return err;
-
-    SubstituteFilenameTsPlaceholder(&filename, FormatTs(start_time_));
-    full_path_ = dir_path / filename;
-    is_cloud_ = IsCloudPath(full_path_.string());
-    return {};
-  }
-
-  // Switch to saving state if in active state
-  GenericError SwitchState() {
-    GlobalState new_state = service_->SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-    if (new_state != GlobalState::SAVING && new_state != GlobalState::TAKEN_OVER)
-      return {make_error_code(errc::operation_in_progress),
-              StrCat(GlobalStateName(new_state), " - can not save database")};
-    return {};
-  }
-
-  void SaveCb(unsigned index) {
-    if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted())
-      shared_err_ = snapshot->SaveBody();
-  }
-
-  void CloseCb(unsigned index) {
-    if (auto& snapshot = snapshots_[index].first; snapshot) {
-      shared_err_ = snapshot->Close();
-
-      lock_guard lk{rdb_name_map_mu_};
-      for (const auto& k_v : snapshot->freq_map())
-        rdb_name_map_[RdbTypeName(k_v.first)] += k_v.second;
-    }
-
-    if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)
-      es->db_slice().ResetUpdateEvents();
-  }
-
-  void RunStage(void (SaveStagesController::*cb)(unsigned)) {
-    if (use_dfs_format_) {
-      shard_set->RunBlockingInParallel([&](EngineShard* es) { (this->*cb)(es->shard_id()); });
-      (this->*cb)(shard_set->size());
-    } else {
-      (this->*cb)(0);
-    }
-  }
-
-  RdbSaver::GlobalData GetGlobalData() const {
-    StringVec script_bodies, search_indices;
-
-    {
-      auto scripts = service_->script_mgr()->GetAll();
-      script_bodies.reserve(scripts.size());
-      for (auto& [sha, data] : scripts)
-        script_bodies.push_back(move(data.body));
-    }
-
-    {
-      shard_set->Await(0, [&] {
-        auto* indices = EngineShard::tlocal()->search_indices();
-        for (auto index_name : indices->GetIndexNames()) {
-          auto index_info = indices->GetIndex(index_name)->GetInfo();
-          search_indices.emplace_back(
-              absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
-        }
-      });
-    }
-
-    return RdbSaver::GlobalData{move(script_bodies), move(search_indices)};
-  }
-
- private:
-  absl::Time start_time_;
-  fs::path full_path_;
-  bool is_cloud_;
-
-  AggregateGenericError shared_err_;
-  vector<pair<unique_ptr<RdbSnapshot>, fs::path>> snapshots_;
-
-  absl::flat_hash_map<string_view, size_t> rdb_name_map_;
-  Mutex rdb_name_map_mu_;
-};
 
 void RebuildAllSearchIndices(Service* service) {
   boost::intrusive_ptr<Transaction> trans{new Transaction{service->FindCmd("FT.CREATE")}};
@@ -887,7 +355,8 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_id_.size());
   }
 
-  if (auto ec = ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
+  if (auto ec =
+          detail::ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
       ec) {
     LOG(ERROR) << ec.Format();
     exit(1);
@@ -962,7 +431,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     }
   }
 
-  string load_path = InferLoadFile(flag_dir, aws_.get());
+  string load_path = detail::InferLoadFile(flag_dir, aws_.get());
   if (!load_path.empty()) {
     load_result_ = Load(load_path);
   }
@@ -1441,9 +910,9 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  SaveStagesController sc{SaveStagesInputs{new_version, basename, trans, &service_, &is_saving_,
-                                           fq_threadpool_.get(), &last_save_info_, &save_mu_,
-                                           &aws_}};
+  SaveStagesController sc{detail::SaveStagesInputs{new_version, basename, trans, &service_,
+                                                   &is_saving_, fq_threadpool_.get(),
+                                                   &last_save_info_, &save_mu_, &aws_}};
   return sc.Save();
 }
 
