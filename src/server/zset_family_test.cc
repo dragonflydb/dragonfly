@@ -183,6 +183,11 @@ TEST_F(ZSetFamilyTest, ZRevRangeByLex) {
   resp = Run({"zrevrangebylex", "key", "+", "[a"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("foo", "elephant", "down", "cool", "bar", "alpha"));
+
+  Run({"zadd", "myzset", "0", "a", "0", "b", "0", "c", "0", "d", "0", "e", "0", "f", "0", "g"});
+  resp = Run({"zrevrangebylex", "myzset", "(c", "-"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "a"));
 }
 
 TEST_F(ZSetFamilyTest, ZRange) {
