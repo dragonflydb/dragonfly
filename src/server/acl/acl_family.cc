@@ -218,6 +218,10 @@ void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
+  cntx->SendSimpleString(absl::StrCat("User is ", cntx->authed_username));
+}
+
 using CI = dfly::CommandId;
 
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
@@ -232,6 +236,7 @@ constexpr uint32_t kAcl = acl::CONNECTION;
 constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kWhoAmI = acl::SLOW;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -248,6 +253,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
                    .HFUNC(SetUser);
   *registry << CI{"ACL DELUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 2, 0, 0, 0, acl::kDelUser}
                    .HFUNC(DelUser);
+  *registry << CI{"ACL WHOAMI", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kWhoAmI}
+                   .HFUNC(WhoAmI);
 }
 
 #undef HFUNC

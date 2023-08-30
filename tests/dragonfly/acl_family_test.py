@@ -219,6 +219,7 @@ async def test_acl_deluser(df_server):
     await admin_client.close()
 
 
+<<<<<<< HEAD
 script = """
 for i = 1, 10000 do
   redis.call('SET', 'key', i)
@@ -267,3 +268,18 @@ async def test_acl_with_long_running_script(df_server):
 
     await client.close()
     await admin_client.close()
+
+@pytest.mark.asyncio
+async def test_acl_whoami(async_client):
+    await async_client.execute_command("ACL SETUSER kostas >kk +@ALL ON")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("ACL WHOAMI WHO")
+
+    result = await async_client.execute_command("ACL WHOAMI")
+    assert result == "User is default"
+
+    result = await async_client.execute_command("AUTH kostas kk")
+
+    result = await async_client.execute_command("ACL WHOAMI")
+    assert result == "User is kostas"
