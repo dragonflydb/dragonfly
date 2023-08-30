@@ -416,7 +416,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
                           apply_memory_limit};
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
-  if (!caching_mode_ && evp.mem_budget() < 0) {
+  if (apply_memory_limit && !caching_mode_ && evp.mem_budget() < 0) {
     VLOG(1) << "AddOrFind2: over limit, budget: " << evp.mem_budget();
     events_.insertion_rejections++;
     throw bad_alloc();
