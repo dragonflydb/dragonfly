@@ -89,8 +89,12 @@ class PrimeEvictionPolicy {
 
   PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_budget, ssize_t soft_limit,
                       DbSlice* db_slice, bool apply_memory_limit)
-      : db_slice_(db_slice), mem_budget_(mem_budget), soft_limit_(soft_limit), cntx_(cntx),
-        can_evict_(can_evict), apply_memory_limit_(apply_memory_limit) {
+      : db_slice_(db_slice),
+        mem_budget_(mem_budget),
+        soft_limit_(soft_limit),
+        cntx_(cntx),
+        can_evict_(can_evict),
+        apply_memory_limit_(apply_memory_limit) {
   }
 
   // A hook function that is called every time a segment is full and requires splitting.
