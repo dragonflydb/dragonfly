@@ -143,7 +143,7 @@ Dragonfly 支持 Redis 的常见参数。
 ```bash
 ./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
-还可以通过运行 `Dragonfly --flagfile <filename>` 从配置文件提供参数。该文件每行应该列出一个标志，并用等号代替键值标志的空格。
+还可以通过运行 `Dragonfly --flagfile <filename>` 从配置文件提供参数，这个文件每行应该列出一个标志，并用等号代替键值标志的空格。
 
 要获取更多选项，如日志管理或TLS支持，请运行 `dragonfly --help`。
 
