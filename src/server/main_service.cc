@@ -664,7 +664,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   }
 
   shard_set->Init(shard_num, !opts.disable_time_update);
-
+  const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
+  // We assume that listeners.front() is the main_listener
+  // see dfly_main RunEngine
+  if (!tcp_disabled && !listeners.empty()) {
+    acl_family_.Init(listeners.front());
+  }
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
@@ -2132,7 +2137,7 @@ void Service::RegisterCommands() {
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
   SearchFamily::Register(&registry_);
-  acl::AclFamily::Register(&registry_);
+  acl_family_.Register(&registry_);
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
