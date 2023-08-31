@@ -172,7 +172,7 @@ RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
   parser_buffer_.reset(new uint8_t[SinkSize()]);
   auto* ptr = parser_buffer_.get();
   memcpy(ptr, str().data(), SinkSize());
-  RedisParser parser(false);  // client side
+  RedisParser parser(UINT32_MAX, false);  // client side
   result.result =
       parser.Parse(RedisParser::Buffer{ptr, SinkSize()}, &result.consumed, &result.args);
   return result;
