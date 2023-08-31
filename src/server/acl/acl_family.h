@@ -21,7 +21,7 @@ namespace acl {
 
 class AclFamily final {
  public:
-  explicit AclFamily(util::ProactorPool& pp);
+  AclFamily() = default;
 
   void Register(CommandRegistry* registry);
   void Init(facade::Listener* listener);
@@ -41,7 +41,6 @@ class AclFamily final {
   void EvictOpenConnectionsOnAllProactors(std::string_view user);
 
   facade::Listener* main_listener_{nullptr};
-  util::ProactorPool& pp_;
 };
 
 }  // namespace acl

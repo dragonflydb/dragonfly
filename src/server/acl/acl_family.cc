@@ -49,9 +49,6 @@ static std::string AclToString(uint32_t acl_category) {
   return tmp;
 }
 
-AclFamily::AclFamily(util::ProactorPool& pp) : pp_(pp) {
-}
-
 void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError("Wrong number of arguments for acl command");
 }
@@ -180,7 +177,10 @@ void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uin
       ctx->acl_categories = update_cat;
     }
   };
-  TraverseConnectionsOnAllProactors(update_cb);
+
+  if (main_listener_) {
+    main_listener_->TraverseConnections(update_cb);
+  }
 }
 
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
