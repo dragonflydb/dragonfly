@@ -163,6 +163,14 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
 
 }  // namespace
 
+template <typename F> void AclFamily::TraverseConnectionsOnAllProactors(F fun) {
+  pp_.AwaitFiberOnAll([this, fun](util::ProactorBase* pb) {
+    if (main_listener_) {
+      main_listener_->TraverseConnections(fun);
+    }
+  });
+}
+
 void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uint32_t update_cat) {
   auto update_cb = [user, update_cat]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
@@ -172,12 +180,7 @@ void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uin
       ctx->acl_categories = update_cat;
     }
   };
-
-  pp_.AwaitFiberOnAll([this, update_cb](util::ProactorBase* pb) {
-    if (main_listener_) {
-      main_listener_->TraverseConnections(update_cb);
-    }
-  });
+  TraverseConnectionsOnAllProactors(update_cb);
 }
 
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
@@ -202,18 +205,11 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
     if (ctx && ctx->authed_username == user) {
-      // ctx->CancelBlocking();
-      // what about nonblocking?
-      // I am pretty sure this is broken
       connection->ShutdownSelf();
     }
   };
 
-  pp_.AwaitFiberOnAll([this, close_cb](util::ProactorBase* pb) {
-    for (auto& listener : listeners_) {
-      listener->TraverseConnections(close_cb);
-    }
-  });
+  TraverseConnectionsOnAllProactors(close_cb);
 }
 
 void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {

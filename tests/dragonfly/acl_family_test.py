@@ -192,14 +192,8 @@ async def test_acl_categories_multi_exec_squash(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_acl_deluser(df_local_factory):
-    df = df_local_factory.create(multi_exec_squash=True, port=1111)
-
-    df.start()
-
-    client = aioredis.Redis(port=df.port)
-
-    client = aioredis.Redis(port=df.port)
+async def test_acl_deluser(df_server):
+    client = aioredis.Redis(port=df_server.port)
 
     try:
         res = await client.execute_command("ACL DELUSER adi")
@@ -215,7 +209,7 @@ async def test_acl_deluser(df_local_factory):
     await client.execute_command("MULTI")
     await client.execute_command("SET key 44")
 
-    admin_client = aioredis.Redis(port=df.port)
+    admin_client = aioredis.Redis(port=df_server.port)
     await admin_client.execute_command("ACL DELUSER adi")
 
     with pytest.raises(redis.exceptions.ConnectionError):
