@@ -53,4 +53,6 @@ ENTRYPOINT ["entrypoint.sh"]
 # For inter-container communication.
 EXPOSE 6379
 
+USER dfly
+
 CMD ["dragonfly", "--logtostderr"]
