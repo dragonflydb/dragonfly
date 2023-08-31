@@ -21,30 +21,38 @@
 #include "util/tls/tls_socket.h"
 #endif
 
+using namespace std;
+
 ABSL_FLAG(bool, tcp_nodelay, false,
           "Configures dragonfly connections with socket option TCP_NODELAY");
 ABSL_FLAG(bool, primary_port_http_enabled, true,
           "If true allows accessing http console on main TCP port");
 
-ABSL_FLAG(
-    std::uint16_t, admin_port, 0,
-    "If set, would enable admin access to console on the assigned port. This supports both HTTP "
-    "and RESP protocols");
-ABSL_FLAG(std::string, admin_bind, "",
-          "If set, the admin consol TCP connection would be bind the given address. "
-          "This supports both HTTP and RESP "
-          "protocols");
+ABSL_FLAG(uint16_t, admin_port, 0,
+          "If set, would enable admin access to console on the assigned port. "
+          "This supports both HTTP and RESP protocols");
 
-ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
+ABSL_FLAG(string, admin_bind, "",
+          "If set, the admin consol TCP connection would be bind the given address. "
+          "This supports both HTTP and RESP protocols");
+
+ABSL_FLAG(uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
-ABSL_FLAG(std::uint64_t, pipeline_squash, 0,
+ABSL_FLAG(uint64_t, pipeline_squash, 0,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
 
+// When changing this constant, also update `test_large_cmd` test in connection_test.py.
+ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
+          "Maximum multi-bulk (array) length that is "
+          "allowed to be accepted when parsing RESP protocol");
+
+ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
+          "Maximum io buffer length that is used to read client requests.");
+
 using namespace util;
-using namespace std;
 using nonstd::make_unexpected;
 
 namespace facade {
@@ -79,8 +87,6 @@ bool MatchHttp11Line(string_view line) {
 }
 
 constexpr size_t kMinReadSize = 256;
-constexpr size_t kMaxReadSize = 64_KB;
-
 constexpr size_t kMaxDispatchQMemory = 5_MB;
 
 thread_local uint32_t free_req_release_weight = 0;
@@ -235,7 +241,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   switch (protocol) {
     case Protocol::REDIS:
-      redis_parser_.reset(new RedisParser);
+      redis_parser_.reset(new RedisParser(absl::GetFlag(FLAGS_max_multi_bulk_len)));
       break;
     case Protocol::MEMCACHE:
       memcache_parser_.reset(new MemcacheParser);
@@ -676,6 +682,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   error_code ec;
   ParserStatus parse_status = OK;
 
+  size_t max_iobfuf_len = absl::GetFlag(FLAGS_max_client_iobuf_len);
+
   do {
     FetchBuilderStats(stats_, orig_builder);
 
@@ -709,13 +717,13 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
       parse_status = OK;
 
       size_t capacity = io_buf_.Capacity();
-      if (capacity < kMaxReadSize) {
+      if (capacity < max_iobfuf_len) {
         size_t parser_hint = 0;
         if (redis_parser_)
           parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
 
         if (parser_hint > capacity) {
-          io_buf_.Reserve(std::min(kMaxReadSize, parser_hint));
+          io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
         }
 
         if (io_buf_.AppendLen() < 64u) {

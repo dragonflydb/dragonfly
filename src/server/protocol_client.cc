@@ -425,7 +425,8 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
 }
 
 void ProtocolClient::ResetParser(bool server_mode) {
-  parser_.reset(new RedisParser(server_mode));
+  // We accept any length for the parser because it has been approved by the master.
+  parser_.reset(new RedisParser(UINT32_MAX, server_mode));
 }
 
 uint64_t ProtocolClient::LastIoTime() const {
