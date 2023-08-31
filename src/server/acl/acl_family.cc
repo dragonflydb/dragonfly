@@ -160,14 +160,6 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
 
 }  // namespace
 
-template <typename F> void AclFamily::TraverseConnectionsOnAllProactors(F fun) {
-  pp_.AwaitFiberOnAll([this, fun](util::ProactorBase* pb) {
-    if (main_listener_) {
-      main_listener_->TraverseConnections(fun);
-    }
-  });
-}
-
 void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uint32_t update_cat) {
   auto update_cb = [user, update_cat]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
@@ -209,7 +201,9 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
     }
   };
 
-  TraverseConnectionsOnAllProactors(close_cb);
+  if (main_listener_) {
+    main_listener_->TraverseConnections(close_cb);
+  }
 }
 
 void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
