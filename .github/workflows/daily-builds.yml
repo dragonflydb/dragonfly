@@ -39,16 +39,14 @@ jobs:
       - name: Install dependencies
         run: |
           cmake --version
-          mkdir -p ${{github.workspace}}/build
+          mkdir -p $GITHUB_WORKSPACE/build
 
       - name: Configure & Build
-        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-        working-directory: ${{github.workspace}}/build
         run: |
+          cd $GITHUB_WORKSPACE/build
           cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ${{ matrix.flags }}
           ninja src/all
       - name: Test
-        working-directory: ${{github.workspace}}/build
         run: |
+            cd $GITHUB_WORKSPACE/build
             ctest -V -L DFLY

@@ -25,12 +25,10 @@ jobs:
           node --version
           npm --version
           yarn --version
-          mkdir -p ${{github.workspace}}/build
+          mkdir -p $GITHUB_WORKSPACE/build
       - name: Configure/Build
-        working-directory: ${{github.workspace}}/build
-        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
+          cd $GITHUB_WORKSPACE/build
           cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja
           ninja dragonfly
           ./dragonfly --alsologtostderr &
@@ -43,6 +41,6 @@ jobs:
           yarn install --ignore-engines --frozen-lockfile --non-interactive
           yarn build
       - name: Test BullMQ
-        working-directory: ${{github.workspace}}/bullmq
         run: |
+          cd $GITHUB_WORKSPACE/bullmq
           # yarn test -i -g "should process delayed jobs with several workers respecting delay"
