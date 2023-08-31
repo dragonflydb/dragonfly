@@ -97,7 +97,7 @@ jobs:
           ninja src/all
           ${SCCACHE_PATH} --show-stats | tee $GITHUB_STEP_SUMMARY
 
-      - name: Test
+      - name: C++ Unit Tests
         run: |
           cd ${{github.workspace}}/build
           echo Run ctest -V -L DFLY
@@ -117,6 +117,14 @@ jobs:
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
+      - name: Run regression tests
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          run-only-on-ubuntu-latest: false
+          build-folder-name: build
+          filter: "not slow"
+          report-errors: false
       - name: Upload cache log
         uses: actions/upload-artifact@v3
         with:

@@ -120,6 +120,7 @@ jobs:
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
         run-only-on-ubuntu-latest: false
         build-folder-name: build-opt
+        report-errors: true
     - name: Save artifacts
       run: |
           # place all artifacts at the same location
