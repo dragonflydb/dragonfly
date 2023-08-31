@@ -665,7 +665,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   shard_set->Init(shard_num, !opts.disable_time_update);
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
-  if (!tcp_disabled) {
+  if (!tcp_disabled && !listeners.empty()) {
     acl_family_.Init(listeners.front());
   }
   request_latency_usec.Init(&pp_);
