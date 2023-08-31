@@ -24,7 +24,7 @@ class AclFamily final {
   explicit AclFamily(util::ProactorPool& pp);
 
   void Register(CommandRegistry* registry);
-  void Init(std::vector<facade::Listener*> listeners);
+  void Init(facade::Listener* listener);
 
  private:
   void Acl(CmdArgList args, ConnectionContext* cntx);
@@ -35,7 +35,7 @@ class AclFamily final {
   // respective ACL fields on all the available proactor threads
   void StreamUpdatesToAllProactorConnections(std::string_view user, uint32_t update_cat);
 
-  std::vector<facade::Listener*> listeners_;
+  facade::Listener* main_listener_{nullptr};
   util::ProactorPool& pp_;
 };
 
