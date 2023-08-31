@@ -42,4 +42,6 @@ ENTRYPOINT ["entrypoint.sh"]
 
 EXPOSE 6379
 
+USER dfly
+
 CMD ["dragonfly", "--logtostderr"]
