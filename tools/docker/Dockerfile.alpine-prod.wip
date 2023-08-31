@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-from ghcr.io/romange/alpine-dev as builder
+FROM ghcr.io/romange/alpine-dev as builder
 
 WORKDIR /build
 COPY src/  ./src/
@@ -29,4 +29,7 @@ HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
 ENTRYPOINT ["entrypoint.sh"]
 
 EXPOSE 6380
+
+USER dfly
+
 CMD ["dragonfly", "--logtostderr"]
