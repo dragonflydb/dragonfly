@@ -6,6 +6,7 @@
 
 #include <optional>
 #include <string_view>
+#include <utility>
 
 #include "facade/facade_types.h"
 
@@ -158,9 +159,7 @@ struct CmdArgParser {
 
   // Get optional error if occured
   std::optional<ErrorInfo> Error() {
-    auto out = std::move(error_);
-    error_.reset();
-    return out;
+    return std::exchange(error_, {});
   }
 
  private:
