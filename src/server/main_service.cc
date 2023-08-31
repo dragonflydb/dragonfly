@@ -664,8 +664,10 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   }
 
   shard_set->Init(shard_num, !opts.disable_time_update);
-
-  acl_family_.Init(listeners);
+  const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
+  if (!tcp_disabled) {
+    acl_family_.Init(listeners.front());
+  }
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
@@ -2046,6 +2048,8 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   unsigned index = 0;
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
 
+  string res = absl::StrCat("db=", server_cntx->db_index());
+
   if (server_cntx->async_dispatch)
     buf[index++] = 'a';
 
@@ -2058,7 +2062,10 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   if (server_cntx->conn_state.is_blocking)
     buf[index++] = 'b';
 
-  return index ? absl::StrCat("flags:", buf) : string();
+  if (index) {
+    absl::StrAppend(&res, " flags=", buf);
+  }
+  return res;
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);

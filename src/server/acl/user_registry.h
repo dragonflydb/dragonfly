@@ -30,7 +30,6 @@ class UserRegistry {
   // If the user with name `username` does not exist, it's added in the store with
   // the exact fields found in req
   // If the user exists, the bitfields are updated with a `logical and` operation
-  // TODO change return time to communicate back results to acl commands
   void MaybeAddAndUpdate(std::string_view username, User::UpdateRequest req);
 
   // Acquires a write lock on mu_
@@ -54,15 +53,28 @@ class UserRegistry {
   // Helper class for accessing the registry with a ReadLock outside the scope of UserRegistry
   class RegistryViewWithLock {
    public:
-    RegistryViewWithLock(std::shared_lock<util::SharedMutex> mu, const RegistryType& registry);
+    RegistryViewWithLock(std::shared_lock<util::SharedMutex> lk, const RegistryType& registry);
     const RegistryType& registry;
 
    private:
-    std::shared_lock<util::SharedMutex> registry_mu_;
+    std::shared_lock<util::SharedMutex> registry_lk_;
   };
 
   // Helper function used for printing users via ACL LIST
   RegistryViewWithLock GetRegistryWithLock() const;
+
+  // Helper class for accessing a user with a ReadLock outside the scope of UserRegistry
+  class UserViewWithLock {
+   public:
+    UserViewWithLock(std::shared_lock<util::SharedMutex> lk, const User& user, bool exists);
+    const User& user;
+    const bool exists;
+
+   private:
+    std::shared_lock<util::SharedMutex> registry_lk_;
+  };
+
+  UserViewWithLock MaybeAddAndUpdateWithLock(std::string_view username, User::UpdateRequest req);
 
  private:
   RegistryType registry_;

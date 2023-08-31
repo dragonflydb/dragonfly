@@ -174,8 +174,8 @@ void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uin
   };
 
   pp_.AwaitFiberOnAll([this, update_cb](util::ProactorBase* pb) {
-    for (auto& listener : listeners_) {
-      listener->TraverseConnections(update_cb);
+    if (main_listener_) {
+      main_listener_->TraverseConnections(update_cb);
     }
   });
 }
@@ -185,10 +185,12 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   auto req = ParseAclSetUser(args.subspan(1));
   auto error_case = [cntx](ErrorReply&& error) { (*cntx)->SendError(error); };
   auto update_case = [username, cntx, this](User::UpdateRequest&& req) {
-    ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
-    auto cred = ServerState::tlocal()->user_registry->GetCredentials(username);
-    StreamUpdatesToAllProactorConnections(username, cred.acl_categories);
-    cntx->SendOk();
+    auto& registry = ServerState::tlocal()->user_registry;
+    auto user_with_lock = registry->MaybeAddAndUpdateWithLock(username, std::move(req));
+    if (user_with_lock.exists) {
+      StreamUpdatesToAllProactorConnections(username, user_with_lock.user.AclCategory());
+    }
+    (*cntx)->SendOk();
   };
 
   std::visit(Overloaded{error_case, update_case}, std::move(req));
@@ -260,8 +262,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
 
 #undef HFUNC
 
-void AclFamily::Init(std::vector<facade::Listener*> listeners) {
-  listeners_ = std::move(listeners);
+void AclFamily::Init(facade::Listener* main_listener) {
+  main_listener_ = main_listener;
 }
 
 }  // namespace dfly::acl

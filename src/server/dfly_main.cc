@@ -330,6 +330,9 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   Listener* main_listener = nullptr;
 
   std::vector<facade::Listener*> listeners;
+  // If we ever add a new listener, plz don't change this,
+  // we depend on tcp listener to be at the front since we later
+  // need to pass it to the AclFamily::Init
   if (!tcp_disabled) {
     main_listener = new Listener{Protocol::REDIS, &service};
     listeners.push_back(main_listener);

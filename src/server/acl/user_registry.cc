@@ -54,14 +54,28 @@ bool UserRegistry::AuthUser(std::string_view username, std::string_view password
   return user->second.IsActive() && user->second.HasPassword(password);
 }
 
-UserRegistry::RegistryViewWithLock::RegistryViewWithLock(std::shared_lock<util::SharedMutex> mu,
+UserRegistry::RegistryViewWithLock::RegistryViewWithLock(std::shared_lock<util::SharedMutex> lk,
                                                          const RegistryType& registry)
-    : registry(registry), registry_mu_(std::move(mu)) {
+    : registry(registry), registry_lk_(std::move(lk)) {
 }
 
 UserRegistry::RegistryViewWithLock UserRegistry::GetRegistryWithLock() const {
   std::shared_lock<util::SharedMutex> lock(mu_);
   return {std::move(lock), registry_};
+}
+
+UserRegistry::UserViewWithLock::UserViewWithLock(std::shared_lock<util::SharedMutex> lk,
+                                                 const User& user, bool exists)
+    : user(user), exists(exists), registry_lk_(std::move(lk)) {
+}
+
+UserRegistry::UserViewWithLock UserRegistry::MaybeAddAndUpdateWithLock(std::string_view username,
+                                                                       User::UpdateRequest req) {
+  std::shared_lock<util::SharedMutex> lock(mu_);
+  const bool exists = registry_.contains(username);
+  auto& user = registry_[username];
+  user.Update(std::move(req));
+  return {std::move(lock), user, exists};
 }
 
 }  // namespace dfly::acl

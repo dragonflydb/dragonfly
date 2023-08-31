@@ -391,9 +391,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get());
-    if (!cc_info.empty()) {
-      absl::StrAppend(&res, " ", cc_info);
-    }
+    absl::StrAppend(&res, " ", cc_info);
   }
 
   return res;
