@@ -608,7 +608,7 @@ optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
 }  // namespace
 
 Service::Service(ProactorPool* pp)
-    : pp_(*pp), acl_family_(*pp), server_family_(this), cluster_family_(&server_family_) {
+    : pp_(*pp), server_family_(this), cluster_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -665,6 +665,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   shard_set->Init(shard_num, !opts.disable_time_update);
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
+  // We assume that listeners.front() is the main_listener
+  // see dfly_main RunEngine
   if (!tcp_disabled && !listeners.empty()) {
     acl_family_.Init(listeners.front());
   }
