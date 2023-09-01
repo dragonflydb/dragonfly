@@ -142,11 +142,7 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
 }
 
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
-  SearchDocData out{};
-  // TODO: use short names by checking current path
-  for (const auto& member : json_.object_range())
-    out[member.key()] = member.value().as_string();
-  return out;
+  return {{"$", json_.to_string()}};
 }
 
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
