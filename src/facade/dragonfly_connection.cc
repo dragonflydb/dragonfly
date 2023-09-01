@@ -15,6 +15,7 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "server/conn_context.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
@@ -130,6 +131,7 @@ struct Connection::DispatchOperations {
   void operator()(const PubMessage& msg);
   void operator()(Connection::PipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
+  void operator()(const AclUpdateMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -191,7 +193,11 @@ size_t Connection::MessageHandle::UsedMemory() const {
            arg.storage.capacity();
   };
   auto monitor_size = [](const MonitorMessage& arg) -> size_t { return arg.capacity(); };
-  return sizeof(MessageHandle) + visit(Overloaded{pub_size, msg_size, monitor_size}, this->handle);
+  auto acl_update_size = [](const AclUpdateMessage& msg) -> size_t {
+    return sizeof(AclUpdateMessage);
+  };
+  return sizeof(MessageHandle) +
+         visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size}, this->handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -201,6 +207,13 @@ bool Connection::MessageHandle::IsPipelineMsg() const {
 void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
+}
+
+void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
+  auto* ctx = static_cast<dfly::ConnectionContext*>(self->cntx());
+  if (ctx && msg.username == ctx->authed_username) {
+    ctx->acl_categories = msg.categories;
+  }
 }
 
 void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
@@ -929,6 +942,10 @@ void Connection::SendMonitorMessageAsync(string msg) {
   SendAsync({MonitorMessage{move(msg)}});
 }
 
+void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
+  SendAsync({msg});
+}
+
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(owner());
@@ -945,7 +962,11 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
-  dispatch_q_.push_back(move(msg));
+  if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
+    dispatch_q_.push_front(std::move(msg));
+  } else {
+    dispatch_q_.push_back(std::move(msg));
+  }
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.
   // This might only happen if we started receving messages while `SUBSCRIBE`
@@ -975,7 +996,7 @@ std::string Connection::RemoteEndpointAddress() const {
   return re.address().to_string();
 }
 
-ConnectionContext* Connection::cntx() {
+facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
 }
 

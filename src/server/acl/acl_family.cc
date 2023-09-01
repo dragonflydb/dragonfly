@@ -164,10 +164,7 @@ void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uin
   auto update_cb = [user, update_cat]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
-    if (ctx && user == ctx->authed_username) {
-      ctx->acl_categories = update_cat;
-    }
+    connection->SendAclUpdateAsync(facade::Connection::AclUpdateMessage{user, update_cat});
   };
 
   if (main_listener_) {
