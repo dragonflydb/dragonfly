@@ -110,8 +110,8 @@ struct StreamInfo {
   streamID last_generated_id;
   streamID max_deleted_entry_id;
   size_t entries_added;
-  Record first_entry;
-  Record last_entry;
+  Record* first_entry;
+  Record* last_entry;
   vector<Record> entries;
   GroupInfoVec cgroups;
 };
@@ -1163,9 +1163,17 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
     sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
     // TODO : fix for empty stream
     vector<Record> first_entry_vector = streamWithRange(s, s->first_id, s->last_id, 0, 1);
-    sinfo.first_entry = first_entry_vector.at(0);
+    if (first_entry_vector.size() != 0) {
+      sinfo.first_entry = &first_entry_vector.at(0);
+    } else {
+      sinfo.first_entry = NULL;
+    }
     vector<Record> last_entry_vector = streamWithRange(s, s->first_id, s->last_id, 1, 1);
-    sinfo.last_entry = last_entry_vector.at(0);
+    if (last_entry_vector.size() != 0) {
+      sinfo.last_entry = &last_entry_vector.at(0);
+    } else {
+      sinfo.last_entry = NULL;
+    }
   }
 
   return sinfo;
@@ -1844,7 +1852,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       int full = 0;
       size_t count = 10;  // default count for xinfo streams
 
-      if (args.size() == 4) {
+      if (args.size() == 4 || args.size() > 5) {
         return (*cntx)->SendError(
             "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
       }
@@ -1852,10 +1860,14 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       if (args.size() >= 3) {
         full = 1;
         string_view full_arg = ArgS(args, 2);
+        if (full_arg != "full") {
+            return (*cntx)->SendError(
+                "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
+          }
         if (args.size() > 3) {
           string_view count_arg = ArgS(args, 3);
           string_view count_value_arg = ArgS(args, 4);
-          if (full_arg != "full" || count_arg != "count") {
+          if (count_arg != "count") {
             return (*cntx)->SendError(
                 "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
           }
@@ -1978,22 +1990,31 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           (*cntx)->SendLong(sinfo->groups);
 
           (*cntx)->SendBulkString("first-entry");
-          (*cntx)->StartArray(2);
-          (*cntx)->SendBulkString(StreamIdRepr(sinfo->first_entry.id));
-          (*cntx)->StartArray(sinfo->first_entry.kv_arr.size() * 2);
-          for (const auto& k_v : sinfo->first_entry.kv_arr) {
-            (*cntx)->SendBulkString(k_v.first);
-            (*cntx)->SendBulkString(k_v.second);
+          if (sinfo->first_entry != NULL) {
+            (*cntx)->StartArray(2);
+            (*cntx)->SendBulkString(StreamIdRepr(sinfo->first_entry->id));
+            (*cntx)->StartArray(sinfo->first_entry->kv_arr.size() * 2);
+            for (const auto& k_v : sinfo->first_entry->kv_arr) {
+              (*cntx)->SendBulkString(k_v.first);
+              (*cntx)->SendBulkString(k_v.second);
+            }
+          } else {
+            (*cntx)->SendNullArray();
           }
 
           (*cntx)->SendBulkString("last-entry");
-          (*cntx)->StartArray(2);
-          (*cntx)->SendBulkString(StreamIdRepr(sinfo->last_entry.id));
-          (*cntx)->StartArray(sinfo->last_entry.kv_arr.size() * 2);
-          for (const auto& k_v : sinfo->last_entry.kv_arr) {
-            (*cntx)->SendBulkString(k_v.first);
-            (*cntx)->SendBulkString(k_v.second);
+          if (sinfo->last_entry != NULL) {
+            (*cntx)->StartArray(2);
+            (*cntx)->SendBulkString(StreamIdRepr(sinfo->last_entry->id));
+            (*cntx)->StartArray(sinfo->last_entry->kv_arr.size() * 2);
+            for (const auto& k_v : sinfo->last_entry->kv_arr) {
+              (*cntx)->SendBulkString(k_v.first);
+              (*cntx)->SendBulkString(k_v.second);
+            }
+          } else {
+            (*cntx)->SendNullArray();
           }
+          
         }
         return;
       }
