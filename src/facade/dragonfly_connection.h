@@ -79,6 +79,11 @@ class Connection : public util::Connection {
 
   struct MonitorMessage : public std::string {};
 
+  struct AclUpdateMessage {
+    std::string_view username;
+    uint64_t categories{0};
+  };
+
   struct PipelineMessage {
     PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
@@ -111,7 +116,7 @@ class Connection : public util::Connection {
 
     bool IsPipelineMsg() const;
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr> handle;
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage> handle;
   };
 
   enum Phase { READ_SOCKET, PROCESS };
@@ -123,6 +128,9 @@ class Connection : public util::Connection {
 
   // Add monitor message to dispatch queue.
   void SendMonitorMessageAsync(std::string);
+
+  // Add acl update to dispatch queue.
+  void SendAclUpdateAsync(AclUpdateMessage msg);
 
   // Must be called before Send_Async to ensure the connection dispatch queue is not overfilled.
   // Blocks until free space is available.
