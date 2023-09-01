@@ -64,17 +64,17 @@ class UserRegistry {
   RegistryViewWithLock GetRegistryWithLock() const;
 
   // Helper class for accessing a user with a ReadLock outside the scope of UserRegistry
-  class UserViewWithLock {
+  class UserWithWriteLock {
    public:
-    UserViewWithLock(std::shared_lock<util::SharedMutex> lk, const User& user, bool exists);
+    UserWithWriteLock(std::unique_lock<util::SharedMutex> lk, const User& user, bool exists);
     const User& user;
     const bool exists;
 
    private:
-    std::shared_lock<util::SharedMutex> registry_lk_;
+    std::unique_lock<util::SharedMutex> registry_lk_;
   };
 
-  UserViewWithLock MaybeAddAndUpdateWithLock(std::string_view username, User::UpdateRequest req);
+  UserWithWriteLock MaybeAddAndUpdateWithLock(std::string_view username, User::UpdateRequest req);
 
  private:
   RegistryType registry_;

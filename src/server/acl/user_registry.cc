@@ -64,14 +64,14 @@ UserRegistry::RegistryViewWithLock UserRegistry::GetRegistryWithLock() const {
   return {std::move(lock), registry_};
 }
 
-UserRegistry::UserViewWithLock::UserViewWithLock(std::shared_lock<util::SharedMutex> lk,
-                                                 const User& user, bool exists)
+UserRegistry::UserWithWriteLock::UserWithWriteLock(std::unique_lock<util::SharedMutex> lk,
+                                                   const User& user, bool exists)
     : user(user), exists(exists), registry_lk_(std::move(lk)) {
 }
 
-UserRegistry::UserViewWithLock UserRegistry::MaybeAddAndUpdateWithLock(std::string_view username,
-                                                                       User::UpdateRequest req) {
-  std::shared_lock<util::SharedMutex> lock(mu_);
+UserRegistry::UserWithWriteLock UserRegistry::MaybeAddAndUpdateWithLock(std::string_view username,
+                                                                        User::UpdateRequest req) {
+  std::unique_lock<util::SharedMutex> lock(mu_);
   const bool exists = registry_.contains(username);
   auto& user = registry_[username];
   user.Update(std::move(req));

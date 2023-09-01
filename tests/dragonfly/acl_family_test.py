@@ -247,3 +247,23 @@ async def test_acl_del_user_while_running_lua_script(df_server):
         assert res == b"10000"
 
     await admin_client.close()
+
+
+@pytest.mark.asyncio
+async def test_acl_with_long_running_script(df_server):
+    client = aioredis.Redis(port=df_server.port)
+    await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting")
+    await client.execute_command("AUTH roman yoman")
+    admin_client = aioredis.Redis(port=df_server.port)
+
+    await asyncio.gather(
+        client.eval(script, 4, "key", "key1", "key2", "key3"),
+        admin_client.execute_command("ACL SETUSER -@string -@scripting"),
+    )
+
+    for i in range(1, 4):
+        res = await admin_client.get(f"key{i}")
+        assert res == b"10000"
+
+    await client.close()
+    await admin_client.close()
