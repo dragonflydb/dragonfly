@@ -3,6 +3,8 @@ import redis
 from redis import asyncio as aioredis
 from . import DflyInstanceFactory
 from .utility import disconnect_clients
+import time
+import asyncio
 
 
 @pytest.mark.asyncio
@@ -189,3 +191,32 @@ async def test_acl_categories_multi_exec_squash(df_local_factory):
 
     await admin_client.close()
     await client.close()
+
+
+script = """
+for i = 1, 10000 do
+  redis.call('SET', 'key', i)
+  redis.call('SET', 'key1', i)
+  redis.call('SET', 'key2', i)
+  redis.call('SET', 'key3', i)
+end
+"""
+
+
+@pytest.mark.asyncio
+async def test_acl_with_long_running_script(df_server):
+    client = aioredis.Redis(port=df_server.port)
+    await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting")
+    await client.execute_command("AUTH roman yoman")
+    admin_client = aioredis.Redis(port=df_server.port)
+
+    res = await asyncio.gather(
+        client.eval(script, 4, "key", "key1", "key2", "key3"),
+        admin_client.execute_command("ACL SETUSER -@string -@scripting"),
+    )
+
+    res = await admin_client.get("key")
+    assert res == b"10000"
+
+    await client.close()
+    await admin_client.close()
