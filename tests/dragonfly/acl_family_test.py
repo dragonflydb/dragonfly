@@ -210,13 +210,14 @@ async def test_acl_with_long_running_script(df_server):
     await client.execute_command("AUTH roman yoman")
     admin_client = aioredis.Redis(port=df_server.port)
 
-    res = await asyncio.gather(
+    await asyncio.gather(
         client.eval(script, 4, "key", "key1", "key2", "key3"),
         admin_client.execute_command("ACL SETUSER -@string -@scripting"),
     )
 
-    res = await admin_client.get("key")
-    assert res == b"10000"
+    for i in range(1, 4):
+        res = await admin_client.get(f"key{i}")
+        assert res == b"10000"
 
     await client.close()
     await admin_client.close()
