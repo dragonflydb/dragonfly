@@ -22,10 +22,13 @@ namespace facade {
  */
 class RedisParser {
  public:
+  constexpr static long kMaxBulkLen = 256 * (1ul << 20);  // 256MB.
+
   enum Result { OK, INPUT_PENDING, BAD_ARRAYLEN, BAD_BULKLEN, BAD_STRING, BAD_INT, BAD_DOUBLE };
   using Buffer = RespExpr::Buffer;
 
-  explicit RedisParser(bool server_mode = true) : server_mode_(server_mode) {
+  explicit RedisParser(uint32_t max_arr_len = UINT32_MAX, bool server_mode = true)
+      : max_arr_len_(max_arr_len), server_mode_(server_mode) {
   }
 
   /**
@@ -98,6 +101,8 @@ class RedisParser {
   using BlobPtr = std::unique_ptr<uint8_t[]>;
   std::vector<BlobPtr> buf_stash_;
   RespVec* cached_expr_ = nullptr;
+  uint32_t max_arr_len_;
+
   bool is_broken_token_ = false;
   bool server_mode_ = true;
 };

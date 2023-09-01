@@ -17,6 +17,7 @@
 #include "base/logging.h"
 #include "core/json_object.h"
 #include "core/search/search.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
@@ -37,38 +38,34 @@ namespace {
 static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", "DIM",
                                                  "DISTANCE_METRIC"};
 
-optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList args,
+bool IsValidJsonPath(string_view path) {
+  error_code ec;
+  jsoncons::jsonpath::make_expression<JsonType>(path, ec);
+  return !ec;
+}
+
+optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
                                             ConnectionContext* cntx) {
   search::Schema schema;
 
-  for (size_t i = 0; i < args.size(); i++) {
-    string_view field = ArgS(args, i++);
+  while (parser.HasNext()) {
+    string_view field = parser.Next();
+    string_view field_alias = field;
 
     // Verify json path is correct
-    if (type == DocIndex::JSON) {
-      error_code ec;
-      jsoncons::jsonpath::make_expression<JsonType>(field, ec);
-      if (ec) {
-        (*cntx)->SendError("Bad json path: " + string{field});
-        return nullopt;
-      }
-    }
-
-    // Check optional AS [alias]
-    string_view field_alias = field;  // by default "alias" is same as identifier
-    if (i + 1 < args.size() && absl::AsciiStrToUpper(ArgS(args, i)) == "AS") {
-      field_alias = ArgS(args, i + 1);
-      i += 2;
-    }
-
-    if (i >= args.size()) {
-      (*cntx)->SendError("No field type for field: " + string{field});
+    if (type == DocIndex::JSON && !IsValidJsonPath(field)) {
+      (*cntx)->SendError("Bad json path: " + string{field});
       return nullopt;
     }
 
+    parser.ToUpper();
+
+    // AS [alias]
+    if (parser.Check("AS").ExpectTail(1).NextUpper())
+      field_alias = parser.Next();
+
     // Determine type
-    ToUpper(&args[i]);
-    auto type_str = ArgS(args, i);
+    string_view type_str = parser.Next();
     auto type = ParseSearchFieldType(type_str);
     if (!type) {
       (*cntx)->SendError("Invalid field type: " + string{type_str});
@@ -77,12 +74,11 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
 
     // Skip {algorithm} {dim} flags
     if (*type == search::SchemaField::VECTOR)
-      i += 2;
+      parser.Skip(2);
 
     // Skip all trailing ignored parameters
-    while (i + 2 < args.size() && kIgnoredOptions.count(ArgS(args, i + 1)) > 0) {
-      i += 2;
-    }
+    while (kIgnoredOptions.count(parser.Peek()) > 0)
+      parser.Skip(2);
 
     schema.fields[field] = {*type, string{field_alias}};
   }
@@ -91,83 +87,58 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgList 
   for (const auto& [field_ident, field_info] : schema.fields)
     schema.field_names[field_info.short_name] = field_ident;
 
+  if (auto err = parser.Error(); err) {
+    (*cntx)->SendError(err->MakeReply());
+    return nullopt;
+  }
+
   return schema;
 }
 
-optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionContext* cntx) {
+optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
   size_t limit_offset = 0, limit_total = 10;
   search::FtVector knn_vector;
   optional<SearchParams::FieldAliasList> alias_list;
 
-  for (size_t i = 0; i < args.size(); i++) {
-    ToUpper(&args[i]);
-
+  while (parser.ToUpper().HasNext()) {
     // [LIMIT offset total]
-    if (ArgS(args, i) == "LIMIT") {
-      if (i + 2 >= args.size()) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &limit_offset) ||
-          !absl::SimpleAtoi(ArgS(args, i + 2), &limit_total)) {
-        (*cntx)->SendError(kInvalidIntErr);
-        return nullopt;
-      }
-      i += 2;
+    if (parser.Check("LIMIT").ExpectTail(2)) {
+      limit_offset = parser.Next().Int<size_t>();
+      limit_total = parser.Next().Int<size_t>();
       continue;
     }
 
     // RETURN {num} [{ident} AS {name}...]
-    if (ArgS(args, i) == "RETURN") {
-      if (i + 1 >= args.size()) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-
-      uint64_t num_fields = args.size();
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &num_fields)) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-
-      i += 1;
-
+    if (parser.Check("RETURN").ExpectTail(1)) {
+      size_t num_fields = parser.Next().Int<size_t>();
       alias_list = SearchParams::FieldAliasList{};
       while (alias_list->size() < num_fields) {
-        if (++i >= args.size()) {
-          (*cntx)->SendError(kSyntaxErr);
-          return nullopt;
-        }
-
-        string_view ident = ArgS(args, i);
-        string_view alias = ident;
-
-        if (i + 2 < args.size() && absl::EqualsIgnoreCase(ArgS(args, i + 1), "AS")) {
-          alias = ArgS(args, i + 2);
-          i += 2;
-        }
-
+        string_view ident = parser.Next();
+        string_view alias = parser.Check("AS").IgnoreCase().ExpectTail(1) ? parser.Next() : ident;
         alias_list->emplace_back(ident, alias);
       }
       continue;
     }
 
     // NOCONTENT
-    if (ArgS(args, i) == "NOCONTENT") {
+    if (parser.Check("NOCONTENT")) {
       alias_list = SearchParams::FieldAliasList{};
       continue;
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (ArgS(args, i) == "PARAMS") {
-      if (i + 3 >= args.size()) {
-        (*cntx)->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      knn_vector = BytesToFtVector(ArgS(args, i + 3));
-      i += 3;
+    if (parser.Check("PARAMS").ExpectTail(3)) {
+      knn_vector = BytesToFtVector(parser.Skip(2).Next());
       continue;
     }
+
+    // Unsupported parameters are ignored for now
+    parser.Skip(1);
+  }
+
+  if (auto err = parser.Error(); err) {
+    (*cntx)->SendError(err->MakeReply());
+    return nullopt;
   }
 
   return SearchParams{limit_offset, limit_total, std::move(alias_list), std::move(knn_vector)};
@@ -255,53 +226,42 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
-  string_view idx_name = ArgS(args, 0);
-
   DocIndex index{};
 
-  for (size_t i = 1; i < args.size(); i++) {
-    ToUpper(&args[i]);
+  CmdArgParser parser{args};
+  string_view idx_name = parser.Next();
 
-    // [ON HASH | JSON]
-    if (ArgS(args, i) == "ON") {
-      if (++i >= args.size())
-        return (*cntx)->SendError(kSyntaxErr);
-
-      ToUpper(&args[i]);
-      string_view type = ArgS(args, i);
-      if (type == "HASH")
-        index.type = DocIndex::HASH;
-      else if (type == "JSON")
-        index.type = DocIndex::JSON;
-      else
-        return (*cntx)->SendError("Invalid rule type: " + string{type});
+  while (parser.ToUpper().HasNext()) {
+    // ON HASH | JSON
+    if (parser.Check("ON").ExpectTail(1)) {
+      index.type =
+          parser.ToUpper().Next().Case("HASH"sv, DocIndex::HASH).Case("JSON"sv, DocIndex::JSON);
       continue;
     }
 
-    // [PREFIX count prefix [prefix ...]]
-    if (ArgS(args, i) == "PREFIX") {
-      if (i + 2 >= args.size())
-        return (*cntx)->SendError(kSyntaxErr);
-
-      if (ArgS(args, ++i) != "1")
+    // PREFIX count prefix [prefix ...]
+    if (parser.Check("PREFIX").ExpectTail(2)) {
+      if (size_t num = parser.Next().Int<size_t>(); num != 1)
         return (*cntx)->SendError("Multiple prefixes are not supported");
-
-      index.prefix = ArgS(args, ++i);
+      index.prefix = string(parser.Next());
       continue;
     }
 
-    // [SCHEMA]
-    if (ArgS(args, i) == "SCHEMA") {
-      if (i++ >= args.size())
-        return (*cntx)->SendError("Empty schema");
-
-      auto schema = ParseSchemaOrReply(index.type, args.subspan(i), cntx);
+    // SCHEMA
+    if (parser.Check("SCHEMA")) {
+      auto schema = ParseSchemaOrReply(index.type, parser.Tail(), cntx);
       if (!schema)
         return;
       index.schema = move(*schema);
       break;  // SCHEMA always comes last
     }
+
+    // Unsupported parameters are ignored for now
+    parser.Skip(1);
   }
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
   auto idx_ptr = make_shared<DocIndex>(move(index));
   cntx->transaction->ScheduleSingleHop([idx_name, idx_ptr](auto* tx, auto* es) {
