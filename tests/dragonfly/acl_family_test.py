@@ -3,6 +3,7 @@ import redis
 from redis import asyncio as aioredis
 from . import DflyInstanceFactory
 from .utility import disconnect_clients
+import asyncio
 
 
 @pytest.mark.asyncio
@@ -214,5 +215,35 @@ async def test_acl_deluser(df_server):
 
     with pytest.raises(redis.exceptions.ConnectionError):
         await client.execute_command("EXEC")
+
+    await admin_client.close()
+
+
+script = """
+for i = 1, 10000 do
+  redis.call('SET', 'key', i)
+  redis.call('SET', 'key1', i)
+  redis.call('SET', 'key2', i)
+  redis.call('SET', 'key3', i)
+end
+"""
+
+
+@pytest.mark.asyncio
+async def test_acl_del_user_while_running_lua_script(df_server):
+    client = aioredis.Redis(port=df_server.port)
+    await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting")
+    await client.execute_command("AUTH kostas kk")
+    admin_client = aioredis.Redis(port=df_server.port)
+
+    with pytest.raises(redis.exceptions.ConnectionError):
+        await asyncio.gather(
+            client.eval(script, 4, "key", "key1", "key2", "key3"),
+            admin_client.execute_command("ACL DELUSER kostas"),
+        )
+
+    for i in range(1, 4):
+        res = await admin_client.get(f"key{i}")
+        assert res == b"10000"
 
     await admin_client.close()
