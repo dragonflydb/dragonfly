@@ -64,6 +64,10 @@ class ConnectionContext {
     rbuilder_->SendSimpleString(str);
   }
 
+  void SendOk() {
+    rbuilder_->SendOk();
+  }
+
   // connection state / properties.
   bool conn_closing : 1;
   bool req_auth : 1;

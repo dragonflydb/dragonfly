@@ -35,8 +35,7 @@ class UserRegistry {
   // Acquires a write lock on mu_
   // Removes user from the store
   // kills already existing connections from the removed user
-  // TODO change return time to communicate back results to acl commands
-  void RemoveUser(std::string_view username);
+  bool RemoveUser(std::string_view username);
 
   struct UserCredentials {
     uint32_t acl_categories{0};

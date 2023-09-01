@@ -3,7 +3,6 @@ import redis
 from redis import asyncio as aioredis
 from . import DflyInstanceFactory
 from .utility import disconnect_clients
-import time
 import asyncio
 
 
@@ -193,6 +192,33 @@ async def test_acl_categories_multi_exec_squash(df_local_factory):
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_acl_deluser(df_server):
+    client = aioredis.Redis(port=df_server.port)
+
+    try:
+        res = await client.execute_command("ACL DELUSER adi")
+    except redis.exceptions.ResponseError as e:
+        assert e.args[0] == "User adi does not exist"
+
+    res = await client.execute_command("ACL SETUSER adi ON >pass +@transaction +@string")
+    assert res == b"OK"
+
+    res = await client.execute_command("AUTH adi pass")
+    assert res == b"OK"
+
+    await client.execute_command("MULTI")
+    await client.execute_command("SET key 44")
+
+    admin_client = aioredis.Redis(port=df_server.port)
+    await admin_client.execute_command("ACL DELUSER adi")
+
+    with pytest.raises(redis.exceptions.ConnectionError):
+        await client.execute_command("EXEC")
+
+    await admin_client.close()
+
+
 script = """
 for i = 1, 10000 do
   redis.call('SET', 'key', i)
@@ -201,6 +227,26 @@ for i = 1, 10000 do
   redis.call('SET', 'key3', i)
 end
 """
+
+
+@pytest.mark.asyncio
+async def test_acl_del_user_while_running_lua_script(df_server):
+    client = aioredis.Redis(port=df_server.port)
+    await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting")
+    await client.execute_command("AUTH kostas kk")
+    admin_client = aioredis.Redis(port=df_server.port)
+
+    with pytest.raises(redis.exceptions.ConnectionError):
+        await asyncio.gather(
+            client.eval(script, 4, "key", "key1", "key2", "key3"),
+            admin_client.execute_command("ACL DELUSER kostas"),
+        )
+
+    for i in range(1, 4):
+        res = await admin_client.get(f"key{i}")
+        assert res == b"10000"
+
+    await admin_client.close()
 
 
 @pytest.mark.asyncio
