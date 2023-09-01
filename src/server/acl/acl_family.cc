@@ -49,9 +49,6 @@ static std::string AclToString(uint32_t acl_category) {
   return tmp;
 }
 
-AclFamily::AclFamily(util::ProactorPool& pp) : pp_(pp) {
-}
-
 void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError("Wrong number of arguments for acl command");
 }

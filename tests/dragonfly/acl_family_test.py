@@ -196,22 +196,20 @@ async def test_acl_categories_multi_exec_squash(df_local_factory):
 async def test_acl_deluser(df_server):
     client = aioredis.Redis(port=df_server.port)
 
-    try:
-        res = await client.execute_command("ACL DELUSER adi")
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == "User adi does not exist"
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command("ACL DELUSER random")
 
-    res = await client.execute_command("ACL SETUSER adi ON >pass +@transaction +@string")
+    res = await client.execute_command("ACL SETUSER george ON >pass +@transaction +@string")
     assert res == b"OK"
 
-    res = await client.execute_command("AUTH adi pass")
+    res = await client.execute_command("AUTH george pass")
     assert res == b"OK"
 
     await client.execute_command("MULTI")
     await client.execute_command("SET key 44")
 
     admin_client = aioredis.Redis(port=df_server.port)
-    await admin_client.execute_command("ACL DELUSER adi")
+    await admin_client.execute_command("ACL DELUSER george")
 
     with pytest.raises(redis.exceptions.ConnectionError):
         await client.execute_command("EXEC")
@@ -219,9 +217,8 @@ async def test_acl_deluser(df_server):
     await admin_client.close()
 
 
-<<<<<<< HEAD
 script = """
-for i = 1, 10000 do
+for i = 1, 100000 do
   redis.call('SET', 'key', i)
   redis.call('SET', 'key1', i)
   redis.call('SET', 'key2', i)
@@ -245,7 +242,7 @@ async def test_acl_del_user_while_running_lua_script(df_server):
 
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
-        assert res == b"10000"
+        assert res == b"100000"
 
     await admin_client.close()
 
@@ -259,15 +256,16 @@ async def test_acl_with_long_running_script(df_server):
 
     await asyncio.gather(
         client.eval(script, 4, "key", "key1", "key2", "key3"),
-        admin_client.execute_command("ACL SETUSER -@string -@scripting"),
+        admin_client.execute_command("ACL SETUSER roman -@string -@scripting"),
     )
 
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
-        assert res == b"10000"
+        assert res == b"100000"
 
     await client.close()
     await admin_client.close()
+
 
 @pytest.mark.asyncio
 async def test_acl_whoami(async_client):
