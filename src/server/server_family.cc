@@ -720,8 +720,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
   if (sdata_res.has_value()) {
-    AppendMetricWithoutLabels("used_memory_rss_bytes", "", sdata_res->vm_rss, MetricType::GAUGE,
-                              &resp->body());
+    size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+    AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
   } else {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                            << sdata_res.error().message();
@@ -1311,7 +1311,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("uptime_in_days", uptime / (3600 * 24));
   }
 
-  auto sdata_res = io::ReadStatusInfo();
+  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
 
   DbStats total;
   for (const auto& db_stats : m.db) {
@@ -1335,8 +1335,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("comitted_memory", GetMallocCurrentCommitted());
 
     if (sdata_res.has_value()) {
-      append("used_memory_rss", sdata_res->vm_rss);
-      append("used_memory_rss_human", HumanReadableNumBytes(sdata_res->vm_rss));
+      size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+      append("used_memory_rss", rss);
+      append("used_memory_rss_human", HumanReadableNumBytes(rss));
     } else {
       LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                              << sdata_res.error().message();
