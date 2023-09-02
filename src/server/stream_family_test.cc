@@ -499,4 +499,48 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
+TEST_F(StreamFamilyTest, XInfoGroups) {
+  Run({"del", "mystream"});
+  Run({"xgroup", "create", "mystream", "mygroup", "$", "MKSTREAM"});
+
+  // non-existent-stream
+  auto resp = Run({"xinfo", "groups", "non-existent-stream"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  // group with no consumers
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp, ArrLen(12));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending", IntArg(0),
+                          "last-delivered-id", "0-0", "entries-read", IntArg(0), "lag", IntArg(0)));
+
+  // group with multiple consumers
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "consumer1"});
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "consumer2"});
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp, ArrLen(12));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(2));
+
+  // group with lag
+  Run({"xadd", "mystream", "1-0", "test-field-1", "test-value-1"});
+  Run({"xadd", "mystream", "2-0", "test-field-2", "test-value-2"});
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp.GetVec()[11], IntArg(2));
+  EXPECT_THAT(resp.GetVec()[6], "0-0");
+
+  // group with no lag, before ack
+  Run({"xreadgroup", "group", "mygroup", "consumer1", "STREAMS", "mystream", ">"});
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("name", "mygroup", "consumers", IntArg(2), "pending", IntArg(2),
+                          "last-delivered-id", "2-0", "entries-read", IntArg(2), "lag", IntArg(0)));
+
+  // after ack
+  // TODO : xack command not available now, uncomment this test when available
+  // Run({"xack", "mystream", "mygroup", "1-0"});
+  // Run({"xack", "mystream", "mygroup", "2-0"});
+  // resp = Run({"xinfo", "groups", "mystream"});
+  // EXPECT_THAT(resp.GetVec(), ElementsAre("name", "mygroup", "consumers", IntArg(2), "pending",
+  // IntArg(0), "last-delivered-id", "2-0", "entries-read", IntArg(2), "lag", IntArg(0)));
+}
 }  // namespace dfly
