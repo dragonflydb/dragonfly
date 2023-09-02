@@ -55,6 +55,17 @@ class FieldIndices {
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
 };
 
+struct AlgorithmProfile {
+  struct ProfileEvent {
+    std::string descr;
+    size_t micros;  // time event took in microseconds
+    size_t depth;   // tree depth of event
+    size_t flow;    // number of results processed by op
+  };
+
+  std::vector<ProfileEvent> events;
+};
+
 // Represents a search result returned from the search algorithm.
 struct SearchResult {
   std::vector<DocId> ids;
@@ -62,6 +73,9 @@ struct SearchResult {
   // If a KNN-query is present, distances for doc ids are returned as well
   // and sorted from smallest to largest.
   std::vector<float> knn_distances;
+
+  // If profiling was enabled
+  std::optional<AlgorithmProfile> profile;
 };
 
 // SearchAlgorithm allows searching field indices with a query
@@ -78,7 +92,10 @@ class SearchAlgorithm {
   // Return KNN limit if it is enabled
   std::optional<size_t> HasKnn() const;
 
+  void EnableProfiling();
+
  private:
+  bool profiling_enabled_ = false;
   std::unique_ptr<AstNode> query_;
 };
 

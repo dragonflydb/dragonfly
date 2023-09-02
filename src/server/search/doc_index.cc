@@ -204,7 +204,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), score});
   }
 
-  return SearchResult{std::move(out), search_results.ids.size() - expired_count};
+  return SearchResult{std::move(out), search_results.ids.size() - expired_count,
+                      std::move(search_results.profile)};
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {

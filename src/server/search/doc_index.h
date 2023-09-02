@@ -33,6 +33,8 @@ struct SerializedSearchDoc {
 struct SearchResult {
   std::vector<SerializedSearchDoc> docs;
   size_t total_hits;
+
+  std::optional<search::AlgorithmProfile> profile;
 };
 
 struct SearchParams {

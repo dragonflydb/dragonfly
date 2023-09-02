@@ -4,11 +4,16 @@
 
 #include "core/search/search.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 
+#include <chrono>
 #include <variant>
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "core/search/ast_expr.h"
 #include "core/search/compressed_sorted_set.h"
 #include "core/search/indices.h"
@@ -50,6 +55,10 @@ struct IndexResult {
     return get<const CompressedSortedSet*>(value_)->Size();
   }
 
+  bool IsOwned() const {
+    return holds_alternative<DocVec>(value_);
+  }
+
   IndexResult& operator=(DocVec&& entries) {
     if (holds_alternative<DocVec>(value_)) {
       swap(get<DocVec>(value_), entries);  // swap to keep backing array
@@ -79,10 +88,57 @@ struct IndexResult {
   variant<DocVec /*owned*/, const CompressedSortedSet* /* borrowed */> value_;
 };
 
+struct ProfileBuilder {
+  string GetNodeInfo(const AstNode& node) {
+    Overloaded node_info{
+        [](monostate) -> string { return ""s; },
+        [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
+        [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
+        [](const AstLogicalNode& n) {
+          auto op = n.op == AstLogicalNode::AND ? "and" : "or";
+          return absl::StrCat("Logical{n=", n.nodes.size(), ",o=", op, "}");
+        },
+        [](const AstTagsNode& n) { return absl::StrCat("Tags{", absl::StrJoin(n.tags, ","), "}"); },
+        [](const AstFieldNode& n) { return absl::StrCat("Field{", n.field, "}"); },
+        [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
+        [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
+        [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
+    };
+    return visit(node_info, static_cast<const NodeVariants&>(node));
+  }
+
+  using Tp = std::chrono::steady_clock::time_point;
+
+  Tp Start() {
+    depth_++;
+    return chrono::steady_clock::now();
+  }
+
+  void Finish(Tp start, const AstNode& node, const IndexResult& result) {
+    DCHECK_GE(depth_, 1u);
+    auto took = chrono::steady_clock::now() - start;
+    size_t micros = chrono::duration_cast<chrono::microseconds>(took).count();
+    auto descr = GetNodeInfo(node);
+    profile_.events.push_back({std::move(descr), micros, depth_ - 1, result.Size()});
+    depth_--;
+  }
+
+  AlgorithmProfile Take() {
+    reverse(profile_.events.begin(), profile_.events.end());
+    return std::move(profile_);
+  }
+
+ private:
+  size_t depth_;
+  AlgorithmProfile profile_;
+};
+
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices) : indices_{indices}, tmp_vec_{} {
+  BasicSearch(const FieldIndices* indices, bool profile = false) : indices_{indices}, tmp_vec_{} {
+    if (profile)
+      profile_builder_ = ProfileBuilder{};
   }
 
   // Get casted sub index by field
@@ -231,6 +287,8 @@ struct BasicSearch {
 
   // Determine node type and call specific search function
   IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
+    ProfileBuilder::Tp start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
+
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
     auto result = visit(cb, static_cast<const NodeVariants&>(node));
 
@@ -239,24 +297,34 @@ struct BasicSearch {
     DCHECK(top_level ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
+    if (profile_builder_)
+      profile_builder_->Finish(start, node, result);
+
     return result;
   }
 
   SearchResult Search(const AstNode& query) {
     IndexResult result = SearchGeneric(query, "", true);
 
+    // Copy knn distances to be returned
+    vector<float> knn_distances;
     if (!distances_.empty()) {
-      vector<float> out_distances(result.Size());
-      for (size_t i = 0; i < out_distances.size(); i++)
-        out_distances[i] = distances_[i].first;
-
-      return SearchResult{result.Take(), move(out_distances)};
+      knn_distances.resize(result.Size());
+      for (size_t i = 0; i < knn_distances.size(); i++)
+        knn_distances[i] = distances_[i].first;
     }
 
-    return SearchResult{result.Take(), {}};
+    // Extract profile if enabled
+    optional<AlgorithmProfile> profile =
+        profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
+
+    return SearchResult{result.Take(), std::move(knn_distances), std::move(profile)};
   }
 
   const FieldIndices* indices_;
+
+  optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
+
   vector<DocId> tmp_vec_;
   vector<pair<float, DocId>> distances_;
 };
@@ -340,7 +408,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams& params) {
 }
 
 SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
-  return BasicSearch{index}.Search(*query_);
+  return BasicSearch{index, profiling_enabled_}.Search(*query_);
 }
 
 optional<size_t> SearchAlgorithm::HasKnn() const {
@@ -348,6 +416,10 @@ optional<size_t> SearchAlgorithm::HasKnn() const {
   if (holds_alternative<AstKnnNode>(*query_))
     return get<AstKnnNode>(*query_).limit;
   return nullopt;
+}
+
+void SearchAlgorithm::EnableProfiling() {
+  profiling_enabled_ = true;
 }
 
 }  // namespace dfly::search

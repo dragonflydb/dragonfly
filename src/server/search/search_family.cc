@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
+#include <absl/strings/str_format.h>
 
 #include <atomic>
 #include <jsoncons/json.hpp>
@@ -382,6 +383,85 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     ReplyWithResults(*params, absl::MakeSpan(docs), cntx);
 }
 
+void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
+  string_view index_name = ArgS(args, 0);
+  string_view query_str = ArgS(args, 3);
+
+  search::SearchAlgorithm search_algo;
+  if (!search_algo.Init(query_str, {search::FtVector{}}))
+    return (*cntx)->SendError("Query syntax error");
+
+  optional<SearchParams> params = ParseSearchParamsOrReply(args.subspan(4), cntx);
+  if (!params.has_value())
+    return;
+
+  search_algo.EnableProfiling();
+
+  absl::Time start = absl::Now();
+  atomic_uint total_docs = 0;
+  atomic_uint total_serialized = 0;
+
+  vector<pair<search::AlgorithmProfile, absl::Duration>> results(shard_set->size());
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(index_name);
+    if (!index)
+      return OpStatus::OK;
+
+    auto shard_start = absl::Now();
+    auto res = index->Search(t->GetOpArgs(es), *params, &search_algo);
+
+    total_docs.fetch_add(res.total_hits);
+    total_serialized.fetch_add(res.docs.size());
+
+    DCHECK(res.profile);
+    results[es->shard_id()] = {std::move(*res.profile), absl::Now() - shard_start};
+
+    return OpStatus::OK;
+  });
+
+  auto took = absl::Now() - start;
+
+  (*cntx)->StartArray(results.size() + 1);
+
+  // General stats
+  (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
+  (*cntx)->SendBulkString("took");
+  (*cntx)->SendLong(absl::ToInt64Microseconds(took));
+  (*cntx)->SendBulkString("hits");
+  (*cntx)->SendLong(total_docs);
+  (*cntx)->SendBulkString("serialized");
+  (*cntx)->SendLong(total_serialized);
+
+  // Per-shard stats
+  for (const auto& [profile, shard_took] : results) {
+    (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
+    (*cntx)->SendBulkString("took");
+    (*cntx)->SendLong(absl::ToInt64Microseconds(shard_took));
+    (*cntx)->SendBulkString("tree");
+
+    for (size_t i = 0; i < profile.events.size(); i++) {
+      const auto& event = profile.events[i];
+
+      size_t children = 0;
+      for (size_t j = i + 1; j < profile.events.size(); j++) {
+        if (profile.events[j].depth == event.depth)
+          break;
+        if (profile.events[j].depth == event.depth + 1)
+          children++;
+      }
+
+      if (children > 0)
+        (*cntx)->StartArray(2);
+
+      (*cntx)->SendSimpleString(
+          absl::StrFormat("t=%-10u f=%-10u %s", event.micros, event.flow, event.descr));
+
+      if (children > 0)
+        (*cntx)->StartArray(children);
+    }
+  }
+}
+
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
@@ -396,7 +476,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
             // Underscore same as in RediSearch because it's "temporary" (long time already)
             << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch);
+            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
+            << CI{"FT.PROFILE", CO::GLOBAL_TRANS, -4, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
 }
 
 }  // namespace dfly
