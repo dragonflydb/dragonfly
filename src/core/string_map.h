@@ -81,6 +81,12 @@ class StringMap : public DenseSet {
       return *this;
     }
 
+    iterator& operator+=(unsigned int n) {
+      for (unsigned int i = 0; i < n; ++i)
+        Advance();
+      return *this;
+    }
+
     bool operator==(const iterator& b) const {
       return curr_list_ == b.curr_list_;
     }
@@ -116,6 +122,21 @@ class StringMap : public DenseSet {
   iterator end() {
     return iterator{this, true};
   }
+
+  // Returns a random key value pair.
+  // Returns key only if value is a nullptr.
+  std::pair<sds, sds> RandomPair();
+
+  // Randomly selects count of key value pairs. The selections are unique.
+  // if count is larger than the total number of key value pairs, returns
+  // every pair.
+  void RandomPairsUnique(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
+                         bool with_value);
+
+  // Randomly selects count of key value pairs. The select key value pairs
+  // are allowed to have duplications.
+  void RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
+                   bool with_value);
 
  private:
   // Reallocate key and/or value if their pages are underutilized.
