@@ -110,8 +110,8 @@ struct StreamInfo {
   streamID last_generated_id;
   streamID max_deleted_entry_id;
   size_t entries_added;
-  Record* first_entry;
-  Record* last_entry;
+  Record first_entry;
+  Record last_entry;
   vector<Record> entries;
   GroupInfoVec cgroups;
 };
@@ -849,71 +849,6 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   return s->length;
 }
 
-OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
-                                         EngineShard* shard) {
-  auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
-
-  vector<GroupInfo> result;
-  CompactObj& cobj = (*res_it)->second;
-  stream* s = (stream*)cobj.RObjPtr();
-
-  if (s->cgroups) {
-    result.reserve(raxSize(s->cgroups));
-
-    raxIterator ri;
-    raxStart(&ri, s->cgroups);
-    raxSeek(&ri, "^", NULL, 0);
-    while (raxNext(&ri)) {
-      streamCG* cg = (streamCG*)ri.data;
-      GroupInfo ginfo;
-      ginfo.name.assign(reinterpret_cast<char*>(ri.key), ri.key_len);
-      ginfo.consumer_size = raxSize(cg->consumers);
-      ginfo.pending_size = raxSize(cg->pel);
-      ginfo.last_id = cg->last_id;
-      result.push_back(std::move(ginfo));
-    }
-    raxStop(&ri);
-  }
-
-  return result;
-}
-
-vector<Record> streamWithRange(stream* s, streamID start, streamID end, int reverse, size_t count) {
-  streamIterator si;
-  int64_t numfields;
-  streamID id;
-  size_t arraylen = 0;
-  vector<Record> records;
-
-  streamIteratorStart(&si, s, &start, &end, reverse);
-  while (streamIteratorGetID(&si, &id, &numfields)) {
-    Record rec;
-    rec.id = id;
-    rec.kv_arr.reserve(numfields);
-
-    while (numfields--) {
-      unsigned char *key, *value;
-      int64_t key_len, value_len;
-      streamIteratorGetField(&si, &key, &value, &key_len, &value_len);
-      string skey(reinterpret_cast<char*>(key), key_len);
-      string sval(reinterpret_cast<char*>(value), value_len);
-
-      rec.kv_arr.emplace_back(move(skey), move(sval));
-    }
-    records.push_back(rec);
-    arraylen++;
-    if (count && count == arraylen)
-      break;
-  }
-
-  streamIteratorStop(&si);
-
-  return records;
-}
-
 /* A helper that returns non-zero if the range from 'start' to `end`
  * contains a tombstone.
  *
@@ -1046,6 +981,73 @@ void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
   }
 }
 
+OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
+                                         EngineShard* shard) {
+  auto& db_slice = shard->db_slice();
+  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
+  if (!res_it)
+    return res_it.status();
+
+  vector<GroupInfo> result;
+  CompactObj& cobj = (*res_it)->second;
+  stream* s = (stream*)cobj.RObjPtr();
+
+  if (s->cgroups) {
+    result.reserve(raxSize(s->cgroups));
+
+    raxIterator ri;
+    raxStart(&ri, s->cgroups);
+    raxSeek(&ri, "^", NULL, 0);
+    while (raxNext(&ri)) {
+      streamCG* cg = (streamCG*)ri.data;
+      GroupInfo ginfo;
+      ginfo.name.assign(reinterpret_cast<char*>(ri.key), ri.key_len);
+      ginfo.consumer_size = raxSize(cg->consumers);
+      ginfo.pending_size = raxSize(cg->pel);
+      ginfo.last_id = cg->last_id;
+      ginfo.entries_read = cg->entries_read;  // TODO : this returns incorrect value, check.
+      getConsumerGroupLag(s, cg, &ginfo);
+      result.push_back(std::move(ginfo));
+    }
+    raxStop(&ri);
+  }
+
+  return result;
+}
+
+vector<Record> streamWithRange(stream* s, streamID start, streamID end, int reverse, size_t count) {
+  streamIterator si;
+  int64_t numfields;
+  streamID id;
+  size_t arraylen = 0;
+  vector<Record> records;
+
+  streamIteratorStart(&si, s, &start, &end, reverse);
+  while (streamIteratorGetID(&si, &id, &numfields)) {
+    Record rec;
+    rec.id = id;
+    rec.kv_arr.reserve(numfields);
+
+    while (numfields--) {
+      unsigned char *key, *value;
+      int64_t key_len, value_len;
+      streamIteratorGetField(&si, &key, &value, &key_len, &value_len);
+      string skey(reinterpret_cast<char*>(key), key_len);
+      string sval(reinterpret_cast<char*>(value), value_len);
+
+      rec.kv_arr.emplace_back(move(skey), move(sval));
+    }
+    records.push_back(rec);
+    arraylen++;
+    if (count && count == arraylen)
+      break;
+  }
+
+  streamIteratorStop(&si);
+
+  return records;
+}
+
 void getGroupPEL(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
   vector<NACKInfo> nack_info_vec;
   long long arraylen_cg_pel = 0;
@@ -1161,25 +1163,21 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
     }
   } else {
     sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
-    // TODO : fix for empty stream
     vector<Record> first_entry_vector = streamWithRange(s, s->first_id, s->last_id, 0, 1);
     if (first_entry_vector.size() != 0) {
-      sinfo.first_entry = &first_entry_vector.at(0);
-    } else {
-      sinfo.first_entry = NULL;
+      sinfo.first_entry = first_entry_vector.at(0);
     }
     vector<Record> last_entry_vector = streamWithRange(s, s->first_id, s->last_id, 1, 1);
     if (last_entry_vector.size() != 0) {
-      sinfo.last_entry = &last_entry_vector.at(0);
-    } else {
-      sinfo.last_entry = NULL;
+      sinfo.last_entry = last_entry_vector.at(0);
     }
   }
 
   return sinfo;
 }
 
-OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard* shard, string_view stream_name, string_view group_name) {
+OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard* shard,
+                                           string_view stream_name, string_view group_name) {
   auto& db_slice = shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, stream_name, OBJ_STREAM);
   if (!res_it)
@@ -1196,14 +1194,15 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
   result.reserve(raxSize(s->cgroups));
 
   raxIterator ri;
-  raxStart(&ri,cg->consumers);
-  raxSeek(&ri,"^",NULL,0);
+  raxStart(&ri, cg->consumers);
+  raxSeek(&ri, "^", NULL, 0);
   mstime_t now = mstime();
-  while(raxNext(&ri)) {
+  while (raxNext(&ri)) {
     ConsumerInfo consumer_info;
     streamConsumer* consumer = (streamConsumer*)ri.data;
     mstime_t idle = now - consumer->seen_time;
-    if (idle < 0) idle = 0;
+    if (idle < 0)
+      idle = 0;
 
     consumer_info.name = consumer->name;
     consumer_info.pel_count = raxSize(consumer->pel);
@@ -1804,16 +1803,14 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   if (sub_cmd == "HELP") {
-    string_view help_arr[] = {
-        "CONSUMERS <key> <groupname>",
-        "    Show consumers of <groupname>.",
-        "GROUPS <key>",
-        "    Show the stream consumer groups.",
-        "STREAM <key> [FULL [COUNT <count>]",
-        "    Show information about the stream.",
-        "HELP",
-        "    Prints this help."
-    };
+    string_view help_arr[] = {"CONSUMERS <key> <groupname>",
+                              "    Show consumers of <groupname>.",
+                              "GROUPS <key>",
+                              "    Show the stream consumer groups.",
+                              "STREAM <key> [FULL [COUNT <count>]",
+                              "    Show information about the stream.",
+                              "HELP",
+                              "    Prints this help."};
     return (*cntx)->SendSimpleStrArr(help_arr);
   }
 
@@ -1835,7 +1832,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         for (const auto& ginfo : *result) {
           string last_id = StreamIdRepr(ginfo.last_id);
 
-          (*cntx)->StartCollection(4, RedisReplyBuilder::MAP);
+          (*cntx)->StartCollection(6, RedisReplyBuilder::MAP);
           (*cntx)->SendBulkString("name");
           (*cntx)->SendBulkString(ginfo.name);
           (*cntx)->SendBulkString("consumers");
@@ -1844,6 +1841,10 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           (*cntx)->SendLong(ginfo.pending_size);
           (*cntx)->SendBulkString("last-delivered-id");
           (*cntx)->SendBulkString(last_id);
+          (*cntx)->SendBulkString("entries-read");
+          (*cntx)->SendLong(ginfo.entries_read);
+          (*cntx)->SendBulkString("lag");
+          (*cntx)->SendLong(ginfo.lag);
         }
         return;
       }
@@ -1860,10 +1861,10 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       if (args.size() >= 3) {
         full = 1;
         string_view full_arg = ArgS(args, 2);
-        if (full_arg != "full") {
-            return (*cntx)->SendError(
-                "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
-          }
+        if (full_arg != "FULL") {
+          return (*cntx)->SendError(
+              "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
+        }
         if (args.size() > 3) {
           string_view count_arg = ArgS(args, 3);
           string_view count_value_arg = ArgS(args, 4);
@@ -1990,11 +1991,11 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           (*cntx)->SendLong(sinfo->groups);
 
           (*cntx)->SendBulkString("first-entry");
-          if (sinfo->first_entry != NULL) {
+          if (sinfo->first_entry.kv_arr.size() != 0) {
             (*cntx)->StartArray(2);
-            (*cntx)->SendBulkString(StreamIdRepr(sinfo->first_entry->id));
-            (*cntx)->StartArray(sinfo->first_entry->kv_arr.size() * 2);
-            for (const auto& k_v : sinfo->first_entry->kv_arr) {
+            (*cntx)->SendBulkString(StreamIdRepr(sinfo->first_entry.id));
+            (*cntx)->StartArray(sinfo->first_entry.kv_arr.size() * 2);
+            for (pair<string, string> k_v : sinfo->first_entry.kv_arr) {
               (*cntx)->SendBulkString(k_v.first);
               (*cntx)->SendBulkString(k_v.second);
             }
@@ -2003,18 +2004,17 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           }
 
           (*cntx)->SendBulkString("last-entry");
-          if (sinfo->last_entry != NULL) {
+          if (sinfo->last_entry.kv_arr.size() != 0) {
             (*cntx)->StartArray(2);
-            (*cntx)->SendBulkString(StreamIdRepr(sinfo->last_entry->id));
-            (*cntx)->StartArray(sinfo->last_entry->kv_arr.size() * 2);
-            for (const auto& k_v : sinfo->last_entry->kv_arr) {
+            (*cntx)->SendBulkString(StreamIdRepr(sinfo->last_entry.id));
+            (*cntx)->StartArray(sinfo->last_entry.kv_arr.size() * 2);
+            for (pair<string, string> k_v : sinfo->last_entry.kv_arr) {
               (*cntx)->SendBulkString(k_v.first);
               (*cntx)->SendBulkString(k_v.second);
             }
           } else {
             (*cntx)->SendNullArray();
           }
-          
         }
         return;
       }
