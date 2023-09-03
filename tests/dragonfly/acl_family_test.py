@@ -53,6 +53,11 @@ async def test_acl_setuser(async_client):
     result = await async_client.execute_command("ACL LIST")
     assert "user kostas on nopass +@LIST" in result
 
+    # mix and match interleaved
+    await async_client.execute_command("ACL SETUSER kostas +@set -@set +@set")
+    result = await async_client.execute_command("ACL LIST")
+    assert "user kostas on nopass +@SET +@LIST" in result
+
     await async_client.execute_command("ACL SETUSER kostas +@all")
     result = await async_client.execute_command("ACL LIST")
     assert "user kostas on nopass +@ALL" in result
