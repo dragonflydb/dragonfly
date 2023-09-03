@@ -11,7 +11,8 @@
 namespace dfly::acl {
 
 UserRegistry::UserRegistry() {
-  User::UpdateRequest req{{}, acl::ALL, {}, true};
+  std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
+  User::UpdateRequest req{{}, {acl}, true};
   MaybeAddAndUpdate("default", std::move(req));
 }
 

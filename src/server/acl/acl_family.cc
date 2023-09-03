@@ -7,6 +7,7 @@
 
 #include <cctype>
 #include <optional>
+#include <utility>
 #include <variant>
 
 #include "absl/strings/ascii.h"
@@ -151,8 +152,10 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
       return ErrorReply(absl::StrCat("Unrecognized parameter", command));
     }
 
-    auto* acl_field = add ? &req.plus_acl_categories : &req.minus_acl_categories;
-    *acl_field = acl_field->value_or(0) | *cat;
+    using Sign = User::Sign;
+    using Val = std::pair<Sign, uint32_t>;
+    auto val = add ? Val{Sign::PLUS, *cat} : Val{Sign::MINUS, *cat};
+    req.categories.push_back(val);
   }
 
   return req;

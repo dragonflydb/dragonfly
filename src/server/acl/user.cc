@@ -28,12 +28,12 @@ void User::Update(UpdateRequest&& req) {
     SetPasswordHash(*req.password);
   }
 
-  if (req.plus_acl_categories) {
-    SetAclCategories(*req.plus_acl_categories);
-  }
-
-  if (req.minus_acl_categories) {
-    UnsetAclCategories(*req.minus_acl_categories);
+  for (auto [sign, category] : req.categories) {
+    if (sign == Sign::PLUS) {
+      SetAclCategories(category);
+      continue;
+    }
+    UnsetAclCategories(category);
   }
 
   if (req.is_active) {

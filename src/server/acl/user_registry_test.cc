@@ -23,24 +23,27 @@ TEST_F(UserRegistryTest, BasicOp) {
   const std::string username = "kostas";
   const std::string pass = "mypass";
 
-  User::UpdateRequest req{pass, {}, {}, true};
+  User::UpdateRequest req{pass, {}, true};
   registry.MaybeAddAndUpdate(username, std::move(req));
   CHECK_EQ(registry.AuthUser(username, pass), true);
   CHECK_EQ(registry.IsUserActive(username), true);
 
   CHECK_EQ(registry.GetCredentials(username).acl_categories, NONE);
 
-  const uint32_t set_category = NONE | LIST | SET;
-  req = User::UpdateRequest{{}, set_category, {}, {}};
+  using Sign = User::Sign;
+  std::vector<std::pair<Sign, uint32_t>> cat = {{Sign::PLUS, LIST}, {Sign::PLUS, SET}};
+  req = User::UpdateRequest{{}, std::move(cat), {}};
   registry.MaybeAddAndUpdate(username, std::move(req));
   auto acl_categories = registry.GetCredentials(username).acl_categories;
-  CHECK_EQ(acl_categories, set_category);
+  uint32_t expected_result = NONE | LIST | SET;
+  CHECK_EQ(acl_categories, expected_result);
 
-  req = User::UpdateRequest{{}, {}, 0 | LIST, {}};
+  cat.push_back({Sign::MINUS, LIST});
+  req = User::UpdateRequest{{}, std::move(cat), {}};
   registry.MaybeAddAndUpdate(username, std::move(req));
   acl_categories = registry.GetCredentials(username).acl_categories;
-  const uint32_t expected_res = NONE | SET;
-  CHECK_EQ(acl_categories, expected_res);
+  expected_result = NONE | SET;
+  CHECK_EQ(acl_categories, expected_result);
 }
 
 }  // namespace dfly::acl
