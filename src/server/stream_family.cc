@@ -1860,15 +1860,17 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
       if (args.size() >= 3) {
         full = 1;
+        ToUpper(&args[2]);
         string_view full_arg = ArgS(args, 2);
         if (full_arg != "FULL") {
           return (*cntx)->SendError(
               "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
         }
         if (args.size() > 3) {
+          ToUpper(&args[3]);
           string_view count_arg = ArgS(args, 3);
           string_view count_value_arg = ArgS(args, 4);
-          if (count_arg != "count") {
+          if (count_arg != "COUNT") {
             return (*cntx)->SendError(
                 "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
           }
@@ -1942,7 +1944,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
             (*cntx)->SendLong(ginfo.entries_read);  // TODO : check this, value is incorrect.
 
             (*cntx)->SendBulkString("lag");
-            (*cntx)->SendLong(ginfo.lag);
+            (*cntx)->SendLong(ginfo.lag);  // TODO : check this, value is incorrect.
 
             (*cntx)->SendBulkString("pel-count");
             (*cntx)->SendLong(ginfo.pel_count);

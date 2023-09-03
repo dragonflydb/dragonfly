@@ -577,4 +577,132 @@ TEST_F(StreamFamilyTest, XInfoConsumers) {
   // pending for second-consumer
   EXPECT_THAT(resp.GetVec()[1].GetVec()[3], IntArg(0));
 }
+
+TEST_F(StreamFamilyTest, XInfoStream) {
+  Run({"del", "mystream"});
+  Run({"xgroup", "create", "mystream", "mygroup", "$", "MKSTREAM"});
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "first-consumer"});
+
+  // invalid key
+  auto resp = Run({"xinfo", "stream", "non-existent-stream"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  // invalid args
+  resp = Run({"xinfo", "stream", "mystream", "extra-arg"});
+  EXPECT_THAT(
+      resp,
+      ErrArg("unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP."));
+  resp = Run({"xinfo", "stream", "mystream", "full", "count"});
+  EXPECT_THAT(
+      resp,
+      ErrArg("unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP."));
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "a"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // no message in stream
+  resp = Run({"xinfo", "stream", "mystream"});
+  EXPECT_THAT(resp, ArrLen(20));
+  EXPECT_THAT(
+      resp.GetVec(),
+      ElementsAre("length", IntArg(0), "radix-tree-keys", IntArg(0), "radix-tree-nodes", IntArg(1),
+                  "last-generated-id", "0-0", "max-deleted-entry-id", "0-0", "entries-added",
+                  IntArg(0), "recorded-first-entry-id", "0-0", "groups", IntArg(1), "first-entry",
+                  ArgType(RespExpr::NIL_ARRAY), "last-entry", ArgType(RespExpr::NIL_ARRAY)));
+
+  Run({"xadd", "mystream", "1-1", "message", "one"});
+  Run({"xadd", "mystream", "2-1", "message", "two"});
+  Run({"xadd", "mystream", "3-1", "message", "three"});
+  Run({"xadd", "mystream", "4-1", "message", "four"});
+  Run({"xadd", "mystream", "5-1", "message", "five"});
+  Run({"xadd", "mystream", "6-1", "message", "six"});
+  Run({"xadd", "mystream", "7-1", "message", "seven"});
+  Run({"xadd", "mystream", "8-1", "message", "eight"});
+  Run({"xadd", "mystream", "9-1", "message", "nine"});
+  Run({"xadd", "mystream", "10-1", "message", "ten"});
+  Run({"xadd", "mystream", "11-1", "message", "eleven"});
+  resp = Run({"xinfo", "stream", "mystream"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(11), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "0-0",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "1-1", "groups",
+                          IntArg(1), "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0], "1-1");
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[1].GetVec(), ElementsAre("message", "one"));
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[0], "11-1");
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[1].GetVec(), ElementsAre("message", "eleven"));
+
+  // full - default
+  resp = Run({"xinfo", "stream", "mystream", "full"});
+  EXPECT_THAT(resp, ArrLen(18));
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(10));
+  EXPECT_THAT(resp.GetVec()[17], ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0], ArrLen(14));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(11), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "0-0",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "1-1", "entries",
+                          ArrLen(10), "groups", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
+              ElementsAre("name", "mygroup", "last-delivered-id", "0-0", "entries-read", IntArg(0),
+                          "lag", IntArg(11), "pel-count", IntArg(0), "pending", ArrLen(0),
+                          "consumers", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
+              ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
+                          "pel-count", IntArg(0), "pending", ArrLen(0)));
+
+  // full with count less than number of messages in stream
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "5"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(5));
+
+  // full with count exceeding number of messages in stream
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "12"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(11));
+
+  // full - all messages
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "0"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(11));
+
+  // read message
+  Run({"xreadgroup", "group", "mygroup", "first-consumer", "STREAMS", "mystream", ">"});
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "0"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(11));
+  // group
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[5], IntArg(11));   // entries-read
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[7], IntArg(0));    // lag
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[9], IntArg(11));   // pel-count
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[11], ArrLen(11));  // pending list
+  // consumer
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec()[5],
+              IntArg(11));  // pel-count
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec()[7],
+              ArrLen(11));  // pending list
+
+  // delete message
+  Run({"xdel", "mystream", "1-1"});
+  resp = Run({"xinfo", "stream", "mystream"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(10), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "1-1",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "2-1", "groups",
+                          IntArg(1), "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0], "2-1");
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[1].GetVec(), ElementsAre("message", "two"));
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[0], "11-1");
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[1].GetVec(), ElementsAre("message", "eleven"));
+
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "0"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(10));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(10), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "1-1",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "2-1", "entries",
+                          ArrLen(10), "groups", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
+              ElementsAre("name", "mygroup", "last-delivered-id", "11-1", "entries-read",
+                          IntArg(11), "lag", IntArg(0), "pel-count", IntArg(11), "pending",
+                          ArrLen(11), "consumers", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
+              ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
+                          "pel-count", IntArg(11), "pending", ArrLen(11)));
+}
 }  // namespace dfly
