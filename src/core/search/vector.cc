@@ -41,7 +41,7 @@ __attribute__((optimize("fast-math"))) float CosineDistance(const float* u, cons
 }  // namespace
 
 OwnedFtVector BytesToFtVector(string_view value) {
-  DCHECK_EQ(value.size() % sizeof(float), 0u);
+  DCHECK_EQ(value.size() % sizeof(float), 0u) << value.size();
 
   size_t size = value.size() / sizeof(float);
   auto out = make_unique<float[]>(size);

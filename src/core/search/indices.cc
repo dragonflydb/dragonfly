@@ -154,22 +154,23 @@ VectorIndex::VectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim
 }
 
 void VectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  DCHECK_LE(id, entries_.size());
-  if (id == entries_.size())
-    entries_.push_back(nullptr);
+  DCHECK_LE(id * dim_, entries_.size());
+  if (id * dim_ == entries_.size())
+    entries_.resize((id + 1) * dim_);
 
+  // TODO: Let get vector write to buf itself
   auto [ptr, size] = doc->GetVector(field);
 
   if (size == dim_)
-    entries_[id] = std::move(ptr);
+    memcpy(&entries_[id * dim_], ptr.get(), dim_ * sizeof(float));
 }
 
 void VectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  entries_[id].reset();
+  // noop
 }
 
 const float* VectorIndex::Get(DocId doc) const {
-  return entries_[doc].get();
+  return &entries_[doc * dim_];
 }
 
 std::pair<size_t /*dim*/, VectorSimilarity> VectorIndex::Info() const {

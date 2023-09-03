@@ -19,6 +19,7 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
+#include "core/search/vector.h"
 
 namespace dfly {
 namespace search {
@@ -41,18 +42,7 @@ struct MockedDocument : public DocumentAccessor {
   }
 
   VectorInfo GetVector(string_view field) const override {
-    string_view str_value = fields_.at(field);
-    std::vector<float> out;
-    for (string_view coord : absl::StrSplit(str_value, ',')) {
-      float v;
-      CHECK(absl::SimpleAtof(coord, &v));
-      out.push_back(v);
-    }
-
-    auto ptr = make_unique<float[]>(out.size());
-    memcpy(ptr.get(), out.data(), sizeof(float) * out.size());
-
-    return {std::move(ptr), out.size()};
+    return BytesToFtVector(GetString(field));
   }
 
   string DebugFormat() {
@@ -346,7 +336,7 @@ TEST_F(SearchParserTest, SimpleKnn) {
 
   // Place points on a straight line
   for (size_t i = 0; i < 100; i++) {
-    Map values{{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", to_string(float(i))}}};
+    Map values{{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", ToBytes({float(i)})}}};
     MockedDocument doc{values};
     indices.Add(i, &doc);
   }
@@ -402,8 +392,7 @@ TEST_F(SearchParserTest, Simple2dKnn) {
   FieldIndices indices{schema};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
-    auto [x, y] = kTestCoords[i];
-    string coords = absl::StrCat(x, ",", y);
+    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
     MockedDocument doc{Map{{"pos", coords}}};
     indices.Add(i, &doc);
   }
@@ -453,6 +442,42 @@ TEST_F(SearchParserTest, Simple2dKnn) {
     EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(2, 4, 3, 1, 0));
   }
 }
+
+static void BM_VectorSearch(benchmark::State& state) {
+  unsigned ndims = state.range(0);
+  unsigned nvecs = state.range(1);
+
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].knn_dim = ndims;
+  FieldIndices indices{schema};
+
+  auto random_vec = [ndims]() {
+    vector<float> coords;
+    for (size_t j = 0; j < ndims; j++)
+      coords.push_back(static_cast<float>(rand()) / static_cast<float>(RAND_MAX));
+    return coords;
+  };
+
+  for (size_t i = 0; i < nvecs; i++) {
+    auto rv = random_vec();
+    MockedDocument doc{Map{{"pos", ToBytes(rv)}}};
+    indices.Add(i, &doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  auto rv = random_vec();
+  params["vec"] = ToBytes(rv);
+  algo.Init("* =>[KNN 1 @pos $vec]", params);
+
+  while (state.KeepRunningBatch(10)) {
+    for (size_t i = 0; i < 10; i++)
+      benchmark::DoNotOptimize(algo.Search(&indices));
+  }
+}
+
+BENCHMARK(BM_VectorSearch)->Args({120, 10'000});
 
 }  // namespace search
 

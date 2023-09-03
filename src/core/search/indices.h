@@ -68,7 +68,7 @@ struct VectorIndex : public BaseIndex {
  private:
   size_t dim_;
   VectorSimilarity sim_;
-  std::vector<std::unique_ptr<float[]>> entries_;
+  std::vector<float> entries_;
 };
 
 }  // namespace dfly::search
