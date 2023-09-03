@@ -385,4 +385,24 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
 }
 
+TEST_F(SearchFamilyTest, FtProfile) {
+  Run({"ft.create", "i1", "schema", "name", "text"});
+
+  auto resp = Run({"ft.profile", "i1", "search", "query", "(a | b) c d"});
+
+  const auto& top_level = resp.GetVec();
+  EXPECT_EQ(top_level.size(), shard_set->size() + 1);
+
+  EXPECT_THAT(top_level[0].GetVec(), ElementsAre("took", _, "hits", _, "serialized", _));
+
+  for (size_t sid = 0; sid < shard_set->size(); sid++) {
+    const auto& shard_resp = top_level[sid + 1].GetVec();
+    EXPECT_THAT(shard_resp, ElementsAre("took", _, "tree", _));
+
+    const auto& tree = shard_resp[3].GetVec();
+    EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
+    EXPECT_EQ(tree[1].GetVec().size(), 3);
+  }
+}
+
 }  // namespace dfly
