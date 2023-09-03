@@ -396,7 +396,12 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   int cpu = 0;
   socklen_t len = sizeof(cpu);
   getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
+
+#ifdef __APPLE__
+  int my_cpu_id = -1;  // __APPLE__ does not have sched_getcpu()
+#else
   int my_cpu_id = sched_getcpu();
+#endif
 
   static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");

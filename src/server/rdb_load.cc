@@ -1495,7 +1495,7 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
-  uint64_t len;
+  size_t len;
   SET_OR_UNEXPECT(LoadLen(nullptr), len);
 
   if (len == 0)
@@ -1506,7 +1506,7 @@ auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
   len *= 2;
   load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
   for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min(len, kMaxBlobLen);
+    size_t n = std::min<size_t>(len, kMaxBlobLen);
     load_trace->arr[i].resize(n);
     for (size_t j = 0; j < n; ++j) {
       error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
@@ -1533,7 +1533,7 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   double score;
 
   for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min(zsetlen, kMaxBlobLen);
+    size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
     load_trace->arr[i].resize(n);
     for (size_t j = 0; j < n; ++j) {
       error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
@@ -1581,7 +1581,7 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
 
   for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min(len, kMaxBlobLen);
+    size_t n = std::min<size_t>(len, kMaxBlobLen);
     load_trace->arr[i].resize(n);
     for (size_t j = 0; j < n; ++j) {
       uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;

@@ -74,7 +74,8 @@ absl::flat_hash_set<std::string> ICUTokenizeWords(std::string_view text) {
 
 // Convert string to lowercase with ICU library
 std::string ICUToLowercase(string_view input) {
-  icu::UnicodeString uStr = icu::UnicodeString::fromUTF8(input);
+  icu::UnicodeString uStr =
+      icu::UnicodeString::fromUTF8(icu::StringPiece(input.data(), input.size()));
   uStr.toLower();
   std::string result;
   uStr.toUTF8String(result);

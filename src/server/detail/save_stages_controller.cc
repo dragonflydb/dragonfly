@@ -39,7 +39,11 @@ namespace fs = std::filesystem;
 namespace {
 
 const size_t kBucketConnectMs = 2000;
+
+#ifdef __linux__
 const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
+#endif
+
 constexpr string_view kS3Prefix = "s3://"sv;
 
 bool IsCloudPath(string_view path) {
@@ -252,6 +256,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
         return GenericError(res.error(), "Couldn't open file for writing");
       io_sink_.reset(*res);
     } else {
+#ifdef __linux__
       auto res = OpenLinux(path, kRdbWriteFlags, 0666);
       if (!res) {
         return GenericError(
@@ -261,6 +266,9 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
       is_linux_file_ = true;
       io_sink_.reset(new LinuxWriteWrapper(res->release()));
       is_direct = kRdbWriteFlags & O_DIRECT;
+#else
+      LOG(FATAL) << "Linux I/O is not supported on this platform";
+#endif
     }
   }
 
@@ -507,6 +515,7 @@ RdbSaver::GlobalData SaveStagesController::GetGlobalData() const {
       script_bodies.push_back(move(data.body));
   }
 
+#ifndef __APPLE__
   {
     shard_set->Await(0, [&] {
       auto* indices = EngineShard::tlocal()->search_indices();
@@ -517,6 +526,7 @@ RdbSaver::GlobalData SaveStagesController::GetGlobalData() const {
       }
     });
   }
+#endif
 
   return RdbSaver::GlobalData{move(script_bodies), move(search_indices)};
 }
