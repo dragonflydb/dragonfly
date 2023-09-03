@@ -12,6 +12,7 @@
 
 #include "core/json_object.h"
 #include "core/search/search.h"
+#include "core/search/vector.h"
 #include "core/string_map.h"
 #include "server/container_utils.h"
 
@@ -32,7 +33,7 @@ string_view SdsToSafeSv(sds str) {
 
 string PrintField(search::SchemaField::FieldType type, string_view value) {
   if (type == search::SchemaField::VECTOR)
-    return absl::StrCat("[", absl::StrJoin(BytesToFtVector(value), ","), "]");
+    return absl::StrCat("[", absl::StrJoin(search::BytesToFtVector(value), ","), "]");
   else
     return string{value};
 }
@@ -48,7 +49,7 @@ string ExtractValue(const search::Schema& schema, string_view key, string_view v
 }  // namespace
 
 SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
-                                      const SearchParams::FieldAliasList& fields) const {
+                                      const SearchParams::FieldReturnList& fields) const {
   SearchDocData out{};
   for (const auto& [fident, fname] : fields) {
     auto it = schema.fields.find(fident);
@@ -63,7 +64,7 @@ string_view ListPackAccessor::GetString(string_view active_field) const {
 }
 
 search::FtVector ListPackAccessor::GetVector(string_view active_field) const {
-  return BytesToFtVector(GetString(active_field));
+  return search::BytesToFtVector(GetString(active_field));
 }
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
@@ -89,7 +90,7 @@ string_view StringMapAccessor::GetString(string_view active_field) const {
 }
 
 search::FtVector StringMapAccessor::GetVector(string_view active_field) const {
-  return BytesToFtVector(GetString(active_field));
+  return search::BytesToFtVector(GetString(active_field));
 }
 
 SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
@@ -146,7 +147,7 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
 }
 
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
-                                      const SearchParams::FieldAliasList& fields) const {
+                                      const SearchParams::FieldReturnList& fields) const {
   SearchDocData out{};
   for (const auto& [ident, name] : fields)
     out[name] = GetString(ident);

@@ -85,7 +85,7 @@ class SearchAlgorithm {
   ~SearchAlgorithm();
 
   // Init with query and return true if successful.
-  bool Init(std::string_view query, const QueryParams& params);
+  bool Init(std::string_view query, const QueryParams* params);
 
   SearchResult Search(const FieldIndices* index) const;
 

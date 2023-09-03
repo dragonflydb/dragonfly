@@ -26,7 +26,7 @@ namespace dfly::search {
 
 namespace {
 
-AstExpr ParseQuery(std::string_view query, const QueryParams& params) {
+AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
   QueryDriver driver{};
   driver.ResetScanner();
   driver.SetParams(params);
@@ -396,7 +396,7 @@ const vector<DocId>& FieldIndices::GetAllDocs() const {
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-bool SearchAlgorithm::Init(string_view query, const QueryParams& params) {
+bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
   try {
     query_ = make_unique<AstExpr>(ParseQuery(query, params));
     return !holds_alternative<monostate>(*query_);
