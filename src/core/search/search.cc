@@ -10,6 +10,7 @@
 #include <absl/strings/str_join.h>
 
 #include <chrono>
+#include <type_traits>
 #include <variant>
 
 #include "base/logging.h"
@@ -38,6 +39,7 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
   using DocVec = vector<DocId>;
+  using BorrowedView = variant<const DocVec*, const CompressedSortedSet*>;
 
   IndexResult() : value_{DocVec{}} {};
 
@@ -49,10 +51,11 @@ struct IndexResult {
   IndexResult(DocVec&& dv) : value_{move(dv)} {
   }
 
+  IndexResult(const DocVec* dv) : value_{dv} {
+  }
+
   size_t Size() const {
-    if (holds_alternative<DocVec>(value_))
-      return get<DocVec>(value_).size();
-    return get<const CompressedSortedSet*>(value_)->Size();
+    return visit([](auto* set) { return set->size(); }, Borrowed());
   }
 
   bool IsOwned() const {
@@ -69,23 +72,30 @@ struct IndexResult {
     return *this;
   }
 
-  variant<const DocVec*, const CompressedSortedSet*> Borrowed() {
-    if (holds_alternative<DocVec>(value_))
-      return &get<DocVec>(value_);
-    return get<const CompressedSortedSet*>(value_);
+  BorrowedView Borrowed() const {
+    auto cb = [](const auto& v) -> BorrowedView {
+      if constexpr (is_pointer_v<remove_reference_t<decltype(v)>>)
+        return v;
+      else
+        return &v;
+    };
+    return visit(cb, value_);
   }
 
   // Move out of owned or copy borrowed
   DocVec Take() {
-    if (holds_alternative<DocVec>(value_))
+    if (IsOwned())
       return move(get<DocVec>(value_));
 
-    const CompressedSortedSet* css = get<const CompressedSortedSet*>(value_);
-    return DocVec(css->begin(), css->end());
+    return visit([](auto* set) { return DocVec(set->begin(), set->end()); }, Borrowed());
   }
 
  private:
-  variant<DocVec /*owned*/, const CompressedSortedSet* /* borrowed */> value_;
+  bool IsOwned() const {
+    return holds_alternative<DocVec>(value_);
+  }
+
+  variant<DocVec /*owned*/, const CompressedSortedSet*, const DocVec*> value_;
 };
 
 struct ProfileBuilder {
@@ -206,7 +216,7 @@ struct BasicSearch {
 
   IndexResult Search(const AstStarNode& node, string_view active_field) {
     DCHECK(active_field.empty());
-    return vector<DocId>{indices_->GetAllDocs()};  // TODO FIX;
+    return {&indices_->GetAllDocs()};
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set
@@ -268,19 +278,23 @@ struct BasicSearch {
     auto sub_results = SearchGeneric(*knn.filter, active_field);
 
     auto* vec_index = GetIndex<VectorIndex>(knn.field);
+    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second)
+      return IndexResult{};
 
     distances_.reserve(sub_results.Size());
     auto cb = [&](auto* set) {
+      auto [dim, sim] = vec_index->Info();
       for (DocId matched_doc : *set) {
-        float dist = VectorDistance(knn.vector, vec_index->Get(matched_doc));
+        float dist = VectorDistance(knn.vec.first.get(), vec_index->Get(matched_doc), dim, sim);
         distances_.emplace_back(dist, matched_doc);
       }
     };
     visit(cb, sub_results.Borrowed());
 
-    sort(distances_.begin(), distances_.end());
+    size_t prefix_size = min(knn.limit, distances_.size());
+    partial_sort(distances_.begin(), distances_.begin() + prefix_size, distances_.end());
 
-    vector<DocId> out(min(knn.limit, distances_.size()));
+    vector<DocId> out(prefix_size);
     for (size_t i = 0; i < out.size(); i++)
       out[i] = distances_[i].second;
 
@@ -346,7 +360,7 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
         indices_[field_ident] = make_unique<NumericIndex>();
         break;
       case SchemaField::VECTOR:
-        indices_[field_ident] = make_unique<VectorIndex>();
+        indices_[field_ident] = make_unique<VectorIndex>(field_info.knn_dim, field_info.knn_sim);
         break;
     }
   }

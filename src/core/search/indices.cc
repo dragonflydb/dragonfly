@@ -150,17 +150,30 @@ absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) cons
   return NormalizeTags(value);
 }
 
+VectorIndex::VectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim}, entries_{} {
+}
+
 void VectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  entries_[id] = doc->GetVector(field);
+  DCHECK_LE(id, entries_.size());
+  if (id == entries_.size())
+    entries_.push_back(nullptr);
+
+  auto [ptr, size] = doc->GetVector(field);
+
+  if (size == dim_)
+    entries_[id] = std::move(ptr);
 }
 
 void VectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  entries_.erase(id);
+  entries_[id].reset();
 }
 
-FtVector VectorIndex::Get(DocId doc) const {
-  auto it = entries_.find(doc);
-  return it != entries_.end() ? it->second : FtVector{};
+const float* VectorIndex::Get(DocId doc) const {
+  return entries_[doc].get();
+}
+
+std::pair<size_t /*dim*/, VectorSimilarity> VectorIndex::Info() const {
+  return {dim_, sim_};
 }
 
 }  // namespace dfly::search

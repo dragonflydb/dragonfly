@@ -57,13 +57,18 @@ struct TagIndex : public BaseStringIndex {
 // Index for vector fields.
 // Only supports lookup by id.
 struct VectorIndex : public BaseIndex {
+  VectorIndex(size_t dim, VectorSimilarity sim);
+
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
-  FtVector Get(DocId doc) const;
+  const float* Get(DocId doc) const;
+  std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
 
  private:
-  absl::flat_hash_map<DocId, FtVector> entries_;
+  size_t dim_;
+  VectorSimilarity sim_;
+  std::vector<std::unique_ptr<float[]>> entries_;
 };
 
 }  // namespace dfly::search

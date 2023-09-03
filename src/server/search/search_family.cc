@@ -46,6 +46,24 @@ bool IsValidJsonPath(string_view path) {
   return !ec;
 }
 
+pair<size_t, search::VectorSimilarity> ParseVectorFieldInfoOrReply(CmdArgParser* parser,
+                                                                   ConnectionContext* cntx) {
+  size_t dim = 0;
+  search::VectorSimilarity sim = search::VectorSimilarity::L2;
+
+  size_t num_args = parser->Next().Int<size_t>();
+  for (size_t i = 0; i * 2 < num_args; i++) {
+    parser->ToUpper();
+    if (parser->Check("DIM")) {
+      dim = parser->Next().Int<size_t>();
+      continue;
+    }
+    parser->Skip(2);
+  }
+
+  return {dim, sim};
+}
+
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
                                             ConnectionContext* cntx) {
   search::Schema schema;
@@ -74,15 +92,19 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
       return nullopt;
     }
 
-    // Skip {algorithm} {dim} flags
-    if (*type == search::SchemaField::VECTOR)
-      parser.Skip(2);
+    // Vector fields include: {algorithm} num_args args...
+    size_t knn_dim = 0;
+    search::VectorSimilarity knn_sim = search::VectorSimilarity::L2;
+    if (*type == search::SchemaField::VECTOR) {
+      parser.Skip(1);  // algorithm
+      std::tie(knn_dim, knn_sim) = ParseVectorFieldInfoOrReply(&parser, cntx);
+    }
 
     // Skip all trailing ignored parameters
     while (kIgnoredOptions.count(parser.Peek()) > 0)
       parser.Skip(2);
 
-    schema.fields[field] = {*type, string{field_alias}};
+    schema.fields[field] = {*type, string{field_alias}, knn_dim, knn_sim};
   }
 
   // Build field name mapping table
@@ -208,8 +230,9 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
     }
   }
 
-  partial_sort(docs.begin(),
-               docs.begin() + min(params.limit_offset + params.limit_total, knn_limit), docs.end(),
+  size_t prefix = min(params.limit_offset + params.limit_total, knn_limit);
+
+  partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
                [](const auto* l, const auto* r) { return l->knn_distance < r->knn_distance; });
   docs.resize(min(docs.size(), knn_limit));
 

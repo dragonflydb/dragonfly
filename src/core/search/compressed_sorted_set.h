@@ -59,6 +59,10 @@ class CompressedSortedSet {
   size_t Size() const;
   size_t ByteSize() const;
 
+  size_t size() const {
+    return Size();
+  }
+
  private:
   struct EntryLocation {
     IntType value;                        // Value or 0
