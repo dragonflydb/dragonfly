@@ -33,7 +33,7 @@ class SearchParserTest : public ::testing::Test {
     return Parser(&query_driver_)();
   }
 
-  void SetParams(const QueryParams& params) {
+  void SetParams(const QueryParams* params) {
     query_driver_.SetParams(params);
   }
 
@@ -118,7 +118,7 @@ TEST_F(SearchParserTest, ParseParams) {
   QueryParams params;
   params["k"] = "10";
   params["name"] = "alex";
-  SetParams(params);
+  SetParams(&params);
 
   SetInput("$name $k");
   NEXT_EQ(TOK_TERM, string, "alex");

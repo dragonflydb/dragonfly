@@ -25,9 +25,9 @@ class QueryDriver {
     scanner()->in(cur_str_);
   }
 
-  void SetParams(const QueryParams& params) {
-    params_ = &params;
-    scanner_->SetParams(params_);
+  void SetParams(const QueryParams* params) {
+    params_ = params;
+    scanner_->SetParams(params);
   }
 
   Parser::symbol_type Lex() {
@@ -44,7 +44,7 @@ class QueryDriver {
     return std::move(expr_);
   }
 
-  const QueryParams& GetParams() {
+  const QueryParams& GetParams() const {
     return *params_;
   }
 

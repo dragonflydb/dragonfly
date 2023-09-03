@@ -17,20 +17,23 @@ using DocId = uint32_t;
 using FtVector = std::vector<float>;
 
 // Query params represent named parameters for queries supplied via PARAMS.
-struct QueryParams : private absl::flat_hash_map<std::string, std::string> {
+struct QueryParams {
   size_t Size() const {
-    return size();
+    return params.size();
   }
 
   std::string_view operator[](std::string_view name) const {
-    if (auto it = find(name); it != end())
+    if (auto it = params.find(name); it != params.end())
       return it->second;
     return "";
   }
 
   decltype(auto) operator[](std::string_view k) {
-    return static_cast<absl::flat_hash_map<std::string, std::string>*>(this)->operator[](k);
+    return params[k];
   }
+
+ private:
+  absl::flat_hash_map<std::string, std::string> params;
 };
 
 // Interface for accessing document values with different data structures underneath.
