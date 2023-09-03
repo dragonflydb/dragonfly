@@ -109,6 +109,17 @@ unsigned NumPagesInSegment(PageClass pc) {
   return 0;
 }
 
+template <size_t N> size_t FindFirst(const std::bitset<N>& bs) {
+#ifdef _LIBCPP_VERSION
+  for (size_t i = 0; i < bs.size(); ++i) {
+    if (bs.test(i))
+      return i;
+  }
+#else
+  return bs._Find_first();
+#endif
+}
+
 };  // namespace
 
 /*
@@ -337,7 +348,9 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
   }
 
   DCHECK(page->available);
-  size_t pos = page->free_blocks._Find_first();
+
+  size_t pos = FindFirst(page->free_blocks);
+
   page->free_blocks.flip(pos);
   --page->available;
   allocated_bytes_ += ToBlockSize(page->block_size_bin);

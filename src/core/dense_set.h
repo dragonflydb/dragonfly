@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <type_traits>
+#include <vector>
 
 #include "base/pmr/memory_resource.h"
 
