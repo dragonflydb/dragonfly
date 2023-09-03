@@ -526,7 +526,7 @@ TEST_F(StreamFamilyTest, XInfoGroups) {
   Run({"xadd", "mystream", "2-0", "test-field-2", "test-value-2"});
   resp = Run({"xinfo", "groups", "mystream"});
   EXPECT_THAT(resp.GetVec()[11], IntArg(2));
-  EXPECT_THAT(resp.GetVec()[6], "0-0");
+  EXPECT_THAT(resp.GetVec()[7], "0-0");
 
   // group with no lag, before ack
   Run({"xreadgroup", "group", "mygroup", "consumer1", "STREAMS", "mystream", ">"});
@@ -542,5 +542,39 @@ TEST_F(StreamFamilyTest, XInfoGroups) {
   // resp = Run({"xinfo", "groups", "mystream"});
   // EXPECT_THAT(resp.GetVec(), ElementsAre("name", "mygroup", "consumers", IntArg(2), "pending",
   // IntArg(0), "last-delivered-id", "2-0", "entries-read", IntArg(2), "lag", IntArg(0)));
+}
+
+TEST_F(StreamFamilyTest, XInfoConsumers) {
+  Run({"del", "mystream"});
+  Run({"xgroup", "create", "mystream", "mygroup", "$", "MKSTREAM"});
+
+  // no consumer
+  auto resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // invalid key
+  resp = Run({"xinfo", "consumers", "non-existent-stream", "mygroup"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  // invalid group
+  resp = Run({"xinfo", "consumers", "mystream", "non-existent-group"});
+  EXPECT_THAT(resp, ErrArg("NOGROUP"));
+
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "first-consumer"});
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "second-consumer"});
+  resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], ArrLen(6));
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(6));
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[1], "first-consumer");
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[1], "second-consumer");
+
+  Run({"xadd", "mystream", "1-0", "test-field-1", "test-value-1"});
+  Run({"xreadgroup", "group", "mygroup", "consumer1", "STREAMS", "mystream", ">"});
+  resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  // pending for first-consumer
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[3], IntArg(1));
+  // pending for second-consumer
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[3], IntArg(0));
 }
 }  // namespace dfly
