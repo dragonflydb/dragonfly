@@ -58,9 +58,9 @@ class FieldIndices {
 struct AlgorithmProfile {
   struct ProfileEvent {
     std::string descr;
-    size_t micros;  // time event took in microseconds
-    size_t depth;   // tree depth of event
-    size_t flow;    // number of results processed by op
+    size_t micros;         // time event took in microseconds
+    size_t depth;          // tree depth of event
+    size_t num_processed;  // number of results processed by the event
   };
 
   std::vector<ProfileEvent> events;

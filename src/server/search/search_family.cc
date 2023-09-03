@@ -454,7 +454,7 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->StartArray(2);
 
       (*cntx)->SendSimpleString(
-          absl::StrFormat("t=%-10u f=%-10u %s", event.micros, event.flow, event.descr));
+          absl::StrFormat("t=%-10u n=%-10u %s", event.micros, event.num_processed, event.descr));
 
       if (children > 0)
         (*cntx)->StartArray(children);

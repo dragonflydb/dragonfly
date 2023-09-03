@@ -136,9 +136,11 @@ struct ProfileBuilder {
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
-  BasicSearch(const FieldIndices* indices, bool profile = false) : indices_{indices}, tmp_vec_{} {
-    if (profile)
-      profile_builder_ = ProfileBuilder{};
+  BasicSearch(const FieldIndices* indices) : indices_{indices}, tmp_vec_{} {
+  }
+
+  void EnableProfiling() {
+    profile_builder_ = ProfileBuilder{};
   }
 
   // Get casted sub index by field
@@ -408,7 +410,10 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams& params) {
 }
 
 SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
-  return BasicSearch{index, profiling_enabled_}.Search(*query_);
+  auto bs = BasicSearch{index};
+  if (profiling_enabled_)
+    bs.EnableProfiling();
+  return bs.Search(*query_);
 }
 
 optional<size_t> SearchAlgorithm::HasKnn() const {
