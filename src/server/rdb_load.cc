@@ -2289,6 +2289,8 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
   DCHECK_LT(key_num, 1U << 31);
   DCHECK_LT(expire_num, 1U << 31);
+  // Note: To reserve space, it's necessary to allocate space at the shard level. We might
+  // load with different number of shards which makes database resizing unfeasible.
 }
 
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {

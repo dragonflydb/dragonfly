@@ -936,7 +936,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   uint64_t start_ns = absl::GetCurrentTimeNanos();
 
-  if (cid->opt_mask() & CO::DENYOOM) {
+  if (cid->opt_mask() & CO::DENYOOM && etl.is_master) {
     uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
