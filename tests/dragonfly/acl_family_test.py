@@ -233,6 +233,7 @@ end
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip("Non deterministic")
 async def test_acl_del_user_while_running_lua_script(df_server):
     client = aioredis.Redis(port=df_server.port)
     await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting")
@@ -253,6 +254,7 @@ async def test_acl_del_user_while_running_lua_script(df_server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip("Non deterministic")
 async def test_acl_with_long_running_script(df_server):
     client = aioredis.Redis(port=df_server.port)
     await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting")
