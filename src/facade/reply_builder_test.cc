@@ -1,4 +1,10 @@
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "facade/reply_builder.h"
+
+#include <random>
 
 #include "absl/strings/str_split.h"
 #include "base/gtest.h"
@@ -11,6 +17,7 @@
 // This will test the reply_builder RESP (Redis).
 
 using namespace testing;
+using namespace std;
 
 namespace facade {
 
@@ -847,5 +854,41 @@ TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
 
   builder_->SetResp3(false);
 }
+
+TEST_F(RedisReplyBuilderTest, FormatDouble) {
+  char buf[64];
+
+  auto format = [&](double d) { return RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf)); };
+
+  EXPECT_STREQ("0.1", format(0.1));
+  EXPECT_STREQ("0.2", format(0.2));
+  EXPECT_STREQ("0.8", format(0.8));
+  EXPECT_STREQ("1.1", format(1.1));
+  EXPECT_STREQ("inf", format(INFINITY));
+  EXPECT_STREQ("-inf", format(-INFINITY));
+  EXPECT_STREQ("0", format(-0.0));
+  EXPECT_STREQ("1e-7", format(0.0000001));
+  EXPECT_STREQ("111111111111111110000", format(111111111111111111111.0));
+  EXPECT_STREQ("1.1111111111111111e+21", format(1111111111111111111111.0));
+  EXPECT_STREQ("1e-23", format(1e-23));
+}
+
+static void BM_FormatDouble(benchmark::State& state) {
+  vector<double> values;
+  char buf[64];
+
+  uniform_real_distribution<double> unif(0, 1e9);
+  default_random_engine re;
+  for (unsigned i = 0; i < 100; i++) {
+    values.push_back(unif(re));
+  }
+
+  while (state.KeepRunning()) {
+    for (auto d : values) {
+      RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf));
+    }
+  }
+}
+BENCHMARK(BM_FormatDouble);
 
 }  // namespace facade
