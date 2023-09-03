@@ -394,13 +394,13 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   string_view index_name = ArgS(args, 0);
   string_view query_str = ArgS(args, 3);
 
-  search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, {search::FtVector{}}))
-    return (*cntx)->SendError("Query syntax error");
-
   optional<SearchParams> params = ParseSearchParamsOrReply(args.subspan(4), cntx);
   if (!params.has_value())
     return;
+
+  search::SearchAlgorithm search_algo;
+  if (!search_algo.Init(query_str, &params->query_params))
+    return (*cntx)->SendError("Query syntax error");
 
   search_algo.EnableProfiling();
 
