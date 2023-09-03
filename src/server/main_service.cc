@@ -4,8 +4,9 @@
 
 #include "server/main_service.h"
 
-#include "facade/resp_expr.h"
-#include "server/acl/user_registry.h"
+#ifdef __FreeBSD__
+#include <pthread_np.h>
+#endif
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -25,8 +26,10 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_capture.h"
+#include "facade/resp_expr.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/acl/user_registry.h"
 #include "server/acl/validator.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
@@ -104,9 +107,24 @@ std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
 
 namespace dfly {
 
+#if defined(__linux__)
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
 #include <sys/syscall.h>
 #define gettid() syscall(SYS_gettid)
+#endif
+
+#elif defined(__FreeBSD__)
+
+#define gettid() pthread_getthreadid_np()
+
+#elif defined(__APPLE__)
+
+inline unsigned gettid() {
+  uint64_t tid;
+  pthread_threadid_np(NULL, &tid);
+  return tid;
+}
+
 #endif
 
 using namespace util;

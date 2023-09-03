@@ -24,7 +24,6 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/io_mgr.h"
 #include "server/journal/journal.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -43,7 +42,7 @@ DEFINE_VARZ(VarzQps, set_qps);
 DEFINE_VARZ(VarzQps, get_qps);
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
-constexpr uint32_t kMinTieredLen = TieredStorage::kMinBlobLen;
+constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
 string GetString(EngineShard* shard, const PrimeValue& pv) {
   string res;
