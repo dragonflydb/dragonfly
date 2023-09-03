@@ -28,7 +28,7 @@ struct QueryParams {
     return "";
   }
 
-  decltype(auto) operator[](std::string_view k) {
+  std::string& operator[](std::string_view k) {
     return params[k];
   }
 

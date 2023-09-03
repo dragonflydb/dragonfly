@@ -39,7 +39,7 @@ class Scanner : public Lexer {
   }
 
   Parser::symbol_type ParseParam(std::string_view name, const Parser::location_type& loc) {
-    if (name.size() > 0)
+    if (!name.empty())
       name.remove_prefix(1);
 
     std::string_view str = (*params_)[name];

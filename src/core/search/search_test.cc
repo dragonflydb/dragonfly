@@ -113,7 +113,7 @@ class SearchParserTest : public ::testing::Test {
       index.Add(i, &entries_[i].first);
 
     SearchAlgorithm search_algo{};
-    if (!search_algo.Init(query_, params_)) {
+    if (!search_algo.Init(query_, &params_)) {
       error_ = "Failed to parse query";
       return false;
     }
@@ -352,35 +352,35 @@ TEST_F(SearchParserTest, SimpleKnn) {
   // Five closest to 50
   {
     params["vec"] = FtVectorToBytes(FtVector{50.0});
-    algo.Init("*=>[KNN 5 @pos $vec]", params);
+    algo.Init("*=>[KNN 5 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(48, 49, 50, 51, 52));
   }
 
   // Five closest to 0
   {
     params["vec"] = FtVectorToBytes(FtVector{0.0});
-    algo.Init("*=>[KNN 5 @pos $vec]", params);
+    algo.Init("*=>[KNN 5 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
   }
 
   // Five closest to 20, all even
   {
     params["vec"] = FtVectorToBytes(FtVector{20.0});
-    algo.Init("@even:{yes} =>[KNN 5 @pos $vec]", params);
+    algo.Init("@even:{yes} =>[KNN 5 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(16, 18, 20, 22, 24));
   }
 
   // Three closest to 31, all odd
   {
     params["vec"] = FtVectorToBytes(FtVector{31.0});
-    algo.Init("@even:{no} =>[KNN 3 @pos $vec]", params);
+    algo.Init("@even:{no} =>[KNN 3 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(29, 31, 33));
   }
 
   // Two closest to 70.5
   {
     params["vec"] = FtVectorToBytes(FtVector{70.5});
-    algo.Init("* =>[KNN 2 @pos $vec]", params);
+    algo.Init("* =>[KNN 2 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(70, 71));
   }
 }
@@ -408,42 +408,42 @@ TEST_F(SearchParserTest, Simple2dKnn) {
   // Single center
   {
     params["vec"] = FtVectorToBytes(FtVector{0.5, 0.5});
-    algo.Init("* =>[KNN 1 @pos $vec]", params);
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
   }
 
   // Lower left
   {
     params["vec"] = FtVectorToBytes(FtVector{0, 0});
-    algo.Init("* =>[KNN 4 @pos $vec]", params);
+    algo.Init("* =>[KNN 4 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 3, 4));
   }
 
   // Upper right
   {
     params["vec"] = FtVectorToBytes(FtVector{1, 1});
-    algo.Init("* =>[KNN 4 @pos $vec]", params);
+    algo.Init("* =>[KNN 4 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2, 3, 4));
   }
 
   // Request more than there is
   {
     params["vec"] = FtVectorToBytes(FtVector{0, 0});
-    algo.Init("* => [KNN 10 @pos $vec]", params);
+    algo.Init("* => [KNN 10 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
   }
 
   // Test correct order: (0.7, 0.15)
   {
     params["vec"] = FtVectorToBytes(FtVector{0.7, 0.15});
-    algo.Init("* => [KNN 10 @pos $vec]", params);
+    algo.Init("* => [KNN 10 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(1, 4, 0, 2, 3));
   }
 
   // Test correct order: (0.8, 0.9)
   {
     params["vec"] = FtVectorToBytes(FtVector{0.8, 0.9});
-    algo.Init("* => [KNN 10 @pos $vec]", params);
+    algo.Init("* => [KNN 10 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(2, 4, 3, 1, 0));
   }
 }
