@@ -47,7 +47,11 @@ endfunction()
 
 add_third_party(
   dconv
-  URL https://github.com/google/double-conversion/archive/refs/tags/v3.2.0.tar.gz
+  URL https://github.com/google/double-conversion/archive/refs/tags/v3.3.0.tar.gz
+  PATCH_COMMAND sed -i "/static const std::ctype/d"
+                <SOURCE_DIR>/double-conversion/string-to-double.cc
+  COMMAND sed -i "/std::use_facet</d" <SOURCE_DIR>/double-conversion/string-to-double.cc
+  COMMAND sed -i "s/cType.tolower/std::tolower/g" <SOURCE_DIR>/double-conversion/string-to-double.cc
   LIB libdouble-conversion.a
 )
 
