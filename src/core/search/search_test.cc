@@ -332,6 +332,7 @@ std::string ToBytes(absl::Span<const float> vec) {
 TEST_F(SearchParserTest, SimpleKnn) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].knn_dim = 1;
+  schema.fields["pos"].hnsw_capacity = 120;
   FieldIndices indices{schema};
 
   // Place points on a straight line

@@ -26,8 +26,9 @@ struct SchemaField {
   FieldType type;
   std::string short_name;  // equal to ident if none provided
 
-  size_t knn_dim = 0u;                              // dimension of knn vectors
-  VectorSimilarity knn_sim = VectorSimilarity::L2;  // similarity type
+  size_t knn_dim = 0u;                                 // dimension of knn vectors
+  VectorSimilarity knn_sim = VectorSimilarity::L2;     // similarity type
+  std::optional<size_t> hnsw_capacity = std::nullopt;  // if set, capacity for hnsw world
 };
 
 // Describes the fields of an index
@@ -51,6 +52,8 @@ class FieldIndices {
   BaseIndex* GetIndex(std::string_view field) const;
   std::vector<TextIndex*> GetAllTextIndices() const;
   const std::vector<DocId>& GetAllDocs() const;
+
+  const Schema& GetSchema() const;
 
  private:
   Schema schema_;
