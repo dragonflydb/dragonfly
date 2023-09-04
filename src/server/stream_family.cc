@@ -1005,8 +1005,11 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
       ginfo.consumer_size = raxSize(cg->consumers);
       ginfo.pending_size = raxSize(cg->pel);
       ginfo.last_id = cg->last_id;
-      ginfo.entries_read = cg->entries_read;  // TODO : this returns incorrect value, check.
-      getConsumerGroupLag(s, cg, &ginfo);
+      // ginfo.entries_read = cg->entries_read;  // TODO : this returns incorrect value, check.
+      ginfo.entries_read = streamEstimateDistanceFromFirstEverEntry(
+          s, &cg->last_id);  // TODO : check if this is correct.
+      // getConsumerGroupLag(s, cg, &ginfo);
+      ginfo.lag = s->entries_added - ginfo.entries_read;  // TODO : check if this is correct.
       result.push_back(std::move(ginfo));
     }
     raxStop(&ri);
@@ -1147,10 +1150,13 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
         GroupInfo ginfo;
         ginfo.name.assign(reinterpret_cast<char*>(ri_cgroups.key), ri_cgroups.key_len);
         ginfo.last_id = cg->last_id;
-        ginfo.entries_read = cg->entries_read;
+        ginfo.entries_read = streamEstimateDistanceFromFirstEverEntry(
+            s, &cg->last_id);  // TODO : check if this is correct
+        // ginfo.entries_read = cg->entries_read;
         ginfo.consumer_size = raxSize(cg->consumers);
         ginfo.pending_size = raxSize(cg->pel);
-        getConsumerGroupLag(s, cg, &ginfo);
+        // getConsumerGroupLag(s, cg, &ginfo);
+        ginfo.lag = s->entries_added - ginfo.entries_read;  // TODO : check if this is correct
         ginfo.pel_count = raxSize(cg->pel);
         getGroupPEL(s, cg, &ginfo, count);
         getConsumers(s, cg, &ginfo, count);
