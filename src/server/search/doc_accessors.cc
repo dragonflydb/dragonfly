@@ -12,7 +12,7 @@
 
 #include "core/json_object.h"
 #include "core/search/search.h"
-#include "core/search/vector.h"
+#include "core/search/vector_utils.h"
 #include "core/string_map.h"
 #include "server/container_utils.h"
 

@@ -2,12 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/search/vector.h"
-
 #include <cmath>
 #include <memory>
 
 #include "base/logging.h"
+#include "core/search/vector.h"
 
 namespace dfly::search {
 

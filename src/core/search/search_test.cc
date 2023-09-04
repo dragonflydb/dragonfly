@@ -19,7 +19,7 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
-#include "core/search/vector.h"
+#include "core/search/vector_utils.h"
 
 namespace dfly {
 namespace search {
@@ -361,7 +361,7 @@ TEST_F(SearchParserTest, SimpleKnn) {
   // Five closest to 20, all even
   {
     params["vec"] = ToBytes({20.0});
-    algo.Init("@even:{yes} =>[KNN 5 @pos $vec]",&params);
+    algo.Init("@even:{yes} =>[KNN 5 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(16, 18, 20, 22, 24));
   }
 

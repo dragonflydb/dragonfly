@@ -17,8 +17,8 @@
 
 #include "base/logging.h"
 #include "core/json_object.h"
+#include "core/search/_utils"
 #include "core/search/search.h"
-#include "core/search/vector.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"

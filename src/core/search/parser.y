@@ -25,7 +25,7 @@
 // Added to cc file
 %code {
 #include "core/search/query_driver.h"
-#include "core/search/vector.h"
+#include "core/search/vector_utils.h"
 
 // Have to disable because GCC doesn't understand `symbol_type`'s union
 // implementation
