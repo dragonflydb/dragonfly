@@ -78,6 +78,7 @@ ABSL_FLAG(bool, multi_exec_squash, false,
 
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
+ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without auth "
           "token needed.");
@@ -2029,6 +2030,11 @@ GlobalState Service::GetGlobalState() const {
 }
 
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
+  // We set the password for the HTTP service unless it is only enabled on the
+  // admin port and the admin port is password-less.
+  if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
+    base->SetPassword(GetPassword());
+  }
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
   base->RegisterCb("/topkeys", Topkeys);
