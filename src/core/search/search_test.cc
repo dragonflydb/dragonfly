@@ -469,7 +469,7 @@ static void BM_VectorSearch(benchmark::State& state) {
 
   auto rv = random_vec();
   params["vec"] = ToBytes(rv);
-  algo.Init("* =>[KNN 1 @pos $vec]", params);
+  algo.Init("* =>[KNN 1 @pos $vec]", &params);
 
   while (state.KeepRunningBatch(10)) {
     for (size_t i = 0; i < 10; i++)

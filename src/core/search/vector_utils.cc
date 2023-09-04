@@ -2,11 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
+#include "core/search/vector_utils.h"
+
 #include <cmath>
 #include <memory>
 
 #include "base/logging.h"
-#include "core/search/vector.h"
 
 namespace dfly::search {
 
@@ -42,6 +43,8 @@ __attribute__((optimize("fast-math"))) float CosineDistance(const float* u, cons
 OwnedFtVector BytesToFtVector(string_view value) {
   DCHECK_EQ(value.size() % sizeof(float), 0u) << value.size();
 
+  // Value cannot be casted directly as it might be not aligned as a float (4 bytes).
+  // Misaligned memory access is UB.
   size_t size = value.size() / sizeof(float);
   auto out = make_unique<float[]>(size);
   memcpy(out.get(), value.data(), size * sizeof(float));
@@ -53,7 +56,7 @@ float VectorDistance(const float* u, const float* v, size_t dims, VectorSimilari
   switch (sim) {
     case VectorSimilarity::L2:
       return L2Distance(u, v, dims);
-    case VectorSimilarity::CONSINE:
+    case VectorSimilarity::COSINE:
       return CosineDistance(u, v, dims);
   };
   return 0.0f;

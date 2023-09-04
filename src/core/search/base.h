@@ -15,7 +15,7 @@ namespace dfly::search {
 
 using DocId = uint32_t;
 
-enum class VectorSimilarity { L2, CONSINE };
+enum class VectorSimilarity { L2, COSINE };
 
 using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /*dims*/>;
 

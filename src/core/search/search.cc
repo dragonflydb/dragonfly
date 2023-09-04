@@ -41,7 +41,8 @@ struct IndexResult {
   using DocVec = vector<DocId>;
   using BorrowedView = variant<const DocVec*, const CompressedSortedSet*>;
 
-  IndexResult() : value_{DocVec{}} {};
+  IndexResult() : value_{DocVec{}} {
+  }
 
   IndexResult(const CompressedSortedSet* css) : value_{css} {
     if (css == nullptr)
@@ -67,7 +68,7 @@ struct IndexResult {
       swap(get<DocVec>(value_), entries);  // swap to keep backing array
       entries.clear();
     } else {
-      value_ = move(entries);
+      value_ = std::move(entries);
     }
     return *this;
   }
@@ -91,10 +92,6 @@ struct IndexResult {
   }
 
  private:
-  bool IsOwned() const {
-    return holds_alternative<DocVec>(value_);
-  }
-
   variant<DocVec /*owned*/, const CompressedSortedSet*, const DocVec*> value_;
 };
 
@@ -204,7 +201,7 @@ struct BasicSearch {
     sort(sub_results.begin(), sub_results.end(),
          [](const auto& l, const auto& r) { return l.Size() < r.Size(); });
 
-    IndexResult out{move(sub_results[0])};
+    IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
       Merge(move(matched), &out, op);
     return out;
