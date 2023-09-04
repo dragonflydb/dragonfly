@@ -854,42 +854,42 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
  *
  * NOTE: this assumes that the caller had verified that 'start' is less than
  * 's->last_id'. */
-int streamRangeHasTombstones(stream* s, streamID* start, streamID* end) {
-  streamID start_id, end_id;
+// int streamRangeHasTombstones(stream* s, streamID* start, streamID* end) {
+//   streamID start_id, end_id;
 
-  if (!s->length || streamIDEqZero(&s->max_deleted_entry_id)) {
-    /* The stream is empty or has no tombstones. */
-    return 0;
-  }
+//   if (!s->length || streamIDEqZero(&s->max_deleted_entry_id)) {
+//     /* The stream is empty or has no tombstones. */
+//     return 0;
+//   }
 
-  if (streamCompareID(&s->first_id, &s->max_deleted_entry_id) > 0) {
-    /* The latest tombstone is before the first entry. */
-    return 0;
-  }
+//   if (streamCompareID(&s->first_id, &s->max_deleted_entry_id) > 0) {
+//     /* The latest tombstone is before the first entry. */
+//     return 0;
+//   }
 
-  if (start) {
-    start_id = *start;
-  } else {
-    start_id.ms = 0;
-    start_id.seq = 0;
-  }
+//   if (start) {
+//     start_id = *start;
+//   } else {
+//     start_id.ms = 0;
+//     start_id.seq = 0;
+//   }
 
-  if (end) {
-    end_id = *end;
-  } else {
-    end_id.ms = UINT64_MAX;
-    end_id.seq = UINT64_MAX;
-  }
+//   if (end) {
+//     end_id = *end;
+//   } else {
+//     end_id.ms = UINT64_MAX;
+//     end_id.seq = UINT64_MAX;
+//   }
 
-  if (streamCompareID(&start_id, &s->max_deleted_entry_id) <= 0 &&
-      streamCompareID(&s->max_deleted_entry_id, &end_id) <= 0) {
-    /* start_id <= max_deleted_entry_id <= end_id: The range does include a tombstone. */
-    return 1;
-  }
+//   if (streamCompareID(&start_id, &s->max_deleted_entry_id) <= 0 &&
+//       streamCompareID(&s->max_deleted_entry_id, &end_id) <= 0) {
+//     /* start_id <= max_deleted_entry_id <= end_id: The range does include a tombstone. */
+//     return 1;
+//   }
 
-  /* The range doesn't includes a tombstone. */
-  return 0;
-}
+//   /* The range doesn't includes a tombstone. */
+//   return 0;
+// }
 
 /* This function returns a value that is the ID's logical read counter, or its
  * distance (the number of entries) from the first entry ever to have been added
@@ -952,34 +952,34 @@ long long streamEstimateDistanceFromFirstEverEntry(stream* s, streamID* id) {
   return SCG_INVALID_ENTRIES_READ;
 }
 
-void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
-  int valid = 0;
-  long long lag = 0;
+// void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
+//   int valid = 0;
+//   long long lag = 0;
 
-  if (!s->entries_added) {
-    /* The lag of a newly-initialized stream is 0. */
-    lag = 0;
-    valid = 1;
-  } else if (cg->entries_read != SCG_INVALID_ENTRIES_READ &&
-             !streamRangeHasTombstones(s, &cg->last_id, NULL)) {
-    /* No fragmentation ahead means that the group's logical reads counter
-     * is valid for performing the lag calculation. */
-    lag = (long long)s->entries_added - cg->entries_read;
-    valid = 1;
-  } else {
-    /* Attempt to retrieve the group's last ID logical read counter. */
-    long long entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg->last_id);
-    if (entries_read != SCG_INVALID_ENTRIES_READ) {
-      /* A valid counter was obtained. */
-      lag = (long long)s->entries_added - entries_read;
-      valid = 1;
-    }
-  }
+//   if (!s->entries_added) {
+//     /* The lag of a newly-initialized stream is 0. */
+//     lag = 0;
+//     valid = 1;
+//   } else if (cg->entries_read != SCG_INVALID_ENTRIES_READ &&
+//              !streamRangeHasTombstones(s, &cg->last_id, NULL)) {
+//     /* No fragmentation ahead means that the group's logical reads counter
+//      * is valid for performing the lag calculation. */
+//     lag = (long long)s->entries_added - cg->entries_read;
+//     valid = 1;
+//   } else {
+//     /* Attempt to retrieve the group's last ID logical read counter. */
+//     long long entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg->last_id);
+//     if (entries_read != SCG_INVALID_ENTRIES_READ) {
+//       /* A valid counter was obtained. */
+//       lag = (long long)s->entries_added - entries_read;
+//       valid = 1;
+//     }
+//   }
 
-  if (valid) {
-    ginfo->lag = lag;
-  }
-}
+//   if (valid) {
+//     ginfo->lag = lag;
+//   }
+// }
 
 OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
                                          EngineShard* shard) {
