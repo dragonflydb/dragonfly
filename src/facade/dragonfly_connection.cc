@@ -718,6 +718,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     stats_->io_read_bytes += *recv_sz;
     ++stats_->io_read_cnt;
     phase_ = PROCESS;
+    bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
       parse_status = ParseRedis(orig_builder);
@@ -735,11 +736,20 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         if (redis_parser_)
           parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
 
+        // If we got a partial request and we managed to parse its
+        // length, make sure we have space to store it instead of
+        // increasing space incrementally.
+        // (Note: The buffer object is only working in power-of-2 sizes,
+        // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
           io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
         }
 
-        if (io_buf_.AppendLen() < 64u) {
+        // If we got a partial request and we couldn't parse the length, just
+        // double the capacity.
+        // If we got a partial request because iobuf was full, grow it up to
+        // a reasonable limit to save on Recv() calls.
+        if (io_buf_.AppendLen() < 64u || (is_iobuf_full && capacity < 4096)) {
           // Last io used most of the io_buf to the end.
           io_buf_.Reserve(capacity * 2);  // Valid growth range.
         }
@@ -784,11 +794,27 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
 
+  uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   while (!builder->GetError()) {
     evc_.await(
         [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)
       break;
+
+    // We really want to have batching in the builder if possible. This is especially
+    // critical in situations where Nagle's algorithm can introduce unwanted high
+    // latencies. However we can only batch if we're sure that there are more commands
+    // on the way that will trigger a flush. To know if there are, we sometimes yield before
+    // executing the last command in the queue and let the producer fiber push more commands if it
+    // wants to.
+    // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
+    uint64_t cur_epoch = fb2::FiberSwitchEpoch();
+    if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
+      ThisFiber::Yield();
+      DVLOG(1) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
+    }
+    prev_epoch = cur_epoch;
+    builder->SetBatchMode(dispatch_q_.size() > 1);
 
     auto recycle = [this, request_cache_limit](MessageHandle msg) {
       dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
@@ -802,8 +828,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
         }
       }
     };
-
-    builder->SetBatchMode(dispatch_q_.size() > 1);
 
     // Special case: if the dispatch queue accumulated a big number of commands,
     // we can try to squash them
