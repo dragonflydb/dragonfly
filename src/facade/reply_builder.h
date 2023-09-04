@@ -62,9 +62,7 @@ class SinkReplyBuilder {
   // In order to reduce interrupt rate we allow coalescing responses together using
   // Batch mode. It is controlled by Connection state machine because it makes sense only
   // when pipelined requests are arriving.
-  void SetBatchMode(bool batch) {
-    should_batch_ = batch;
-  }
+  void SetBatchMode(bool batch);
 
   void FlushBatch();
 
@@ -121,10 +119,7 @@ class SinkReplyBuilder {
 
   void Send(const iovec* v, uint32_t len);
 
-  void StartAggregate() {
-    should_aggregate_ = true;
-  }
-
+  void StartAggregate();
   void StopAggregate();
 
   std::string batch_;
