@@ -9,6 +9,7 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
+#include "redis/zmalloc.h"
 }
 
 #include "base/logging.h"
@@ -1007,6 +1008,22 @@ void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
 
 void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
+  int64_t count = 0;
+  bool with_values = false;
+  if (args.size() > 1) {
+    string_view count_str = ArgS(args, 1);
+    if (!absl::SimpleAtoi(count_str, &count)) {
+      return (*cntx)->SendError(facade::UnknownArgumentError(count_str));
+    }
+  }
+  if (args.size() > 2) {
+    string_view with_values_str = ArgS(args, 2);
+    if (with_values_str == "WITHVALUES") {
+      with_values = true;
+    } else {
+      return (*cntx)->SendError(facade::UnknownArgumentError(with_values_str));
+    }
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = shard->db_slice();
@@ -1020,25 +1037,86 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     StringVec str_vec;
 
     if (pv.Encoding() == kEncodingStrMap2) {
-      // TODO: to create real random logic.
       StringMap* string_map = (StringMap*)pv.RObjPtr();
 
-      sds key = string_map->begin()->first;
-      str_vec.emplace_back(key, sdslen(key));
+      // Randomize list
+      std::vector<dfly::StringMap::iterator> it_vec;
+      for (auto it = string_map->begin(); it != string_map->end(); ++it) {
+        it_vec.push_back(it);
+      }
+      auto rng = std::default_random_engine{};
+      std::shuffle(std::begin(it_vec), std::end(it_vec), rng);
+
+      if (count > 0) {
+        // If positive, emplace only unique elements, capped by vector size
+        for (size_t i = 0; i < std::min(size_t(count), it_vec.size()); i++) {
+          auto it = it_vec[i];
+          sds it_key = it->first;
+          sds it_value = it->second;
+          str_vec.emplace_back(it_key, sdslen(it_key));
+          if (with_values) {
+            str_vec.emplace_back(it_value, sdslen(it_value));
+          }
+        }
+      } else if (count < 0) {
+        // If negative, randomly pick elements |COUNT| times
+        for (size_t i = 0; i < size_t(-count); i++) {
+          auto it = it_vec[rand() % it_vec.size()];
+          sds it_key = it->first;
+          sds it_value = it->second;
+          str_vec.emplace_back(it_key, sdslen(it_key));
+          if (with_values) {
+            str_vec.emplace_back(it_value, sdslen(it_value));
+          }
+        }
+      } else if (it_vec.size() > 0) {
+        // Special case if count is 0, just single element in the array
+        sds it_key = it_vec[0]->first;
+        sds it_value = it_vec[0]->second;
+        str_vec.emplace_back(it_key, sdslen(it_key));
+        if (with_values) {
+          str_vec.emplace_back(it_value, sdslen(it_value));
+        }
+      }
     } else if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
       size_t lplen = lpLength(lp);
       CHECK(lplen > 0 && lplen % 2 == 0);
 
       size_t hlen = lplen / 2;
-      listpackEntry key;
-
-      lpRandomPair(lp, hlen, &key, NULL);
-      if (key.sval) {
-        str_vec.emplace_back(reinterpret_cast<char*>(key.sval), key.slen);
+      listpackEntry *keys, *values = NULL;
+      size_t lp_size = count >= 0 ? hlen : size_t(-count);
+      keys = (listpackEntry*)zmalloc(sizeof(listpackEntry) * lp_size);
+      values = (listpackEntry*)zmalloc(sizeof(listpackEntry) * lp_size);
+      size_t picked = 1;
+      if (count > 0) {
+        // With lpRandomPairsUnique, we can't be sure how many elements will be picked, so rely on
+        // return value to tell us
+        picked = lpRandomPairsUnique(lp, std::min(size_t(count), hlen), keys, values);
+      } else if (count < 0) {
+        // We know that lpRandomPairs will get the 'count' number of elements regardless, so we
+        // already know how many elements will be there
+        picked = size_t(-count);
+        lpRandomPairs(lp, size_t(-count), keys, values);
       } else {
-        str_vec.emplace_back(absl::StrCat(key.lval));
+        lpRandomPair(lp, hlen, keys, values);
       }
+      for (size_t i = 0; i < picked; i++) {
+        if (keys[i].sval) {
+          str_vec.emplace_back(reinterpret_cast<char*>(keys[i].sval), keys[i].slen);
+        } else {
+          str_vec.emplace_back(absl::StrCat(keys[i].lval));
+        }
+        if (with_values) {
+          if (values[i].sval) {
+            str_vec.emplace_back(reinterpret_cast<char*>(values[i].sval), values[i].slen);
+          } else {
+            str_vec.emplace_back(absl::StrCat(values[i].lval));
+          }
+        }
+      }
+      zfree(keys);
+      zfree(values);
     } else {
       LOG(ERROR) << "Invalid encoding " << pv.Encoding();
       return OpStatus::INVALID_VALUE;
@@ -1048,8 +1126,18 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    CHECK_EQ(1u, result->size());  // TBD: to support count and withvalues.
-    (*cntx)->SendBulkString(result->front());
+    if (result->size() == 1u) {
+      (*cntx)->SendBulkString(result->front());
+    } else {
+      (*cntx)->StartArray(result->size());
+      for (const auto& val : *result) {
+        if (val.size() > 0) {
+          (*cntx)->SendBulkString(val);
+        } else {
+          (*cntx)->SendNull();
+        }
+      }
+    }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     (*cntx)->SendNull();
   } else {
@@ -1096,7 +1184,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
       << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1, acl::kHKeys}.HFUNC(HKeys)
 
       // TODO: add options support
-      << CI{"HRANDFIELD", CO::READONLY, 2, 1, 1, 1, acl::kHRandField}.HFUNC(HRandField)
+      << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1, 1, acl::kHRandField}.HFUNC(HRandField)
       << CI{"HSCAN", CO::READONLY, -3, 1, 1, 1, acl::kHScan}.HFUNC(HScan)
       << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kHSet}.HFUNC(HSet)
       << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, 1, acl::kHSetEx}.SetHandler(

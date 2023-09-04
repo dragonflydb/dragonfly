@@ -10,6 +10,7 @@
 
 namespace facade {
 
+std::string UnknownArgumentError(std::string_view arg);
 std::string WrongNumArgsError(std::string_view cmd);
 std::string ConfigSetFailed(std::string_view config_name);
 std::string InvalidExpireTime(std::string_view cmd);

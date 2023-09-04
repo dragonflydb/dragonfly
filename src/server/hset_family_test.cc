@@ -203,6 +203,79 @@ TEST_F(HSetFamilyTest, HRandFloat) {
   Run({"hrandfield", "k"});
 }
 
+TEST_F(HSetFamilyTest, HRandFieldCount) {
+  // Setting keys
+  Run({"HSET", "a", "field1", "value1", "field2", "value2", "field3", "value3"});
+  Run({"HSET", "b", "field1", "value1"});
+
+  // Check validity of the keys
+  auto resp = Run({"hrandfield", "a", "3"});
+  EXPECT_THAT(resp, ArrLen(3));
+  bool unexpected_response_key = false, has_value = false;
+  set<string> unique_keys;
+  for (size_t i = 0; i < resp.GetVec().size(); i++) {
+    unique_keys.insert(resp.GetVec()[i].GetString());
+    if (resp.GetVec()[i] != "field1" && resp.GetVec()[i] != "field2" &&
+        resp.GetVec()[i] != "field3") {
+      unexpected_response_key = true;
+    }
+  }
+  EXPECT_EQ(unique_keys.size(), resp.GetVec().size());
+  EXPECT_FALSE(unexpected_response_key);
+
+  resp = Run({"hrandfield", "a", "3", "WITHVALUES"});
+
+  // Check validity of the keys and values
+  for (size_t i = 0; i < resp.GetVec().size(); i++) {
+    if (resp.GetVec()[i] != "field1" && resp.GetVec()[i] != "field2" &&
+        resp.GetVec()[i] != "field3" && resp.GetVec()[i] != "value1" &&
+        resp.GetVec()[i] != "value2" && resp.GetVec()[i] != "value3") {
+      unexpected_response_key = true;
+    }
+    if (resp.GetVec()[i] == "value1" || resp.GetVec()[i] == "value2" ||
+        resp.GetVec()[i] == "value3") {
+      has_value = true;
+    }
+  }
+  EXPECT_FALSE(unexpected_response_key);
+  EXPECT_TRUE(has_value);
+  EXPECT_EQ(resp.GetVec().size(), 6);
+
+  // Aggregated check to confirm our expected sizing
+  resp = Run({"hrandfield", "a", "10"});
+  EXPECT_EQ(resp.GetVec().size(), 3);
+  resp = Run({"hrandfield", "a", "-10"});
+  EXPECT_EQ(resp.GetVec().size(), 10);
+
+  // Check expected keys when the negative number is provided with values
+  resp = Run({"hrandfield", "a", "-2", "WITHVALUES"});
+  has_value = false;
+  for (size_t i = 0; i < resp.GetVec().size(); i++) {
+    if (resp.GetVec()[i] != "field1" && resp.GetVec()[i] != "field2" &&
+        resp.GetVec()[i] != "field3" && resp.GetVec()[i] != "value1" &&
+        resp.GetVec()[i] != "value2" && resp.GetVec()[i] != "value3") {
+      unexpected_response_key = true;
+    }
+    if (resp.GetVec()[i] == "value1" || resp.GetVec()[i] == "value2" ||
+        resp.GetVec()[i] == "value3") {
+      has_value = true;
+    }
+  }
+  EXPECT_FALSE(unexpected_response_key);
+  EXPECT_TRUE(has_value);
+
+  // Check that negative count should create duplicates
+  resp = Run({"hrandfield", "b", "-2", "WITHVALUES"});
+  for (size_t i = 0; i < resp.GetVec().size(); i++) {
+    if (i % 2 == 0) {
+      // if it's key
+      EXPECT_EQ(resp.GetVec()[i], "field1");
+    } else {
+      EXPECT_EQ(resp.GetVec()[i], "value1");
+    }
+  }
+}
+
 TEST_F(HSetFamilyTest, HSetEx) {
   TEST_current_time_ms = kMemberExpiryBase * 1000;  // to reset to test time.
 

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <optional>
 
 #include "facade/op_status.h"
