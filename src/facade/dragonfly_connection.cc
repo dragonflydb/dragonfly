@@ -11,39 +11,49 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "server/conn_context.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
 #endif
 
+using namespace std;
+
 ABSL_FLAG(bool, tcp_nodelay, false,
           "Configures dragonfly connections with socket option TCP_NODELAY");
 ABSL_FLAG(bool, primary_port_http_enabled, true,
           "If true allows accessing http console on main TCP port");
 
-ABSL_FLAG(
-    std::uint16_t, admin_port, 0,
-    "If set, would enable admin access to console on the assigned port. This supports both HTTP "
-    "and RESP protocols");
-ABSL_FLAG(std::string, admin_bind, "",
-          "If set, the admin consol TCP connection would be bind the given address. "
-          "This supports both HTTP and RESP "
-          "protocols");
+ABSL_FLAG(uint16_t, admin_port, 0,
+          "If set, would enable admin access to console on the assigned port. "
+          "This supports both HTTP and RESP protocols");
 
-ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
+ABSL_FLAG(string, admin_bind, "",
+          "If set, the admin consol TCP connection would be bind the given address. "
+          "This supports both HTTP and RESP protocols");
+
+ABSL_FLAG(uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
-ABSL_FLAG(std::uint64_t, pipeline_squash, 0,
+ABSL_FLAG(uint64_t, pipeline_squash, 0,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
 
+// When changing this constant, also update `test_large_cmd` test in connection_test.py.
+ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
+          "Maximum multi-bulk (array) length that is "
+          "allowed to be accepted when parsing RESP protocol");
+
+ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
+          "Maximum io buffer length that is used to read client requests.");
+
 using namespace util;
-using namespace std;
 using nonstd::make_unexpected;
 
 namespace facade {
@@ -78,8 +88,6 @@ bool MatchHttp11Line(string_view line) {
 }
 
 constexpr size_t kMinReadSize = 256;
-constexpr size_t kMaxReadSize = 32_KB;
-
 constexpr size_t kMaxDispatchQMemory = 5_MB;
 
 thread_local uint32_t free_req_release_weight = 0;
@@ -123,6 +131,7 @@ struct Connection::DispatchOperations {
   void operator()(const PubMessage& msg);
   void operator()(Connection::PipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
+  void operator()(const AclUpdateMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -184,7 +193,11 @@ size_t Connection::MessageHandle::UsedMemory() const {
            arg.storage.capacity();
   };
   auto monitor_size = [](const MonitorMessage& arg) -> size_t { return arg.capacity(); };
-  return sizeof(MessageHandle) + visit(Overloaded{pub_size, msg_size, monitor_size}, this->handle);
+  auto acl_update_size = [](const AclUpdateMessage& msg) -> size_t {
+    return sizeof(AclUpdateMessage);
+  };
+  return sizeof(MessageHandle) +
+         visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size}, this->handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -194,6 +207,13 @@ bool Connection::MessageHandle::IsPipelineMsg() const {
 void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
+}
+
+void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
+  auto* ctx = static_cast<dfly::ConnectionContext*>(self->cntx());
+  if (ctx && msg.username == ctx->authed_username) {
+    ctx->acl_categories = msg.categories;
+  }
 }
 
 void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
@@ -234,7 +254,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   switch (protocol) {
     case Protocol::REDIS:
-      redis_parser_.reset(new RedisParser);
+      redis_parser_.reset(new RedisParser(absl::GetFlag(FLAGS_max_multi_bulk_len)));
       break;
     case Protocol::MEMCACHE:
       memcache_parser_.reset(new MemcacheParser);
@@ -390,9 +410,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get());
-    if (!cc_info.empty()) {
-      absl::StrAppend(&res, " ", cc_info);
-    }
+    absl::StrAppend(&res, " ", cc_info);
   }
 
   return res;
@@ -403,8 +421,7 @@ uint32_t Connection::GetClientId() const {
 }
 
 bool Connection::IsAdmin() const {
-  uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
-  return socket_->LocalEndpoint().port() == admin_port;
+  return static_cast<Listener*>(owner())->IsAdminInterface();
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
@@ -467,6 +484,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
+    if (io_buf_.AppendLen() < 64) {
+      io_buf_.EnsureCapacity(io_buf_.Capacity() * 2);
+    }
     auto res = IoLoop(peer, orig_builder);
 
     if (holds_alternative<error_code>(res)) {
@@ -646,8 +666,8 @@ auto Connection::ParseMemcache() -> ParserStatus {
     return NEED_MORE;
   }
 
-  if (result == MemcacheParser::PARSE_ERROR) {
-    builder->SendError("");  // ERROR.
+  if (result == MemcacheParser::PARSE_ERROR || result == MemcacheParser::UNKNOWN_CMD) {
+    builder->SendSimpleString("ERROR");
   } else if (result == MemcacheParser::BAD_DELTA) {
     builder->SendClientError("invalid numeric delta argument");
   } else if (result != MemcacheParser::OK) {
@@ -675,10 +695,14 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   error_code ec;
   ParserStatus parse_status = OK;
 
+  size_t max_iobfuf_len = absl::GetFlag(FLAGS_max_client_iobuf_len);
+
   do {
     FetchBuilderStats(stats_, orig_builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
+    DCHECK(!append_buf.empty());
+
     phase_ = READ_SOCKET;
 
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
@@ -706,14 +730,16 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
       parse_status = OK;
 
       size_t capacity = io_buf_.Capacity();
-      if (capacity < kMaxReadSize) {
+      if (capacity < max_iobfuf_len) {
         size_t parser_hint = 0;
         if (redis_parser_)
           parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
 
         if (parser_hint > capacity) {
-          io_buf_.Reserve(std::min(kMaxReadSize, parser_hint));
-        } else if (append_buf.size() == *recv_sz && append_buf.size() > capacity / 2) {
+          io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
+        }
+
+        if (io_buf_.AppendLen() < 64u) {
           // Last io used most of the io_buf to the end.
           io_buf_.Reserve(capacity * 2);  // Valid growth range.
         }
@@ -722,6 +748,13 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
           VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
           stats_->read_buf_capacity += (io_buf_.Capacity() - capacity);
         }
+        DCHECK_GT(io_buf_.AppendLen(), 0U);
+      } else if (io_buf_.AppendLen() == 0) {
+        // We have a full buffer and we can not progress with parsing.
+        // This means that we have request too large.
+        LOG(ERROR) << "Request is too large, closing connection";
+        parse_status = ERROR;
+        break;
       }
     } else if (parse_status != OK) {
       break;
@@ -909,6 +942,10 @@ void Connection::SendMonitorMessageAsync(string msg) {
   SendAsync({MonitorMessage{move(msg)}});
 }
 
+void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
+  SendAsync({msg});
+}
+
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(owner());
@@ -925,7 +962,11 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
-  dispatch_q_.push_back(move(msg));
+  if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
+    dispatch_q_.push_front(std::move(msg));
+  } else {
+    dispatch_q_.push_back(std::move(msg));
+  }
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.
   // This might only happen if we started receving messages while `SUBSCRIBE`
@@ -955,7 +996,7 @@ std::string Connection::RemoteEndpointAddress() const {
   return re.address().to_string();
 }
 
-ConnectionContext* Connection::cntx() {
+facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
 }
 

@@ -68,9 +68,15 @@ async def index_test_data(async_client: aioredis.Redis, itype: IndexType, prefix
             await async_client.json().set(prefix + str(i), "$", e)
 
 
-def doc_to_str(doc):
+def doc_to_str(index_type, doc):
     if not type(doc) is dict:
         doc = doc.__dict__
+
+    if "json" in doc:
+        return json.dumps(json.loads(doc["json"]), sort_keys=True)
+
+    if index_type == IndexType.JSON:
+        return json.dumps(doc, sort_keys=True)
 
     doc = dict(doc)  # copy to remove fields
     doc.pop("id", None)
@@ -79,14 +85,14 @@ def doc_to_str(doc):
     return "//".join(sorted(doc))
 
 
-def contains_test_data(res, td_indices):
+def contains_test_data(itype, res, td_indices):
     if res.total != len(td_indices):
         return False
 
-    docset = {doc_to_str(doc) for doc in res.docs}
+    docset = {doc_to_str(itype, doc) for doc in res.docs}
 
     for td_entry in (TEST_DATA[tdi] for tdi in td_indices):
-        if not doc_to_str(td_entry) in docset:
+        if not doc_to_str(itype, td_entry) in docset:
             return False
 
     return True
@@ -143,34 +149,34 @@ async def test_basic(async_client: aioredis.Redis, index_type):
     )
 
     res = await i1.search("article")
-    assert contains_test_data(res, [0, 1])
+    assert contains_test_data(index_type, res, [0, 1])
 
     res = await i1.search("text")
-    assert contains_test_data(res, [1, 3])
+    assert contains_test_data(index_type, res, [1, 3])
 
     res = await i1.search("brief piece")
-    assert contains_test_data(res, [2])
+    assert contains_test_data(index_type, res, [2])
 
     res = await i1.search("@title:(article|last) @content:text")
-    assert contains_test_data(res, [1, 3])
+    assert contains_test_data(index_type, res, [1, 3])
 
     res = await i1.search("@views:[200 300]")
-    assert contains_test_data(res, [1, 2])
+    assert contains_test_data(index_type, res, [1, 2])
 
     res = await i1.search("@views:[0 150] | @views:[350 500]")
-    assert contains_test_data(res, [0, 3])
+    assert contains_test_data(index_type, res, [0, 3])
 
     res = await i1.search("@topic:{world}")
-    assert contains_test_data(res, [0, 3])
+    assert contains_test_data(index_type, res, [0, 3])
 
     res = await i1.search("@topic:{business}")
-    assert contains_test_data(res, [3])
+    assert contains_test_data(index_type, res, [3])
 
     res = await i1.search("@topic:{world | national}")
-    assert contains_test_data(res, [0, 1, 3])
+    assert contains_test_data(index_type, res, [0, 1, 3])
 
     res = await i1.search("@topic:{science | health}")
-    assert contains_test_data(res, [0, 2])
+    assert contains_test_data(index_type, res, [0, 2])
 
     await i1.dropindex()
 
@@ -211,18 +217,18 @@ async def test_knn(async_client: aioredis.Redis, index_type):
             pipe.json().set(f"k{i}", "$", {"even": even, "pos": [float(i)]})
     await pipe.execute()
 
-    assert await knn_query(i2, "* => [KNN 3 @pos VEC]", [50.0]) == {"k49", "k50", "k51"}
+    assert await knn_query(i2, "* => [KNN 3 @pos $vec]", [50.0]) == {"k49", "k50", "k51"}
 
-    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [20.0]) == {"k18", "k20", "k22"}
+    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos $vec]", [20.0]) == {"k18", "k20", "k22"}
 
-    assert await knn_query(i2, "@even:{no} => [KNN 4 @pos VEC]", [30.0]) == {
+    assert await knn_query(i2, "@even:{no} => [KNN 4 @pos $vec]", [30.0]) == {
         "k27",
         "k29",
         "k31",
         "k33",
     }
 
-    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [10.0] == {"k8", "k10", "k12"})
+    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos $vec]", [10.0] == {"k8", "k10", "k12"})
 
     await i2.dropindex()
 
@@ -275,7 +281,7 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type):
             for i, point in sorted(points, key=lambda p: np.linalg.norm(center - p[1]))[:limit]
         ]
 
-        got_ids = await knn_query(i3, f"* => [KNN {limit} @pos VEC]", center)
+        got_ids = await knn_query(i3, f"* => [KNN {limit} @pos $vec]", center)
 
         assert set(expected_ids) == set(got_ids)
 

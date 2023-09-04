@@ -11,14 +11,6 @@ namespace facade {
 
 using namespace std;
 
-namespace {
-
-// When changing this constant, also update `test_large_cmd` test in connection_test.py.
-constexpr int kMaxArrayLen = 65536;
-constexpr int64_t kMaxBulkLen = 256 * (1ul << 20);  // 256MB.
-
-}  // namespace
-
 auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> Result {
   *consumed = 0;
   res->clear();
@@ -251,8 +243,8 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
     case BAD_INT:
       return BAD_ARRAYLEN;
     case OK:
-      if (len < -1 || len > kMaxArrayLen) {
-        LOG_IF(WARNING, len > kMaxArrayLen) << "Multi bulk len is too big " << len;
+      if (len < -1 || len > max_arr_len_) {
+        LOG_IF(WARNING, len > max_arr_len_) << "Multibulk len is too large " << len;
 
         return BAD_ARRAYLEN;
       }

@@ -20,7 +20,6 @@ namespace dfly {
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
 
-search::FtVector BytesToFtVector(std::string_view value);
 std::optional<search::SchemaField::FieldType> ParseSearchFieldType(std::string_view name);
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
@@ -33,15 +32,26 @@ struct SerializedSearchDoc {
 struct SearchResult {
   std::vector<SerializedSearchDoc> docs;
   size_t total_hits;
+
+  std::optional<search::AlgorithmProfile> profile;
 };
 
 struct SearchParams {
+  using FieldReturnList =
+      std::vector<std::pair<std::string /*identifier*/, std::string /*short name*/>>;
+
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
   // the whole result set
   size_t limit_offset;
   size_t limit_total;
 
-  search::FtVector knn_vector;
+  // Set but empty means no fields should be returned
+  std::optional<FieldReturnList> return_fields;
+  search::QueryParams query_params;
+
+  bool IdsOnly() const {
+    return return_fields && return_fields->empty();
+  }
 };
 
 // Stores basic info about a document index.

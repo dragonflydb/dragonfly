@@ -2268,9 +2268,16 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
       continue;
 
-    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
-    if (!added) {
-      LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+    try {
+      auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+      if (!added) {
+        LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+      }
+    } catch (const std::bad_alloc&) {
+      LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
+      ec_ = RdbError(errc::out_of_memory);
+      stop_early_ = true;
+      break;
     }
   }
 
@@ -2282,6 +2289,8 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
   DCHECK_LT(key_num, 1U << 31);
   DCHECK_LT(expire_num, 1U << 31);
+  // Note: To reserve space, it's necessary to allocate space at the shard level. We might
+  // load with different number of shards which makes database resizing unfeasible.
 }
 
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {

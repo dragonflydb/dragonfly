@@ -23,13 +23,17 @@ struct TextIndex;
 struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
-  std::string identifier;  // short alias name is stored only in schema
   FieldType type;
+  std::string short_name;  // equal to ident if none provided
 };
 
 // Describes the fields of an index
 struct Schema {
-  absl::flat_hash_map<std::string /*name*/, SchemaField> fields;
+  // List of fields by identifier.
+  absl::flat_hash_map<std::string /*identifier*/, SchemaField> fields;
+
+  // Mapping for short field names (aliases).
+  absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
 };
 
 // Collection of indices for all fields in schema
@@ -51,6 +55,17 @@ class FieldIndices {
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
 };
 
+struct AlgorithmProfile {
+  struct ProfileEvent {
+    std::string descr;
+    size_t micros;         // time event took in microseconds
+    size_t depth;          // tree depth of event
+    size_t num_processed;  // number of results processed by the event
+  };
+
+  std::vector<ProfileEvent> events;
+};
+
 // Represents a search result returned from the search algorithm.
 struct SearchResult {
   std::vector<DocId> ids;
@@ -58,6 +73,9 @@ struct SearchResult {
   // If a KNN-query is present, distances for doc ids are returned as well
   // and sorted from smallest to largest.
   std::vector<float> knn_distances;
+
+  // If profiling was enabled
+  std::optional<AlgorithmProfile> profile;
 };
 
 // SearchAlgorithm allows searching field indices with a query
@@ -67,14 +85,17 @@ class SearchAlgorithm {
   ~SearchAlgorithm();
 
   // Init with query and return true if successful.
-  bool Init(std::string_view query, const QueryParams& params);
+  bool Init(std::string_view query, const QueryParams* params);
 
   SearchResult Search(const FieldIndices* index) const;
 
   // Return KNN limit if it is enabled
   std::optional<size_t> HasKnn() const;
 
+  void EnableProfiling();
+
  private:
+  bool profiling_enabled_ = false;
   std::unique_ptr<AstNode> query_;
 };
 

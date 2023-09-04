@@ -29,8 +29,6 @@ enum class OpStatus : uint16_t {
   CANCELLED,
 };
 
-const char* DebugString(OpStatus op);
-
 class OpResultBase {
  public:
   OpResultBase(OpStatus st = OpStatus::OK) : st_(st) {
@@ -125,6 +123,8 @@ template <typename V> class OpResultTyped : public OpResult<V> {
 inline bool operator==(OpStatus st, const OpResultBase& ob) {
   return ob.operator==(st);
 }
+
+std::string_view StatusToMsg(OpStatus status);
 
 }  // namespace facade
 

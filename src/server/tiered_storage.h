@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#ifdef __linux__
+
 #include <absl/container/flat_hash_map.h>
 
 #include "core/external_alloc.h"
@@ -72,3 +74,54 @@ class TieredStorage {
 };
 
 }  // namespace dfly
+
+#else
+
+#include "server/common.h"
+
+class DbSlice;
+
+// This is a stub implementation for non-linux platforms.
+namespace dfly {
+class TieredStorage {
+ public:
+  static constexpr size_t kMinBlobLen = size_t(-1);  // infinity.
+
+  explicit TieredStorage(DbSlice* db_slice) {
+  }
+  ~TieredStorage() {
+  }
+
+  std::error_code Open(const std::string& path) {
+    return {};
+  }
+
+  std::error_code Read(size_t offset, size_t len, char* dest) {
+    return {};
+  }
+
+  // Schedules unloading of the item, pointed by the iterator.
+  std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it) {
+    return {};
+  }
+
+  void CancelIo(DbIndex db_index, PrimeIterator it) {
+  }
+
+  static bool EligibleForOffload(std::string_view val) {
+    return false;
+  }
+
+  void Free(size_t offset, size_t len) {
+  }
+
+  void Shutdown() {
+  }
+
+  TieredStats GetStats() const {
+    return {};
+  }
+};
+}  // namespace dfly
+
+#endif  // __linux__

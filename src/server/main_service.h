@@ -9,6 +9,7 @@
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
+#include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
@@ -55,7 +56,8 @@ class Service : public facade::ServiceInterface {
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
-  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandId* cid);
+  std::optional<facade::ErrorReply> VerifyCommandExecution(const CommandId* cid,
+                                                           const ConnectionContext* cntx);
 
   // Verify command prepares excution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
@@ -164,6 +166,7 @@ class Service : public facade::ServiceInterface {
   util::ProactorPool& pp_;
 
   acl::UserRegistry user_registry_;
+  acl::AclFamily acl_family_;
   ServerFamily server_family_;
   ClusterFamily cluster_family_;
   CommandRegistry registry_;

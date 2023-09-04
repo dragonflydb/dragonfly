@@ -9,7 +9,7 @@ AllowShortLoopsOnASingleLine: false
 AllowShortFunctionsOnASingleLine: false
 AllowShortIfStatementsOnASingleLine: false
 AlwaysBreakTemplateDeclarations: false
-ConstructorInitializerAllOnOneLineOrOnePerLine: false
+PackConstructorInitializers: NextLine
 DerivePointerAlignment: false
 PointerAlignment: Left
 BasedOnStyle: Google

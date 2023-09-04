@@ -4,11 +4,16 @@
 
 #include "core/search/search.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 
+#include <chrono>
 #include <variant>
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "core/search/ast_expr.h"
 #include "core/search/compressed_sorted_set.h"
 #include "core/search/indices.h"
@@ -21,7 +26,7 @@ namespace dfly::search {
 
 namespace {
 
-AstExpr ParseQuery(std::string_view query, const QueryParams& params) {
+AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
   QueryDriver driver{};
   driver.ResetScanner();
   driver.SetParams(params);
@@ -48,6 +53,10 @@ struct IndexResult {
     if (holds_alternative<DocVec>(value_))
       return get<DocVec>(value_).size();
     return get<const CompressedSortedSet*>(value_)->Size();
+  }
+
+  bool IsOwned() const {
+    return holds_alternative<DocVec>(value_);
   }
 
   IndexResult& operator=(DocVec&& entries) {
@@ -79,10 +88,59 @@ struct IndexResult {
   variant<DocVec /*owned*/, const CompressedSortedSet* /* borrowed */> value_;
 };
 
+struct ProfileBuilder {
+  string GetNodeInfo(const AstNode& node) {
+    Overloaded node_info{
+        [](monostate) -> string { return ""s; },
+        [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
+        [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
+        [](const AstLogicalNode& n) {
+          auto op = n.op == AstLogicalNode::AND ? "and" : "or";
+          return absl::StrCat("Logical{n=", n.nodes.size(), ",o=", op, "}");
+        },
+        [](const AstTagsNode& n) { return absl::StrCat("Tags{", absl::StrJoin(n.tags, ","), "}"); },
+        [](const AstFieldNode& n) { return absl::StrCat("Field{", n.field, "}"); },
+        [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
+        [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
+        [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
+    };
+    return visit(node_info, static_cast<const NodeVariants&>(node));
+  }
+
+  using Tp = std::chrono::steady_clock::time_point;
+
+  Tp Start() {
+    depth_++;
+    return chrono::steady_clock::now();
+  }
+
+  void Finish(Tp start, const AstNode& node, const IndexResult& result) {
+    DCHECK_GE(depth_, 1u);
+    auto took = chrono::steady_clock::now() - start;
+    size_t micros = chrono::duration_cast<chrono::microseconds>(took).count();
+    auto descr = GetNodeInfo(node);
+    profile_.events.push_back({std::move(descr), micros, depth_ - 1, result.Size()});
+    depth_--;
+  }
+
+  AlgorithmProfile Take() {
+    reverse(profile_.events.begin(), profile_.events.end());
+    return std::move(profile_);
+  }
+
+ private:
+  size_t depth_;
+  AlgorithmProfile profile_;
+};
+
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
   BasicSearch(const FieldIndices* indices) : indices_{indices}, tmp_vec_{} {
+  }
+
+  void EnableProfiling() {
+    profile_builder_ = ProfileBuilder{};
   }
 
   // Get casted sub index by field
@@ -231,6 +289,8 @@ struct BasicSearch {
 
   // Determine node type and call specific search function
   IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
+    ProfileBuilder::Tp start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
+
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
     auto result = visit(cb, static_cast<const NodeVariants&>(node));
 
@@ -239,24 +299,34 @@ struct BasicSearch {
     DCHECK(top_level ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
+    if (profile_builder_)
+      profile_builder_->Finish(start, node, result);
+
     return result;
   }
 
   SearchResult Search(const AstNode& query) {
     IndexResult result = SearchGeneric(query, "", true);
 
+    // Copy knn distances to be returned
+    vector<float> knn_distances;
     if (!distances_.empty()) {
-      vector<float> out_distances(result.Size());
-      for (size_t i = 0; i < out_distances.size(); i++)
-        out_distances[i] = distances_[i].first;
-
-      return SearchResult{result.Take(), move(out_distances)};
+      knn_distances.resize(result.Size());
+      for (size_t i = 0; i < knn_distances.size(); i++)
+        knn_distances[i] = distances_[i].first;
     }
 
-    return SearchResult{result.Take(), {}};
+    // Extract profile if enabled
+    optional<AlgorithmProfile> profile =
+        profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
+
+    return SearchResult{result.Take(), std::move(knn_distances), std::move(profile)};
   }
 
   const FieldIndices* indices_;
+
+  optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
+
   vector<DocId> tmp_vec_;
   vector<pair<float, DocId>> distances_;
 };
@@ -264,19 +334,19 @@ struct BasicSearch {
 }  // namespace
 
 FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, indices_{} {
-  for (const auto& [field_name, field_info] : schema_.fields) {
+  for (const auto& [field_ident, field_info] : schema_.fields) {
     switch (field_info.type) {
       case SchemaField::TAG:
-        indices_[field_name] = make_unique<TagIndex>();
+        indices_[field_ident] = make_unique<TagIndex>();
         break;
       case SchemaField::TEXT:
-        indices_[field_name] = make_unique<TextIndex>();
+        indices_[field_ident] = make_unique<TextIndex>();
         break;
       case SchemaField::NUMERIC:
-        indices_[field_name] = make_unique<NumericIndex>();
+        indices_[field_ident] = make_unique<NumericIndex>();
         break;
       case SchemaField::VECTOR:
-        indices_[field_name] = make_unique<VectorIndex>();
+        indices_[field_ident] = make_unique<VectorIndex>();
         break;
     }
   }
@@ -284,14 +354,14 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
 
 void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Add(doc, access, schema_.fields[field].identifier);
+    index->Add(doc, access, field);
   }
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
 }
 
 void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Remove(doc, access, schema_.fields[field].identifier);
+    index->Remove(doc, access, field);
   }
   auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
   CHECK(it != all_ids_.end() && *it == doc);
@@ -299,6 +369,10 @@ void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
+  // Replace short field name with full ident
+  if (auto it = schema_.field_names.find(field); it != schema_.field_names.end())
+    field = it->second;
+
   auto it = indices_.find(field);
   return it != indices_.end() ? it->second.get() : nullptr;
 }
@@ -322,7 +396,7 @@ const vector<DocId>& FieldIndices::GetAllDocs() const {
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-bool SearchAlgorithm::Init(string_view query, const QueryParams& params) {
+bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
   try {
     query_ = make_unique<AstExpr>(ParseQuery(query, params));
     return !holds_alternative<monostate>(*query_);
@@ -336,7 +410,10 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams& params) {
 }
 
 SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
-  return BasicSearch{index}.Search(*query_);
+  auto bs = BasicSearch{index};
+  if (profiling_enabled_)
+    bs.EnableProfiling();
+  return bs.Search(*query_);
 }
 
 optional<size_t> SearchAlgorithm::HasKnn() const {
@@ -344,6 +421,10 @@ optional<size_t> SearchAlgorithm::HasKnn() const {
   if (holds_alternative<AstKnnNode>(*query_))
     return get<AstKnnNode>(*query_).limit;
   return nullopt;
+}
+
+void SearchAlgorithm::EnableProfiling() {
+  profiling_enabled_ = true;
 }
 
 }  // namespace dfly::search

@@ -84,7 +84,7 @@ zlexrangespec GetLexRange(bool reverse, const ZSetFamily::LexInterval& li) {
   range.min = GetLexStr(interval.first);
   range.max = GetLexStr(interval.second);
   range.minex = (interval.first.type == ZSetFamily::LexBound::OPEN);
-  range.maxex = (li.second.type == ZSetFamily::LexBound::OPEN);
+  range.maxex = (interval.second.type == ZSetFamily::LexBound::OPEN);
 
   return range;
 }

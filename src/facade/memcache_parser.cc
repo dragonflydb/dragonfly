@@ -154,8 +154,8 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
     return UNKNOWN_CMD;
   }
 
-  if (cmd->type <= CAS) {  // Store command
-    if (num_tokens < 5 || tokens[1].size() > 250) {
+  if (cmd->type <= CAS) {                            // Store command
+    if (num_tokens < 5 || tokens[1].size() > 250) {  // key length limit
       return MP::PARSE_ERROR;
     }
 

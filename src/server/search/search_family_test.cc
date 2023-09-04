@@ -251,6 +251,46 @@ TEST_F(SearchFamilyTest, TestLimit) {
   EXPECT_THAT(resp, ArrLen(3 * 2 + 1));
 }
 
+TEST_F(SearchFamilyTest, TestReturn) {
+  for (unsigned i = 0; i < 20; i++)
+    Run({"hset", "k"s + to_string(i), "longA", to_string(i), "longB", to_string(i + 1), "longC",
+         to_string(i + 2), "secret", to_string(i + 3)});
+
+  Run({"ft.create", "i1", "SCHEMA", "longA", "AS", "justA", "TEXT", "longB", "AS", "justB",
+       "NUMERIC", "longC", "AS", "justC", "NUMERIC"});
+
+  auto MatchEntry = [](string key, auto... fields) {
+    return RespArray(ElementsAre(IntArg(1), "k0", RespArray(UnorderedElementsAre(fields...))));
+  };
+
+  // Check all fields are returned
+  auto resp = Run({"ft.search", "i1", "@justA:0"});
+  EXPECT_THAT(resp, MatchEntry("k0", "longA", "0", "longB", "1", "longC", "2", "secret", "3"));
+
+  // Check no fields are returned
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+
+  resp = Run({"ft.search", "i1", "@justA:0", "nocontent"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+
+  // Check only one field is returned (and with original identifier)
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "longA"});
+  EXPECT_THAT(resp, MatchEntry("k0", "longA", "0"));
+
+  // Check only one field is returned with right alias
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "longB", "as", "madeupname"});
+  EXPECT_THAT(resp, MatchEntry("k0", "madeupname", "1"));
+
+  // Check two fields
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "2", "longB", "as", "madeupname", "longC"});
+  EXPECT_THAT(resp, MatchEntry("k0", "madeupname", "1", "longC", "2"));
+
+  // Check non-existing field
+  resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "nothere"});
+  EXPECT_THAT(resp, MatchEntry("k0", "nothere", ""));
+}
+
 TEST_F(SearchFamilyTest, SimpleUpdates) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
 
@@ -343,6 +383,26 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
   AdvanceTime(60);
   Run({"HGETALL", "d:3"});  // Trigger expiry by access
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
+}
+
+TEST_F(SearchFamilyTest, FtProfile) {
+  Run({"ft.create", "i1", "schema", "name", "text"});
+
+  auto resp = Run({"ft.profile", "i1", "search", "query", "(a | b) c d"});
+
+  const auto& top_level = resp.GetVec();
+  EXPECT_EQ(top_level.size(), shard_set->size() + 1);
+
+  EXPECT_THAT(top_level[0].GetVec(), ElementsAre("took", _, "hits", _, "serialized", _));
+
+  for (size_t sid = 0; sid < shard_set->size(); sid++) {
+    const auto& shard_resp = top_level[sid + 1].GetVec();
+    EXPECT_THAT(shard_resp, ElementsAre("took", _, "tree", _));
+
+    const auto& tree = shard_resp[3].GetVec();
+    EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
+    EXPECT_EQ(tree[1].GetVec().size(), 3);
+  }
 }
 
 }  // namespace dfly

@@ -1,4 +1,10 @@
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "facade/reply_builder.h"
+
+#include <random>
 
 #include "absl/strings/str_split.h"
 #include "base/gtest.h"
@@ -11,6 +17,7 @@
 // This will test the reply_builder RESP (Redis).
 
 using namespace testing;
+using namespace std;
 
 namespace facade {
 
@@ -172,7 +179,7 @@ RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
   parser_buffer_.reset(new uint8_t[SinkSize()]);
   auto* ptr = parser_buffer_.get();
   memcpy(ptr, str().data(), SinkSize());
-  RedisParser parser(false);  // client side
+  RedisParser parser(UINT32_MAX, false);  // client side
   result.result =
       parser.Parse(RedisParser::Buffer{ptr, SinkSize()}, &result.consumed, &result.args);
   return result;
@@ -232,26 +239,48 @@ TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
       OpStatus::OUT_OF_MEMORY, OpStatus::INVALID_FLOAT, OpStatus::INVALID_INT,
       OpStatus::SYNTAX_ERR,    OpStatus::BUSY_GROUP,    OpStatus::INVALID_NUMERIC_RESULT};
   for (const auto& err : error_codes) {
-    const std::string_view error_code_name = DebugString(err);
-    const std::string_view error_name = RedisReplyBuilder::StatusToMsg(err);
+    const std::string_view error_name = StatusToMsg(err);
     const std::string_view error_type = GetErrorType(error_name);
 
     sink_.Clear();
     builder_->SendError(err);
-    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart))
-        << " invalid start char for " << error_code_name;
-    ASSERT_TRUE(absl::EndsWith(str(), kCRLF))
-        << " failed to find correct termination at " << error_code_name;
+    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart)) << " invalid start char for " << err;
+    ASSERT_TRUE(absl::EndsWith(str(), kCRLF)) << " failed to find correct termination at " << err;
     ASSERT_EQ(builder_->err_count().at(error_type), 1)
-        << " number of error count is invalid for " << error_code_name;
+        << " number of error count is invalid for " << err;
     ASSERT_EQ(str(), BuildExpectedErrorString(error_name))
         << " error different from expected - '" << str() << "'";
 
     auto parsing_output = Parse();
     ASSERT_TRUE(parsing_output.Verify(SinkSize()))
-        << " verify for the result is invalid for " << error_code_name;
-    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << error_code_name;
+        << " verify for the result is invalid for " << err;
+    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << err;
   }
+}
+
+TEST_F(RedisReplyBuilderTest, ErrorReplyBuiltInMessage) {
+  ErrorReply err{OpStatus::OUT_OF_RANGE};
+  builder_->SendError(err);
+  ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
+  ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
+  ASSERT_EQ(builder_->err_count().at(kIndexOutOfRange), 1);
+  ASSERT_EQ(str(), BuildExpectedErrorString(kIndexOutOfRange));
+
+  auto parsing_output = Parse();
+  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
+  ASSERT_TRUE(parsing_output.IsError());
+  sink_.Clear();
+
+  err = ErrorReply{"e1", "e2"};
+  builder_->SendError(err);
+  ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
+  ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
+  ASSERT_EQ(builder_->err_count().at("e2"), 1);
+  ASSERT_EQ(str(), BuildExpectedErrorString("e1"));
+
+  parsing_output = Parse();
+  ASSERT_TRUE(parsing_output.Verify(SinkSize()));
+  ASSERT_TRUE(parsing_output.IsError());
 }
 
 TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
@@ -261,24 +290,21 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
                                   OpStatus::TIMED_OUT,           OpStatus::STREAM_ID_SMALL};
   uint64_t error_count = 0;
   for (const auto& err : none_unique_codes) {
-    const std::string_view error_code_name = DebugString(err);
-    const std::string_view error_name = RedisReplyBuilder::StatusToMsg(err);
+    const std::string_view error_name = StatusToMsg(err);
     const std::string_view error_type = GetErrorType(error_name);
 
     sink_.Clear();
     builder_->SendError(err);
-    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart))
-        << " invalid start char for " << error_code_name;
+    ASSERT_TRUE(absl::StartsWith(str(), kErrorStart)) << " invalid start char for " << err;
     ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
     auto current_error_count = builder_->err_count().at(error_type);
     error_count++;
-    ASSERT_EQ(current_error_count, error_count)
-        << " number of error count is invalid for " << error_code_name;
+    ASSERT_EQ(current_error_count, error_count) << " number of error count is invalid for " << err;
     auto parsing_output = Parse();
     ASSERT_TRUE(parsing_output.Verify(SinkSize()))
-        << " verify for the result is invalid for " << error_code_name;
+        << " verify for the result is invalid for " << err;
 
-    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << error_code_name;
+    ASSERT_TRUE(parsing_output.IsError()) << " expecting error for " << err;
   }
 }
 
@@ -828,5 +854,41 @@ TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
 
   builder_->SetResp3(false);
 }
+
+TEST_F(RedisReplyBuilderTest, FormatDouble) {
+  char buf[64];
+
+  auto format = [&](double d) { return RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf)); };
+
+  EXPECT_STREQ("0.1", format(0.1));
+  EXPECT_STREQ("0.2", format(0.2));
+  EXPECT_STREQ("0.8", format(0.8));
+  EXPECT_STREQ("1.1", format(1.1));
+  EXPECT_STREQ("inf", format(INFINITY));
+  EXPECT_STREQ("-inf", format(-INFINITY));
+  EXPECT_STREQ("0", format(-0.0));
+  EXPECT_STREQ("1e-7", format(0.0000001));
+  EXPECT_STREQ("111111111111111110000", format(111111111111111111111.0));
+  EXPECT_STREQ("1.1111111111111111e+21", format(1111111111111111111111.0));
+  EXPECT_STREQ("1e-23", format(1e-23));
+}
+
+static void BM_FormatDouble(benchmark::State& state) {
+  vector<double> values;
+  char buf[64];
+
+  uniform_real_distribution<double> unif(0, 1e9);
+  default_random_engine re;
+  for (unsigned i = 0; i < 100; i++) {
+    values.push_back(unif(re));
+  }
+
+  while (state.KeepRunning()) {
+    for (auto d : values) {
+      RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf));
+    }
+  }
+}
+BENCHMARK(BM_FormatDouble);
 
 }  // namespace facade

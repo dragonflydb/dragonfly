@@ -15,7 +15,11 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
+
+#ifdef __linux__
 #include <liburing.h>
+#endif
+
 #include <mimalloc.h>
 #include <openssl/err.h>
 #include <signal.h>
@@ -330,6 +334,9 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   Listener* main_listener = nullptr;
 
   std::vector<facade::Listener*> listeners;
+  // If we ever add a new listener, plz don't change this,
+  // we depend on tcp listener to be at the front since we later
+  // need to pass it to the AclFamily::Init
   if (!tcp_disabled) {
     main_listener = new Listener{Protocol::REDIS, &service};
     listeners.push_back(main_listener);
@@ -346,7 +353,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   if (!unix_sock.empty()) {
     string perm_str = GetFlag(FLAGS_unixsocketperm);
-    mode_t unix_socket_perm;
+    uint32_t unix_socket_perm;
     if (perm_str.empty()) {
       // get umask of running process, indicates the permission bits that are turned off
       mode_t umask_val = umask(0);
@@ -392,6 +399,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
     Listener* admin_listener = new Listener{Protocol::REDIS, &service};
+    admin_listener->SetAdminInterface();
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener);
 
     if (ec) {
@@ -457,6 +465,7 @@ bool CreatePidFile(const string& path) {
   return true;
 }
 
+#ifdef __linux__
 bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   if (GetFlag(FLAGS_force_epoll))
     return true;
@@ -666,6 +675,8 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   }
 }
 
+#endif
+
 }  // namespace
 }  // namespace dfly
 
@@ -746,7 +757,9 @@ Usage: dragonfly [FLAGS]
   auto memory = ReadMemInfo().value();
   size_t max_available_threads = 0u;
 
+#ifdef __linux__
   UpdateResourceLimitsIfInsideContainer(&memory, &max_available_threads);
+#endif
 
   if (memory.swap_total != 0)
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
@@ -775,13 +788,14 @@ Usage: dragonfly [FLAGS]
   mi_option_set(mi_option_max_warnings, 0);
   mi_option_set(mi_option_decommit_delay, 0);
 
+  unique_ptr<util::ProactorPool> pool;
+
+#ifdef __linux__
   base::sys::KernelVersion kver;
   base::sys::GetKernelVersion(&kver);
 
   CHECK_LT(kver.major, 99u);
   dfly::kernel_version = kver.kernel * 100 + kver.major;
-
-  unique_ptr<util::ProactorPool> pool;
 
   bool use_epoll = ShouldUseEpollAPI(kver);
 
@@ -790,6 +804,9 @@ Usage: dragonfly [FLAGS]
   } else {
     pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
   }
+#else
+  pool.reset(fb2::Pool::Epoll(max_available_threads));
+#endif
 
   pool->Run();
 

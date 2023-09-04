@@ -19,6 +19,7 @@ class SearchFamily {
   static void FtInfo(CmdArgList args, ConnectionContext* cntx);
   static void FtList(CmdArgList args, ConnectionContext* cntx);
   static void FtSearch(CmdArgList args, ConnectionContext* cntx);
+  static void FtProfile(CmdArgList args, ConnectionContext* cntx);
 
  public:
   static void Register(CommandRegistry* registry);

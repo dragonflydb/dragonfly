@@ -106,7 +106,18 @@ There are also some Dragonfly-specific arguments:
  * `dbnum`: Maximum number of supported databases for `select`.
  * `cache_mode`: See the [novel cache design](#novel-cache-design) section below.
  * `hz`: Key expiry evaluation frequency (`default: 100`). Lower frequency uses less CPU when idle at the expense of a slower eviction rate.
- * `save_schedule`: Glob spec for the UTC to save a snapshot in HH:MM (24h time) format (`default: ""`).
+ * `snapshot_cron`: Cron schedule expression for automatic backup snapshots using standard cron syntax with the granularity of minutes (`default: ""`).
+   Here are some cron schedule expression examples below, and feel free to read more about this argument in our [documentation](https://www.dragonflydb.io/docs/managing-dragonfly/backups#the-snapshot_cron-flag).
+
+   | Cron Schedule Expression | Description                                |
+   |--------------------------|--------------------------------------------|
+   | `* * * * *`              | At every minute                            |
+   | `*/5 * * * *`            | At every 5th minute                        |
+   | `5 */2 * * *`            | At minute 5 past every 2nd hour            |
+   | `0 0 * * *`              | At 00:00 (midnight) every day              |
+   | `0 6 * * 1-5`            | At 06:00 (dawn) from Monday through Friday |
+
+ * `save_schedule`: Glob spec for the UTC to save a snapshot in HH:MM (24h time) format (`default: ""`). This argument is deprecated, and `snapshot_cron` should be preferred when available.
  * `primary_port_http_enabled`: Allows accessing HTTP console on main TCP port if `true` (`default: true`).
  * `admin_port`: To enable admin access to the console on the assigned port (`default: disabled`). Supports both HTTP and RESP protocols.
  * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols.
@@ -126,7 +137,7 @@ For more options like logs management or TLS support, run `dragonfly --help`.
 
 ## <a name="roadmap-status"><a/>Roadmap and status
 
-Dragonfly currently supports ~185 Redis commands and all Memcache commands besides `cas`. Almost on par with the Redis 5 API, Dragonfly's next milestone will be to stabilize basic functionality and implement the replication API. If there is a command you need that is not implemented yet, please open an issue.
+Dragonfly currently supports ~185 Redis commands and all Memcached commands besides `cas`. Almost on par with the Redis 5 API, Dragonfly's next milestone will be to stabilize basic functionality and implement the replication API. If there is a command you need that is not implemented yet, please open an issue.
 
 For Dragonfly-native replication, we are designing a distributed log format that will support order-of-magnitude higher speeds.
 

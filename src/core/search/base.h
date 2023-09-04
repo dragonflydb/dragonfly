@@ -1,5 +1,7 @@
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -15,9 +17,23 @@ using DocId = uint32_t;
 using FtVector = std::vector<float>;
 
 // Query params represent named parameters for queries supplied via PARAMS.
-// Currently its only a placeholder to pass the vector to KNN.
 struct QueryParams {
-  FtVector knn_vec;
+  size_t Size() const {
+    return params.size();
+  }
+
+  std::string_view operator[](std::string_view name) const {
+    if (auto it = params.find(name); it != params.end())
+      return it->second;
+    return "";
+  }
+
+  std::string& operator[](std::string_view k) {
+    return params[k];
+  }
+
+ private:
+  absl::flat_hash_map<std::string, std::string> params;
 };
 
 // Interface for accessing document values with different data structures underneath.

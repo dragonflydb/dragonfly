@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/hash/hash.h"
@@ -16,17 +18,14 @@
 
 namespace dfly::acl {
 
-// TODO implement these
-//#bool CheckIfCommandAllowed(uint64_t command_id, const CommandId& command);
-//#bool CheckIfAclCategoryAllowed(uint64_t command_id, const CommandId& command);
-
 class User final {
  public:
+  enum class Sign : int8_t { PLUS, MINUS };
+
   struct UpdateRequest {
     std::optional<std::string> password{};
 
-    std::optional<uint32_t> plus_acl_categories{};
-    std::optional<uint32_t> minus_acl_categories{};
+    std::vector<std::pair<Sign, uint32_t>> categories;
 
     // DATATYPE_BITSET commands;
 

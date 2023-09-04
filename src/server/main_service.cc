@@ -4,8 +4,9 @@
 
 #include "server/main_service.h"
 
-#include "facade/resp_expr.h"
-#include "server/acl/user_registry.h"
+#ifdef __FreeBSD__
+#include <pthread_np.h>
+#endif
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -25,8 +26,11 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_capture.h"
+#include "facade/resp_expr.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/acl/user_registry.h"
+#include "server/acl/validator.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
 #include "server/conn_context.h"
@@ -103,9 +107,24 @@ std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
 
 namespace dfly {
 
+#if defined(__linux__)
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
 #include <sys/syscall.h>
 #define gettid() syscall(SYS_gettid)
+#endif
+
+#elif defined(__FreeBSD__)
+
+#define gettid() pthread_getthreadid_np()
+
+#elif defined(__APPLE__)
+
+inline unsigned gettid() {
+  uint64_t tid;
+  pthread_threadid_np(NULL, &tid);
+  return tid;
+}
+
 #endif
 
 using namespace util;
@@ -637,7 +656,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                    const InitOpts& opts) {
   InitRedisTables();
 
-  config_registry.Register("maxmemory", [](const absl::CommandLineFlag& flag) {
+  config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
     auto res = flag.TryGet<MaxMemoryFlag>();
     if (!res)
       return false;
@@ -646,10 +665,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
-  config_registry.Register("dir");
-  config_registry.Register("requirepass");
-  config_registry.Register("masterauth");
-  config_registry.Register("tcp_keepalive");
+  config_registry.Register("dbnum");       // equivalent to databases in redis.
+  config_registry.RegisterMutable("dir");  // TODO: to add validation for dir
+  config_registry.RegisterMutable("requirepass");
+  config_registry.RegisterMutable("masterauth");
+  config_registry.RegisterMutable("tcp_keepalive");
+
   acl::UserRegistry* reg = &user_registry_;
   pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
 
@@ -661,7 +682,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   }
 
   shard_set->Init(shard_num, !opts.disable_time_update);
-
+  const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
+  // We assume that listeners.front() is the main_listener
+  // see dfly_main RunEngine
+  if (!tcp_disabled && !listeners.empty()) {
+    acl_family_.Init(listeners.front());
+  }
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
@@ -782,9 +808,25 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid) {
-  // TODO: Move OOM check here
+static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
+                                                      const ConnectionContext* cntx,
+                                                      string_view error_msg) {
+  // If we are on a squashed context we need to use the owner, because the
+  // context we are operating on is a stub and the acl username is not copied
+  // See: MultiCommandSquasher::SquashedHopCb
+  if (cntx->conn_state.squashing_info)
+    cntx = cntx->conn_state.squashing_info->owner;
+
+  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
+    return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
+  }
   return nullopt;
+}
+
+optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
+                                                     const ConnectionContext* cntx) {
+  // TODO: Move OOM check here
+  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC");
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
@@ -864,7 +906,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{status};
   }
 
-  return nullopt;
+  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
@@ -877,7 +919,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   const auto [cid, args_no_cmd] = FindCmd(args);
 
   if (cid == nullptr) {
-    return (*cntx)->SendError(ReportUnknownCmd(ArgS(args, 0)));
+    return cntx->SendError(ReportUnknownCmd(ArgS(args, 0)));
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -897,7 +939,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
-    (*dfly_cntx)->SendError(std::move(*err));
+    dfly_cntx->SendError(std::move(*err));
     return;
   }
 
@@ -907,16 +949,16 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
-    return (*cntx)->SendSimpleString("QUEUED");
+    return cntx->SendSimpleString("QUEUED");
   }
 
   uint64_t start_ns = absl::GetCurrentTimeNanos();
 
-  if (cid->opt_mask() & CO::DENYOOM) {
-    int64_t used_memory = etl.GetUsedMemory(start_ns);
+  if (cid->opt_mask() & CO::DENYOOM && etl.is_master) {
+    uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
-      return (*cntx)->SendError(kOutOfMemory);
+      return cntx->reply_builder()->SendError(kOutOfMemory);
     }
   }
 
@@ -978,7 +1020,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  if (auto err = VerifyCommandExecution(cid); err) {
+  if (auto err = VerifyCommandExecution(cid, cntx); err) {
     (*cntx)->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
@@ -2026,6 +2068,8 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   unsigned index = 0;
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
 
+  string res = absl::StrCat("db=", server_cntx->db_index());
+
   if (server_cntx->async_dispatch)
     buf[index++] = 'a';
 
@@ -2038,7 +2082,10 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   if (server_cntx->conn_state.is_blocking)
     buf[index++] = 'b';
 
-  return index ? absl::StrCat("flags:", buf) : string();
+  if (index) {
+    absl::StrAppend(&res, " flags=", buf);
+  }
+  return res;
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
@@ -2108,7 +2155,7 @@ void Service::RegisterCommands() {
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
   SearchFamily::Register(&registry_);
-  acl::AclFamily::Register(&registry_);
+  acl_family_.Register(&registry_);
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);

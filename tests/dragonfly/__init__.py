@@ -72,7 +72,7 @@ class DflyInstance:
     def _start(self):
         if self.params.existing_port:
             return
-        base_args = [f"--{v}" for v in self.params.args]
+        base_args = ["--use_zset_tree"] + [f"--{v}" for v in self.params.args]
         all_args = self.format_args(self.args) + base_args
         print(f"Starting instance on {self.port} with arguments {all_args} from {self.params.path}")
 
@@ -106,7 +106,7 @@ class DflyInstance:
     def mc_port(self) -> int:
         if self.params.existing_mc_port:
             return self.params.existing_mc_port
-        return int(self.args.get("mc_port", "11211"))
+        return int(self.args.get("memcached_port", "11211"))
 
     @staticmethod
     def format_args(args):

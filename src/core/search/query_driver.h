@@ -20,17 +20,14 @@ class QueryDriver {
   QueryDriver();
   ~QueryDriver();
 
-  Scanner* scanner() {
-    return scanner_.get();
-  }
-
   void SetInput(std::string str) {
     cur_str_ = std::move(str);
     scanner()->in(cur_str_);
   }
 
-  void SetParams(QueryParams params) {
-    params_ = std::move(params);
+  void SetParams(const QueryParams* params) {
+    params_ = params;
+    scanner_->SetParams(params);
   }
 
   Parser::symbol_type Lex() {
@@ -47,15 +44,19 @@ class QueryDriver {
     return std::move(expr_);
   }
 
-  const QueryParams& GetParams() {
-    return params_;
+  const QueryParams& GetParams() const {
+    return *params_;
+  }
+
+  Scanner* scanner() {
+    return scanner_.get();
   }
 
  public:
   Parser::location_type location;
 
  private:
-  QueryParams params_;
+  const QueryParams* params_;
   AstExpr expr_;
 
   std::string cur_str_;

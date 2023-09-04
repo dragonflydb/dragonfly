@@ -3,8 +3,11 @@
 
 #include "server/acl/acl_family.h"
 
+#include <glog/logging.h>
+
 #include <cctype>
 #include <optional>
+#include <utility>
 #include <variant>
 
 #include "absl/strings/ascii.h"
@@ -12,6 +15,7 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "core/overloaded.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -148,8 +152,10 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
       return ErrorReply(absl::StrCat("Unrecognized parameter", command));
     }
 
-    auto* acl_field = add ? &req.plus_acl_categories : &req.minus_acl_categories;
-    *acl_field = acl_field->value_or(0) | *cat;
+    using Sign = User::Sign;
+    using Val = std::pair<Sign, uint32_t>;
+    auto val = add ? Val{Sign::PLUS, *cat} : Val{Sign::MINUS, *cat};
+    req.categories.push_back(val);
   }
 
   return req;
@@ -157,24 +163,80 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
 
 }  // namespace
 
+void AclFamily::StreamUpdatesToAllProactorConnections(std::string_view user, uint32_t update_cat) {
+  auto update_cb = [user, update_cat]([[maybe_unused]] size_t id, util::Connection* conn) {
+    DCHECK(conn);
+    auto connection = static_cast<facade::Connection*>(conn);
+    connection->SendAclUpdateAsync(facade::Connection::AclUpdateMessage{user, update_cat});
+  };
+
+  if (main_listener_) {
+    main_listener_->TraverseConnections(update_cb);
+  }
+}
+
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
   auto req = ParseAclSetUser(args.subspan(1));
   auto error_case = [cntx](ErrorReply&& error) { (*cntx)->SendError(error); };
-  auto update_case = [username, cntx](User::UpdateRequest&& req) {
-    ServerState::tlocal()->user_registry->MaybeAddAndUpdate(username, std::move(req));
+  auto update_case = [username, cntx, this](User::UpdateRequest&& req) {
+    auto& registry = ServerState::tlocal()->user_registry;
+    auto user_with_lock = registry->MaybeAddAndUpdateWithLock(username, std::move(req));
+    if (user_with_lock.exists) {
+      StreamUpdatesToAllProactorConnections(username, user_with_lock.user.AclCategory());
+    }
     (*cntx)->SendOk();
   };
 
   std::visit(Overloaded{error_case, update_case}, std::move(req));
 }
 
+void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
+  auto close_cb = [user]([[maybe_unused]] size_t id, util::Connection* conn) {
+    DCHECK(conn);
+    auto connection = static_cast<facade::Connection*>(conn);
+    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
+    if (ctx && ctx->authed_username == user) {
+      connection->ShutdownSelf();
+    }
+  };
+
+  if (main_listener_) {
+    main_listener_->TraverseConnections(close_cb);
+  }
+}
+
+void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view username = facade::ToSV(args[0]);
+  auto& registry = *ServerState::tlocal()->user_registry;
+  if (!registry.RemoveUser(username)) {
+    cntx->SendError(absl::StrCat("User ", username, " does not exist"));
+    return;
+  }
+
+  EvictOpenConnectionsOnAllProactors(username);
+  cntx->SendOk();
+}
+
+void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
+  cntx->SendSimpleString(absl::StrCat("User is ", cntx->authed_username));
+}
+
 using CI = dfly::CommandId;
 
-#define HFUNC(x) SetHandler(&AclFamily::x)
+using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
+inline CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
+  return [=](CmdArgList args, ConnectionContext* cntx) { return (acl->*f)(args, cntx); };
+}
+
+#define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
+
+constexpr uint32_t kAcl = acl::CONNECTION;
 constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kWhoAmI = acl::SLOW;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -184,13 +246,21 @@ constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 // easy to handle that case explicitly in `DispatchCommand`.
 
 void AclFamily::Register(dfly::CommandRegistry* registry) {
-  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kList}.HFUNC(Acl);
+  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
   *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kList}.HFUNC(
       List);
   *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSetUser}
                    .HFUNC(SetUser);
+  *registry << CI{"ACL DELUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 2, 0, 0, 0, acl::kDelUser}
+                   .HFUNC(DelUser);
+  *registry << CI{"ACL WHOAMI", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kWhoAmI}
+                   .HFUNC(WhoAmI);
 }
 
 #undef HFUNC
+
+void AclFamily::Init(facade::Listener* main_listener) {
+  main_listener_ = main_listener;
+}
 
 }  // namespace dfly::acl

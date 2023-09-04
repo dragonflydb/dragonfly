@@ -8,6 +8,8 @@
 
 namespace dfly::search {
 
+FtVector BytesToFtVector(std::string_view value);
+
 float VectorDistance(const FtVector& v1, const FtVector& v2);
 
 }  // namespace dfly::search

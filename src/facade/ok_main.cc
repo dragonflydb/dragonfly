@@ -59,12 +59,22 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
 }  // namespace facade
 
+#ifdef __linux__
+#define USE_URING 1
+#else
+#define USE_URING 0
+#endif
+
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
   CHECK_GT(GetFlag(FLAGS_port), 0u);
 
+#if USE_URING
   unique_ptr<util::ProactorPool> pp(fb2::Pool::IOUring(1024));
+#else
+  unique_ptr<util::ProactorPool> pp(fb2::Pool::Epoll());
+#endif
   pp->Run();
 
   AcceptServer acceptor(pp.get());

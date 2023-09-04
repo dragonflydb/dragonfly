@@ -10,15 +10,23 @@
 #include "core/search/lexer.h"
 #endif
 
+#include <absl/strings/str_cat.h>
+
+#include "base/logging.h"
+
 namespace dfly {
 namespace search {
 
 class Scanner : public Lexer {
  public:
-  Scanner() {
+  Scanner() : params_{nullptr} {
   }
 
   Parser::symbol_type Lex();
+
+  void SetParams(const QueryParams* params) {
+    params_ = params;
+  }
 
  private:
   std::string_view matched_view(size_t skip_left = 0, size_t skip_right = 0) const {
@@ -29,6 +37,24 @@ class Scanner : public Lexer {
   dfly::search::location loc() {
     return location();
   }
+
+  Parser::symbol_type ParseParam(std::string_view name, const Parser::location_type& loc) {
+    if (!name.empty())
+      name.remove_prefix(1);
+
+    std::string_view str = (*params_)[name];
+    if (str.empty())
+      throw std::runtime_error(absl::StrCat("Query parameter ", name, " not found"));
+
+    int64_t val = 0;
+    if (!absl::SimpleAtoi(str, &val))
+      return Parser::make_TERM(std::string{str}, loc);
+
+    return Parser::make_INT64(val, loc);
+  }
+
+ private:
+  const QueryParams* params_;
 };
 
 }  // namespace search
