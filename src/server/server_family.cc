@@ -1366,6 +1366,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
+
+      // PHP Symphony needs this field to work.
+      append("maxmemory_policy", "eviction");
     } else {
       append("cache_mode", "store");
       // Compatible with redis based frameworks.
