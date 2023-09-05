@@ -1141,7 +1141,7 @@ struct PendingReducedResult {
   uint64_t count = 0;
   streamID start;
   streamID end;
-  vector<pair<string_view, uint64_t>> consumer_list;
+  vector<pair<string_view, uint64_t /* size of consumer pending list*/>> consumer_list;
 };
 
 struct PendingExtendedResult {
@@ -1151,11 +1151,8 @@ struct PendingExtendedResult {
   mstime_t elapsed;
 };
 
-struct PendingResult {
-  bool is_reduced = true;
-  PendingReducedResult reduced;
-  vector<PendingExtendedResult> extended;
-};
+using PendingExtendedResultList = std::vector<PendingExtendedResult>;
+using PendingResult = std::variant<PendingReducedResult, PendingExtendedResultList>;
 
 PendingReducedResult GetPendingReducedResult(streamCG* cg) {
   PendingReducedResult result;
@@ -1184,7 +1181,7 @@ PendingReducedResult GetPendingReducedResult(streamCG* cg) {
       continue;
 
     pair<string_view, uint64_t> item;
-    item.first = static_cast<string_view>(consumer->name);
+    item.first = string_view{consumer->name, sdslen(consumer->name)};
     item.second = pel_size;
     result.consumer_list.push_back(item);
   }
@@ -1192,9 +1189,9 @@ PendingReducedResult GetPendingReducedResult(streamCG* cg) {
   return result;
 }
 
-vector<PendingExtendedResult> GetPendingExtendedResult(streamCG* cg, streamConsumer* consumer,
-                                                       const PendingOpts& opts) {
-  vector<PendingExtendedResult> result;
+PendingExtendedResultList GetPendingExtendedResult(streamCG* cg, streamConsumer* consumer,
+                                                   const PendingOpts& opts) {
+  PendingExtendedResultList result;
   rax* pel = consumer ? consumer->pel : cg->pel;
   streamID sstart = opts.start.val, send = opts.end.val;
   auto now = GetCurrentTimeMs();
@@ -1265,10 +1262,9 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   PendingResult result;
 
   if (opts.count == -1) {
-    result.reduced = GetPendingReducedResult(cg);
+    result = GetPendingReducedResult(cg);
   } else {
-    result.is_reduced = false;
-    result.extended = GetPendingExtendedResult(cg, consumer, opts);
+    result = GetPendingExtendedResult(cg, consumer, opts);
   }
   return result;
 }
@@ -1730,28 +1726,30 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
   }
   PendingResult result = op_result.value();
 
-  if (result.is_reduced) {
-    if (!result.reduced.count) {
+  if (std::holds_alternative<PendingReducedResult>(result)) {
+    const auto& res = std::get<PendingReducedResult>(result);
+    if (!res.count) {
       return (*cntx)->SendEmptyArray();
     }
     (*cntx)->StartArray(4);
-    (*cntx)->SendLong(result.reduced.count);
-    (*cntx)->SendBulkString(StreamIdRepr(result.reduced.start));
-    (*cntx)->SendBulkString(StreamIdRepr(result.reduced.end));
-    (*cntx)->StartArray(result.reduced.consumer_list.size());
+    (*cntx)->SendLong(res.count);
+    (*cntx)->SendBulkString(StreamIdRepr(res.start));
+    (*cntx)->SendBulkString(StreamIdRepr(res.end));
+    (*cntx)->StartArray(res.consumer_list.size());
 
-    for (auto& [consumer_name, count] : result.reduced.consumer_list) {
+    for (auto& [consumer_name, count] : res.consumer_list) {
       (*cntx)->StartArray(2);
       (*cntx)->SendBulkString(consumer_name);
       (*cntx)->SendLong(count);
     }
   } else {
-    if (!result.extended.size()) {
+    const auto& res = std::get<PendingExtendedResultList>(result);
+    if (!res.size()) {
       return (*cntx)->SendEmptyArray();
     }
 
-    (*cntx)->StartArray(result.extended.size());
-    for (auto& item : result.extended) {
+    (*cntx)->StartArray(res.size());
+    for (auto& item : res) {
       (*cntx)->StartArray(4);
       (*cntx)->SendBulkString(StreamIdRepr(item.start));
       (*cntx)->SendBulkString(item.consumer_name);
