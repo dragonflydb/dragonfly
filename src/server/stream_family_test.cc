@@ -499,4 +499,70 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
+TEST_F(StreamFamilyTest, XPending) {
+  Run({"xadd", "foo", "1-0", "k1", "v1"});
+  Run({"xadd", "foo", "1-1", "k2", "v2"});
+  Run({"xadd", "foo", "1-2", "k3", "v3"});
+
+  // create a group for foo stream
+  Run({"xgroup", "create", "foo", "group", "0"});
+  // alice consume all the stream entries
+  Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+  // bob doesn't have pending entries
+  Run({"xgroup", "createconsumer", "foo", "group", "bob"});
+
+  // XPending should print 4 entries
+  auto resp = Run({"xpending", "foo", "group"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        IntArg(3), "1-0", "1-2",
+                        RespArray(ElementsAre(RespArray(ElementsAre("alice", IntArg(3))))))));
+
+  resp = Run({"xpending", "foo", "group", "-", "+", "10"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre("1-0", "alice", ArgType(RespExpr::INT64), IntArg(1))),
+                  RespArray(ElementsAre("1-1", "alice", ArgType(RespExpr::INT64), IntArg(1))),
+                  RespArray(ElementsAre("1-2", "alice", ArgType(RespExpr::INT64), IntArg(1))))));
+
+  // only return a single entry
+  resp = Run({"xpending", "foo", "group", "-", "+", "1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1-0", "alice", ArgType(RespExpr::INT64), IntArg(1)));
+
+  // Bob read a new entry
+  Run({"xadd", "foo", "1-3", "k4", "v4"});
+  Run({"xreadgroup", "group", "group", "bob", "streams", "foo", ">"});
+  // Bob now has` an entry in his pending list
+  resp = Run({"xpending", "foo", "group", "-", "+", "10", "bob"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1-3", "bob", ArgType(RespExpr::INT64), IntArg(1)));
+
+  Run({"xadd", "foo", "1-4", "k5", "v5"});
+  TEST_current_time_ms = 100;
+  Run({"xreadgroup", "group", "group", "bob", "streams", "foo", ">"});
+  TEST_current_time_ms += 3000;
+
+  // min-idle-time is exceeding the delivery time of last inserted entry
+  resp = Run({"xpending", "foo", "group", "IDLE", "4000", "-", "+", "10"});
+  EXPECT_THAT(resp, ArrLen(0));
+}
+
+TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
+  Run({"xadd", "foo", "1-0", "k1", "v1"});
+  Run({"xadd", "foo", "1-1", "k2", "v2"});
+
+  auto resp = Run({"xpending", "unknown", "group"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  // group doesn't exist
+  resp = Run({"xpending", "foo", "group"});
+  EXPECT_THAT(resp, ErrArg("NOGROUP"));
+
+  Run({"xgroup", "create", "foo", "group", "0"});
+  // start end count not provided
+  resp = Run({"xpending", "foo", "group", "IDLE", "0"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // count not provided
+  resp = Run({"xpending", "foo", "group", "-", "+"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
 }  // namespace dfly

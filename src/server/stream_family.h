@@ -21,6 +21,7 @@ class StreamFamily {
   static void XGroup(CmdArgList args, ConnectionContext* cntx);
   static void XInfo(CmdArgList args, ConnectionContext* cntx);
   static void XLen(CmdArgList args, ConnectionContext* cntx);
+  static void XPending(CmdArgList args, ConnectionContext* cntx);
   static void XRevRange(CmdArgList args, ConnectionContext* cntx);
   static void XRange(CmdArgList args, ConnectionContext* cntx);
   static void XRead(CmdArgList args, ConnectionContext* cntx);
