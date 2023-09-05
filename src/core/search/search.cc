@@ -36,6 +36,11 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
   return driver.Take();
 }
 
+// GCC 12 yields a wrong warning in a deeply inlined call in UnifyResults, only ignoring the whole
+// scope solves it
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
   using DocVec = vector<DocId>;
@@ -195,16 +200,11 @@ struct BasicSearch {
     if (sub_results.empty())
       return vector<DocId>{};
 
-      // Unifying from smallest to largest is more efficient.
-      // AND: the result only shrinks, so starting with the smallest is most optimal.
-      // OR: unifying smaller sets first reduces the number of element traversals on average.
-
-      // Ignore Wmaybe-uninitialized because it yields maybe-uninitialized with GCC 12
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+    // Unifying from smallest to largest is more efficient.
+    // AND: the result only shrinks, so starting with the smallest is most optimal.
+    // OR: unifying smaller sets first reduces the number of element traversals on average.
     sort(sub_results.begin(), sub_results.end(),
          [](const auto& l, const auto& r) { return l.Size() < r.Size(); });
-#pragma GCC diagnostic pop
 
     IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
@@ -346,6 +346,8 @@ struct BasicSearch {
   vector<DocId> tmp_vec_;
   vector<pair<float, DocId>> distances_;
 };
+
+#pragma GCC diagnostic pop
 
 }  // namespace
 

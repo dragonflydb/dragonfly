@@ -17,7 +17,7 @@ using DocId = uint32_t;
 
 enum class VectorSimilarity { L2, COSINE };
 
-using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /*dims*/>;
+using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /* dimension (size) */>;
 
 // Query params represent named parameters for queries supplied via PARAMS.
 struct QueryParams {
@@ -41,7 +41,7 @@ struct QueryParams {
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
-  using VectorInfo = std::pair<std::unique_ptr<float[]>, size_t /* dims */>;
+  using VectorInfo = search::OwnedFtVector;
 
   virtual ~DocumentAccessor() = default;
   virtual std::string_view GetString(std::string_view active_field) const = 0;

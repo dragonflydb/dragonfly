@@ -74,7 +74,7 @@ struct AstTagsNode {
 
 // Applies nearest neighbor search to the final result set
 struct AstKnnNode {
-  AstKnnNode(AstNode&& sub, size_t limit, std::string field, OwnedFtVector vec);
+  AstKnnNode(AstNode&& sub, size_t limit, std::string_view field, OwnedFtVector vec);
 
   std::unique_ptr<AstNode> filter;
   size_t limit;
