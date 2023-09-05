@@ -57,10 +57,10 @@ AstTagsNode::AstTagsNode(AstExpr&& l, std::string tag) {
 }
 
 AstKnnNode::AstKnnNode(AstNode&& filter, size_t limit, std::string_view field, OwnedFtVector vec)
-    : filter{make_unique<AstNode>(move(filter))},
+    : filter{make_unique<AstNode>(std::move(filter))},
       limit{limit},
       field{field.substr(1)},
-      vec{move(vec)} {
+      vec{std::move(vec)} {
 }
 
 }  // namespace dfly::search
