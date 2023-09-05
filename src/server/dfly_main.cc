@@ -9,6 +9,7 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <absl/flags/reflection.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
@@ -701,6 +702,24 @@ void PrintBasicUsageInfo() {
   std::cout << endl;
 }
 
+void ParseFlagsFromEnv() {
+  const auto& flags = absl::GetAllFlags();
+  for (const auto& flag_entry : flags) {
+    auto& flag_name = flag_entry.first;
+    auto& flag = flag_entry.second;
+    const char* flag_env_value = getenv(absl::StrCat("FLAGS_", flag_name).data());
+    if (flag_env_value != nullptr) {
+      string error;
+      bool success = flag->ParseFrom(flag_env_value, &error);
+      if (!success) {
+        LOG(ERROR) << "could not parse flag " << flag->Name()
+                   << " from environment variable. Error: " << error;
+        exit(1);
+      }
+    }
+  }
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
@@ -721,6 +740,7 @@ Usage: dragonfly [FLAGS]
   absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
+  ParseFlagsFromEnv();
 
   PrintBasicUsageInfo();
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
