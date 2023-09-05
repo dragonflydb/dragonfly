@@ -157,6 +157,10 @@ struct CmdArgParser {
     return cur_i_ < args_.size() && !error_;
   }
 
+  bool HasError() {
+    return error_.has_value();
+  }
+
   // Get optional error if occured
   std::optional<ErrorInfo> Error() {
     return std::exchange(error_, {});

@@ -46,16 +46,22 @@ bool IsValidJsonPath(string_view path) {
   return !ec;
 }
 
-pair<size_t, search::VectorSimilarity> ParseVectorFieldInfoOrReply(CmdArgParser* parser,
-                                                                   ConnectionContext* cntx) {
+pair<size_t, search::VectorSimilarity> ParseVectorFieldInfo(CmdArgParser* parser,
+                                                            ConnectionContext* cntx) {
   size_t dim = 0;
   search::VectorSimilarity sim = search::VectorSimilarity::L2;
 
   size_t num_args = parser->Next().Int<size_t>();
   for (size_t i = 0; i * 2 < num_args; i++) {
     parser->ToUpper();
-    if (parser->Check("DIM")) {
+    if (parser->Check("DIM").ExpectTail(1)) {
       dim = parser->Next().Int<size_t>();
+      continue;
+    }
+    if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
+      sim = parser->Next()
+                .Case("L2", search::VectorSimilarity::L2)
+                .Case("COSINE", search::VectorSimilarity::COSINE);
       continue;
     }
     parser->Skip(2);
@@ -97,7 +103,12 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     search::VectorSimilarity knn_sim = search::VectorSimilarity::L2;
     if (*type == search::SchemaField::VECTOR) {
       parser.Skip(1);  // algorithm
-      std::tie(knn_dim, knn_sim) = ParseVectorFieldInfoOrReply(&parser, cntx);
+      std::tie(knn_dim, knn_sim) = ParseVectorFieldInfo(&parser, cntx);
+
+      if (!parser.HasError() && knn_dim == 0) {
+        (*cntx)->SendError("Vector dimension cannot be zero");
+        return nullopt;
+      }
     }
 
     // Skip all trailing ignored parameters
