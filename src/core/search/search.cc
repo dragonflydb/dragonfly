@@ -195,11 +195,16 @@ struct BasicSearch {
     if (sub_results.empty())
       return vector<DocId>{};
 
-    // Unifying from smallest to largest is more efficient.
-    // AND: the result only shrinks, so starting with the smallest is most optimal.
-    // OR: unifying smaller sets first reduces the number of element traversals on average.
+      // Unifying from smallest to largest is more efficient.
+      // AND: the result only shrinks, so starting with the smallest is most optimal.
+      // OR: unifying smaller sets first reduces the number of element traversals on average.
+
+      // Ignore Wmaybe-uninitialized because it yields maybe-uninitialized with GCC 12
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
     sort(sub_results.begin(), sub_results.end(),
          [](const auto& l, const auto& r) { return l.Size() < r.Size(); });
+#pragma GCC diagnostic pop
 
     IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
