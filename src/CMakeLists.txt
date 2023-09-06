@@ -92,6 +92,13 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  uni-algo
+  URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
+
+  BUILD_IN_SOURCE 1
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
