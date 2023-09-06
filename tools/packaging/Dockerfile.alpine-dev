@@ -6,7 +6,7 @@ FROM alpine:3 as builder
 # "openssl-libs-static" fixes "Could NOT find OpenSSL, try to set the path to OpenSSL root folder in the"
 RUN apk add autoconf-archive automake bash bison boost-dev cmake coreutils \
         curl ccache git gcc gdb g++ libunwind-dev libtool libxml2-dev make ninja \
-        openssl-dev openssl-libs-static patch zip
+        openssl-dev openssl-libs-static patch zip zstd-static
 
 # This is required to make static linking work
 RUN ls -1 /usr/lib/libboost_*.so | while read -r _file; do ln -sfv ${_file} ${_file//.so/.a}; done
