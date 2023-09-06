@@ -163,6 +163,8 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
+  OpStatus ScheduleRemoteCoordination(RunnableType cb);
+
   // Execute single hop with return value and conclude.
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));

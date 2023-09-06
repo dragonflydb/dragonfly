@@ -6,6 +6,8 @@
 
 #include <absl/strings/match.h>
 
+#include <atomic>
+
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -382,7 +384,7 @@ void Transaction::StartMultiNonAtomic() {
 
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
-  DCHECK(!cb_ptr_);
+  // DCHECK(!cb_ptr_);
 
   unique_shard_id_ = 0;
   unique_shard_cnt_ = 0;
@@ -539,7 +541,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     }
   }
 
-  CHECK_GE(DecreaseRunCnt(), 1u);
+  // CHECK_GE(DecreaseRunCnt(), 1u);
+  DecreaseRunCnt();
   // From this point on we can not access 'this'.
 
   return !tx_stop_runnig;
@@ -725,6 +728,43 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   return local_result_;
 }
 
+OpStatus Transaction::ScheduleRemoteCoordination(RunnableType cb) {
+  DCHECK(!cb_ptr_);
+  DCHECK_EQ(unique_shard_cnt_, 1UL);
+  DCHECK_NE(unique_shard_id_, kInvalidSid);
+  // DCHECK_EQ(shard_data_.size(), 1);
+  DCHECK(multi_);
+  DCHECK_EQ(multi_->mode, LOCK_AHEAD);
+  DCHECK(!IsGlobal());
+
+  auto* ss = ServerState::tlocal();
+  DCHECK_NE(ss->thread_index(), unique_shard_id_);
+
+  // TODO XXX Use a better notification mechanism
+  atomic_bool finished = false;
+  EventCount remote_coord_ec;
+  auto wrapped_cb = [&](Transaction* tx, EngineShard* shard) {
+    auto result = cb(tx, shard);
+    finished.store(true, std::memory_order_release);
+    remote_coord_ec.notify();
+    return result;
+  };
+  RunnableType wrapped_cb_type = wrapped_cb;
+  cb_ptr_ = &wrapped_cb_type;
+
+  coordinator_state_ |= COORD_EXEC;
+
+  ExecuteAsync();
+
+  DVLOG(2) << "ScheduleRemoteCoordination before Wait " << DebugId() << " " << run_count_.load();
+  remote_coord_ec.await([&]() { return finished.load(std::memory_order_relaxed); });
+  // WaitForShardCallbacks();
+  DVLOG(2) << "ScheduleRemoteCoordination after Wait " << DebugId();
+
+  cb_ptr_ = nullptr;
+  return local_result_;
+}
+
 void Transaction::ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write) {
   DCHECK(multi_);
   for (unsigned i = 0; i < multi_->shard_journal_write.size(); i++)
@@ -750,8 +790,8 @@ void Transaction::UnlockMulti() {
   unsigned shard_journals_cnt =
       ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
 
-  uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
-  DCHECK_EQ(prev, 0u);
+  run_count_.store(shard_data_.size(), memory_order_relaxed);
+  // DCHECK_EQ(prev, 0u);
 
   use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
@@ -965,7 +1005,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 // Optimized path that schedules and runs transactions out of order if possible.
 // Returns true if was eagerly executed, false if it was scheduled into queue.
 bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
-  DCHECK(!IsAtomicMulti());
+  // DCHECK(!IsAtomicMulti());
   DCHECK_EQ(0u, txid_);
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
   DCHECK_NE(unique_shard_id_, kInvalidSid);

@@ -306,6 +306,12 @@ TEST_F(MultiTest, FlushDb) {
 }
 
 TEST_F(MultiTest, Eval) {
+  constexpr string_view kKey = "foo3";
+  Run({"set", kKey, "42"});
+  EXPECT_EQ(Run({"eval", "redis.call('set', KEYS[1], '42')\nreturn redis.call('get', KEYS[1])", "1",
+                 kKey}),
+            "42");
+
   if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
     return;
