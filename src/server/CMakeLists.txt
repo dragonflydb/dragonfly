@@ -73,6 +73,7 @@ cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
+cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 
 
 

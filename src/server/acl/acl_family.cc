@@ -149,7 +149,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(CmdArgList args) {
 
     auto [cat, add] = MaybeParseAclCategory(command);
     if (!cat) {
-      return ErrorReply(absl::StrCat("Unrecognized parameter", command));
+      return ErrorReply(absl::StrCat("Unrecognized parameter ", command));
     }
 
     using Sign = User::Sign;
