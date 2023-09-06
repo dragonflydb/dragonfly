@@ -19,6 +19,7 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
+#include "core/search/vector_utils.h"
 
 namespace dfly {
 namespace search {
@@ -40,15 +41,8 @@ struct MockedDocument : public DocumentAccessor {
     return it != fields_.end() ? string_view{it->second} : "";
   }
 
-  FtVector GetVector(string_view field) const override {
-    string_view str_value = fields_.at(field);
-    FtVector out;
-    for (string_view coord : absl::StrSplit(str_value, ',')) {
-      float v;
-      CHECK(absl::SimpleAtof(coord, &v));
-      out.push_back(v);
-    }
-    return out;
+  VectorInfo GetVector(string_view field) const override {
+    return BytesToFtVector(GetString(field));
   }
 
   string DebugFormat() {
@@ -331,17 +325,18 @@ TEST_F(SearchParserTest, IntegerTerms) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
-std::string FtVectorToBytes(FtVector vec) {
+std::string ToBytes(absl::Span<const float> vec) {
   return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
 }
 
 TEST_F(SearchParserTest, SimpleKnn) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].knn_dim = 1;
   FieldIndices indices{schema};
 
   // Place points on a straight line
   for (size_t i = 0; i < 100; i++) {
-    Map values{{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", to_string(float(i))}}};
+    Map values{{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", ToBytes({float(i)})}}};
     MockedDocument doc{values};
     indices.Add(i, &doc);
   }
@@ -351,35 +346,35 @@ TEST_F(SearchParserTest, SimpleKnn) {
 
   // Five closest to 50
   {
-    params["vec"] = FtVectorToBytes(FtVector{50.0});
+    params["vec"] = ToBytes({50.0});
     algo.Init("*=>[KNN 5 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(48, 49, 50, 51, 52));
   }
 
   // Five closest to 0
   {
-    params["vec"] = FtVectorToBytes(FtVector{0.0});
+    params["vec"] = ToBytes({0.0});
     algo.Init("*=>[KNN 5 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
   }
 
   // Five closest to 20, all even
   {
-    params["vec"] = FtVectorToBytes(FtVector{20.0});
+    params["vec"] = ToBytes({20.0});
     algo.Init("@even:{yes} =>[KNN 5 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(16, 18, 20, 22, 24));
   }
 
   // Three closest to 31, all odd
   {
-    params["vec"] = FtVectorToBytes(FtVector{31.0});
+    params["vec"] = ToBytes({31.0});
     algo.Init("@even:{no} =>[KNN 3 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(29, 31, 33));
   }
 
   // Two closest to 70.5
   {
-    params["vec"] = FtVectorToBytes(FtVector{70.5});
+    params["vec"] = ToBytes({70.5});
     algo.Init("* =>[KNN 2 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(70, 71));
   }
@@ -393,11 +388,11 @@ TEST_F(SearchParserTest, Simple2dKnn) {
   const pair<float, float> kTestCoords[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0.5, 0.5}};
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].knn_dim = 2;
   FieldIndices indices{schema};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
-    auto [x, y] = kTestCoords[i];
-    string coords = absl::StrCat(x, ",", y);
+    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
     MockedDocument doc{Map{{"pos", coords}}};
     indices.Add(i, &doc);
   }
@@ -407,46 +402,82 @@ TEST_F(SearchParserTest, Simple2dKnn) {
 
   // Single center
   {
-    params["vec"] = FtVectorToBytes(FtVector{0.5, 0.5});
+    params["vec"] = ToBytes({0.5, 0.5});
     algo.Init("* =>[KNN 1 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
   }
 
   // Lower left
   {
-    params["vec"] = FtVectorToBytes(FtVector{0, 0});
+    params["vec"] = ToBytes({0, 0});
     algo.Init("* =>[KNN 4 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 3, 4));
   }
 
   // Upper right
   {
-    params["vec"] = FtVectorToBytes(FtVector{1, 1});
+    params["vec"] = ToBytes({1, 1});
     algo.Init("* =>[KNN 4 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2, 3, 4));
   }
 
   // Request more than there is
   {
-    params["vec"] = FtVectorToBytes(FtVector{0, 0});
+    params["vec"] = ToBytes({0, 0});
     algo.Init("* => [KNN 10 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
   }
 
   // Test correct order: (0.7, 0.15)
   {
-    params["vec"] = FtVectorToBytes(FtVector{0.7, 0.15});
+    params["vec"] = ToBytes({0.7, 0.15});
     algo.Init("* => [KNN 10 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(1, 4, 0, 2, 3));
   }
 
   // Test correct order: (0.8, 0.9)
   {
-    params["vec"] = FtVectorToBytes(FtVector{0.8, 0.9});
+    params["vec"] = ToBytes({0.8, 0.9});
     algo.Init("* => [KNN 10 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(2, 4, 3, 1, 0));
   }
 }
+
+static void BM_VectorSearch(benchmark::State& state) {
+  unsigned ndims = state.range(0);
+  unsigned nvecs = state.range(1);
+
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].knn_dim = ndims;
+  FieldIndices indices{schema};
+
+  auto random_vec = [ndims]() {
+    vector<float> coords;
+    for (size_t j = 0; j < ndims; j++)
+      coords.push_back(static_cast<float>(rand()) / static_cast<float>(RAND_MAX));
+    return coords;
+  };
+
+  for (size_t i = 0; i < nvecs; i++) {
+    auto rv = random_vec();
+    MockedDocument doc{Map{{"pos", ToBytes(rv)}}};
+    indices.Add(i, &doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  auto rv = random_vec();
+  params["vec"] = ToBytes(rv);
+  algo.Init("* =>[KNN 1 @pos $vec]", &params);
+
+  while (state.KeepRunningBatch(10)) {
+    for (size_t i = 0; i < 10; i++)
+      benchmark::DoNotOptimize(algo.Search(&indices));
+  }
+}
+
+BENCHMARK(BM_VectorSearch)->Args({120, 10'000});
 
 }  // namespace search
 

@@ -3,6 +3,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,7 +15,9 @@ namespace dfly::search {
 
 using DocId = uint32_t;
 
-using FtVector = std::vector<float>;
+enum class VectorSimilarity { L2, COSINE };
+
+using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /* dimension (size) */>;
 
 // Query params represent named parameters for queries supplied via PARAMS.
 struct QueryParams {
@@ -38,9 +41,11 @@ struct QueryParams {
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
+  using VectorInfo = search::OwnedFtVector;
+
   virtual ~DocumentAccessor() = default;
   virtual std::string_view GetString(std::string_view active_field) const = 0;
-  virtual FtVector GetVector(std::string_view active_field) const = 0;
+  virtual VectorInfo GetVector(std::string_view active_field) const = 0;
 };
 
 // Base class for type-specific indices.
