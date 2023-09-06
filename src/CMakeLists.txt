@@ -103,7 +103,7 @@ add_third_party(
   hnswlib
   URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
 
-  INSTALL_COMMAND cp -RT <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include
+  INSTALL_COMMAND cp -RT <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/hnswlib
   LIB "none"
 )
 

@@ -11,10 +11,10 @@
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
-#include <hnswalg.h>
-#include <hnswlib.h>
-#include <space_ip.h>
-#include <space_l2.h>
+#include <hnswlib/hnswalg.h>
+#include <hnswlib/hnswlib.h>
+#include <hnswlib/space_ip.h>
+#include <hnswlib/space_l2.h>
 #include <uni_algo/case.h>
 #include <uni_algo/ranges_word.h>
 #include <unicode/brkiter.h>
