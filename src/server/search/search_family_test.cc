@@ -361,6 +361,19 @@ TEST_F(SearchFamilyTest, Unicode) {
               UnorderedElementsAre("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας"));
 }
 
+TEST_F(SearchFamilyTest, UnicodeWords) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text"}), "OK");
+
+  Run({"hset", "d:1", "title",
+       "WORD!!! Одно слово? Zwei Wörter. Comma before ,sentence, "
+       "Τρεις λέξεις: χελώνα-σκύλου-γάτας",
+       "visits", "400"});
+
+  // Make sure it includes ALL those words
+  EXPECT_THAT(Run({"ft.search", "i1", "word слово wörter sentence λέξεις γάτας"}),
+              AreDocIds("d:1"));
+}
+
 TEST_F(SearchFamilyTest, SimpleExpiry) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "expires-in", "numeric"}), "OK");
 

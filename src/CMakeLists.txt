@@ -92,6 +92,13 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  unialgo
+  URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
+  LIB "none"
+  INSTALL_COMMAND cp -r <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/unialgo/
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
@@ -101,6 +108,11 @@ add_library(TRDP::croncpp INTERFACE IMPORTED)
 add_dependencies(TRDP::croncpp croncpp_project)
 set_target_properties(TRDP::croncpp PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${CRONCPP_INCLUDE_DIR}")
+
+add_library(TRDP::unialgo INTERFACE IMPORTED)
+add_dependencies(TRDP::unialgo unialgo_project)
+set_target_properties(TRDP::unialgo PROPERTIES
+                      INTERFACE_INCLUDE_DIRECTORIES "${UNIALGO_INCLUDE_DIR}")
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
