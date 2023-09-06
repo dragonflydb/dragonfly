@@ -1,5 +1,5 @@
 %skeleton "lalr1.cc" // -*- C++ -*-
-%require "3.5.1"    // That's what's present on ubuntu 20.04.
+%require "3.5"  // fedora 32 has this one.
 
 %defines  // %header starts from 3.8.1
 

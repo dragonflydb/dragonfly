@@ -22,7 +22,7 @@ sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
 On Fedora:
 
 ```bash
-sudo yum install automake boost-devel g++ git cmake libtool ninja-build libzstd-devel  \
+sudo dnf install -y automake boost-devel g++ git cmake libtool ninja-build libzstd-devel  \
      openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel libicu-devel
 ```
 
