@@ -9,7 +9,6 @@
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_split.h>
 
-#define UNI_ALGO_STATIC_DATA
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
 #include <uni_algo/case.h>
