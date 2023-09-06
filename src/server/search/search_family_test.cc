@@ -366,11 +366,11 @@ TEST_F(SearchFamilyTest, UnicodeWords) {
 
   Run({"hset", "d:1", "title",
        "WORD!!! Одно слово? Zwei Wörter. Comma before ,sentence, "
-       "Τρεις λέξεις: χελώνα-σκύλου-γάτας",
+       "Τρεις λέξεις: χελώνα-σκύλου-γάτας. !זה עובד",
        "visits", "400"});
 
   // Make sure it includes ALL those words
-  EXPECT_THAT(Run({"ft.search", "i1", "word слово wörter sentence λέξεις γάτας"}),
+  EXPECT_THAT(Run({"ft.search", "i1", "word слово wörter sentence λέξεις γάτας עובד"}),
               AreDocIds("d:1"));
 }
 
