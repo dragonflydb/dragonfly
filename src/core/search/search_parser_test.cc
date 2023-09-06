@@ -12,9 +12,9 @@ namespace dfly::search {
 
 using namespace std;
 
-class SearchParserTest : public ::testing::Test {
+class SearchTest : public ::testing::Test {
  protected:
-  SearchParserTest() {
+  SearchTest() {
     query_driver_.scanner()->set_debug(1);
   }
 
@@ -64,7 +64,7 @@ class SearchParserTest : public ::testing::Test {
     ASSERT_TRUE(caught);                      \
   }
 
-TEST_F(SearchParserTest, Scanner) {
+TEST_F(SearchTest, Scanner) {
   SetInput("ab cd");
   // 3.5.1 does not have name() method.
   // EXPECT_STREQ("term", tok.name());
@@ -103,7 +103,7 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_ERROR();
 }
 
-TEST_F(SearchParserTest, Parse) {
+TEST_F(SearchTest, Parse) {
   EXPECT_EQ(0, Parse(" foo bar (baz) "));
   EXPECT_EQ(0, Parse(" -(foo) @foo:bar @ss:[1 2]"));
   EXPECT_EQ(0, Parse("@foo:{ tag1 | tag2 }"));
@@ -114,7 +114,7 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" @foo: "));
 }
 
-TEST_F(SearchParserTest, ParseParams) {
+TEST_F(SearchTest, ParseParams) {
   QueryParams params;
   params["k"] = "10";
   params["name"] = "alex";

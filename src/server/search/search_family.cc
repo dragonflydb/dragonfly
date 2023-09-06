@@ -46,28 +46,38 @@ bool IsValidJsonPath(string_view path) {
   return !ec;
 }
 
-pair<size_t, search::VectorSimilarity> ParseVectorFieldInfo(CmdArgParser* parser,
-                                                            ConnectionContext* cntx) {
+search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   size_t dim = 0;
-  search::VectorSimilarity sim = search::VectorSimilarity::L2;
+  auto sim = search::VectorSimilarity::L2;
+  size_t capacity = 1000;
 
+  bool use_hnsw = parser->ToUpper().Next().Case("HNSW", true).Case("FLAT", false);
   size_t num_args = parser->Next().Int<size_t>();
+
   for (size_t i = 0; i * 2 < num_args; i++) {
     parser->ToUpper();
+
     if (parser->Check("DIM").ExpectTail(1)) {
       dim = parser->Next().Int<size_t>();
       continue;
     }
+
     if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
       sim = parser->Next()
                 .Case("L2", search::VectorSimilarity::L2)
                 .Case("COSINE", search::VectorSimilarity::COSINE);
       continue;
     }
+
+    if (parser->Check("INITIAL_CAP").ExpectTail(1)) {
+      capacity = parser->Next().Int<size_t>();
+      continue;
+    }
+
     parser->Skip(2);
   }
 
-  return {dim, sim};
+  return {use_hnsw, dim, sim, capacity};
 }
 
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
@@ -99,23 +109,22 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     }
 
     // Vector fields include: {algorithm} num_args args...
-    size_t knn_dim = 0;
-    search::VectorSimilarity knn_sim = search::VectorSimilarity::L2;
+    search::SchemaField::ParamsVariant params = std::monostate{};
     if (*type == search::SchemaField::VECTOR) {
-      parser.Skip(1);  // algorithm
-      std::tie(knn_dim, knn_sim) = ParseVectorFieldInfo(&parser, cntx);
-
-      if (!parser.HasError() && knn_dim == 0) {
-        (*cntx)->SendError("Vector dimension cannot be zero");
+      auto vector_params = ParseVectorParams(&parser);
+      if (!parser.HasError() && vector_params.dim == 0) {
+        (*cntx)->SendError("Knn vector dimension cannot be zero");
         return nullopt;
       }
+
+      params = std::move(vector_params);
     }
 
     // Skip all trailing ignored parameters
     while (kIgnoredOptions.count(parser.Peek()) > 0)
       parser.Skip(2);
 
-    schema.fields[field] = {*type, string{field_alias}, knn_dim, knn_sim};
+    schema.fields[field] = {*type, string{field_alias}, std::move(params)};
   }
 
   // Build field name mapping table

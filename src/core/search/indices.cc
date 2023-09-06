@@ -17,8 +17,6 @@
 #include <hnswlib/space_l2.h>
 #include <uni_algo/case.h>
 #include <uni_algo/ranges_word.h>
-#include <unicode/brkiter.h>
-#include <unicode/unistr.h>
 
 #include <algorithm>
 #include <cctype>
@@ -190,9 +188,10 @@ struct HnswlibAdapter {
   }
 
   template <typename Q> static vector<pair<float, DocId>> QueueToVec(Q queue) {
-    vector<pair<float, DocId>> out;
+    vector<pair<float, DocId>> out(queue.size());
+    size_t idx = out.size();
     while (!queue.empty()) {
-      out.push_back(queue.top());
+      out[--idx] = queue.top();
       queue.pop();
     }
     return out;

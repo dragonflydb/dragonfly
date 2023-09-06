@@ -310,8 +310,16 @@ struct BasicSearch {
     DCHECK(active_field.empty());
     auto sub_results = SearchGeneric(*knn.filter, active_field);
 
+    const auto& schema = indices_->GetSchema();
+    string_view knn_field = knn.field;
+    if (auto it = schema.field_names.find(knn_field); it != schema.field_names.end())
+      knn_field = it->second;
+
+    const auto& field_info = schema.fields.at(knn_field);
+    DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
+
     distances_.clear();
-    if (indices_->GetSchema().fields.at(knn.field).hnsw_capacity.has_value())
+    if (get<SchemaField::VectorParams>(field_info.special_params).use_hnsw)
       SearchKnnHnsw(knn, std::move(sub_results));
     else
       SearchKnnFlat(knn, std::move(sub_results));
@@ -385,11 +393,13 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
       case SchemaField::VECTOR:
         unique_ptr<BaseVectorIndex> vector_index;
 
-        if (auto capacity = field_info.hnsw_capacity; capacity)
-          vector_index =
-              make_unique<HnswVectorIndex>(field_info.knn_dim, field_info.knn_sim, *capacity);
+        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
+        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
+
+        if (vparams.use_hnsw)
+          vector_index = make_unique<HnswVectorIndex>(vparams.dim, vparams.sim, vparams.capacity);
         else
-          vector_index = make_unique<FlatVectorIndex>(field_info.knn_dim, field_info.knn_sim);
+          vector_index = make_unique<FlatVectorIndex>(vparams.dim, vparams.sim);
 
         indices_[field_ident] = std::move(vector_index);
         break;
