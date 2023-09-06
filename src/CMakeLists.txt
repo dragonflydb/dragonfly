@@ -96,7 +96,6 @@ add_third_party(
   unialgo
   URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
   LIB "none"
-  INSTALL_COMMAND cp -r <SOURCE_DIR>/include ${THIRD_PARTY_LIB_DIR}/unialgo/
 )
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
