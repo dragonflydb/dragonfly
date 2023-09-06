@@ -1729,13 +1729,13 @@ void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
+  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
+
   if (!cntx->conn_state.exec_info.IsCollecting()) {
     return rb->SendError("EXEC without MULTI");
   }
 
   auto& exec_info = cntx->conn_state.exec_info;
-  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
-
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
   }
@@ -2160,7 +2160,11 @@ void Service::RegisterCommands() {
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
+
+#ifndef __APPLE__
   SearchFamily::Register(&registry_);
+#endif
+
   acl_family_.Register(&registry_);
 
   server_family_.Register(&registry_);

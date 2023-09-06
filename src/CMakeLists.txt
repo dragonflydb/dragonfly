@@ -45,13 +45,19 @@ function(gen_bison name)
  set_source_files_properties(${name}.cc ${name}_base.h PROPERTIES GENERATED TRUE)
 endfunction()
 
+if (APPLE)
+  set(SED_REPL sed "-i" '')
+else()
+  set(SED_REPL sed "-i")
+endif()
+
 add_third_party(
   dconv
   URL https://github.com/google/double-conversion/archive/refs/tags/v3.3.0.tar.gz
-  PATCH_COMMAND sed -i "/static const std::ctype/d"
+  PATCH_COMMAND ${SED_REPL} "/static const std::ctype/d"
                 <SOURCE_DIR>/double-conversion/string-to-double.cc
-  COMMAND sed -i "/std::use_facet</d" <SOURCE_DIR>/double-conversion/string-to-double.cc
-  COMMAND sed -i "s/cType.tolower/std::tolower/g" <SOURCE_DIR>/double-conversion/string-to-double.cc
+  COMMAND ${SED_REPL} "/std::use_facet</d" <SOURCE_DIR>/double-conversion/string-to-double.cc
+  COMMAND ${SED_REPL} "s/cType.tolower/std::tolower/g" <SOURCE_DIR>/double-conversion/string-to-double.cc
   LIB libdouble-conversion.a
 )
 
@@ -84,6 +90,13 @@ add_third_party(
   croncpp
   URL https://github.com/mariusbancila/croncpp/archive/refs/tags/v2023.03.30.tar.gz
   LIB "none"
+)
+
+add_third_party(
+  uni-algo
+  URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
+
+  BUILD_IN_SOURCE 1
 )
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)

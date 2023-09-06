@@ -146,4 +146,33 @@ class ShardDocIndices {
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 };
 
+#ifdef __APPLE__
+inline ShardDocIndex* ShardDocIndices::GetIndex(std::string_view name) {
+  return nullptr;
+}
+
+inline void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
+                                       std::shared_ptr<DocIndex> index) {
+}
+
+inline bool ShardDocIndices::DropIndex(std::string_view name) {
+  return false;
+}
+
+inline void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
+}
+
+inline std::vector<std::string> ShardDocIndices::GetIndexNames() const {
+  return {};
+}
+
+inline void ShardDocIndices::AddDoc(std::string_view key, const DbContext& db_cnt,
+                                    const PrimeValue& pv) {
+}
+
+inline void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt,
+                                       const PrimeValue& pv) {
+}
+
+#endif  // __APPLE__
 }  // namespace dfly

@@ -53,10 +53,10 @@ jobs:
       matrix:
         include:
           - flavor: alpine
-            dockerfile: tools/docker/Dockerfile.alpine
+            dockerfile: tools/packaging/Dockerfile.alpine
             tag_main: false
           - flavor: ubuntu
-            dockerfile: tools/docker/Dockerfile.ubuntu
+            dockerfile: tools/packaging/Dockerfile.ubuntu
             tag_main: true
     steps:
       - name: checkout

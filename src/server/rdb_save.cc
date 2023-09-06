@@ -947,10 +947,12 @@ class RdbSaver::Impl {
 // correct closing semantics - channel is closing when K producers marked it as closed.
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
                      SaveMode sm, io::Sink* sink)
-    : sink_(sink), shard_snapshots_(producers_len),
+    : sink_(sink),
+      shard_snapshots_(producers_len),
       meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
                                                 // at all in meta serializer
-      channel_{128, producers_len}, compression_mode_(compression_mode) {
+      channel_{128, producers_len},
+      compression_mode_(compression_mode) {
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
     sink_ = &aligned_buf_.value();
@@ -1022,7 +1024,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
 
-  while (record = records_popper.Pop()) {
+  while ((record = records_popper.Pop())) {
     if (io_error || cll->IsCancelled())
       continue;
 
@@ -1037,7 +1039,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       if (io_error) {
         break;
       }
-    } while (record = records_popper.TryPop());
+    } while ((record = records_popper.TryPop()));
   }  // while (records_popper.Pop())
 
   size_t pushed_bytes = 0;

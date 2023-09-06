@@ -25,6 +25,9 @@ struct SchemaField {
 
   FieldType type;
   std::string short_name;  // equal to ident if none provided
+
+  size_t knn_dim = 0u;                              // dimension of knn vectors
+  VectorSimilarity knn_sim = VectorSimilarity::L2;  // similarity type
 };
 
 // Describes the fields of an index

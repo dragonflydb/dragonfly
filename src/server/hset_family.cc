@@ -27,6 +27,7 @@ using namespace std;
 namespace dfly {
 
 using namespace facade;
+using absl::SimpleAtoi;
 
 namespace {
 
@@ -1005,8 +1006,35 @@ void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
+  if (lp.sval) {
+    str_vec.emplace_back(reinterpret_cast<char*>(lp.sval), lp.slen);
+    return;
+  }
+  str_vec.emplace_back(absl::StrCat(lp.lval));
+}
+
 void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 3) {
+    DVLOG(1) << "Wrong number of command arguments: " << args.size();
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
   string_view key = ArgS(args, 0);
+  int32_t count;
+  bool with_values = false;
+
+  if ((args.size() > 1) && (!SimpleAtoi(ArgS(args, 1), &count))) {
+    return (*cntx)->SendError("count value is not an integer", kSyntaxErrType);
+  }
+
+  if (args.size() == 3) {
+    ToUpper(&args[2]);
+    if (ArgS(args, 2) != "WITHVALUES")
+      return (*cntx)->SendError(kSyntaxErr);
+    else
+      with_values = true;
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = shard->db_slice();
@@ -1020,24 +1048,56 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     StringVec str_vec;
 
     if (pv.Encoding() == kEncodingStrMap2) {
-      // TODO: to create real random logic.
       StringMap* string_map = (StringMap*)pv.RObjPtr();
-
-      sds key = string_map->begin()->first;
-      str_vec.emplace_back(key, sdslen(key));
+      if (args.size() == 1) {
+        auto [key, value] = string_map->RandomPair();
+        str_vec.emplace_back(key, sdslen(key));
+      } else {
+        size_t actual_count =
+            (count >= 0) ? std::min(size_t(count), string_map->Size()) : abs(count);
+        std::vector<sds> keys, vals;
+        if (count >= 0) {
+          string_map->RandomPairsUnique(actual_count, keys, vals, with_values);
+        } else {
+          string_map->RandomPairs(actual_count, keys, vals, with_values);
+        }
+        for (size_t i = 0; i < actual_count; ++i) {
+          str_vec.emplace_back(keys[i], sdslen(keys[i]));
+          if (with_values) {
+            str_vec.emplace_back(vals[i], sdslen(vals[i]));
+          }
+        }
+      }
     } else if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
       size_t lplen = lpLength(lp);
       CHECK(lplen > 0 && lplen % 2 == 0);
-
       size_t hlen = lplen / 2;
-      listpackEntry key;
-
-      lpRandomPair(lp, hlen, &key, NULL);
-      if (key.sval) {
-        str_vec.emplace_back(reinterpret_cast<char*>(key.sval), key.slen);
+      if (args.size() == 1) {
+        listpackEntry key;
+        lpRandomPair(lp, hlen, &key, NULL);
+        StrVecEmplaceBack(str_vec, key);
       } else {
-        str_vec.emplace_back(absl::StrCat(key.lval));
+        size_t actual_count = (count >= 0) ? std::min(size_t(count), hlen) : abs(count);
+        std::unique_ptr<listpackEntry[]> keys = nullptr, vals = nullptr;
+        keys = std::make_unique<listpackEntry[]>(actual_count);
+        if (with_values)
+          vals = std::make_unique<listpackEntry[]>(actual_count);
+
+        // count has been specified.
+        if (count >= 0)
+          // always returns unique entries.
+          lpRandomPairsUnique(lp, actual_count, keys.get(), vals.get());
+        else
+          // allows non-unique entries.
+          lpRandomPairs(lp, actual_count, keys.get(), vals.get());
+
+        for (size_t i = 0; i < actual_count; ++i) {
+          StrVecEmplaceBack(str_vec, keys[i]);
+          if (with_values) {
+            StrVecEmplaceBack(str_vec, vals[i]);
+          }
+        }
       }
     } else {
       LOG(ERROR) << "Invalid encoding " << pv.Encoding();
@@ -1048,8 +1108,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    CHECK_EQ(1u, result->size());  // TBD: to support count and withvalues.
-    (*cntx)->SendBulkString(result->front());
+    (*cntx)->SendStringArr(*result);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     (*cntx)->SendNull();
   } else {
@@ -1094,9 +1153,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
       << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHIncrByFloat}
              .HFUNC(HIncrByFloat)
       << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1, acl::kHKeys}.HFUNC(HKeys)
-
-      // TODO: add options support
-      << CI{"HRANDFIELD", CO::READONLY, 2, 1, 1, 1, acl::kHRandField}.HFUNC(HRandField)
+      << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1, 1, acl::kHRandField}.HFUNC(HRandField)
       << CI{"HSCAN", CO::READONLY, -3, 1, 1, 1, acl::kHScan}.HFUNC(HScan)
       << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kHSet}.HFUNC(HSet)
       << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, 1, acl::kHSetEx}.SetHandler(

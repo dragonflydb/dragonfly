@@ -12,7 +12,7 @@
 
 #include "core/json_object.h"
 #include "core/search/search.h"
-#include "core/search/vector.h"
+#include "core/search/vector_utils.h"
 #include "core/string_map.h"
 #include "server/container_utils.h"
 
@@ -32,10 +32,11 @@ string_view SdsToSafeSv(sds str) {
 }
 
 string PrintField(search::SchemaField::FieldType type, string_view value) {
-  if (type == search::SchemaField::VECTOR)
-    return absl::StrCat("[", absl::StrJoin(search::BytesToFtVector(value), ","), "]");
-  else
-    return string{value};
+  if (type == search::SchemaField::VECTOR) {
+    auto [ptr, size] = search::BytesToFtVector(value);
+    return absl::StrCat("[", absl::StrJoin(absl::Span<const float>{ptr.get(), size}, ","), "]");
+  }
+  return string{value};
 }
 
 string ExtractValue(const search::Schema& schema, string_view key, string_view value) {
@@ -63,7 +64,7 @@ string_view ListPackAccessor::GetString(string_view active_field) const {
   return container_utils::LpFind(lp_, active_field, intbuf_[0].data()).value_or(""sv);
 }
 
-search::FtVector ListPackAccessor::GetVector(string_view active_field) const {
+BaseAccessor::VectorInfo ListPackAccessor::GetVector(string_view active_field) const {
   return search::BytesToFtVector(GetString(active_field));
 }
 
@@ -89,7 +90,7 @@ string_view StringMapAccessor::GetString(string_view active_field) const {
   return SdsToSafeSv(hset_->Find(active_field));
 }
 
-search::FtVector StringMapAccessor::GetVector(string_view active_field) const {
+BaseAccessor::VectorInfo StringMapAccessor::GetVector(string_view active_field) const {
   return search::BytesToFtVector(GetString(active_field));
 }
 
@@ -113,16 +114,20 @@ string_view JsonAccessor::GetString(string_view active_field) const {
   return buf_;
 }
 
-search::FtVector JsonAccessor::GetVector(string_view active_field) const {
+BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const {
   auto res = GetPath(active_field)->evaluate(json_);
   DCHECK(res.is_array());
   if (res.empty())
-    return {};
+    return {nullptr, 0};
 
-  search::FtVector out;
+  size_t size = res[0].size();
+  auto ptr = make_unique<float[]>(size);
+
+  size_t i = 0;
   for (auto v : res[0].array_range())
-    out.push_back(v.as<float>());
-  return out;
+    ptr[i++] = v.as<float>();
+
+  return {std::move(ptr), size};
 }
 
 JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) const {

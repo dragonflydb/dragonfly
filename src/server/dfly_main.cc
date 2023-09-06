@@ -754,14 +754,14 @@ Usage: dragonfly [FLAGS]
     }
   }
 
-  auto memory = ReadMemInfo().value();
+  io::MemInfoData mem_info = ReadMemInfo().value_or(io::MemInfoData{});
   size_t max_available_threads = 0u;
 
 #ifdef __linux__
-  UpdateResourceLimitsIfInsideContainer(&memory, &max_available_threads);
+  UpdateResourceLimitsIfInsideContainer(&mem_info, &max_available_threads);
 #endif
 
-  if (memory.swap_total != 0)
+  if (mem_info.swap_total != 0)
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
   dfly::max_memory_limit = dfly::GetMaxMemoryFlag();
@@ -769,8 +769,13 @@ Usage: dragonfly [FLAGS]
   if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
-    size_t available = memory.mem_avail;
+    size_t available = mem_info.mem_avail;
     size_t maxmemory = size_t(0.8 * available);
+    if (maxmemory == 0) {
+      LOG(ERROR) << "Could not deduce how much memory available. "
+                 << "Use --maxmemory=... to specify explicitly";
+      return 1;
+    }
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
 
@@ -778,9 +783,9 @@ Usage: dragonfly [FLAGS]
     dfly::max_memory_limit = maxmemory;
   } else {
     string hr_limit = HumanReadableNumBytes(dfly::max_memory_limit);
-    if (dfly::max_memory_limit > memory.mem_avail)
+    if (dfly::max_memory_limit > mem_info.mem_avail)
       LOG(WARNING) << "Got memory limit " << hr_limit << ", however only "
-                   << HumanReadableNumBytes(memory.mem_avail) << " was found.";
+                   << HumanReadableNumBytes(mem_info.mem_avail) << " was found.";
     LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
 

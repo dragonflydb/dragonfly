@@ -1,5 +1,5 @@
 %skeleton "lalr1.cc" // -*- C++ -*-
-%require "3.5.1"    // That's what's present on ubuntu 20.04.
+%require "3.5"  // fedora 32 has this one.
 
 %defines  // %header starts from 3.8.1
 
@@ -25,7 +25,7 @@
 // Added to cc file
 %code {
 #include "core/search/query_driver.h"
-#include "core/search/vector.h"
+#include "core/search/vector_utils.h"
 
 // Have to disable because GCC doesn't understand `symbol_type`'s union
 // implementation

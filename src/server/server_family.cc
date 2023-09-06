@@ -315,7 +315,7 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
 
   if (!snapshot_cron_exp.empty() && !save_time.empty()) {
     LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
-    quick_exit(1);
+    exit(1);
   }
 
   string raw_cron_expr;
@@ -411,10 +411,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       used_mem_peak.store(sum, memory_order_relaxed);
   };
 
+// TODO: to addd support on non-linux platforms as well
+#ifdef __linux__
   uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
   uint32_t period_ms = max(1u, 1000 / cache_hz);
+
   stats_caching_task_ =
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
+#endif
 
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
@@ -461,8 +465,10 @@ void ServerFamily::Shutdown() {
   }
 
   pb_task_->Await([this] {
-    pb_task_->CancelPeriodic(stats_caching_task_);
-    stats_caching_task_ = 0;
+    if (stats_caching_task_) {
+      pb_task_->CancelPeriodic(stats_caching_task_);
+      stats_caching_task_ = 0;
+    }
 
     if (journal_->EnterLameDuck()) {
       auto ec = journal_->Close();
@@ -1366,6 +1372,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
+
+      // PHP Symphony needs this field to work.
+      append("maxmemory_policy", "eviction");
     } else {
       append("cache_mode", "store");
       // Compatible with redis based frameworks.
@@ -1519,6 +1528,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
+#ifndef __APPLE__
   if (should_enter("CPU")) {
     ADD_HEADER("# CPU");
     struct rusage ru, cu, tu;
@@ -1532,6 +1542,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("used_cpu_sys_main_thread", StrCat(tu.ru_stime.tv_sec, ".", tu.ru_stime.tv_usec));
     append("used_cpu_user_main_thread", StrCat(tu.ru_utime.tv_sec, ".", tu.ru_utime.tv_usec));
   }
+#endif
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");
