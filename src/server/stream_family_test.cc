@@ -416,6 +416,81 @@ TEST_F(StreamFamilyTest, XGroupConsumer) {
   EXPECT_THAT(resp, ErrArg("NOGROUP"));
 }
 
+TEST_F(StreamFamilyTest, Xclaim) {
+  Run({"xadd", "foo", "1-0", "k1", "v1"});
+  Run({"xadd", "foo", "1-1", "k2", "v2"});
+  Run({"xadd", "foo", "1-2", "k3", "v3"});
+  Run({"xadd", "foo", "1-3", "k4", "v4"});
+
+  // create a group for foo stream
+  Run({"xgroup", "create", "foo", "group", "0"});
+  // alice consume all the stream entries
+  Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+
+  // bob claims alice's two pending stream entries
+  auto resp = Run({"xclaim", "foo", "group", "bob", "0", "1-2", "1-3"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(
+                        RespArray(ElementsAre("1-2", RespArray(ElementsAre("k3", "v3")))),
+                        RespArray(ElementsAre("1-3", RespArray(ElementsAre("k4", "v4")))))));
+
+  // bob really have these claimed entries
+  resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-2", RespArray(ElementsAre("k3", "v3")))),
+                             RespArray(ElementsAre("1-3", RespArray(ElementsAre("k4", "v4")))))))));
+
+  // alice no longer have those entries
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-0", RespArray(ElementsAre("k1", "v1")))),
+                             RespArray(ElementsAre("1-1", RespArray(ElementsAre("k2", "v2")))))))));
+
+  // xclaim ensures that entries before the min-idle-time are not claimed by bob
+  resp = Run({"xclaim", "foo", "group", "bob", "3600000", "1-0"});
+  EXPECT_THAT(resp, ArrLen(0));
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-0", RespArray(ElementsAre("k1", "v1")))),
+                             RespArray(ElementsAre("1-1", RespArray(ElementsAre("k2", "v2")))))))));
+
+  Run({"xadd", "foo", "1-4", "k5", "v5"});
+  Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+  // xclaim returns only claimed ids when justid is set
+  resp = Run({"xclaim", "foo", "group", "bob", "0", "1-0", "1-4", "justid"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1-0", "1-4"));
+
+  Run({"xadd", "foo", "1-5", "k6", "v6"});
+  // bob should claim the id forcefully even if it is not yet present in group pel
+  resp = Run({"xclaim", "foo", "group", "bob", "0", "1-5", "force", "justid"});
+  EXPECT_THAT(resp.GetString(), "1-5");
+  resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[4].GetVec(),
+              ElementsAre("1-5", RespArray(ElementsAre("k6", "v6"))));
+
+  TEST_current_time_ms += 2000;
+  resp = Run({"xclaim", "foo", "group", "alice", "0", "1-4", "TIME",
+              absl::StrCat(TEST_current_time_ms - 500), "justid"});
+  EXPECT_THAT(resp.GetString(), "1-4");
+  // min idle time is exceeded for this entry
+  resp = Run({"xclaim", "foo", "group", "bob", "600", "1-4"});
+  EXPECT_THAT(resp, ArrLen(0));
+  resp = Run({"xclaim", "foo", "group", "bob", "400", "1-4", "justid"});
+  EXPECT_THAT(resp.GetString(), "1-4");
+
+  //  test RETRYCOUNT
+  Run({"xadd", "foo", "1-6", "k7", "v7"});
+  resp = Run({"xclaim", "foo", "group", "bob", "0", "1-6", "force", "justid", "retrycount", "5"});
+  EXPECT_THAT(resp.GetString(), "1-6");
+  resp = Run({"xpending", "foo", "group", "1-6", "1-6", "1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1-6", "bob", ArgType(RespExpr::INT64), IntArg(5)));
+}
+
 TEST_F(StreamFamilyTest, XTrim) {
   Run({"xadd", "foo", "1-*", "k", "v"});
   Run({"xadd", "foo", "1-*", "k", "v"});

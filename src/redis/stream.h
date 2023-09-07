@@ -159,6 +159,7 @@ streamCG *streamCreateCG(stream *s, const char *name, size_t namelen, streamID *
 streamNACK *streamCreateNACK(streamConsumer *consumer);
 void streamDecodeID(void *buf, streamID *id);
 int streamCompareID(streamID *a, streamID *b);
+int streamEntryExists(stream *s, streamID *id);
 void streamFreeNACK(streamNACK *na);
 int streamIncrID(streamID *id);
 int streamDecrID(streamID *id);
