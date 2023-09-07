@@ -47,7 +47,6 @@ jobs:
     timeout-minutes: 60
     env:
       SCCACHE_ERROR_LOG: /tmp/sccache_log.txt
-      SCCACHE_LOG: debug
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
