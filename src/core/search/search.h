@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <memory_resource>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -54,7 +55,7 @@ struct Schema {
 class FieldIndices {
  public:
   // Create indices based on schema
-  FieldIndices(Schema schema);
+  FieldIndices(Schema schema, std::pmr::memory_resource* mr);
 
   void Add(DocId doc, DocumentAccessor* access);
   void Remove(DocId doc, DocumentAccessor* access);
@@ -63,17 +64,19 @@ class FieldIndices {
   BaseSortIndex* GetSortIndex(std::string_view field) const;
 
   std::vector<TextIndex*> GetAllTextIndices() const;
-  const std::vector<DocId>& GetAllDocs() const;
+
+  // TODO FIX
+  std::vector<DocId> GetAllDocs() const;
 
   const Schema& GetSchema() const;
 
  private:
-  void CreateIndices();
-  void CreateSortIndices();
+  void CreateIndices(std::pmr::memory_resource* mr);
+  void CreateSortIndices(std::pmr::memory_resource* mr);
 
  private:
   Schema schema_;
-  std::vector<DocId> all_ids_;
+  std::vector<DocId, std::pmr::polymorphic_allocator<DocId>> all_ids_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseSortIndex>> sort_indices_;
 };

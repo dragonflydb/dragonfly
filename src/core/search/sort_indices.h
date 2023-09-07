@@ -8,6 +8,7 @@
 
 #include <map>
 #include <memory>
+#include <memory_resource>
 #include <optional>
 #include <vector>
 
@@ -18,6 +19,8 @@
 namespace dfly::search {
 
 template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
+  SimpleValueSortIndex(std::pmr::memory_resource* mr);
+
   std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
   virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field);
@@ -26,16 +29,22 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
  protected:
   virtual T Get(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
 
+  std::pmr::memory_resource* GetMemRes() const;
+  
  private:
-  std::vector<T> values_;
+  std::pmr::vector<T> values_;
 };
 
 struct NumericSortIndex : public SimpleValueSortIndex<int64_t> {
+  NumericSortIndex(std::pmr::memory_resource* mr) : SimpleValueSortIndex{mr} {};
+
   int64_t Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
 };
 
 // TODO: Map tags to integers for fast sort
 struct StringSortIndex : public SimpleValueSortIndex<std::string> {
+  StringSortIndex(std::pmr::memory_resource* mr) : SimpleValueSortIndex{mr} {};
+
   std::string Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
 };
 

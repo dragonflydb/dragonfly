@@ -18,6 +18,10 @@ using namespace std;
 namespace {}  // namespace
 
 template <typename T>
+SimpleValueSortIndex<T>::SimpleValueSortIndex(std::pmr::memory_resource* mr) : values_{mr} {
+}
+
+template <typename T>
 std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
                                                        bool desc) const {
   auto cb = [this, desc](const auto& lhs, const auto& rhs) {
@@ -42,6 +46,11 @@ void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_v
 template <typename T>
 void SimpleValueSortIndex<T>::Remove(DocId id, DocumentAccessor* doc, std::string_view field) {
   values_[id] = T{};
+}
+
+template<typename T>
+std::pmr::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {
+  return values_.get_allocator().resource();
 }
 
 template struct SimpleValueSortIndex<int64_t>;

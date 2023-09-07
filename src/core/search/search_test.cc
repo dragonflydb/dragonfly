@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <memory_resource>
 #include <random>
 
 #include "base/gtest.h"
@@ -102,7 +103,7 @@ class SearchTest : public ::testing::Test {
   bool Check() {
     absl::Cleanup cl{[this] { entries_.clear(); }};
 
-    FieldIndices index{schema_};
+    FieldIndices index{schema_, pmr::get_default_resource()};
 
     shuffle(entries_.begin(), entries_.end(), default_random_engine{});
     for (DocId i = 0; i < entries_.size(); i++)
@@ -376,7 +377,7 @@ class KnnTest : public SearchTest, public testing::WithParamInterface<bool /* hn
 TEST_P(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 1};
-  FieldIndices indices{schema};
+  FieldIndices indices{schema, pmr::get_default_resource()};
 
   // Place points on a straight line
   for (size_t i = 0; i < 100; i++) {
@@ -433,7 +434,7 @@ TEST_P(KnnTest, Simple2D) {
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 2};
-  FieldIndices indices{schema};
+  FieldIndices indices{schema, pmr::get_default_resource()};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
     string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
@@ -496,7 +497,7 @@ static void BM_VectorSearch(benchmark::State& state) {
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, ndims};
-  FieldIndices indices{schema};
+  FieldIndices indices{schema, pmr::get_default_resource()};
 
   auto random_vec = [ndims]() {
     vector<float> coords;

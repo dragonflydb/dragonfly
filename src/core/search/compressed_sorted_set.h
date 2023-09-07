@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <iterator>
+#include <memory_resource>
 #include <optional>
 #include <vector>
 
@@ -50,6 +51,8 @@ class CompressedSortedSet {
   friend struct Iterator;
 
  public:
+  CompressedSortedSet(std::pmr::memory_resource* mr);
+
   ConstIterator begin() const;
   ConstIterator end() const;
 
@@ -88,7 +91,7 @@ class CompressedSortedSet {
  private:
   uint32_t size_{0};
   std::optional<IntType> tail_value_{};
-  std::vector<uint8_t> diffs_{};
+  std::vector<uint8_t, std::pmr::polymorphic_allocator<uint8_t>> diffs_;
 };
 
 }  // namespace dfly::search

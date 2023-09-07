@@ -162,12 +162,12 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
-    : base_{std::move(index)}, indices_{{}}, key_index_{} {
+    : base_{std::move(index)}, indices_{{}, nullptr}, key_index_{} {
 }
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args) {
   key_index_ = DocKeyIndex{};
-  indices_ = search::FieldIndices{base_->schema};
+  indices_ = search::FieldIndices{base_->schema, EngineShard::tlocal()->memory_resource()};
 
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
