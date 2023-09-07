@@ -426,7 +426,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
     aws_ = make_unique<cloud::AWS>("s3");
-    if (auto ec = aws_->Init(); ec) {
+    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return aws_->Init(); });
+    if (ec) {
       LOG(FATAL) << "Failed to initialize AWS " << ec;
     }
   }
