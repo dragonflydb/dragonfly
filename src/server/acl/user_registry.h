@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/synchronization/mutex.h>
 
+#include <algorithm>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -18,6 +19,9 @@
 namespace dfly::acl {
 
 class UserRegistry {
+ private:
+  template <template <typename T> typename LockT, typename RegT> class RegistryWithLock;
+
  public:
   UserRegistry();
 
@@ -50,18 +54,14 @@ class UserRegistry {
   // Acquires a read lock
   bool AuthUser(std::string_view username, std::string_view password) const;
 
-  // Helper class for accessing the registry with a ReadLock outside the scope of UserRegistry
-  class RegistryViewWithLock {
-   public:
-    RegistryViewWithLock(std::shared_lock<util::SharedMutex> lk, const RegistryType& registry);
-    const RegistryType& registry;
-
-   private:
-    std::shared_lock<util::SharedMutex> registry_lk_;
-  };
+  using RegistryViewWithLock = RegistryWithLock<std::shared_lock, const RegistryType&>;
+  using RegistryWithWriteLock = RegistryWithLock<std::unique_lock, RegistryType&>;
 
   // Helper function used for printing users via ACL LIST
   RegistryViewWithLock GetRegistryWithLock() const;
+
+  // Helper function to propagate a write lock outside the registry's scope
+  RegistryWithWriteLock GetRegistryWithWriteLock();
 
   // Helper class for accessing a user with a ReadLock outside the scope of UserRegistry
   class UserWithWriteLock {
@@ -78,8 +78,19 @@ class UserRegistry {
 
  private:
   RegistryType registry_;
-  // TODO add abseil mutex attributes
   mutable util::SharedMutex mu_;
+
+  // Helper class for accessing the registry with a ReadLock outside the scope of UserRegistry
+  template <template <typename T> typename LockT, typename RegT> class RegistryWithLock {
+   public:
+    RegistryWithLock(LockT<util::SharedMutex> lk, RegT reg)
+        : registry(reg), registry_lk_(std::move(lk)) {
+    }
+    RegT registry;
+
+   private:
+    LockT<util::SharedMutex> registry_lk_;
+  };
 };
 
 }  // namespace dfly::acl

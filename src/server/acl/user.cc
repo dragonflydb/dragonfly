@@ -25,7 +25,7 @@ User::User() {
 
 void User::Update(UpdateRequest&& req) {
   if (req.password) {
-    SetPasswordHash(*req.password);
+    SetPasswordHash(*req.password, req.is_hashed);
   }
 
   for (auto [sign, category] : req.categories) {
@@ -41,7 +41,11 @@ void User::Update(UpdateRequest&& req) {
   }
 }
 
-void User::SetPasswordHash(std::string_view password) {
+void User::SetPasswordHash(std::string_view password, bool is_hashed) {
+  if (is_hashed) {
+    password_hash_ = password;
+    return;
+  }
   password_hash_ = StringSHA256(password);
 }
 

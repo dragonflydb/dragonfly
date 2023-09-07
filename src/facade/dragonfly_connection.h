@@ -80,8 +80,8 @@ class Connection : public util::Connection {
   struct MonitorMessage : public std::string {};
 
   struct AclUpdateMessage {
-    std::string_view username;
-    uint64_t categories{0};
+    std::vector<std::string> username;
+    std::vector<uint32_t> categories;
   };
 
   struct PipelineMessage {
