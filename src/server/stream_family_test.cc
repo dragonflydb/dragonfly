@@ -483,7 +483,12 @@ TEST_F(StreamFamilyTest, Xclaim) {
   resp = Run({"xclaim", "foo", "group", "bob", "400", "1-4", "justid"});
   EXPECT_THAT(resp.GetString(), "1-4");
 
-  // TODO: test RETRYCOUNT once XPENDING is ready
+  //  test RETRYCOUNT
+  Run({"xadd", "foo", "1-6", "k7", "v7"});
+  resp = Run({"xclaim", "foo", "group", "bob", "0", "1-6", "force", "justid", "retrycount", "5"});
+  EXPECT_THAT(resp.GetString(), "1-6");
+  resp = Run({"xpending", "foo", "group", "1-6", "1-6", "1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1-6", "bob", ArgType(RespExpr::INT64), IntArg(5)));
 }
 
 TEST_F(StreamFamilyTest, XTrim) {
