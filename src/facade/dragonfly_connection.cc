@@ -8,6 +8,8 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <variant>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -211,8 +213,12 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
   auto* ctx = static_cast<dfly::ConnectionContext*>(self->cntx());
-  if (ctx && msg.username == ctx->authed_username) {
-    ctx->acl_categories = msg.categories;
+  if (ctx) {
+    for (size_t id = 0; id < msg.username.size(); ++id) {
+      if (msg.username[id] == ctx->authed_username) {
+        ctx->acl_categories = msg.categories[id];
+      }
+    }
   }
 }
 
@@ -996,9 +1002,22 @@ void Connection::SendAsync(MessageHandle msg) {
         fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
   }
 
+  auto place_in_dispatch_q = [this](MessageHandle msg) {
+    auto it = dispatch_q_.begin();
+    for (; it < dispatch_q_.end(); ++it) {
+      if (!std::holds_alternative<AclUpdateMessage>(it->handle)) {
+        break;
+      }
+    }
+    dispatch_q_.insert(it, std::move(msg));
+  };
+
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
-    dispatch_q_.push_front(std::move(msg));
+    // We need to reorder the queue, since multiple updates might happen before we
+    // pop the message, invalidating the correct order since we always push at the front
+    place_in_dispatch_q(std::move(msg));
+
   } else {
     dispatch_q_.push_back(std::move(msg));
   }

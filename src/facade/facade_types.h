@@ -73,6 +73,10 @@ struct ErrorReply {
   explicit ErrorReply(OpStatus status) : message{}, kind{}, status{status} {
   }
 
+  std::string_view ToSv() const {
+    return std::visit([](auto& str) { return std::string_view(str); }, message);
+  }
+
   std::variant<std::string, std::string_view> message;
   std::string_view kind;
   std::optional<OpStatus> status{std::nullopt};

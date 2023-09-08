@@ -71,8 +71,8 @@ TEST_F(AclFamilyTest, AclList) {
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
   EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL",
-                                        "user kostas off 7a3a725000feb82e8f1 +@ADMIN",
-                                        "user adi off 7a3a725000feb82e8f1 +@FAST"));
+                                        "user kostas off d74ff0ee8da3b98 +@ADMIN",
+                                        "user adi off d74ff0ee8da3b98 +@FAST"));
 }
 
 TEST_F(AclFamilyTest, AclAuth) {
