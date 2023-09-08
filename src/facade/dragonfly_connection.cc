@@ -388,6 +388,9 @@ std::string Connection::LocalBindAddress() const {
 }
 
 string Connection::GetClientInfo(unsigned thread_id) const {
+  CHECK(service_ && socket_);
+  CHECK_LT(unsigned(phase_), NUM_PHASES);
+
   string res;
   auto le = socket_->LocalEndpoint();
   auto re = socket_->RemoteEndpoint();
@@ -403,7 +406,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   int my_cpu_id = sched_getcpu();
 #endif
 
-  static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
+  static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");
 
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
