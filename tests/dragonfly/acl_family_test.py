@@ -236,14 +236,13 @@ SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 @dfly_args(
     {
         "aclfile": os.environ.get(
-            "DRAGONFLY_PATH", os.path.join(SCRIPTS_DIR, "../../build-dbg/error.acl")
+            "DRAGONFLY_PATH/wrong.acl", os.path.join(SCRIPTS_DIR, "../../build-dbg/wrong.acl")
         ),
         "port": 1111,
     }
 )
 async def test_bad_acl_file(df_local_factory):
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    acl = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/error.acl"))
     df = df_local_factory.create()
 
     df.start()
@@ -260,7 +259,7 @@ async def test_bad_acl_file(df_local_factory):
 @dfly_args(
     {
         "aclfile": os.environ.get(
-            "DRAGONFLY_PATH", os.path.join(SCRIPTS_DIR, "../../build-dbg/ok.acl")
+            "DRAGONFLY_PATH/ok.acl", os.path.join(SCRIPTS_DIR, "../../build-dbg/ok.acl")
         ),
         "port": 1111,
     }
