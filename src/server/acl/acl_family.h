@@ -37,6 +37,7 @@ class AclFamily final {
   void WhoAmI(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Load(CmdArgList args, ConnectionContext* cntx);
+  void Load();
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads

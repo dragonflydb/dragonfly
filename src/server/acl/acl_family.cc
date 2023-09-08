@@ -65,7 +65,7 @@ static std::string PrettyPrintSha(std::string_view pass, bool all = false) {
   if (all) {
     return absl::BytesToHexString(pass);
   }
-  return absl::BytesToHexString(pass.substr(15)).substr(15);
+  return absl::BytesToHexString(pass.substr(0, 15)).substr(0, 15);
 };
 
 AclFamily::AclFamily(UserRegistry* registry) : registry_(registry) {
@@ -98,11 +98,14 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
 namespace {
 
 std::optional<std::string> MaybeParsePassword(std::string_view command) {
+  if (command == "nopass") {
+    return std::string(command);
+  }
   if (command[0] != '>') {
     return {};
   }
 
-  return {std::string(command.substr(1))};
+  return std::string(command.substr(1));
 }
 
 std::optional<bool> MaybeParseStatus(std::string_view command) {
@@ -276,7 +279,7 @@ std::string AclFamily::RegistryToString() const {
     std::string command = "ACL SETUSER ";
     const std::string_view pass = user.Password();
     const std::string password =
-        pass == "nopass" ? "" : absl::StrCat(">", PrettyPrintSha(pass, true), " ");
+        pass == "nopass" ? "nopass " : absl::StrCat(">", PrettyPrintSha(pass, true), " ");
     const std::string acl_cat = AclToString(user.AclCategory());
 
     using namespace std::string_view_literals;
@@ -385,6 +388,11 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   return {};
 }
 
+void AclFamily::Load() {
+  auto acl_file = absl::GetFlag(FLAGS_aclfile);
+  LoadToRegistryFromFile(acl_file, true);
+}
+
 void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
   if (acl_file.empty()) {
@@ -393,10 +401,6 @@ void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
   }
 
   const auto is_successfull = LoadToRegistryFromFile(acl_file, !cntx);
-  // Only used when loading for the first time within Init
-  if (!cntx) {
-    return;
-  }
 
   if (is_successfull) {
     cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", is_successfull->ToSv()));
@@ -454,7 +458,7 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   registry_ = registry;
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
   if (!acl_file.empty()) {
-    Load({}, nullptr);
+    Load();
   }
 }
 

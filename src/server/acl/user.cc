@@ -6,6 +6,8 @@
 
 #include <openssl/sha.h>
 
+#include "absl/strings/escaping.h"
+
 namespace dfly::acl {
 
 namespace {
@@ -42,8 +44,12 @@ void User::Update(UpdateRequest&& req) {
 }
 
 void User::SetPasswordHash(std::string_view password, bool is_hashed) {
+  if (password == "nopass") {
+    return;
+  }
+
   if (is_hashed) {
-    password_hash_ = password;
+    password_hash_ = absl::HexStringToBytes(password);
     return;
   }
   password_hash_ = StringSHA256(password);

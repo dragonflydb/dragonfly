@@ -5,6 +5,7 @@ from . import DflyInstanceFactory
 from .utility import disconnect_clients
 import asyncio
 import os
+from . import dfly_args
 
 
 @pytest.mark.asyncio
@@ -228,11 +229,22 @@ async def test_acl_with_long_running_script(df_server):
     await admin_client.close()
 
 
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 @pytest.mark.asyncio
+@dfly_args(
+    {
+        "aclfile": os.environ.get(
+            "DRAGONFLY_PATH", os.path.join(SCRIPTS_DIR, "../../build-dbg/error.acl")
+        ),
+        "port": 1111,
+    }
+)
 async def test_bad_acl_file(df_local_factory):
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     acl = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/error.acl"))
-    df = df_local_factory.create(aclfile=acl, port=1111)
+    df = df_local_factory.create()
 
     df.start()
 
@@ -245,10 +257,16 @@ async def test_bad_acl_file(df_local_factory):
 
 
 @pytest.mark.asyncio
+@dfly_args(
+    {
+        "aclfile": os.environ.get(
+            "DRAGONFLY_PATH", os.path.join(SCRIPTS_DIR, "../../build-dbg/ok.acl")
+        ),
+        "port": 1111,
+    }
+)
 async def test_good_acl_file(df_local_factory):
-    scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    acl = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/ok.acl"))
-    df = df_local_factory.create(aclfile=acl, port=1111)
+    df = df_local_factory.create()
 
     df.start()
     client = aioredis.Redis(port=df.port)
@@ -258,28 +276,24 @@ async def test_good_acl_file(df_local_factory):
     await client.execute_command("ACL SETUSER vlad +@STRING")
 
     result = await client.execute_command("ACL LIST")
-    #    assert 4 == len(result)
-    #    assert 'user roy on 1319c39700a1e045222 +@STRING' in result
-    #    assert 'user shahar off 1319c39700a1e045222 +@SET' in result
-    #    assert 'user default on nopass +@ALL' in result
-    #    assert 'user vlad off nopass +@STRING' in result
-    #
-    #    result = await client.execute_command("ACL DELUSER shahar")
+    assert 4 == len(result)
+    assert "user roy on ea71c25a7a60224 +@STRING" in result
+    assert "user shahar off ea71c25a7a60224 +@SET" in result
+    assert "user default on nopass +@ALL" in result
+    assert "user vlad off nopass +@STRING" in result
+
+    result = await client.execute_command("ACL DELUSER shahar")
+    assert result == b"OK"
+
+    result = await client.execute_command("ACL SAVE")
+
+    result = await client.execute_command("ACL LOAD")
     #    assert result == b"OK"
-    #
-    #    result = await client.execute_command("ACL LIST")
-    #    assert 3 == len(result)
-    #
-    #    result = await client.execute_command("ACL SAVE")
-    #
-    #    result = await client.execute_command("ACL LOAD")
-    #    assert result == b"OK"
-    #
-    #    result = await client.execute_command("ACL LIST")
-    #    assert 3 == len(result)
-    #    assert 'user roy on 1319c39700a1e045222 +@STRING' in result
-    #    assert 'user shahar off 1319c39700a1e045222 +@SET' in result
-    #    assert 'user default on nopass +@ALL' in result
-    #    assert 'user vlad off nopass +@ALL' in result
+
+    result = await client.execute_command("ACL LIST")
+    assert 3 == len(result)
+    assert "user roy on ea71c25a7a60224 +@STRING" in result
+    assert "user default on nopass +@ALL" in result
+    assert "user vlad off nopass +@STRING" in result
 
     await client.close()
