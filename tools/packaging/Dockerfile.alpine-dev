@@ -5,7 +5,7 @@ FROM alpine:3 as builder
 
 # "openssl-libs-static" fixes "Could NOT find OpenSSL, try to set the path to OpenSSL root folder in the"
 RUN apk add autoconf-archive automake bash bison boost-dev cmake coreutils \
-        curl ccache git gcc gdb g++ libunwind-dev libtool libxml2-dev make ninja \
+        curl ccache git gcc gdb g++ libunwind-dev libtool make ninja \
         openssl-dev openssl-libs-static patch zip zstd-static
 
 # This is required to make static linking work
@@ -30,7 +30,7 @@ COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
 
 RUN apk --no-cache add libgcc libstdc++  \
-     su-exec netcat-openbsd libxml2 icu boost-context && ldd /usr/local/bin/dragonfly
+     su-exec netcat-openbsd boost-context && ldd /usr/local/bin/dragonfly
 
 RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
 RUN mkdir /data && chown dfly:dfly /data

@@ -38,7 +38,7 @@ source <virtual env name>/bin/activate
 ```
 Then install all the required dependencies for the tests:
 ```
-pip install -r dragonfly/requirements.txt
+pip3 install -r dragonfly/requirements.txt
 ```
 
 ### Running the tests

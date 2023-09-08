@@ -1,0 +1,14 @@
+{
+  "name": "helio",
+  "image": "ghcr.io/romange/fedora:30",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools-themes",
+        "twxs.cmake"
+      ]
+    }
+  }
+}
