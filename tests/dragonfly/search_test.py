@@ -189,16 +189,18 @@ async def knn_query(idx, query, vector):
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
-async def test_knn(async_client: aioredis.Redis, index_type):
+@pytest.mark.parametrize("algo_type", ["FLAT", "HNSW"])
+async def test_knn(async_client: aioredis.Redis, index_type, algo_type):
     i2 = async_client.ft("i2-" + str(index_type))
 
     vector_field = VectorField(
         "pos",
-        "FLAT",
-        {
+        algorithm=algo_type,
+        attributes={
             "TYPE": "FLOAT32",
             "DIM": 1,
             "DISTANCE_METRIC": "L2",
+            "INITICAL_CAP": 100,
         },
     )
 
@@ -239,11 +241,12 @@ NUM_POINTS = 100
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
-async def test_multidim_knn(async_client: aioredis.Redis, index_type):
+@pytest.mark.parametrize("algo_type", ["HNSW", "FLAT"])
+async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type):
     vector_field = VectorField(
         "pos",
-        "FLAT",
-        {
+        algorithm=algo_type,
+        attributes={
             "TYPE": "FLOAT32",
             "DIM": NUM_DIMS,
             "DISTANCE_METRIC": "L2",

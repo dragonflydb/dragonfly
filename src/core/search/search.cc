@@ -274,14 +274,10 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
-  // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
-  IndexResult Search(const AstKnnNode& knn, string_view active_field) {
-    DCHECK(active_field.empty());
-    auto sub_results = SearchGeneric(*knn.filter, active_field);
-
-    auto* vec_index = GetIndex<VectorIndex>(knn.field);
+  void SearchKnnFlat(const AstKnnNode& knn, IndexResult&& sub_results) {
+    auto* vec_index = GetIndex<FlatVectorIndex>(knn.field);
     if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second)
-      return IndexResult{};
+      return;
 
     distances_.reserve(sub_results.Size());
     auto cb = [&](auto* set) {
@@ -295,11 +291,42 @@ struct BasicSearch {
 
     size_t prefix_size = min(knn.limit, distances_.size());
     partial_sort(distances_.begin(), distances_.begin() + prefix_size, distances_.end());
+    distances_.resize(prefix_size);
+  }
 
-    vector<DocId> out(prefix_size);
-    for (size_t i = 0; i < out.size(); i++)
+  void SearchKnnHnsw(const AstKnnNode& knn, IndexResult&& sub_results) {
+    auto* vec_index = GetIndex<HnswVectorIndex>(knn.field);
+    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second)
+      return;
+
+    if (indices_->GetAllDocs().size() == sub_results.Size())
+      distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit);
+    else
+      distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, sub_results.Take());
+  }
+
+  // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
+  IndexResult Search(const AstKnnNode& knn, string_view active_field) {
+    DCHECK(active_field.empty());
+    auto sub_results = SearchGeneric(*knn.filter, active_field);
+
+    const auto& schema = indices_->GetSchema();
+    string_view knn_field = knn.field;
+    if (auto it = schema.field_names.find(knn_field); it != schema.field_names.end())
+      knn_field = it->second;
+
+    const auto& field_info = schema.fields.at(knn_field);
+    DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
+
+    distances_.clear();
+    if (get<SchemaField::VectorParams>(field_info.special_params).use_hnsw)
+      SearchKnnHnsw(knn, std::move(sub_results));
+    else
+      SearchKnnFlat(knn, std::move(sub_results));
+
+    vector<DocId> out(distances_.size());
+    for (size_t i = 0; i < distances_.size(); i++)
       out[i] = distances_[i].second;
-
     return out;
   }
 
@@ -364,7 +391,17 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
         indices_[field_ident] = make_unique<NumericIndex>();
         break;
       case SchemaField::VECTOR:
-        indices_[field_ident] = make_unique<VectorIndex>(field_info.knn_dim, field_info.knn_sim);
+        unique_ptr<BaseVectorIndex> vector_index;
+
+        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
+        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
+
+        if (vparams.use_hnsw)
+          vector_index = make_unique<HnswVectorIndex>(vparams.dim, vparams.sim, vparams.capacity);
+        else
+          vector_index = make_unique<FlatVectorIndex>(vparams.dim, vparams.sim);
+
+        indices_[field_ident] = std::move(vector_index);
         break;
     }
   }
@@ -409,6 +446,10 @@ std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
 
 const vector<DocId>& FieldIndices::GetAllDocs() const {
   return all_ids_;
+}
+
+const Schema& FieldIndices::GetSchema() const {
+  return schema_;
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;

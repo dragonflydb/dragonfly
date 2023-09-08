@@ -13,9 +13,6 @@
 #include "server/test_utils.h"
 
 using namespace testing;
-using namespace std;
-using namespace util;
-using namespace boost;
 
 namespace dfly {
 
