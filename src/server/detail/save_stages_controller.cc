@@ -155,62 +155,59 @@ FileSnapshotStorage::FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool)
     : fq_threadpool_{fq_threadpool} {
 }
 
-GenericError FileSnapshotStorage::OpenFile(const std::string& path, io::Sink** file,
-                                           bool* is_direct, bool* is_linux_file) {
+io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::OpenFile(
+    const std::string& path) {
   if (fq_threadpool_) {  // EPOLL
     auto res = util::OpenFiberWriteFile(path, fq_threadpool_);
-    if (!res)
-      return GenericError(res.error(), "Couldn't open file for writing");
-    *file = *res;
-    *is_direct = false;
-    *is_linux_file = false;
+    if (!res) {
+      return nonstd::make_unexpected(GenericError(res.error(), "Couldn't open file for writing"));
+    }
+
+    return std::pair(*res, FileType::FILE);
   } else {
 #ifdef __linux__
     auto res = OpenLinux(path, kRdbWriteFlags, 0666);
     if (!res) {
-      return GenericError(
+      return nonstd::make_unexpected(GenericError(
           res.error(),
-          "Couldn't open file for writing (is direct I/O supported by the file system?)");
+          "Couldn't open file for writing (is direct I/O supported by the file system?)"));
     }
-    *file = new LinuxWriteWrapper(res->release());
-    *is_direct = kRdbWriteFlags & O_DIRECT;
-    *is_linux_file = true;
+
+    uint8_t file_type = FileType::FILE | FileType::IO_URING;
+    if (kRdbWriteFlags & O_DIRECT) {
+      file_type |= FileType::DIRECT;
+    }
+    return std::pair(new LinuxWriteWrapper(res->release()), file_type);
 #else
     LOG(FATAL) << "Linux I/O is not supported on this platform";
 #endif
   }
-
-  return {};
 }
 
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(util::cloud::AWS* aws) : aws_{aws} {
 }
 
-GenericError AwsS3SnapshotStorage::OpenFile(const std::string& path, io::Sink** file,
-                                            bool* is_direct, bool* is_linux_file) {
+io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenFile(
+    const std::string& path) {
   DCHECK(aws_);
 
   optional<pair<string, string>> bucket_path = GetBucketPath(path);
   if (!bucket_path) {
-    return GenericError("Invalid S3 path");
+    return nonstd::make_unexpected(GenericError("Invalid S3 path"));
   }
   auto [bucket_name, obj_path] = *bucket_path;
 
   cloud::S3Bucket bucket(*aws_, bucket_name);
   error_code ec = bucket.Connect(kBucketConnectMs);
   if (ec) {
-    return GenericError(ec, "Couldn't connect to S3 bucket");
+    return nonstd::make_unexpected(GenericError(ec, "Couldn't connect to S3 bucket"));
   }
   auto res = bucket.OpenWriteFile(obj_path);
   if (!res) {
-    return GenericError(res.error(), "Couldn't open file for writing");
+    return nonstd::make_unexpected(GenericError(res.error(), "Couldn't open file for writing"));
   }
 
-  *file = *res;
-  *is_direct = false;
-  *is_linux_file = false;
-
-  return {};
+  return std::pair<io::Sink*, uint8_t>(*res, FileType::CLOUD);
 }
 
 string InferLoadFile(string_view dir, cloud::AWS* aws) {
@@ -289,17 +286,19 @@ string InferLoadFile(string_view dir, cloud::AWS* aws) {
 
 GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
                                 const RdbSaver::GlobalData& glob_data) {
-  bool is_direct = false;
   VLOG(1) << "Saving RDB " << path;
 
-  io::Sink* file;
-  GenericError err = snapshot_storage_->OpenFile(path, &file, &is_direct, &is_linux_file_);
-  if (err) {
-    return err;
+  auto res = snapshot_storage_->OpenFile(path);
+  if (!res) {
+    return res.error();
   }
+
+  auto [file, file_type] = *res;
   io_sink_.reset(file);
 
-  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, is_direct));
+  is_linux_file_ = file_type & FileType::IO_URING;
+
+  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, file_type | FileType::DIRECT));
 
   return saver_->SaveHeader(move(glob_data));
 }

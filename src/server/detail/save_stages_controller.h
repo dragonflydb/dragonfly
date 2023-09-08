@@ -19,20 +19,29 @@ class Service;
 
 namespace detail {
 
+enum FileType : uint8_t {
+  FILE = (1u << 0),
+  CLOUD = (1u << 1),
+  IO_URING = (1u << 2),
+  DIRECT = (1u << 3),
+};
+
 class SnapshotStorage {
  public:
   virtual ~SnapshotStorage() = default;
 
-  virtual GenericError OpenFile(const std::string& path, io::Sink** file, bool* is_direct,
-                                bool* is_linux_file) = 0;
+  // Opens the file at the given path, and returns the open file and file
+  // type, which is a bitmask of FileType.
+  virtual io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+      const std::string& path) = 0;
 };
 
 class FileSnapshotStorage : public SnapshotStorage {
  public:
   FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool);
 
-  GenericError OpenFile(const std::string& path, io::Sink** file, bool* is_direct,
-                        bool* is_linux_file) override;
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+      const std::string& path) override;
 
  private:
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
@@ -42,8 +51,8 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
   AwsS3SnapshotStorage(util::cloud::AWS* aws);
 
-  GenericError OpenFile(const std::string& path, io::Sink** file, bool* is_direct,
-                        bool* is_linux_file) override;
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+      const std::string& path) override;
 
  private:
   util::cloud::AWS* aws_;
