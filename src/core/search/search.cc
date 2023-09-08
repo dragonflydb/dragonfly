@@ -250,7 +250,7 @@ struct BasicSearch {
 
   IndexResult Search(const AstStarNode& node, string_view active_field) {
     DCHECK(active_field.empty());
-    return {indices_->GetAllDocs()};
+    return {&indices_->GetAllDocs()};
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set
@@ -440,7 +440,7 @@ struct BasicSearch {
 
 }  // namespace
 
-FieldIndices::FieldIndices(Schema schema, std::pmr::memory_resource* mr) : schema_{move(schema)}, all_ids_{mr}, indices_{} {
+FieldIndices::FieldIndices(Schema schema, std::pmr::memory_resource* mr) : schema_{move(schema)}, all_ids_{}, indices_{} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }
@@ -546,8 +546,8 @@ std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   return out;
 }
 
-vector<DocId> FieldIndices::GetAllDocs() const {
-  return std::vector<DocId>{all_ids_.begin(), all_ids_.end()};
+const vector<DocId>& FieldIndices::GetAllDocs() const {
+  return all_ids_;
 }
 
 const Schema& FieldIndices::GetSchema() const {

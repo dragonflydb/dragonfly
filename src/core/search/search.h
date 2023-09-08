@@ -66,7 +66,7 @@ class FieldIndices {
   std::vector<TextIndex*> GetAllTextIndices() const;
 
   // TODO FIX
-  std::vector<DocId> GetAllDocs() const;
+  const std::vector<DocId>& GetAllDocs() const;
 
   const Schema& GetSchema() const;
 
@@ -76,7 +76,7 @@ class FieldIndices {
 
  private:
   Schema schema_;
-  std::vector<DocId, std::pmr::polymorphic_allocator<DocId>> all_ids_;
+  std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseSortIndex>> sort_indices_;
 };
