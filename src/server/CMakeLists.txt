@@ -35,6 +35,7 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             detail/save_stages_controller.cc
+            detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
