@@ -151,6 +151,68 @@ GenericError ValidateFilename(const fs::path& filename, bool new_version) {
   return {};
 }
 
+FileSnapshotStorage::FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool)
+    : fq_threadpool_{fq_threadpool} {
+}
+
+GenericError FileSnapshotStorage::OpenFile(const std::string& path, io::Sink** file,
+                                           bool* is_direct, bool* is_linux_file) {
+  if (fq_threadpool_) {  // EPOLL
+    auto res = util::OpenFiberWriteFile(path, fq_threadpool_);
+    if (!res)
+      return GenericError(res.error(), "Couldn't open file for writing");
+    *file = *res;
+    *is_direct = false;
+    *is_linux_file = false;
+  } else {
+#ifdef __linux__
+    auto res = OpenLinux(path, kRdbWriteFlags, 0666);
+    if (!res) {
+      return GenericError(
+          res.error(),
+          "Couldn't open file for writing (is direct I/O supported by the file system?)");
+    }
+    *file = new LinuxWriteWrapper(res->release());
+    *is_direct = kRdbWriteFlags & O_DIRECT;
+    *is_linux_file = true;
+#else
+    LOG(FATAL) << "Linux I/O is not supported on this platform";
+#endif
+  }
+
+  return {};
+}
+
+AwsS3SnapshotStorage::AwsS3SnapshotStorage(util::cloud::AWS* aws) : aws_{aws} {
+}
+
+GenericError AwsS3SnapshotStorage::OpenFile(const std::string& path, io::Sink** file,
+                                            bool* is_direct, bool* is_linux_file) {
+  DCHECK(aws_);
+
+  optional<pair<string, string>> bucket_path = GetBucketPath(path);
+  if (!bucket_path) {
+    return GenericError("Invalid S3 path");
+  }
+  auto [bucket_name, obj_path] = *bucket_path;
+
+  cloud::S3Bucket bucket(*aws_, bucket_name);
+  error_code ec = bucket.Connect(kBucketConnectMs);
+  if (ec) {
+    return GenericError(ec, "Couldn't connect to S3 bucket");
+  }
+  auto res = bucket.OpenWriteFile(obj_path);
+  if (!res) {
+    return GenericError(res.error(), "Couldn't open file for writing");
+  }
+
+  *file = *res;
+  *is_direct = false;
+  *is_linux_file = false;
+
+  return {};
+}
+
 string InferLoadFile(string_view dir, cloud::AWS* aws) {
   fs::path data_folder;
   string bucket_name, obj_path;
@@ -230,47 +292,12 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
   bool is_direct = false;
   VLOG(1) << "Saving RDB " << path;
 
-  if (IsCloudPath(path)) {
-    DCHECK(aws_);
-
-    optional<pair<string, string>> bucket_path = GetBucketPath(path);
-    if (!bucket_path) {
-      return GenericError("Invalid S3 path");
-    }
-    auto [bucket_name, obj_path] = *bucket_path;
-
-    cloud::S3Bucket bucket(*aws_, bucket_name);
-    error_code ec = bucket.Connect(kBucketConnectMs);
-    if (ec) {
-      return GenericError(ec, "Couldn't connect to S3 bucket");
-    }
-    auto res = bucket.OpenWriteFile(obj_path);
-    if (!res) {
-      return GenericError(res.error(), "Couldn't open file for writing");
-    }
-    io_sink_.reset(*res);
-  } else {
-    if (fq_tp_) {  // EPOLL
-      auto res = util::OpenFiberWriteFile(path, fq_tp_);
-      if (!res)
-        return GenericError(res.error(), "Couldn't open file for writing");
-      io_sink_.reset(*res);
-    } else {
-#ifdef __linux__
-      auto res = OpenLinux(path, kRdbWriteFlags, 0666);
-      if (!res) {
-        return GenericError(
-            res.error(),
-            "Couldn't open file for writing (is direct I/O supported by the file system?)");
-      }
-      is_linux_file_ = true;
-      io_sink_.reset(new LinuxWriteWrapper(res->release()));
-      is_direct = kRdbWriteFlags & O_DIRECT;
-#else
-      LOG(FATAL) << "Linux I/O is not supported on this platform";
-#endif
-    }
+  io::Sink* file;
+  GenericError err = snapshot_storage_->OpenFile(path, &file, &is_direct, &is_linux_file_);
+  if (err) {
+    return err;
   }
+  io_sink_.reset(file);
 
   saver_.reset(new RdbSaver(io_sink_.get(), save_mode, is_direct));
 
@@ -431,7 +458,7 @@ GenericError SaveStagesController::InitResources() {
 
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
-    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, aws_->get());
+    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
   return {};
 }
 

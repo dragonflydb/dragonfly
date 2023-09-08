@@ -434,6 +434,11 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     if (ec) {
       LOG(FATAL) << "Failed to initialize AWS " << ec;
     }
+    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(aws_.get());
+  } else if (fq_threadpool_) {
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
+  } else {
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
   string load_path = detail::InferLoadFile(flag_dir, aws_.get());
@@ -921,9 +926,9 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  SaveStagesController sc{detail::SaveStagesInputs{new_version, basename, trans, &service_,
-                                                   &is_saving_, fq_threadpool_.get(),
-                                                   &last_save_info_, &save_mu_, &aws_}};
+  SaveStagesController sc{detail::SaveStagesInputs{
+      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
+      &save_mu_, &aws_, snapshot_storage_}};
   return sc.Save();
 }
 
