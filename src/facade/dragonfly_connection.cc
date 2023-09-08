@@ -855,12 +855,12 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       cc_->async_dispatch = false;
 
       // Flush strictly before the dispatch queue is cleared so that no sync dispatch can occur
-      if (dispatch_q_.size() == args.size())  // Flush if no new messages appeared
+      if (dispatch_q_.size() == args.size()) {  // Flush if no new messages appeared
         builder->FlushBatch();
+        builder->SetBatchMode(false);  // in case the next dispatch is sync
+      }
 
       DCHECK(!cc_->sync_dispatch);
-      builder->SetBatchMode(false);  // in case the next dispatch is sync
-
       // Dispatch queue could have grown, so handle strictly as many as we executed
       for (size_t i = 0; i < args.size(); i++) {
         recycle(move(dispatch_q_.front()));
