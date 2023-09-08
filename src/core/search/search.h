@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <variant>
 
 #include "core/search/base.h"
 
@@ -23,11 +24,20 @@ struct TextIndex;
 struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
+  struct VectorParams {
+    bool use_hnsw = false;
+
+    size_t dim = 0u;                              // dimension of knn vectors
+    VectorSimilarity sim = VectorSimilarity::L2;  // similarity type
+    size_t capacity = 1000;                       // initial capacity for hnsw world
+  };
+
+  using ParamsVariant = std::variant<std::monostate, VectorParams>;
+
   FieldType type;
   std::string short_name;  // equal to ident if none provided
 
-  size_t knn_dim = 0u;                              // dimension of knn vectors
-  VectorSimilarity knn_sim = VectorSimilarity::L2;  // similarity type
+  ParamsVariant special_params{std::monostate{}};
 };
 
 // Describes the fields of an index
@@ -51,6 +61,8 @@ class FieldIndices {
   BaseIndex* GetIndex(std::string_view field) const;
   std::vector<TextIndex*> GetAllTextIndices() const;
   const std::vector<DocId>& GetAllDocs() const;
+
+  const Schema& GetSchema() const;
 
  private:
   Schema schema_;
