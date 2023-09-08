@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 #include "server/engine_shard_set.h"
 
@@ -17,7 +18,7 @@ using facade::RedisReplyBuilder;
 
 class JsonFamily {
  public:
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
 
  private:
   static void Get(CmdArgList args, ConnectionContext* cntx);

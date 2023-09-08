@@ -5,6 +5,7 @@
 #pragma once
 
 #include "facade/op_status.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -17,7 +18,7 @@ class EngineShard;
 
 class ListFamily {
  public:
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
 
  private:
   static void LPush(CmdArgList args, ConnectionContext* cntx);

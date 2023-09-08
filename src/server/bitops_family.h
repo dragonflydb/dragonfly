@@ -14,6 +14,9 @@
 ///     BITOP: https://redis.io/commands/bitop/
 ///     GETBIT: https://redis.io/commands/getbit/
 ///     SETBIT: https://redis.io/commands/setbit/
+
+#include "server/acl/acl_commands_def.h"
+
 namespace dfly {
 class CommandRegistry;
 
@@ -24,7 +27,7 @@ class BitOpsFamily {
   ///
   /// We are assuming that this would have a valid registry to work on (i.e this do not point to
   /// null!).
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
 };
 
 }  // end of namespace dfly

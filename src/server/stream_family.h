@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -13,7 +14,7 @@ class ConnectionContext;
 
 class StreamFamily {
  public:
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
 
  private:
   static void XAdd(CmdArgList args, ConnectionContext* cntx);

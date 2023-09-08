@@ -26,7 +26,8 @@ class AclFamily final {
  public:
   explicit AclFamily(UserRegistry* registry);
 
-  void Register(CommandRegistry* registry);
+  void Register(CommandRegistry* registry, CommandsIndexStore index, RevCommandsIndexStore rindex,
+                size_t id);
   void Init(facade::Listener* listener, UserRegistry* registry);
 
  private:
@@ -37,12 +38,14 @@ class AclFamily final {
   void WhoAmI(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Load(CmdArgList args, ConnectionContext* cntx);
-  void Load();
+  bool Load();
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
+  using NestedVector = std::vector<std::vector<uint64_t>>;
   void StreamUpdatesToAllProactorConnections(const std::vector<std::string>& user,
-                                             const std::vector<uint32_t>& update_cat);
+                                             const std::vector<uint32_t>& update_cat,
+                                             const NestedVector& update_commands);
 
   // Helper function that closes all open connection from the deleted user
   void EvictOpenConnectionsOnAllProactors(std::string_view user);

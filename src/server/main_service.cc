@@ -2123,10 +2123,9 @@ constexpr uint32_t kPubSub = SLOW;
 constexpr uint32_t kCommand = SLOW | CONNECTION;
 }  // namespace acl
 
-void Service::RegisterCommands() {
+void Service::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
   using CI = CommandId;
-
-  registry_
+  *registry
       << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kMulti}.HFUNC(Multi)
       << CI{"WATCH", CO::LOADING, -2, 1, -1, 1, acl::kWatch}.HFUNC(Watch)
@@ -2152,30 +2151,40 @@ void Service::RegisterCommands() {
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0, acl::kMonitor}.MFUNC(Monitor)
       << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
       << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0, acl::kCommand}.MFUNC(Command);
+  builder | "QUIT" | "MULTI" | "WATCH" | "UNWATCH" | "DISCARD" | "EVAL" | "EVALSHA" | "EXEC" |
+      "PUBLISH" | "SUBSCRIBE" | "UNSUBSCRIBE" | "PSUBSCRIBE" | "PUNSUBSCRIBE" | "FUNCTION" |
+      "MONITOR" | "PUBSUB" | "COMMAND";
+}
 
-  StreamFamily::Register(&registry_);
-  StringFamily::Register(&registry_);
-  GenericFamily::Register(&registry_);
-  ListFamily::Register(&registry_);
-  SetFamily::Register(&registry_);
-  HSetFamily::Register(&registry_);
-  ZSetFamily::Register(&registry_);
-  JsonFamily::Register(&registry_);
-  BitOpsFamily::Register(&registry_);
-  HllFamily::Register(&registry_);
+void Service::RegisterCommands() {
+  acl::CommandsIndexStore index;
+  acl::RevCommandsIndexStore rindex;
+  size_t id = 0;
+  Register(&registry_, {&index, &rindex, id++});
+  StreamFamily::Register(&registry_, {&index, &rindex, id++});
+  StringFamily::Register(&registry_, {&index, &rindex, id++});
+  GenericFamily::Register(&registry_, {&index, &rindex, id++});
+  ListFamily::Register(&registry_, {&index, &rindex, id++});
+  SetFamily::Register(&registry_, {&index, &rindex, id++});
+  HSetFamily::Register(&registry_, {&index, &rindex, id++});
+  ZSetFamily::Register(&registry_, {&index, &rindex, id++});
+  JsonFamily::Register(&registry_, {&index, &rindex, id++});
+  BitOpsFamily::Register(&registry_, {&index, &rindex, id++});
+  HllFamily::Register(&registry_, {&index, &rindex, id++});
 
 #ifndef __APPLE__
-  SearchFamily::Register(&registry_);
+  SearchFamily::Register(&registry_, {&index, &rindex, id++});
 #endif
 
-  acl_family_.Register(&registry_);
+  server_family_.Register(&registry_, {&index, &rindex, id++});
+  cluster_family_.Register(&registry_, {&index, &rindex, id++});
 
-  server_family_.Register(&registry_);
-  cluster_family_.Register(&registry_);
+  acl_family_.Register(&registry_, std::move(index), std::move(rindex), id);
 
   // Only after all the commands are registered
   registry_.Init(pp_.size());
 
+  using CI = CommandId;
   if (VLOG_IS_ON(1)) {
     LOG(INFO) << "Multi-key commands are: ";
     registry_.Traverse([](std::string_view key, const CI& cid) {
@@ -2196,6 +2205,10 @@ void Service::RegisterCommands() {
       }
     });
   }
+}
+
+void Service::TestInit() {
+  acl_family_.Init(nullptr, &user_registry_);
 }
 
 void SetMaxMemoryFlag(uint64_t value) {

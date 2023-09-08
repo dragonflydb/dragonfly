@@ -1498,7 +1498,7 @@ constexpr uint32_t kSetRange = WRITE | STRING | SLOW;
 constexpr uint32_t kClThrottle = THROTTLE;
 }  // namespace acl
 
-void StringFamily::Register(CommandRegistry* registry) {
+void StringFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
   *registry
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1, acl::kSet}.HFUNC(Set)
       << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1, acl::kSetEx}.HFUNC(
@@ -1531,6 +1531,10 @@ void StringFamily::Register(CommandRegistry* registry) {
              SetRange)
       << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1, acl::kClThrottle}.HFUNC(
              ClThrottle);
+
+  builder | "SET" | "SETEX" | "PSETEX" | "APPEND" | "PREPEND" | "INCR" | "DECR" | "INCRBY" |
+      "INCRBYFLOAT" | "DECRBY" | "GET" | "GETDEL" | "GETEX" | "GETSET" | "MGET" | "MSET" |
+      "MSETNX" | "STRLEN" | "GETRANGE" | "SUBSTR" | "SETRANGE" | "CL.THROTTLE";
 }
 
 }  // namespace dfly

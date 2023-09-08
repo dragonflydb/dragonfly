@@ -94,7 +94,7 @@ class ServerFamily {
   ~ServerFamily();
 
   void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
-  void Register(CommandRegistry* registry);
+  void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
   void Shutdown();
 
   void ShutdownCmd(CmdArgList args, ConnectionContext* cntx);

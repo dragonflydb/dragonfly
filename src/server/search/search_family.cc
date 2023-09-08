@@ -518,7 +518,7 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
 // to set as the default for the search family of commands. More sensible defaults,
 // should also be considered in the future
 
-void SearchFamily::Register(CommandRegistry* registry) {
+void SearchFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
   using CI = CommandId;
 
   *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
@@ -528,6 +528,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
             << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
             << CI{"FT.PROFILE", CO::GLOBAL_TRANS, -4, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
+
+  builder | "FT.CREATE" | "FT.DROPINDEX" | "FT.INFO" | "FT._LIST" | "FT.SEARCH" | "FT.PROFILE";
 }
 
 }  // namespace dfly

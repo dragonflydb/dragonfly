@@ -23,10 +23,12 @@ class UserRegistry {
   template <template <typename T> typename LockT, typename RegT> class RegistryWithLock;
 
  public:
-  UserRegistry();
+  UserRegistry() = default;
 
   UserRegistry(const UserRegistry&) = delete;
   UserRegistry(UserRegistry&&) = delete;
+
+  void Init();
 
   using RegistryType = absl::flat_hash_map<std::string, User>;
 
@@ -43,6 +45,7 @@ class UserRegistry {
 
   struct UserCredentials {
     uint32_t acl_categories{0};
+    std::vector<uint64_t> acl_commands;
   };
 
   // Acquires a read lock

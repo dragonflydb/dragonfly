@@ -1036,6 +1036,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       cntx->authed_username = username;
       auto cred = registry->GetCredentials(username);
       cntx->acl_categories = cred.acl_categories;
+      cntx->acl_commands = cred.acl_commands;
       return (*cntx)->SendOk();
     }
     return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
@@ -2003,10 +2004,11 @@ constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
+// TODO(check this)
 constexpr uint32_t kDfly = ADMIN;
 }  // namespace acl
 
-void ServerFamily::Register(CommandRegistry* registry) {
+void ServerFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
 
@@ -2037,6 +2039,10 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.SetHandler(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_JOURNAL, -2, 0, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, acl::kDfly}.HFUNC(Dfly);
+
+  builder | "AUTH" | "BGSAVE" | "CLIENT" | "CONFIG" | "DBSIZE" | "DEBUG" | "FLUSHDB" | "FLUSHALL" |
+      "INFO" | "HELLO" | "LASTSAVE" | "LATENCY" | "MEMORY" | "SAVE" | "SHUTDOWN" | "SLAVEOF" |
+      "REPLICAOF" | "ROLE" | "SLOWLOG" | "SCRIPT" | "DFLY";
 }
 
 }  // namespace dfly

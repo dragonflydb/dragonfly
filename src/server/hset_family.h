@@ -7,6 +7,7 @@
 #include <optional>
 
 #include "facade/op_status.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -20,7 +21,7 @@ using facade::OpStatus;
 
 class HSetFamily {
  public:
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
   static uint32_t MaxListPackLen();
 
   // Does not free lp.

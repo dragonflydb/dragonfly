@@ -1466,7 +1466,7 @@ constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 }  // namespace acl
 
-void GenericFamily::Register(CommandRegistry* registry) {
+void GenericFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
 
   *registry
@@ -1504,6 +1504,10 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kMove}
              .HFUNC(Move)
       << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1, acl::kRestore}.HFUNC(Restore);
+
+  builder | "DEL" | "PING" | "ECHO" | "EXISTS" | "TOUCH" | "EXPIRE" | "EXPIREAT" | "PERSIST" |
+      "KEYS" | "PEXPIREAT" | "PEXPIRE" | "RENAME" | "RENAMENX" | "SELECT" | "SCAN" | "TTL" |
+      "PTTL" | "TIME" | "TYPE" | "DUMP" | "UNLINK" | "STICK" | "MOVE" | "RESTORE";
 }
 
 }  // namespace dfly

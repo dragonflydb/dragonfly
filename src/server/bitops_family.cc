@@ -839,7 +839,7 @@ constexpr uint32_t kGetBit = READ | BITMAP | FAST;
 constexpr uint32_t kSetBit = WRITE | BITMAP | SLOW;
 }  // namespace acl
 
-void BitOpsFamily::Register(CommandRegistry* registry) {
+void BitOpsFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
   using CI = CommandId;
 
   *registry
@@ -850,6 +850,8 @@ void BitOpsFamily::Register(CommandRegistry* registry) {
       << CI{"BITOP", CO::WRITE | CO::NO_AUTOJOURNAL, -4, 2, -1, 1, acl::kBitOp}.SetHandler(&BitOp)
       << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kGetBit}.SetHandler(&GetBit)
       << CI{"SETBIT", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1, acl::kSetBit}.SetHandler(&SetBit);
+
+  builder | "BITPOS" | "BITCOUNT" | "BITFIELD" | "BITFIELD_RO" | "BITOP" | "GETBIT" | "SETBIT";
 }
 
 }  // namespace dfly

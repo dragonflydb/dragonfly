@@ -217,6 +217,7 @@ void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
     for (size_t id = 0; id < msg.username.size(); ++id) {
       if (msg.username[id] == ctx->authed_username) {
         ctx->acl_categories = msg.categories[id];
+        ctx->acl_commands = msg.commands[id];
       }
     }
   }
@@ -984,7 +985,7 @@ void Connection::SendMonitorMessageAsync(string msg) {
 }
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
-  SendAsync({msg});
+  SendAsync({std::move(msg)});
 }
 
 void Connection::SendAsync(MessageHandle msg) {
@@ -1004,11 +1005,9 @@ void Connection::SendAsync(MessageHandle msg) {
 
   auto place_in_dispatch_q = [this](MessageHandle msg) {
     auto it = dispatch_q_.begin();
-    for (; it < dispatch_q_.end(); ++it) {
-      if (!std::holds_alternative<AclUpdateMessage>(it->handle)) {
-        break;
-      }
-    }
+    const auto end = dispatch_q_.end();
+    while (it < end && std::holds_alternative<AclUpdateMessage>(it->handle))
+      ++it;
     dispatch_q_.insert(it, std::move(msg));
   };
 

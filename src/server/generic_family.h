@@ -6,6 +6,7 @@
 
 #include "base/flags.h"
 #include "facade/op_status.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 #include "server/table.h"
 
@@ -29,7 +30,7 @@ class GenericFamily {
   static void Init(util::ProactorPool* pp);
   static void Shutdown();
 
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
 
   // Accessed by Service::Exec and Service::Watch as an utility.
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);

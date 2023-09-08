@@ -9,6 +9,7 @@
 
 #include "base/histogram.h"
 #include "core/interpreter.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
 #include "server/common.h"
 #include "server/script_mgr.h"

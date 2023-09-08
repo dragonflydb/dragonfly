@@ -5,6 +5,7 @@
 #pragma once
 
 #include "absl/container/flat_hash_map.h"
+#include "base/logging.h"
 
 namespace dfly::acl {
 /* There are 21 ACL categories as of redis 7
@@ -105,5 +106,57 @@ inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
     "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
     "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
     "_RESERVED", "FT_SEARCH", "THROTTLE",  "JSON"};
+
+using BitfieldIndexPar =
+    std::pair<size_t /*index of family in the vector */, uint64_t /*bit index mask*/>;
+using CommandsIndexStore = absl::flat_hash_map<std::string, BitfieldIndexPar>;
+using RevCommandField = std::vector<std::string>;
+using RevCommandsIndexStore = std::vector<RevCommandField>;
+
+class CommandTableBuilder {
+ public:
+  CommandTableBuilder(CommandsIndexStore* index, RevCommandsIndexStore* rindex, size_t pos)
+      : index_(index), rindex_(rindex), pos_(pos) {
+    rindex_->push_back({});
+  }
+
+  friend CommandTableBuilder& operator|(CommandTableBuilder& builder, std::string name) {
+    (*builder.index_)[name] = {builder.pos_, 1ULL << (builder.bit_number_++)};
+    (*builder.rindex_)[builder.pos_].push_back(std::move(name));
+    // We should crash if somehow we end up feeding more than the bitfield size
+    // This won't happen in production, since our tests will fail and we will never
+    // merge something that violates this
+    CHECK_LT(++builder.bits_limit, size_t(64));
+    return builder;
+  }
+
+ private:
+  size_t bit_number_ = 0;
+  size_t bits_limit = 0;
+  CommandsIndexStore* index_;
+  RevCommandsIndexStore* rindex_;
+  const size_t pos_;
+};
+
+constexpr uint64_t ALL_COMMANDS = std::numeric_limits<uint64_t>::max();
+
+// A variation of meyers singleton
+// This is initialized when the constructor of Service is called.
+// Basically, it calls this functions within the AclFamily::Register
+// functions which has the number of all the acl families registered
+inline size_t NumberOfFamilies(size_t number = 0) {
+  static size_t number_of_families = number;
+  return number_of_families;
+}
+
+inline const CommandsIndexStore& CommandsIndexer(CommandsIndexStore store = {}) {
+  static CommandsIndexStore index_store = std::move(store);
+  return index_store;
+}
+
+inline const RevCommandsIndexStore& CommandsRevIndexer(RevCommandsIndexStore store = {}) {
+  static RevCommandsIndexStore rev_index_store = std::move(store);
+  return rev_index_store;
+}
 
 }  // namespace dfly::acl

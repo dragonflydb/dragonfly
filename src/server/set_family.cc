@@ -1579,7 +1579,7 @@ constexpr uint32_t kSUnionStore = WRITE | SET | SLOW;
 constexpr uint32_t kSScan = READ | SET | SLOW;
 }  // namespace acl
 
-void SetFamily::Register(CommandRegistry* registry) {
+void SetFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
   *registry
       << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kSAdd}.HFUNC(SAdd)
       << CI{"SDIFF", CO::READONLY, -2, 1, -1, 1, acl::kSDiff}.HFUNC(SDiff)
@@ -1604,9 +1604,13 @@ void SetFamily::Register(CommandRegistry* registry) {
              .HFUNC(SUnionStore)
       << CI{"SSCAN", CO::READONLY, -3, 1, 1, 1, acl::kSScan}.HFUNC(SScan);
 
+  builder | "SADD" | "SDIFF" | "SINTER" | "SINTERSTORE" | "SMEMBERS" | "SISMEMBER" | "SMISMEMBER" |
+      "SMOVE" | "SREM" | "SCARD" | "SPOP" | "SUNION" | "SUNIONSTORE" | "SSCAN";
+
   if (absl::GetFlag(FLAGS_use_set2)) {
     *registry << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kSAdd}.HFUNC(
         SAddEx);
+    builder | "SADDEX";
   }
 }
 

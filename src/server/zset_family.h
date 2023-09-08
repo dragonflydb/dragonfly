@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "facade/op_status.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -16,7 +17,7 @@ class CommandRegistry;
 
 class ZSetFamily {
  public:
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
 
   using IndexInterval = std::pair<int32_t, int32_t>;
   using MScoreResponse = std::vector<std::optional<double>>;

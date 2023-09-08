@@ -5,8 +5,8 @@
 #pragma once
 
 #include "facade/op_status.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
-
 
 typedef struct intset intset;
 typedef struct redisObject robj;
@@ -22,7 +22,7 @@ class EngineShard;
 
 class SetFamily {
  public:
-  static void Register(CommandRegistry* registry);
+  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
 
   static uint32_t MaxIntsetEntries();
 
