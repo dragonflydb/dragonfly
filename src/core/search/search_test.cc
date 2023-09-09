@@ -232,6 +232,15 @@ TEST_F(SearchParserTest, CheckNotPriority) {
 
     EXPECT_TRUE(Check()) << GetError();
   }
+
+  for (auto expr : {"-bar far|-foo tam"}) {
+    PrepareQuery(expr);
+
+    ExpectAll("far baz", "far foo", "bar tam");
+    ExpectNone("bar far", "foo tam", "bar foo", "far bar foo");
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
 }
 
 TEST_F(SearchParserTest, CheckParenthesisPriority) {
@@ -302,6 +311,14 @@ TEST_F(SearchParserTest, CheckExprInField) {
     ExpectAll(Map{{"f1", "a b w"}, {"f2", "c"}});
     ExpectNone(Map{{"f1", "a b d"}, {"f2", "c"}}, Map{{"f1", "a b w"}, {"f2", "a"}},
                Map{{"f1", "a w"}, {"f2", "c"}});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+  {
+    PrepareQuery("@f1:(-a c|-b d)");
+
+    ExpectAll(Map{{"f1", "c"}}, Map{{"f1", "d"}});
+    ExpectNone(Map{{"f1", "a"}}, Map{{"f1", "b"}});
 
     EXPECT_TRUE(Check()) << GetError();
   }
