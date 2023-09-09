@@ -229,21 +229,12 @@ async def test_acl_with_long_running_script(df_server):
     await admin_client.close()
 
 
-SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
 @pytest.mark.asyncio
-@dfly_args(
-    {
-        "aclfile": os.environ.get(
-            "DRAGONFLY_PATH/wrong.acl", os.path.join(SCRIPTS_DIR, "../../build-dbg/wrong.acl")
-        ),
-        "port": 1111,
-    }
-)
+@dfly_args({"port": 1111})
 async def test_bad_acl_file(df_local_factory):
-    scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    df = df_local_factory.create()
+    path = df_local_factory.params.path
+    acl = os.path.join(os.path.dirname(path), "wrong.acl")
+    df = df_local_factory.create(aclfile=acl)
 
     df.start()
 
@@ -256,16 +247,11 @@ async def test_bad_acl_file(df_local_factory):
 
 
 @pytest.mark.asyncio
-@dfly_args(
-    {
-        "aclfile": os.environ.get(
-            "DRAGONFLY_PATH/ok.acl", os.path.join(SCRIPTS_DIR, "../../build-dbg/ok.acl")
-        ),
-        "port": 1111,
-    }
-)
+@dfly_args({"port": 1111})
 async def test_good_acl_file(df_local_factory):
-    df = df_local_factory.create()
+    path = df_local_factory.params.path
+    acl = os.path.join(os.path.dirname(path), "ok.acl")
+    df = df_local_factory.create(aclfile=acl)
 
     df.start()
     client = aioredis.Redis(port=df.port)
