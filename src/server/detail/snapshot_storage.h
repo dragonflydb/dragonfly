@@ -19,9 +19,7 @@ namespace detail {
 
 namespace fs = std::filesystem;
 
-using namespace std::literals;
-
-constexpr std::string_view kS3Prefix = "s3://"sv;
+constexpr std::string_view kS3Prefix = "s3://";
 
 const size_t kBucketConnectMs = 2000;
 
