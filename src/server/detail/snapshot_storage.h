@@ -38,8 +38,10 @@ class SnapshotStorage {
 
   // Opens the file at the given path, and returns the open file and file
   // type, which is a bitmask of FileType.
-  virtual io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+  virtual io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) = 0;
+
+  virtual io::ReadonlyFileOrError OpenReadFile(const std::string& path) = 0;
 
   // Returns the path of the RDB file or DFS summary file to load.
   virtual std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) = 0;
@@ -52,8 +54,10 @@ class FileSnapshotStorage : public SnapshotStorage {
  public:
   FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool);
 
-  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;
+
+  io::ReadonlyFileOrError OpenReadFile(const std::string& path) override;
 
   std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) override;
 
@@ -67,8 +71,10 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
   AwsS3SnapshotStorage(util::cloud::AWS* aws);
 
-  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;
+
+  io::ReadonlyFileOrError OpenReadFile(const std::string& path) override;
 
   std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) override;
 

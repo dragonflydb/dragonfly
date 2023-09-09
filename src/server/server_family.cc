@@ -594,18 +594,7 @@ void ServerFamily::SnapshotScheduling() {
 
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file) {
   error_code ec;
-  io::ReadonlyFileOrError res;
-
-#ifdef __linux__
-  if (fq_threadpool_) {
-    res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
-  } else {
-    res = OpenRead(rdb_file);
-  }
-#else
-  res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
-#endif
-
+  io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
   if (res) {
     io::FileSource fs(*res);
 

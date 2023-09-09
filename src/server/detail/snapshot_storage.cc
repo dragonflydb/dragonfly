@@ -10,6 +10,7 @@
 #include "io/file_util.h"
 #include "util/cloud/s3.h"
 #include "util/fibers/fiber_file.h"
+#include "util/uring/uring_file.h"
 
 namespace dfly {
 namespace detail {
@@ -34,7 +35,7 @@ FileSnapshotStorage::FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool)
     : fq_threadpool_{fq_threadpool} {
 }
 
-io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::OpenFile(
+io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::OpenWriteFile(
     const std::string& path) {
   if (fq_threadpool_) {  // EPOLL
     auto res = util::OpenFiberWriteFile(path, fq_threadpool_);
@@ -61,6 +62,18 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::Ope
     LOG(FATAL) << "Linux I/O is not supported on this platform";
 #endif
   }
+}
+
+io::ReadonlyFileOrError FileSnapshotStorage::OpenReadFile(const std::string& path) {
+#ifdef __linux__
+  if (fq_threadpool_) {
+    return util::OpenFiberReadFile(path, fq_threadpool_);
+  } else {
+    return util::fb2::OpenRead(path);
+  }
+#else
+  return util::OpenFiberReadFile(path, fq_threadpool_);
+#endif
 }
 
 std::string FileSnapshotStorage::LoadPath(const std::string_view& dir,
@@ -145,7 +158,7 @@ io::Result<std::vector<std::string>> FileSnapshotStorage::LoadPaths(const std::s
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(util::cloud::AWS* aws) : aws_{aws} {
 }
 
-io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenFile(
+io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
   DCHECK(aws_);
 
@@ -166,6 +179,10 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
   }
 
   return std::pair<io::Sink*, uint8_t>(*res, FileType::CLOUD);
+}
+
+io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
+  return nonstd::make_unexpected(std::make_error_code(std::errc::not_supported));
 }
 
 std::string AwsS3SnapshotStorage::LoadPath(const std::string_view& dir,
