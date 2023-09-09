@@ -41,7 +41,11 @@ class SnapshotStorage {
   virtual io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
       const std::string& path) = 0;
 
+  // Returns the path of the RDB file or DFS summary file to load.
   virtual std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) = 0;
+
+  // Returns the snapshot paths given the RDB file or DFS summary file path.
+  virtual io::Result<std::vector<std::string>> LoadPaths(const std::string& load_path) = 0;
 };
 
 class FileSnapshotStorage : public SnapshotStorage {
@@ -52,6 +56,8 @@ class FileSnapshotStorage : public SnapshotStorage {
       const std::string& path) override;
 
   std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) override;
+
+  io::Result<std::vector<std::string>> LoadPaths(const std::string& load_path) override;
 
  private:
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
@@ -65,6 +71,8 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
       const std::string& path) override;
 
   std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) override;
+
+  io::Result<std::vector<std::string>> LoadPaths(const std::string& load_path) override;
 
  private:
   util::cloud::AWS* aws_;

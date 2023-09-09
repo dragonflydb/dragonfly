@@ -499,42 +499,14 @@ struct AggregateLoadResult {
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
 Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
-  if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
-    LOG(ERROR) << "Bad filename extension \"" << load_path << "\"";
+  io::Result<std::vector<std::string>> paths_result = snapshot_storage_->LoadPaths(load_path);
+  if (!paths_result) {
     Promise<std::error_code> ec_promise;
-    ec_promise.set_value(make_error_code(errc::invalid_argument));
+    ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
   }
 
-  vector<std::string> paths{{load_path}};
-
-  // Collect all other files in case we're loading dfs.
-  if (absl::EndsWith(load_path, "summary.dfs")) {
-    std::string glob = absl::StrReplaceAll(load_path, {{"summary", "????"}});
-    io::Result<io::StatShortVec> files = io::StatFiles(glob);
-
-    if (files && files->size() == 0) {
-      Promise<std::error_code> ec_promise;
-      ec_promise.set_value(make_error_code(errc::no_such_file_or_directory));
-      return ec_promise.get_future();
-    }
-
-    for (auto& fstat : *files) {
-      paths.push_back(std::move(fstat.name));
-    }
-  }
-
-  // Check all paths are valid.
-  for (const auto& path : paths) {
-    error_code ec;
-    (void)fs::canonical(path, ec);
-    if (ec) {
-      LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
-      Promise<std::error_code> ec_promise;
-      ec_promise.set_value(ec);
-      return ec_promise.get_future();
-    }
-  }
+  std::vector<std::string> paths = *paths_result;
 
   LOG(INFO) << "Loading " << load_path;
 

@@ -106,6 +106,42 @@ std::string FileSnapshotStorage::LoadPath(const std::string_view& dir,
   return "";
 }
 
+io::Result<std::vector<std::string>> FileSnapshotStorage::LoadPaths(const std::string& load_path) {
+  if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
+    LOG(ERROR) << "Bad filename extension \"" << load_path << "\"";
+    return nonstd::make_unexpected(std::make_error_code(std::errc::invalid_argument));
+  }
+
+  std::vector<std::string> paths{{load_path}};
+
+  // Collect all other files in case we're loading dfs.
+  if (absl::EndsWith(load_path, "summary.dfs")) {
+    std::string glob = absl::StrReplaceAll(load_path, {{"summary", "????"}});
+    io::Result<io::StatShortVec> files = io::StatFiles(glob);
+
+    if (files && files->size() == 0) {
+      LOG(ERROR) << "Cound not find DFS snapshot shard files";
+      return nonstd::make_unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+    }
+
+    for (auto& fstat : *files) {
+      paths.push_back(std::move(fstat.name));
+    }
+  }
+
+  // Check all paths are valid.
+  for (const auto& path : paths) {
+    std::error_code ec;
+    (void)fs::canonical(path, ec);
+    if (ec) {
+      LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
+      return nonstd::make_unexpected(ec);
+    }
+  }
+
+  return paths;
+}
+
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(util::cloud::AWS* aws) : aws_{aws} {
 }
 
@@ -136,6 +172,11 @@ std::string AwsS3SnapshotStorage::LoadPath(const std::string_view& dir,
                                            const std::string_view& dbfilename) {
   LOG(WARNING) << "Loading snapshots from S3 is not supported";
   return "";
+}
+
+io::Result<std::vector<std::string>> AwsS3SnapshotStorage::LoadPaths(const std::string& load_path) {
+  LOG(WARNING) << "Loading snapshots from S3 is not supported";
+  return nonstd::make_unexpected(std::make_error_code(std::errc::invalid_argument));
 }
 
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
