@@ -3,9 +3,11 @@
 
 #include "server/detail/snapshot_storage.h"
 
+#include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 
 #include "base/logging.h"
+#include "io/file_util.h"
 #include "util/cloud/s3.h"
 #include "util/fibers/fiber_file.h"
 
@@ -61,6 +63,49 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::Ope
   }
 }
 
+std::string FileSnapshotStorage::LoadPath(const std::string_view& dir,
+                                          const std::string_view& dbfilename) {
+  if (dbfilename.empty())
+    return "";
+
+  fs::path data_folder;
+  if (dir.empty()) {
+    data_folder = fs::current_path();
+  } else {
+    std::error_code file_ec;
+    data_folder = fs::canonical(dir, file_ec);
+    if (file_ec) {
+      LOG(ERROR) << "Data directory error: " << file_ec.message() << " for dir " << dir;
+      return "";
+    }
+  }
+
+  LOG(INFO) << "Data directory is " << data_folder;
+
+  fs::path fl_path = data_folder.append(dbfilename);
+  if (fs::exists(fl_path))
+    return fl_path.generic_string();
+
+  SubstituteFilenameTsPlaceholder(&fl_path, "*");
+  if (!fl_path.has_extension()) {
+    fl_path += "*";
+  }
+  io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
+
+  if (short_vec) {
+    // io::StatFiles returns a list of sorted files. Because our timestamp format has the same
+    // time order and lexicographic order we iterate from the end to find the latest snapshot.
+    auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
+      return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
+    });
+    if (it != short_vec->rend())
+      return it->name;
+  } else {
+    LOG(WARNING) << "Could not stat " << fl_path << ", error " << short_vec.error().message();
+  }
+  return "";
+}
+
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(util::cloud::AWS* aws) : aws_{aws} {
 }
 
@@ -87,6 +132,12 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
   return std::pair<io::Sink*, uint8_t>(*res, FileType::CLOUD);
 }
 
+std::string AwsS3SnapshotStorage::LoadPath(const std::string_view& dir,
+                                           const std::string_view& dbfilename) {
+  LOG(WARNING) << "Loading snapshots from S3 is not supported";
+  return "";
+}
+
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
   if (res) {
@@ -94,6 +145,10 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   }
 
   return res;
+}
+
+void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement) {
+  *filename = absl::StrReplaceAll(filename->string(), {{"{timestamp}", replacement}});
 }
 
 }  // namespace detail

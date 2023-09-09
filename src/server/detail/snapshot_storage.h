@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -15,6 +16,8 @@
 
 namespace dfly {
 namespace detail {
+
+namespace fs = std::filesystem;
 
 using namespace std::literals;
 
@@ -37,6 +40,8 @@ class SnapshotStorage {
   // type, which is a bitmask of FileType.
   virtual io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
       const std::string& path) = 0;
+
+  virtual std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) = 0;
 };
 
 class FileSnapshotStorage : public SnapshotStorage {
@@ -45,6 +50,8 @@ class FileSnapshotStorage : public SnapshotStorage {
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
       const std::string& path) override;
+
+  std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) override;
 
  private:
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
@@ -56,6 +63,8 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
       const std::string& path) override;
+
+  std::string LoadPath(const std::string_view& dir, const std::string_view& dbfilename) override;
 
  private:
   util::cloud::AWS* aws_;
@@ -80,6 +89,8 @@ class LinuxWriteWrapper : public io::Sink {
   std::unique_ptr<util::fb2::LinuxFile> lf_;
   off_t offset_ = 0;
 };
+
+void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement);
 
 }  // namespace detail
 }  // namespace dfly

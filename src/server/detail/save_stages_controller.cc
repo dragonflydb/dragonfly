@@ -46,10 +46,6 @@ string FormatTs(absl::Time now) {
   return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
 }
 
-void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement) {
-  *filename = absl::StrReplaceAll(filename->string(), {{"{timestamp}", replacement}});
-}
-
 // Create a directory and all its parents if they don't exist.
 error_code CreateDirs(fs::path dir_path) {
   error_code ec;
@@ -102,80 +98,6 @@ GenericError ValidateFilename(const fs::path& filename, bool new_version) {
                          "\" for SAVE with type RDB")};
   }
   return {};
-}
-
-string InferLoadFile(string_view dir, cloud::AWS* aws) {
-  fs::path data_folder;
-  string bucket_name, obj_path;
-
-  if (dir.empty()) {
-    data_folder = fs::current_path();
-  } else {
-    if (IsCloudPath(dir)) {
-      CHECK(aws);
-      auto res = GetBucketPath(dir);
-      if (!res) {
-        LOG(ERROR) << "Invalid S3 path: " << dir;
-        return {};
-      }
-      data_folder = dir;
-      bucket_name = res->first;
-      obj_path = res->second;
-    } else {
-      error_code file_ec;
-      data_folder = fs::canonical(dir, file_ec);
-      if (file_ec) {
-        LOG(ERROR) << "Data directory error: " << file_ec.message() << " for dir " << dir;
-        return {};
-      }
-    }
-  }
-
-  LOG(INFO) << "Data directory is " << data_folder;
-
-  const auto& dbname = GetFlag(FLAGS_dbfilename);
-  if (dbname.empty())
-    return string{};
-
-  if (IsCloudPath(dir)) {
-    cloud::S3Bucket bucket(*aws, bucket_name);
-    ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-    auto ec = proactor->Await([&] { return bucket.Connect(kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Couldn't connect to S3 bucket: " << ec.message();
-      return {};
-    }
-
-    fs::path fl_path{obj_path};
-    fl_path.append(dbname);
-
-    LOG(INFO) << "Loading from s3 path s3://" << bucket_name << "/" << fl_path;
-    // TODO: to load from S3 file.
-    return {};
-  }
-
-  fs::path fl_path = data_folder.append(dbname);
-  if (fs::exists(fl_path))
-    return fl_path.generic_string();
-
-  SubstituteFilenameTsPlaceholder(&fl_path, "*");
-  if (!fl_path.has_extension()) {
-    fl_path += "*";
-  }
-  io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
-
-  if (short_vec) {
-    // io::StatFiles returns a list of sorted files. Because our timestamp format has the same
-    // time order and lexicographic order we iterate from the end to find the latest snapshot.
-    auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
-      return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
-    });
-    if (it != short_vec->rend())
-      return it->name;
-  } else {
-    LOG(WARNING) << "Could not stat " << fl_path << ", error " << short_vec.error().message();
-  }
-  return string{};
 }
 
 GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,

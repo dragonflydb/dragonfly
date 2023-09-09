@@ -441,7 +441,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
-  string load_path = detail::InferLoadFile(flag_dir, aws_.get());
+  string load_path = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
   if (!load_path.empty()) {
     load_result_ = Load(load_path);
   }
