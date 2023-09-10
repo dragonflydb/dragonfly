@@ -6,8 +6,6 @@
 
 #include <absl/strings/match.h>
 
-#include <atomic>
-
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -384,7 +382,7 @@ void Transaction::StartMultiNonAtomic() {
 
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
-  // DCHECK(!cb_ptr_);
+  DCHECK(!cb_ptr_);
 
   unique_shard_id_ = 0;
   unique_shard_cnt_ = 0;
@@ -541,8 +539,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     }
   }
 
-  // CHECK_GE(DecreaseRunCnt(), 1u);
-  DecreaseRunCnt();
+  CHECK_GE(DecreaseRunCnt(), 1u);
   // From this point on we can not access 'this'.
 
   return !tx_stop_runnig;
@@ -737,28 +734,45 @@ OpStatus Transaction::ScheduleRemoteCoordination(RunnableType cb) {
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
   DCHECK(!IsGlobal());
 
-  auto* ss = ServerState::tlocal();
-  DCHECK_NE(ss->thread_index(), unique_shard_id_);
+  DCHECK_NE(ServerState::tlocal()->thread_index(), unique_shard_id_);
 
-  // TODO XXX Use a better notification mechanism
-  atomic_bool finished = false;
-  EventCount remote_coord_ec;
-  auto wrapped_cb = [&](Transaction* tx, EngineShard* shard) {
-    auto result = cb(tx, shard);
-    finished.store(true, std::memory_order_release);
-    remote_coord_ec.notify();
-    return result;
+  BlockingCounter blocker(1);
+  auto wrapped_cb = [&]() {
+    CHECK_EQ(ServerState::tlocal()->thread_index(), unique_shard_id_);
+
+    auto* shard = EngineShard::tlocal();
+    bool run_now = false;
+    if (this->IsOOO()) {
+      run_now = true;
+    } else {
+      TxQueue* txq = shard->txq();
+      if (txq->Empty()) {
+        run_now = true;
+      } else {
+        Transaction* head = std::get<Transaction*>(txq->Front());
+        if (head == this) {
+          run_now = true;
+        }
+      }
+    }
+
+    if (run_now) {
+      PerShardData& sd = shard_data_[SidToId(unique_shard_id_)];
+      sd.is_armed.store(false, memory_order_relaxed);
+      run_count_.store(0, memory_order_release);
+
+      local_result_ = cb(this, shard);
+
+      blocker.Dec();
+    }
   };
-  RunnableType wrapped_cb_type = wrapped_cb;
-  cb_ptr_ = &wrapped_cb_type;
 
   coordinator_state_ |= COORD_EXEC;
 
-  ExecuteAsync();
+  ExecuteAsyncShahar(wrapped_cb);
 
   DVLOG(2) << "ScheduleRemoteCoordination before Wait " << DebugId() << " " << run_count_.load();
-  remote_coord_ec.await([&]() { return finished.load(std::memory_order_relaxed); });
-  // WaitForShardCallbacks();
+  blocker.Wait();
   DVLOG(2) << "ScheduleRemoteCoordination after Wait " << DebugId();
 
   cb_ptr_ = nullptr;
@@ -790,8 +804,8 @@ void Transaction::UnlockMulti() {
   unsigned shard_journals_cnt =
       ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
 
-  run_count_.store(shard_data_.size(), memory_order_relaxed);
-  // DCHECK_EQ(prev, 0u);
+  uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
+  DCHECK_EQ(prev, 0u);
 
   use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
@@ -929,6 +943,33 @@ void Transaction::ExecuteAsync() {
   IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
 }
 
+void Transaction::ExecuteAsyncShahar(absl::FunctionRef<void()> cb) {
+  DVLOG(1) << "ExecuteAsyncShahar " << DebugId();
+
+  DCHECK_GT(unique_shard_cnt_, 0u);
+  DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
+  DCHECK(!IsAtomicMulti() || multi_->locks_recorded);
+
+  // We do not necessarily Execute this transaction in 'cb' below. It well may be that it will be
+  // executed by the engine shard once it has been armed and coordinator thread will finish the
+  // transaction before engine shard thread stops accessing it. Therefore, we increase reference
+  // by number of callbacks accessing 'this' to allow callbacks to execute shard->Execute(this);
+  // safely.
+  use_count_.fetch_add(unique_shard_cnt_, memory_order_relaxed);
+
+  // We access sd.is_armed outside of shard-threads but we guard it with run_count_ release.
+  IterateActiveShards(
+      [](PerShardData& sd, auto i) { sd.is_armed.store(true, memory_order_relaxed); });
+
+  // this fence prevents that a read or write operation before a release fence will be reordered
+  // with a write operation after a release fence. Specifically no writes below will be reordered
+  // upwards. Important, because it protects non-threadsafe local_mask from being accessed by
+  // IsArmedInShard in other threads.
+  run_count_.store(unique_shard_cnt_, memory_order_release);
+
+  IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
+}
+
 void Transaction::Conclude() {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
   Execute(std::move(cb), true);
@@ -1005,7 +1046,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 // Optimized path that schedules and runs transactions out of order if possible.
 // Returns true if was eagerly executed, false if it was scheduled into queue.
 bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
-  // DCHECK(!IsAtomicMulti());
+  DCHECK(!IsAtomicMulti());
   DCHECK_EQ(0u, txid_);
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
   DCHECK_NE(unique_shard_id_, kInvalidSid);

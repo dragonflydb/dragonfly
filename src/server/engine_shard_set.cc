@@ -377,7 +377,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       TxId txid = head->txid();
 
       // committed_txid_ is strictly increasing when processed via TxQueue.
-      DCHECK_LE(committed_txid_, txid);
+      DCHECK_LT(committed_txid_, txid);
 
       // We update committed_txid_ before calling RunInShard() to avoid cases where
       // a transaction stalls the execution with IO while another fiber queries this shard for

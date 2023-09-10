@@ -306,12 +306,6 @@ TEST_F(MultiTest, FlushDb) {
 }
 
 TEST_F(MultiTest, Eval) {
-  constexpr string_view kKey = "foo3";
-  Run({"set", kKey, "42"});
-  EXPECT_EQ(Run({"eval", "redis.call('set', KEYS[1], '42')\nreturn redis.call('get', KEYS[1])", "1",
-                 kKey}),
-            "42");
-
   if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
     return;
@@ -370,6 +364,24 @@ TEST_F(MultiTest, Eval) {
   EXPECT_EQ(resp, "12345678912345-works");
   resp = Run({"eval", kGetScore, "1", "z1", "c"});
   EXPECT_EQ(resp, "12.5-works");
+
+  // Multiple calls in a Lua script
+  EXPECT_EQ(Run({"eval",
+                 R"(redis.call('set', 'foo', '42')
+                    return redis.call('get', 'foo'))",
+                 "1", "foo"}),
+            "42");
+}
+
+TEST_F(MultiTest, EvalWhenLocked) {
+  auto condition = [&]() { return service_->IsLocked(0, "foo"); };
+  auto fb = ExpectConditionWithSuspension(condition);
+  EXPECT_EQ(Run({"eval",
+                 R"(redis.call('set', 'foo', '42')
+                    return redis.call('get', 'foo'))",
+                 "1", "foo"}),
+            "42");
+  fb.Join();
 }
 
 TEST_F(MultiTest, Watch) {

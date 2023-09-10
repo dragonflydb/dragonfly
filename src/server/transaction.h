@@ -438,6 +438,7 @@ class Transaction {
   void RunQuickie(EngineShard* shard);
 
   void ExecuteAsync();
+  void ExecuteAsyncShahar(absl::FunctionRef<void()> cb);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
