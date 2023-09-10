@@ -164,6 +164,7 @@ class Replica : ProtocolClient {
   EventCount waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
+  std::vector<LSN> last_journal_LSNs_ = {};
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)
@@ -221,13 +222,15 @@ class DflyShardReplica : public ProtocolClient {
   void JoinFlow();
 
   // Start replica initialized as dfly flow.
-  std::error_code StartFullSyncFlow(BlockingCounter block, Context* cntx);
+  // Sets is_full_sync when successful.
+  std::error_code StartSyncFlow(BlockingCounter block, Context* cntx, std::vector<LSN>&,
+                                bool& is_full_sync);
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(Context* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(const std::string& eof_token, BlockingCounter block, Context* cntx);
+  void FullSyncDflyFb(std::string eof_token, BlockingCounter block, Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyReadFb(Context* cntx);

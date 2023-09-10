@@ -17,16 +17,20 @@ const char* GetVersion();
 // Please document for each new entry what the behavior changes are
 // and to which released versions this corresponds.
 enum class DflyVersion {
-  // Versions <=1.3
+  //         ver <= 1.3
   VER0,
 
-  // Versions 1.4<=
+  // 1.4  <= ver <= 1.9
   // - Supports receiving ACKs from replicas
   // - Sends version back on REPLCONF capa dragonfly
   VER1,
 
+  // 1.10 <= ver
+  // Supports limited partial sync
+  VER2,
+
   // Always points to the latest version
-  CURRENT_VER = VER1,
+  CURRENT_VER = VER2,
 };
 
 }  // namespace dfly

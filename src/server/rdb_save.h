@@ -88,6 +88,9 @@ class RdbSaver {
   // TODO: to implement break functionality to allow stopping early.
   void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
+  // Send only the incremental snapshot since start_lsn.
+  void StartIncrementalSnapshotInShard(const Cancellation* cll, EngineShard* shard, LSN start_lsn);
+
   // Stops serialization in journal streaming mode in the shard's thread.
   void StopSnapshotInShard(EngineShard* shard);
 
@@ -122,7 +125,7 @@ class CompressorImpl;
 
 class RdbSerializer {
  public:
-  RdbSerializer(CompressionMode compression_mode);
+  explicit RdbSerializer(CompressionMode compression_mode);
 
   ~RdbSerializer();
 

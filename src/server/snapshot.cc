@@ -37,16 +37,16 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
-  snapshot_version_ = db_slice_->RegisterOnChange(move(db_cb));
+  snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
     auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
-    journal_cb_id_ = journal->RegisterOnChange(move(journal_cb));
+    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  serializer_.reset(new RdbSerializer(compression_mode_));
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -59,6 +59,35 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
       CloseRecordChannel();
     }
   });
+}
+
+void SliceSnapshot::StartIncremental(const Cancellation* cll, LSN start_lsn) {
+  auto* journal = db_slice_->shard_owner()->journal();
+  DCHECK(journal);
+
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
+
+  snapshot_fb_ =
+      fb2::Fiber("incremental_snapshot", [this, journal, cll, lsn = start_lsn]() mutable {
+        // The LSN we get from the replica is the last entry that
+        // was processed, so no need to send it.
+        lsn++;
+        while (!cll->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+          // TODO: Should we send multiple entries together?
+          serializer_->WriteJournalEntry(journal->GetEntry(lsn));
+          PushSerializedToChannel(false);
+          lsn++;
+        }
+        if (journal->GetLsn() == (lsn - 1)) {
+          serializer_->SendFullSyncCut();
+          PushSerializedToChannel(true);
+          auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+          journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+        } else {
+          // We stopped but we didn't manage to send the whole stream.
+          Cancel();
+        }
+      });
 }
 
 void SliceSnapshot::Stop() {
@@ -91,8 +120,7 @@ void SliceSnapshot::Cancel() {
 
 void SliceSnapshot::Join() {
   // Fiber could have already been joined by Stop.
-  if (snapshot_fb_.IsJoinable())
-    snapshot_fb_.Join();
+  snapshot_fb_.JoinIfNeeded();
 }
 
 // The algorithm is to go over all the buckets and serialize those with
