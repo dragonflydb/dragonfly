@@ -390,7 +390,8 @@ void SendJsonValue(ConnectionContext* cntx, const JsonType& j) {
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
-                       vector<pair<string_view, JsonExpression>> expressions) {
+                       vector<pair<string_view, JsonExpression>> expressions,
+                       const OptString& indent, const OptString& new_line, const OptString& space) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
@@ -402,9 +403,30 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
     // means we just brings all values
     return json_entry.to_string();
   }
+
+  json_options options;
+  options.indent_size(0)
+      .spaces_around_comma(spaces_option::no_spaces)
+      .spaces_around_colon(spaces_option::no_spaces)
+      .object_array_line_splits(line_split_kind::multi_line);
+
+  if (indent) {
+  }
+
+  if (new_line) {
+    options.new_line_chars(*new_line);
+  }
+
+  if (space) {
+  }
+
   if (expressions.size() == 1) {
     json out = expressions[0].second.evaluate(json_entry);
-    return out.as<string>();
+    json_printable jp(out, options,
+                      new_line.has_value() ? indenting::indent : indenting::no_indent);
+    std::stringstream ss;
+    jp.dump(ss);
+    return ss.str();
   }
 
   json out;
@@ -1748,22 +1770,50 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
   string_view key = ArgS(args, 0);
 
+  OptString indent;
+  OptString new_line;
+  OptString space;
   vector<pair<string_view, JsonExpression>> expressions;
-
   for (size_t i = 1; i < args.size(); ++i) {
-    string_view path = ArgS(args, i);
+    string_view param = ArgS(args, i);
+    if (absl::EqualsIgnoreCase(param, "space")) {
+      if (++i >= args.size()) {
+        return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()),
+                                  facade::kSyntaxErrType);
+      } else {
+        space = ArgS(args, i);
+        continue;
+      }
+    } else if (absl::EqualsIgnoreCase(param, "newline")) {
+      if (++i >= args.size()) {
+        return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()),
+                                  facade::kSyntaxErrType);
+      } else {
+        new_line = ArgS(args, i);
+        continue;
+      }
+    } else if (absl::EqualsIgnoreCase(param, "indent")) {
+      if (++i >= args.size()) {
+        return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()),
+                                  facade::kSyntaxErrType);
+      } else {
+        indent = ArgS(args, i);
+        continue;
+      }
+    }
+
     error_code ec;
-    JsonExpression expr = ParseJsonPath(path, &ec);
+    JsonExpression expr = ParseJsonPath(param, &ec);
 
     if (ec) {
-      LOG(WARNING) << "path '" << path << "': Invalid JSONPath syntax: " << ec.message();
+      LOG(WARNING) << "path '" << param << "': Invalid JSONPath syntax: " << ec.message();
       return (*cntx)->SendError(kSyntaxErr);
     }
-    expressions.emplace_back(path, move(expr));
+    expressions.emplace_back(param, move(expr));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGet(t->GetOpArgs(shard), key, move(expressions));
+    return OpGet(t->GetOpArgs(shard), key, move(expressions), indent, new_line, space);
   };
 
   Transaction* trans = cntx->transaction;
