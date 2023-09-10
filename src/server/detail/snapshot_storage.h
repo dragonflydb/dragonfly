@@ -79,6 +79,10 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
   io::Result<std::vector<std::string>> LoadPaths(const std::string& load_path) override;
 
  private:
+  // List the objects in the given bucket with the given prefix. This must
+  // run from a proactor.
+  std::vector<std::string> ListObjects(const std::string& bucket_name, const std::string& prefix);
+
   util::cloud::AWS* aws_;
 };
 
