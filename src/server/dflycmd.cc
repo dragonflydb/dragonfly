@@ -340,7 +340,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Started full sync with replica " << replica_ptr->address << ":"
+  LOG(INFO) << "Started sync with replica " << replica_ptr->address << ":"
             << replica_ptr->listening_port;
 
   replica_ptr->state.store(SyncState::FULL_SYNC, memory_order_relaxed);

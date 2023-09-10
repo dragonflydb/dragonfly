@@ -456,6 +456,7 @@ error_code Replica::InitiateDflySync() {
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
+  bool partial_sync = false;
   {
     // Going out of the way to avoid using std::vector<bool>...
     auto is_full_sync = std::make_unique<bool[]>(num_df_flows_);
@@ -482,14 +483,13 @@ error_code Replica::InitiateDflySync() {
         all = false;
     }
     if (all) {
-      LOG(INFO) << "Will do a full sync!";
       JournalExecutor{&service_}.FlushAll();
     } else if (any) {
       last_journal_LSNs_.clear();
       cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
                         "Won't do a partial sync: some flows must fully resync");
     } else {
-      LOG(INFO) << "Will do a partial sync!";
+      partial_sync = true;
     }
   }
 
@@ -500,7 +500,8 @@ error_code Replica::InitiateDflySync() {
     return cntx_.ReportError(ec);
   }
 
-  LOG(INFO) << absl::StrCat("Started full sync with ", server().Description());
+  LOG(INFO) << absl::StrCat("Started ", partial_sync ? "partial" : "full", " sync with ",
+                            server().Description());
 
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
