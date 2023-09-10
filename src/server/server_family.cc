@@ -315,7 +315,7 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
 
   if (!snapshot_cron_exp.empty() && !save_time.empty()) {
     LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
-    quick_exit(1);
+    exit(1);
   }
 
   string raw_cron_expr;
@@ -411,10 +411,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       used_mem_peak.store(sum, memory_order_relaxed);
   };
 
+// TODO: to addd support on non-linux platforms as well
+#ifdef __linux__
   uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
   uint32_t period_ms = max(1u, 1000 / cache_hz);
+
   stats_caching_task_ =
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
+#endif
 
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
@@ -426,9 +430,15 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
     aws_ = make_unique<cloud::AWS>("s3");
-    if (auto ec = aws_->Init(); ec) {
+    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return aws_->Init(); });
+    if (ec) {
       LOG(FATAL) << "Failed to initialize AWS " << ec;
     }
+    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(aws_.get());
+  } else if (fq_threadpool_) {
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
+  } else {
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
   string load_path = detail::InferLoadFile(flag_dir, aws_.get());
@@ -461,8 +471,10 @@ void ServerFamily::Shutdown() {
   }
 
   pb_task_->Await([this] {
-    pb_task_->CancelPeriodic(stats_caching_task_);
-    stats_caching_task_ = 0;
+    if (stats_caching_task_) {
+      pb_task_->CancelPeriodic(stats_caching_task_);
+      stats_caching_task_ = 0;
+    }
 
     if (journal_->EnterLameDuck()) {
       auto ec = journal_->Close();
@@ -612,11 +624,15 @@ io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file) {
   error_code ec;
   io::ReadonlyFileOrError res;
 
+#ifdef __linux__
   if (fq_threadpool_) {
     res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
   } else {
     res = OpenRead(rdb_file);
   }
+#else
+  res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
+#endif
 
   if (res) {
     io::FileSource fs(*res);
@@ -720,8 +736,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
   if (sdata_res.has_value()) {
-    AppendMetricWithoutLabels("used_memory_rss_bytes", "", sdata_res->vm_rss, MetricType::GAUGE,
-                              &resp->body());
+    size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+    AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
   } else {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                            << sdata_res.error().message();
@@ -910,9 +926,9 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  SaveStagesController sc{detail::SaveStagesInputs{new_version, basename, trans, &service_,
-                                                   &is_saving_, fq_threadpool_.get(),
-                                                   &last_save_info_, &save_mu_, &aws_}};
+  SaveStagesController sc{detail::SaveStagesInputs{
+      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
+      &save_mu_, &aws_, snapshot_storage_}};
   return sc.Save();
 }
 
@@ -1311,7 +1327,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("uptime_in_days", uptime / (3600 * 24));
   }
 
-  auto sdata_res = io::ReadStatusInfo();
+  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
 
   DbStats total;
   for (const auto& db_stats : m.db) {
@@ -1335,8 +1351,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("comitted_memory", GetMallocCurrentCommitted());
 
     if (sdata_res.has_value()) {
-      append("used_memory_rss", sdata_res->vm_rss);
-      append("used_memory_rss_human", HumanReadableNumBytes(sdata_res->vm_rss));
+      size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+      append("used_memory_rss", rss);
+      append("used_memory_rss_human", HumanReadableNumBytes(rss));
     } else {
       LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                              << sdata_res.error().message();
@@ -1361,6 +1378,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
+
+      // PHP Symphony needs this field to work.
+      append("maxmemory_policy", "eviction");
     } else {
       append("cache_mode", "store");
       // Compatible with redis based frameworks.
@@ -1514,6 +1534,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
+#ifndef __APPLE__
   if (should_enter("CPU")) {
     ADD_HEADER("# CPU");
     struct rusage ru, cu, tu;
@@ -1527,6 +1548,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("used_cpu_sys_main_thread", StrCat(tu.ru_stime.tv_sec, ".", tu.ru_stime.tv_usec));
     append("used_cpu_user_main_thread", StrCat(tu.ru_utime.tv_sec, ".", tu.ru_utime.tv_usec));
   }
+#endif
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");

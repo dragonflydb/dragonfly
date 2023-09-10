@@ -23,6 +23,10 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/transaction.h"
 
+/* List related stuff */
+#define LIST_HEAD 0
+#define LIST_TAIL 1
+
 /**
  * The number of entries allowed per internal list node can be specified
  * as a fixed maximum size or a maximum number of elements.

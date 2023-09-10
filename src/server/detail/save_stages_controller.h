@@ -18,6 +18,46 @@ class Transaction;
 class Service;
 
 namespace detail {
+
+enum FileType : uint8_t {
+  FILE = (1u << 0),
+  CLOUD = (1u << 1),
+  IO_URING = (1u << 2),
+  DIRECT = (1u << 3),
+};
+
+class SnapshotStorage {
+ public:
+  virtual ~SnapshotStorage() = default;
+
+  // Opens the file at the given path, and returns the open file and file
+  // type, which is a bitmask of FileType.
+  virtual io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+      const std::string& path) = 0;
+};
+
+class FileSnapshotStorage : public SnapshotStorage {
+ public:
+  FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool);
+
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+      const std::string& path) override;
+
+ private:
+  util::fb2::FiberQueueThreadPool* fq_threadpool_;
+};
+
+class AwsS3SnapshotStorage : public SnapshotStorage {
+ public:
+  AwsS3SnapshotStorage(util::cloud::AWS* aws);
+
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenFile(
+      const std::string& path) override;
+
+ private:
+  util::cloud::AWS* aws_;
+};
+
 struct SaveStagesInputs {
   bool use_dfs_format_;
   std::string_view basename_;
@@ -28,11 +68,13 @@ struct SaveStagesInputs {
   std::shared_ptr<LastSaveInfo>* last_save_info_;
   util::fb2::Mutex* save_mu_;
   std::unique_ptr<util::cloud::AWS>* aws_;
+  std::shared_ptr<SnapshotStorage> snapshot_storage_;
 };
 
 class RdbSnapshot {
  public:
-  RdbSnapshot(FiberQueueThreadPool* fq_tp, util::cloud::AWS* aws) : fq_tp_{fq_tp}, aws_{aws} {
+  RdbSnapshot(FiberQueueThreadPool* fq_tp, SnapshotStorage* snapshot_storage)
+      : fq_tp_{fq_tp}, snapshot_storage_{snapshot_storage} {
   }
 
   GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data);
@@ -53,7 +95,7 @@ class RdbSnapshot {
   bool started_ = false;
   bool is_linux_file_ = false;
   util::fb2::FiberQueueThreadPool* fq_tp_ = nullptr;
-  util::cloud::AWS* aws_ = nullptr;
+  SnapshotStorage* snapshot_storage_ = nullptr;
 
   unique_ptr<io::Sink> io_sink_;
   unique_ptr<RdbSaver> saver_;

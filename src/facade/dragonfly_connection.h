@@ -80,8 +80,8 @@ class Connection : public util::Connection {
   struct MonitorMessage : public std::string {};
 
   struct AclUpdateMessage {
-    std::string_view username;
-    uint64_t categories{0};
+    std::vector<std::string> username;
+    std::vector<uint32_t> categories;
   };
 
   struct PipelineMessage {
@@ -119,7 +119,7 @@ class Connection : public util::Connection {
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage> handle;
   };
 
-  enum Phase { READ_SOCKET, PROCESS };
+  enum Phase { SETUP, READ_SOCKET, PROCESS, NUM_PHASES };
 
  public:
   // Add PubMessage to dispatch queue.
@@ -249,7 +249,7 @@ class Connection : public util::Connection {
 
   time_t creation_time_, last_interaction_;
 
-  Phase phase_;
+  Phase phase_ = SETUP;
   std::string name_;
 
   // A pointer to the ConnectionContext object if it exists. Some connections (like http

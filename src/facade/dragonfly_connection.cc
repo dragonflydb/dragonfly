@@ -8,6 +8,8 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <variant>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -211,8 +213,12 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
   auto* ctx = static_cast<dfly::ConnectionContext*>(self->cntx());
-  if (ctx && msg.username == ctx->authed_username) {
-    ctx->acl_categories = msg.categories;
+  if (ctx) {
+    for (size_t id = 0; id < msg.username.size(); ++id) {
+      if (msg.username[id] == ctx->authed_username) {
+        ctx->acl_categories = msg.categories[id];
+      }
+    }
   }
 }
 
@@ -388,6 +394,9 @@ std::string Connection::LocalBindAddress() const {
 }
 
 string Connection::GetClientInfo(unsigned thread_id) const {
+  CHECK(service_ && socket_);
+  CHECK_LT(unsigned(phase_), NUM_PHASES);
+
   string res;
   auto le = socket_->LocalEndpoint();
   auto re = socket_->RemoteEndpoint();
@@ -396,9 +405,14 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   int cpu = 0;
   socklen_t len = sizeof(cpu);
   getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
-  int my_cpu_id = sched_getcpu();
 
-  static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
+#ifdef __APPLE__
+  int my_cpu_id = -1;  // __APPLE__ does not have sched_getcpu()
+#else
+  int my_cpu_id = sched_getcpu();
+#endif
+
+  static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");
 
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
@@ -718,6 +732,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     stats_->io_read_bytes += *recv_sz;
     ++stats_->io_read_cnt;
     phase_ = PROCESS;
+    bool is_iobuf_full = io_buf_.AppendLen() == 0;
 
     if (redis_parser_) {
       parse_status = ParseRedis(orig_builder);
@@ -735,11 +750,20 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         if (redis_parser_)
           parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
 
+        // If we got a partial request and we managed to parse its
+        // length, make sure we have space to store it instead of
+        // increasing space incrementally.
+        // (Note: The buffer object is only working in power-of-2 sizes,
+        // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
           io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
         }
 
-        if (io_buf_.AppendLen() < 64u) {
+        // If we got a partial request and we couldn't parse the length, just
+        // double the capacity.
+        // If we got a partial request because iobuf was full, grow it up to
+        // a reasonable limit to save on Recv() calls.
+        if (io_buf_.AppendLen() < 64u || (is_iobuf_full && capacity < 4096)) {
           // Last io used most of the io_buf to the end.
           io_buf_.Reserve(capacity * 2);  // Valid growth range.
         }
@@ -784,11 +808,27 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
 
+  uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   while (!builder->GetError()) {
     evc_.await(
         [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)
       break;
+
+    // We really want to have batching in the builder if possible. This is especially
+    // critical in situations where Nagle's algorithm can introduce unwanted high
+    // latencies. However we can only batch if we're sure that there are more commands
+    // on the way that will trigger a flush. To know if there are, we sometimes yield before
+    // executing the last command in the queue and let the producer fiber push more commands if it
+    // wants to.
+    // As an optimization, we only yield if the fiber was not suspended since the last dispatch.
+    uint64_t cur_epoch = fb2::FiberSwitchEpoch();
+    if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
+      ThisFiber::Yield();
+      DVLOG(1) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
+    }
+    prev_epoch = cur_epoch;
+    builder->SetBatchMode(dispatch_q_.size() > 1);
 
     auto recycle = [this, request_cache_limit](MessageHandle msg) {
       dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
@@ -802,8 +842,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
         }
       }
     };
-
-    builder->SetBatchMode(dispatch_q_.size() > 1);
 
     // Special case: if the dispatch queue accumulated a big number of commands,
     // we can try to squash them
@@ -825,16 +863,19 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       service_->DispatchManyCommands(absl::MakeSpan(args), cc_.get());
       cc_->async_dispatch = false;
 
+      // Flush strictly before the dispatch queue is cleared so that no sync dispatch can occur
+      if (dispatch_q_.size() == args.size()) {  // Flush if no new messages appeared
+        builder->FlushBatch();
+        builder->SetBatchMode(false);  // in case the next dispatch is sync
+      }
+
+      DCHECK(!cc_->sync_dispatch);
       // Dispatch queue could have grown, so handle strictly as many as we executed
       for (size_t i = 0; i < args.size(); i++) {
         recycle(move(dispatch_q_.front()));
         dispatch_q_.pop_front();
       }
 
-      if (dispatch_q_.empty()) {
-        builder->FlushBatch();
-        builder->SetBatchMode(false);  // in case the next dispatch is sync
-      }
     } else {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
@@ -961,9 +1002,22 @@ void Connection::SendAsync(MessageHandle msg) {
         fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
   }
 
+  auto place_in_dispatch_q = [this](MessageHandle msg) {
+    auto it = dispatch_q_.begin();
+    for (; it < dispatch_q_.end(); ++it) {
+      if (!std::holds_alternative<AclUpdateMessage>(it->handle)) {
+        break;
+      }
+    }
+    dispatch_q_.insert(it, std::move(msg));
+  };
+
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
-    dispatch_q_.push_front(std::move(msg));
+    // We need to reorder the queue, since multiple updates might happen before we
+    // pop the message, invalidating the correct order since we always push at the front
+    place_in_dispatch_q(std::move(msg));
+
   } else {
     dispatch_q_.push_back(std::move(msg));
   }

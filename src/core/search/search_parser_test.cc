@@ -33,6 +33,10 @@ class SearchParserTest : public ::testing::Test {
     return Parser(&query_driver_)();
   }
 
+  void SetParams(const QueryParams* params) {
+    query_driver_.SetParams(params);
+  }
+
   QueryDriver query_driver_;
 };
 
@@ -79,8 +83,7 @@ TEST_F(SearchParserTest, Scanner) {
   SetInput(R"( "hello\"world" )");
   NEXT_EQ(TOK_TERM, string, R"(hello"world)");
 
-  SetInput(" $param @field:hello");
-  NEXT_EQ(TOK_PARAM, string, "$param");
+  SetInput("@field:hello");
   NEXT_EQ(TOK_FIELD, string, "@field");
   NEXT_TOK(TOK_COLON);
   NEXT_EQ(TOK_TERM, string, "hello");
@@ -109,6 +112,17 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" foo:bar "));
   EXPECT_EQ(1, Parse(" @foo:@bar "));
   EXPECT_EQ(1, Parse(" @foo: "));
+}
+
+TEST_F(SearchParserTest, ParseParams) {
+  QueryParams params;
+  params["k"] = "10";
+  params["name"] = "alex";
+  SetParams(&params);
+
+  SetInput("$name $k");
+  NEXT_EQ(TOK_TERM, string, "alex");
+  NEXT_EQ(TOK_INT64, int64_t, 10);
 }
 
 }  // namespace dfly::search

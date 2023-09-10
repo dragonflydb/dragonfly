@@ -45,9 +45,19 @@ function(gen_bison name)
  set_source_files_properties(${name}.cc ${name}_base.h PROPERTIES GENERATED TRUE)
 endfunction()
 
+if (APPLE)
+  set(SED_REPL sed "-i" '')
+else()
+  set(SED_REPL sed "-i")
+endif()
+
 add_third_party(
   dconv
-  URL https://github.com/google/double-conversion/archive/refs/tags/v3.2.0.tar.gz
+  URL https://github.com/google/double-conversion/archive/refs/tags/v3.3.0.tar.gz
+  PATCH_COMMAND ${SED_REPL} "/static const std::ctype/d"
+                <SOURCE_DIR>/double-conversion/string-to-double.cc
+  COMMAND ${SED_REPL} "/std::use_facet</d" <SOURCE_DIR>/double-conversion/string-to-double.cc
+  COMMAND ${SED_REPL} "s/cType.tolower/std::tolower/g" <SOURCE_DIR>/double-conversion/string-to-double.cc
   LIB libdouble-conversion.a
 )
 
@@ -82,6 +92,21 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  uni-algo
+  URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
+
+  BUILD_IN_SOURCE 1
+)
+
+add_third_party(
+  hnswlib
+  URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
+
+  INSTALL_COMMAND cp -RT <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/hnswlib
+  LIB "none"
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
@@ -91,6 +116,11 @@ add_library(TRDP::croncpp INTERFACE IMPORTED)
 add_dependencies(TRDP::croncpp croncpp_project)
 set_target_properties(TRDP::croncpp PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${CRONCPP_INCLUDE_DIR}")
+
+add_library(TRDP::hnswlib INTERFACE IMPORTED)
+add_dependencies(TRDP::hnswlib hnswlib_project)
+set_target_properties(TRDP::hnswlib PROPERTIES
+                      INTERFACE_INCLUDE_DIRECTORIES "${HNSWLIB_INCLUDE_DIR}")
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 

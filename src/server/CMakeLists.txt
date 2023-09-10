@@ -8,16 +8,29 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Rele
                               SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 endif()
 
+
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+    SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc)
+endif()
+
+
 add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc
-            common.cc
-            io_mgr.cc journal/journal.cc journal/types.cc journal/journal_slice.cc server_state.cc table.cc
-            tiered_storage.cc top_keys.cc transaction.cc)
+            common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
+            server_state.cc table.cc  top_keys.cc transaction.cc
+            ${TX_LINUX_SRCS}
+            )
 cxx_link(dfly_transaction dfly_core strings_lib)
+
+
+if (NOT APPLE)
+  SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc)
+  cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+endif()
 
 add_library(dragonfly_lib channel_store.cc command_registry.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc json_family.cc
-            search/search_family.cc search/doc_index.cc search/doc_accessors.cc
+            ${SEARCH_FILES}
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
@@ -30,8 +43,10 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             acl/validator.cc)
 
 
+find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
+
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
-         http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4 TRDP::croncpp)
+         http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4 TRDP::croncpp)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
@@ -60,10 +75,10 @@ cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
-cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
+cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 
 
 
@@ -73,3 +88,6 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  redis_parser_test snapshot_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test hll_family_test
                  cluster_config_test cluster_family_test user_registry_test)
+
+configure_file(acl/test/wrong.acl ${CMAKE_BINARY_DIR}/wrong.acl COPYONLY)
+configure_file(acl/test/ok.acl ${CMAKE_BINARY_DIR}/ok.acl COPYONLY)

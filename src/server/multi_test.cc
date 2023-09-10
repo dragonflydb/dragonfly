@@ -70,6 +70,20 @@ TEST_F(MultiTest, MultiAndFlush) {
   EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("'FLUSHALL' inside MULTI is not allowed"));
 }
 
+TEST_F(MultiTest, MultiWithError) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"set", "x"}), ErrArg("wrong number of arguments for 'set' command"));
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "z", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), "OK");
+
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"get", "z"}), "y");
+}
+
 TEST_F(MultiTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");

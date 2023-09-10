@@ -57,19 +57,6 @@ const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTy
 
 }  // namespace
 
-search::FtVector BytesToFtVector(string_view value) {
-  DCHECK_EQ(value.size() % sizeof(float), 0u);
-  search::FtVector out(value.size() / sizeof(float));
-
-  // Create copy for aligned access
-  unique_ptr<float[]> float_ptr = make_unique<float[]>(out.size());
-  memcpy(float_ptr.get(), value.data(), value.size());
-
-  for (size_t i = 0; i < out.size(); i++)
-    out[i] = float_ptr[i];
-  return out;
-}
-
 optional<search::SchemaField::FieldType> ParseSearchFieldType(string_view name) {
   auto it = kSchemaTypes.find(name);
   return it != kSchemaTypes.end() ? make_optional(it->second) : nullopt;
@@ -204,7 +191,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), score});
   }
 
-  return SearchResult{std::move(out), search_results.ids.size() - expired_count};
+  return SearchResult{std::move(out), search_results.ids.size() - expired_count,
+                      std::move(search_results.profile)};
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {

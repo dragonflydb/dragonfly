@@ -6,6 +6,8 @@
 
 #include <openssl/sha.h>
 
+#include "absl/strings/escaping.h"
+
 namespace dfly::acl {
 
 namespace {
@@ -25,15 +27,15 @@ User::User() {
 
 void User::Update(UpdateRequest&& req) {
   if (req.password) {
-    SetPasswordHash(*req.password);
+    SetPasswordHash(*req.password, req.is_hashed);
   }
 
-  if (req.plus_acl_categories) {
-    SetAclCategories(*req.plus_acl_categories);
-  }
-
-  if (req.minus_acl_categories) {
-    UnsetAclCategories(*req.minus_acl_categories);
+  for (auto [sign, category] : req.categories) {
+    if (sign == Sign::PLUS) {
+      SetAclCategories(category);
+      continue;
+    }
+    UnsetAclCategories(category);
   }
 
   if (req.is_active) {
@@ -41,7 +43,15 @@ void User::Update(UpdateRequest&& req) {
   }
 }
 
-void User::SetPasswordHash(std::string_view password) {
+void User::SetPasswordHash(std::string_view password, bool is_hashed) {
+  if (password == "nopass") {
+    return;
+  }
+
+  if (is_hashed) {
+    password_hash_ = absl::HexStringToBytes(password);
+    return;
+  }
   password_hash_ = StringSHA256(password);
 }
 

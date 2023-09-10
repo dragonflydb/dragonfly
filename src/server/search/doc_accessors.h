@@ -29,7 +29,7 @@ struct BaseAccessor : public search::DocumentAccessor {
 
   // Serialize selected fields
   SearchDocData Serialize(const search::Schema& schema,
-                          const SearchParams::FieldAliasList& fields) const;
+                          const SearchParams::FieldReturnList& fields) const;
 };
 
 // Accessor for hashes stored with listpack
@@ -40,7 +40,7 @@ struct ListPackAccessor : public BaseAccessor {
   }
 
   std::string_view GetString(std::string_view field) const override;
-  search::FtVector GetVector(std::string_view field) const override;
+  VectorInfo GetVector(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -54,7 +54,7 @@ struct StringMapAccessor : public BaseAccessor {
   }
 
   std::string_view GetString(std::string_view field) const override;
-  search::FtVector GetVector(std::string_view field) const override;
+  VectorInfo GetVector(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -69,12 +69,12 @@ struct JsonAccessor : public BaseAccessor {
   }
 
   std::string_view GetString(std::string_view field) const override;
-  search::FtVector GetVector(std::string_view field) const override;
+  VectorInfo GetVector(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(const search::Schema& schema,
-                          const SearchParams::FieldAliasList& fields) const;
+                          const SearchParams::FieldReturnList& fields) const;
 
   static void RemoveFieldFromCache(std::string_view field);
 

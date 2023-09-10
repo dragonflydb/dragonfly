@@ -1,5 +1,5 @@
 %skeleton "lalr1.cc" // -*- C++ -*-
-%require "3.5.1"    // That's what's present on ubuntu 20.04.
+%require "3.5"  // fedora 32 has this one.
 
 %defines  // %header starts from 3.8.1
 
@@ -25,6 +25,7 @@
 // Added to cc file
 %code {
 #include "core/search/query_driver.h"
+#include "core/search/vector_utils.h"
 
 // Have to disable because GCC doesn't understand `symbol_type`'s union
 // implementation
@@ -82,7 +83,7 @@ final_query:
   filter
       { driver->Set(move($1)); }
   | filter ARROW LBRACKET KNN INT64 FIELD TERM RBRACKET
-      { driver->Set(AstKnnNode(move($1), $5, $6, driver->GetParams().knn_vec)); }
+      { driver->Set(AstKnnNode(move($1), $5, $6, BytesToFtVector($7))); }
 
 filter:
   search_expr               { $$ = move($1); }

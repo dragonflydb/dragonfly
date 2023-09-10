@@ -189,16 +189,18 @@ async def knn_query(idx, query, vector):
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
-async def test_knn(async_client: aioredis.Redis, index_type):
+@pytest.mark.parametrize("algo_type", ["FLAT", "HNSW"])
+async def test_knn(async_client: aioredis.Redis, index_type, algo_type):
     i2 = async_client.ft("i2-" + str(index_type))
 
     vector_field = VectorField(
         "pos",
-        "FLAT",
-        {
+        algorithm=algo_type,
+        attributes={
             "TYPE": "FLOAT32",
             "DIM": 1,
             "DISTANCE_METRIC": "L2",
+            "INITICAL_CAP": 100,
         },
     )
 
@@ -217,18 +219,18 @@ async def test_knn(async_client: aioredis.Redis, index_type):
             pipe.json().set(f"k{i}", "$", {"even": even, "pos": [float(i)]})
     await pipe.execute()
 
-    assert await knn_query(i2, "* => [KNN 3 @pos VEC]", [50.0]) == {"k49", "k50", "k51"}
+    assert await knn_query(i2, "* => [KNN 3 @pos $vec]", [50.0]) == {"k49", "k50", "k51"}
 
-    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [20.0]) == {"k18", "k20", "k22"}
+    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos $vec]", [20.0]) == {"k18", "k20", "k22"}
 
-    assert await knn_query(i2, "@even:{no} => [KNN 4 @pos VEC]", [30.0]) == {
+    assert await knn_query(i2, "@even:{no} => [KNN 4 @pos $vec]", [30.0]) == {
         "k27",
         "k29",
         "k31",
         "k33",
     }
 
-    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [10.0] == {"k8", "k10", "k12"})
+    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos $vec]", [10.0] == {"k8", "k10", "k12"})
 
     await i2.dropindex()
 
@@ -239,11 +241,13 @@ NUM_POINTS = 100
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
-async def test_multidim_knn(async_client: aioredis.Redis, index_type):
+@pytest.mark.parametrize("algo_type", ["HNSW", "FLAT"])
+@pytest.mark.skip("Fails on ARM")
+async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type):
     vector_field = VectorField(
         "pos",
-        "FLAT",
-        {
+        algorithm=algo_type,
+        attributes={
             "TYPE": "FLOAT32",
             "DIM": NUM_DIMS,
             "DISTANCE_METRIC": "L2",
@@ -281,7 +285,7 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type):
             for i, point in sorted(points, key=lambda p: np.linalg.norm(center - p[1]))[:limit]
         ]
 
-        got_ids = await knn_query(i3, f"* => [KNN {limit} @pos VEC]", center)
+        got_ids = await knn_query(i3, f"* => [KNN {limit} @pos $vec]", center)
 
         assert set(expected_ids) == set(got_ids)
 

@@ -4,6 +4,8 @@
 
 #include "server/acl/user_registry.h"
 
+#include <mutex>
+
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
@@ -11,7 +13,8 @@
 namespace dfly::acl {
 
 UserRegistry::UserRegistry() {
-  User::UpdateRequest req{{}, acl::ALL, {}, true};
+  std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
+  User::UpdateRequest req{{}, {acl}, true};
   MaybeAddAndUpdate("default", std::move(req));
 }
 
@@ -54,13 +57,13 @@ bool UserRegistry::AuthUser(std::string_view username, std::string_view password
   return user->second.IsActive() && user->second.HasPassword(password);
 }
 
-UserRegistry::RegistryViewWithLock::RegistryViewWithLock(std::shared_lock<util::SharedMutex> lk,
-                                                         const RegistryType& registry)
-    : registry(registry), registry_lk_(std::move(lk)) {
-}
-
 UserRegistry::RegistryViewWithLock UserRegistry::GetRegistryWithLock() const {
   std::shared_lock<util::SharedMutex> lock(mu_);
+  return {std::move(lock), registry_};
+}
+
+UserRegistry::RegistryWithWriteLock UserRegistry::GetRegistryWithWriteLock() {
+  std::unique_lock<util::SharedMutex> lock(mu_);
   return {std::move(lock), registry_};
 }
 

@@ -62,7 +62,11 @@ void _serverPanic(const char *file, int line, const char *msg, ...) {
     serverLog(LL_WARNING, "!!! Software Failure. Press left mouse button to continue");
     serverLog(LL_WARNING, "Guru Meditation: %s #%s:%d", fmtmsg,file,line);
 #ifndef NDEBUG
+#ifdef __APPLE__
+    __assert_rtn(msg, file, line, "");
+#else      
     __assert_fail(msg, file, line, "");
+#endif    
 #endif 
 }
 

@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/hash/hash.h"
@@ -18,15 +20,18 @@ namespace dfly::acl {
 
 class User final {
  public:
+  enum class Sign : int8_t { PLUS, MINUS };
+
   struct UpdateRequest {
     std::optional<std::string> password{};
 
-    std::optional<uint32_t> plus_acl_categories{};
-    std::optional<uint32_t> minus_acl_categories{};
+    std::vector<std::pair<Sign, uint32_t>> categories;
 
     // DATATYPE_BITSET commands;
 
     std::optional<bool> is_active{};
+
+    bool is_hashed{false};
   };
 
   /* Used for default user
@@ -64,7 +69,7 @@ class User final {
   void SetIsActive(bool is_active);
 
   // For passwords
-  void SetPasswordHash(std::string_view password);
+  void SetPasswordHash(std::string_view password, bool is_hashed);
 
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64

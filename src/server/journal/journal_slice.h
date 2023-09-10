@@ -5,6 +5,7 @@
 #pragma once
 
 #include <optional>
+#include <shared_mutex>
 #include <string_view>
 
 #include "base/ring_buffer.h"

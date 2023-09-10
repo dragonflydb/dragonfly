@@ -8,6 +8,7 @@
 #include <absl/strings/str_cat.h>
 #include <double-conversion/double-to-string.h>
 
+#include "absl/strings/escaping.h"
 #include "base/logging.h"
 #include "facade/error.h"
 
@@ -57,7 +58,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   if ((should_batch_ || should_aggregate_) && (batch_.size() + bsize < kMaxBatchSize)) {
     for (unsigned i = 0; i < len; ++i) {
       std::string_view src((char*)v[i].iov_base, v[i].iov_len);
-      DVLOG(2) << "Appending to stream " << src;
+      DVLOG(2) << "Appending to stream " << absl::CHexEscape(src);
       batch_.append(src.data(), src.size());
     }
     return;
@@ -71,7 +72,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   if (batch_.empty()) {
     ec = sink_->Write(v, len);
   } else {
-    DVLOG(2) << "Sending batch to stream " << sink_ << "\n" << batch_;
+    DVLOG(2) << "Sending batch to stream " << sink_ << ": " << absl::CHexEscape(batch_);
 
     io_write_bytes_ += batch_.size();
 
@@ -120,13 +121,24 @@ void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
   Send(arr.data(), msg_vec.size());
 }
 
+void SinkReplyBuilder::StartAggregate() {
+  DVLOG(1) << "StartAggregate";
+  should_aggregate_ = true;
+}
+
 void SinkReplyBuilder::StopAggregate() {
+  DVLOG(1) << "StopAggregate";
   should_aggregate_ = false;
 
   if (should_batch_ || batch_.empty())
     return;
 
   FlushBatch();
+}
+
+void SinkReplyBuilder::SetBatchMode(bool batch) {
+  DVLOG(1) << "SetBatchMode(" << (batch ? "true" : "false") << ")";
+  should_batch_ = batch;
 }
 
 void SinkReplyBuilder::FlushBatch() {
@@ -390,6 +402,8 @@ void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
       len *= 2;
     type = ARRAY;
   }
+
+  DVLOG(2) << "StartCollection(" << len << ", " << type << ")";
 
   // We do not want to send multiple packets for small responses because these
   // trigger TCP-related artifacts (e.g. Nagle's algorithm) that slow down the delivery of the whole

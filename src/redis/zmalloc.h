@@ -51,6 +51,7 @@
 #include <malloc/malloc.h>
 #define HAVE_MALLOC_SIZE 1
 #define zmalloc_size(p) malloc_size(p)
+#define ZMALLOC_LIB "macos"
 #endif
 
 /* On native libc implementations, we should still do our best to provide a

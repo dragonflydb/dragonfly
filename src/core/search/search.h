@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <variant>
 
 #include "core/search/base.h"
 
@@ -23,8 +24,20 @@ struct TextIndex;
 struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
+  struct VectorParams {
+    bool use_hnsw = false;
+
+    size_t dim = 0u;                              // dimension of knn vectors
+    VectorSimilarity sim = VectorSimilarity::L2;  // similarity type
+    size_t capacity = 1000;                       // initial capacity for hnsw world
+  };
+
+  using ParamsVariant = std::variant<std::monostate, VectorParams>;
+
   FieldType type;
   std::string short_name;  // equal to ident if none provided
+
+  ParamsVariant special_params{std::monostate{}};
 };
 
 // Describes the fields of an index
@@ -49,10 +62,23 @@ class FieldIndices {
   std::vector<TextIndex*> GetAllTextIndices() const;
   const std::vector<DocId>& GetAllDocs() const;
 
+  const Schema& GetSchema() const;
+
  private:
   Schema schema_;
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
+};
+
+struct AlgorithmProfile {
+  struct ProfileEvent {
+    std::string descr;
+    size_t micros;         // time event took in microseconds
+    size_t depth;          // tree depth of event
+    size_t num_processed;  // number of results processed by the event
+  };
+
+  std::vector<ProfileEvent> events;
 };
 
 // Represents a search result returned from the search algorithm.
@@ -62,6 +88,9 @@ struct SearchResult {
   // If a KNN-query is present, distances for doc ids are returned as well
   // and sorted from smallest to largest.
   std::vector<float> knn_distances;
+
+  // If profiling was enabled
+  std::optional<AlgorithmProfile> profile;
 };
 
 // SearchAlgorithm allows searching field indices with a query
@@ -71,14 +100,17 @@ class SearchAlgorithm {
   ~SearchAlgorithm();
 
   // Init with query and return true if successful.
-  bool Init(std::string_view query, const QueryParams& params);
+  bool Init(std::string_view query, const QueryParams* params);
 
   SearchResult Search(const FieldIndices* index) const;
 
   // Return KNN limit if it is enabled
   std::optional<size_t> HasKnn() const;
 
+  void EnableProfiling();
+
  private:
+  bool profiling_enabled_ = false;
   std::unique_ptr<AstNode> query_;
 };
 

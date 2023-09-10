@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
+#include <absl/strings/str_format.h>
 
 #include <atomic>
 #include <jsoncons/json.hpp>
@@ -17,6 +18,7 @@
 #include "base/logging.h"
 #include "core/json_object.h"
 #include "core/search/search.h"
+#include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "facade/reply_builder.h"
@@ -42,6 +44,40 @@ bool IsValidJsonPath(string_view path) {
   error_code ec;
   jsoncons::jsonpath::make_expression<JsonType>(path, ec);
   return !ec;
+}
+
+search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
+  size_t dim = 0;
+  auto sim = search::VectorSimilarity::L2;
+  size_t capacity = 1000;
+
+  bool use_hnsw = parser->ToUpper().Next().Case("HNSW", true).Case("FLAT", false);
+  size_t num_args = parser->Next().Int<size_t>();
+
+  for (size_t i = 0; i * 2 < num_args; i++) {
+    parser->ToUpper();
+
+    if (parser->Check("DIM").ExpectTail(1)) {
+      dim = parser->Next().Int<size_t>();
+      continue;
+    }
+
+    if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
+      sim = parser->Next()
+                .Case("L2", search::VectorSimilarity::L2)
+                .Case("COSINE", search::VectorSimilarity::COSINE);
+      continue;
+    }
+
+    if (parser->Check("INITIAL_CAP").ExpectTail(1)) {
+      capacity = parser->Next().Int<size_t>();
+      continue;
+    }
+
+    parser->Skip(2);
+  }
+
+  return {use_hnsw, dim, sim, capacity};
 }
 
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
@@ -72,15 +108,23 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
       return nullopt;
     }
 
-    // Skip {algorithm} {dim} flags
-    if (*type == search::SchemaField::VECTOR)
-      parser.Skip(2);
+    // Vector fields include: {algorithm} num_args args...
+    search::SchemaField::ParamsVariant params = std::monostate{};
+    if (*type == search::SchemaField::VECTOR) {
+      auto vector_params = ParseVectorParams(&parser);
+      if (!parser.HasError() && vector_params.dim == 0) {
+        (*cntx)->SendError("Knn vector dimension cannot be zero");
+        return nullopt;
+      }
+
+      params = std::move(vector_params);
+    }
 
     // Skip all trailing ignored parameters
     while (kIgnoredOptions.count(parser.Peek()) > 0)
       parser.Skip(2);
 
-    schema.fields[field] = {*type, string{field_alias}};
+    schema.fields[field] = {*type, string{field_alias}, std::move(params)};
   }
 
   // Build field name mapping table
@@ -97,8 +141,9 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
   size_t limit_offset = 0, limit_total = 10;
-  search::FtVector knn_vector;
-  optional<SearchParams::FieldAliasList> alias_list;
+
+  optional<SearchParams::FieldReturnList> return_list;
+  search::QueryParams query_params;
 
   while (parser.ToUpper().HasNext()) {
     // [LIMIT offset total]
@@ -111,24 +156,29 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     // RETURN {num} [{ident} AS {name}...]
     if (parser.Check("RETURN").ExpectTail(1)) {
       size_t num_fields = parser.Next().Int<size_t>();
-      alias_list = SearchParams::FieldAliasList{};
-      while (alias_list->size() < num_fields) {
+      return_list = SearchParams::FieldReturnList{};
+      while (return_list->size() < num_fields) {
         string_view ident = parser.Next();
         string_view alias = parser.Check("AS").IgnoreCase().ExpectTail(1) ? parser.Next() : ident;
-        alias_list->emplace_back(ident, alias);
+        return_list->emplace_back(ident, alias);
       }
       continue;
     }
 
     // NOCONTENT
     if (parser.Check("NOCONTENT")) {
-      alias_list = SearchParams::FieldAliasList{};
+      return_list = SearchParams::FieldReturnList{};
       continue;
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (parser.Check("PARAMS").ExpectTail(3)) {
-      knn_vector = BytesToFtVector(parser.Skip(2).Next());
+    if (parser.Check("PARAMS").ExpectTail(1)) {
+      size_t num_args = parser.Next().Int<size_t>();
+      while (parser.HasNext() && query_params.Size() * 2 < num_args) {
+        string_view k = parser.Next();
+        string_view v = parser.Next();
+        query_params[k] = v;
+      }
       continue;
     }
 
@@ -141,7 +191,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     return nullopt;
   }
 
-  return SearchParams{limit_offset, limit_total, std::move(alias_list), std::move(knn_vector)};
+  return SearchParams{limit_offset, limit_total, std::move(return_list), std::move(query_params)};
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
@@ -200,8 +250,9 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
     }
   }
 
-  partial_sort(docs.begin(),
-               docs.begin() + min(params.limit_offset + params.limit_total, knn_limit), docs.end(),
+  size_t prefix = min(params.limit_offset + params.limit_total, knn_limit);
+
+  partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
                [](const auto* l, const auto* r) { return l->knn_distance < r->knn_distance; });
   docs.resize(min(docs.size(), knn_limit));
 
@@ -358,7 +409,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, {move(params->knn_vector)}))
+  if (!search_algo.Init(query_str, &params->query_params))
     return (*cntx)->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
@@ -382,6 +433,85 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     ReplyWithResults(*params, absl::MakeSpan(docs), cntx);
 }
 
+void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
+  string_view index_name = ArgS(args, 0);
+  string_view query_str = ArgS(args, 3);
+
+  optional<SearchParams> params = ParseSearchParamsOrReply(args.subspan(4), cntx);
+  if (!params.has_value())
+    return;
+
+  search::SearchAlgorithm search_algo;
+  if (!search_algo.Init(query_str, &params->query_params))
+    return (*cntx)->SendError("Query syntax error");
+
+  search_algo.EnableProfiling();
+
+  absl::Time start = absl::Now();
+  atomic_uint total_docs = 0;
+  atomic_uint total_serialized = 0;
+
+  vector<pair<search::AlgorithmProfile, absl::Duration>> results(shard_set->size());
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    auto* index = es->search_indices()->GetIndex(index_name);
+    if (!index)
+      return OpStatus::OK;
+
+    auto shard_start = absl::Now();
+    auto res = index->Search(t->GetOpArgs(es), *params, &search_algo);
+
+    total_docs.fetch_add(res.total_hits);
+    total_serialized.fetch_add(res.docs.size());
+
+    DCHECK(res.profile);
+    results[es->shard_id()] = {std::move(*res.profile), absl::Now() - shard_start};
+
+    return OpStatus::OK;
+  });
+
+  auto took = absl::Now() - start;
+
+  (*cntx)->StartArray(results.size() + 1);
+
+  // General stats
+  (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
+  (*cntx)->SendBulkString("took");
+  (*cntx)->SendLong(absl::ToInt64Microseconds(took));
+  (*cntx)->SendBulkString("hits");
+  (*cntx)->SendLong(total_docs);
+  (*cntx)->SendBulkString("serialized");
+  (*cntx)->SendLong(total_serialized);
+
+  // Per-shard stats
+  for (const auto& [profile, shard_took] : results) {
+    (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
+    (*cntx)->SendBulkString("took");
+    (*cntx)->SendLong(absl::ToInt64Microseconds(shard_took));
+    (*cntx)->SendBulkString("tree");
+
+    for (size_t i = 0; i < profile.events.size(); i++) {
+      const auto& event = profile.events[i];
+
+      size_t children = 0;
+      for (size_t j = i + 1; j < profile.events.size(); j++) {
+        if (profile.events[j].depth == event.depth)
+          break;
+        if (profile.events[j].depth == event.depth + 1)
+          children++;
+      }
+
+      if (children > 0)
+        (*cntx)->StartArray(2);
+
+      (*cntx)->SendSimpleString(
+          absl::StrFormat("t=%-10u n=%-10u %s", event.micros, event.num_processed, event.descr));
+
+      if (children > 0)
+        (*cntx)->StartArray(children);
+    }
+  }
+}
+
 #define HFUNC(x) SetHandler(&SearchFamily::x)
 
 // Redis search is a module. Therefore we introduce dragonfly extension search
@@ -396,7 +526,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
             // Underscore same as in RediSearch because it's "temporary" (long time already)
             << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch);
+            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
+            << CI{"FT.PROFILE", CO::GLOBAL_TRANS, -4, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
 }
 
 }  // namespace dfly
