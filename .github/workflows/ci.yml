@@ -46,7 +46,10 @@ jobs:
             cxx_flags: ""
     timeout-minutes: 60
     env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_CACHE_SIZE: 6G
       SCCACHE_ERROR_LOG: /tmp/sccache_log.txt
+      SCCACHE_LOG: debug
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -64,13 +67,6 @@ jobs:
           cmake --version
           mkdir -p ${{github.workspace}}/build
 
-      - name: Write GCS service account key
-        shell: bash
-        env:
-          GCS_SERVICE_ACCOUNT_KEY: ${{ secrets.GCS_SERVICE_ACCOUNT_KEY }}
-        run: |
-          echo "$GCS_SERVICE_ACCOUNT_KEY" > /tmp/key.json
-
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.3
 
@@ -78,10 +74,8 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            core.exportVariable('SCCACHE_GCS_KEY_PATH', '/tmp/key.json');
-            core.exportVariable('SCCACHE_GCS_BUCKET', 'gh-sccache-storage')
-            core.exportVariable('SCCACHE_GCS_RW_MODE', 'READ_WRITE')
-            core.exportVariable('SCCACHE_GCS_VERBOSE_STATS', '1')
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
       - name: Configure CMake
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
