@@ -725,43 +725,44 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   return local_result_;
 }
 
-OpStatus Transaction::ScheduleRemoteCoordination(RunnableType cb) {
-  DCHECK(!cb_ptr_);
+namespace {
+bool IsReadyToRun(Transaction* tx) {
+  if (tx->IsOOO()) {
+    return true;
+  }
+
+  auto* txq = EngineShard::tlocal()->txq();
+  if (txq->Empty()) {
+    return true;
+  }
+
+  Transaction* head = std::get<Transaction*>(txq->Front());
+  if (head == tx) {
+    return true;
+  }
+
+  return false;
+}
+}  // namespace
+
+void Transaction::ScheduleRemoteCoordination(absl::FunctionRef<void()> cb) {
   DCHECK_EQ(unique_shard_cnt_, 1UL);
   DCHECK_NE(unique_shard_id_, kInvalidSid);
-  // DCHECK_EQ(shard_data_.size(), 1);
   DCHECK(multi_);
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
   DCHECK(!IsGlobal());
-
   DCHECK_NE(ServerState::tlocal()->thread_index(), unique_shard_id_);
 
   BlockingCounter blocker(1);
   auto wrapped_cb = [&]() {
-    CHECK_EQ(ServerState::tlocal()->thread_index(), unique_shard_id_);
+    DCHECK_EQ(ServerState::tlocal()->thread_index(), unique_shard_id_);
 
-    auto* shard = EngineShard::tlocal();
-    bool run_now = false;
-    if (this->IsOOO()) {
-      run_now = true;
-    } else {
-      TxQueue* txq = shard->txq();
-      if (txq->Empty()) {
-        run_now = true;
-      } else {
-        Transaction* head = std::get<Transaction*>(txq->Front());
-        if (head == this) {
-          run_now = true;
-        }
-      }
-    }
-
-    if (run_now) {
+    if (IsReadyToRun(this)) {
       PerShardData& sd = shard_data_[SidToId(unique_shard_id_)];
       sd.is_armed.store(false, memory_order_relaxed);
       run_count_.store(0, memory_order_release);
 
-      local_result_ = cb(this, shard);
+      cb();
 
       blocker.Dec();
     }
@@ -769,14 +770,16 @@ OpStatus Transaction::ScheduleRemoteCoordination(RunnableType cb) {
 
   coordinator_state_ |= COORD_EXEC;
 
-  ExecuteAsyncShahar(wrapped_cb);
+  // See comments in ExecuteAsync() for how these variables are used.
+  use_count_.fetch_add(unique_shard_cnt_, memory_order_relaxed);
+  IterateActiveShards(
+      [](PerShardData& sd, auto i) { sd.is_armed.store(true, memory_order_relaxed); });
+  run_count_.store(unique_shard_cnt_, memory_order_release);
+  IterateActiveShards([&wrapped_cb](PerShardData& sd, auto i) { shard_set->Add(i, wrapped_cb); });
 
   DVLOG(2) << "ScheduleRemoteCoordination before Wait " << DebugId() << " " << run_count_.load();
   blocker.Wait();
   DVLOG(2) << "ScheduleRemoteCoordination after Wait " << DebugId();
-
-  cb_ptr_ = nullptr;
-  return local_result_;
 }
 
 void Transaction::ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write) {
@@ -940,33 +943,6 @@ void Transaction::ExecuteAsync() {
   };
 
   // IsArmedInShard is the protector of non-thread safe data.
-  IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
-}
-
-void Transaction::ExecuteAsyncShahar(absl::FunctionRef<void()> cb) {
-  DVLOG(1) << "ExecuteAsyncShahar " << DebugId();
-
-  DCHECK_GT(unique_shard_cnt_, 0u);
-  DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
-  DCHECK(!IsAtomicMulti() || multi_->locks_recorded);
-
-  // We do not necessarily Execute this transaction in 'cb' below. It well may be that it will be
-  // executed by the engine shard once it has been armed and coordinator thread will finish the
-  // transaction before engine shard thread stops accessing it. Therefore, we increase reference
-  // by number of callbacks accessing 'this' to allow callbacks to execute shard->Execute(this);
-  // safely.
-  use_count_.fetch_add(unique_shard_cnt_, memory_order_relaxed);
-
-  // We access sd.is_armed outside of shard-threads but we guard it with run_count_ release.
-  IterateActiveShards(
-      [](PerShardData& sd, auto i) { sd.is_armed.store(true, memory_order_relaxed); });
-
-  // this fence prevents that a read or write operation before a release fence will be reordered
-  // with a write operation after a release fence. Specifically no writes below will be reordered
-  // upwards. Important, because it protects non-threadsafe local_mask from being accessed by
-  // IsArmedInShard in other threads.
-  run_count_.store(unique_shard_cnt_, memory_order_release);
-
   IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
 }
 

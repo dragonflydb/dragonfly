@@ -371,9 +371,7 @@ TEST_F(MultiTest, Eval) {
                     return redis.call('get', 'foo'))",
                  "1", "foo"}),
             "42");
-}
 
-TEST_F(MultiTest, EvalWhenLocked) {
   auto condition = [&]() { return service_->IsLocked(0, "foo"); };
   auto fb = ExpectConditionWithSuspension(condition);
   EXPECT_EQ(Run({"eval",

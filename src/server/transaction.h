@@ -163,7 +163,7 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
-  OpStatus ScheduleRemoteCoordination(RunnableType cb);
+  void ScheduleRemoteCoordination(absl::FunctionRef<void()> cb);
 
   // Execute single hop with return value and conclude.
   // Can be used only for single key invocations, because it writes a into shared variable.
@@ -438,7 +438,6 @@ class Transaction {
   void RunQuickie(EngineShard* shard);
 
   void ExecuteAsync();
-  void ExecuteAsyncShahar(absl::FunctionRef<void()> cb);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);

@@ -1582,15 +1582,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   Interpreter::RunResult result;
   optional<ShardId> sid = GetRemoteShardToRunAt(*tx);
-  // TODO XXX: handle Global() and non-atomic
   if (sid.has_value()) {
     // If script runs on a single shard, we run it remotely to save hops.
-    // pp_.at(sid.value())->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error);
-    // });
-    cntx->transaction->ScheduleRemoteCoordination([&](Transaction* t, auto* shard) {
-      result = interpreter->RunFunction(eval_args.sha, &error);
-      return OpStatus::OK;
-    });
+    cntx->transaction->ScheduleRemoteCoordination(
+        [&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
   } else {
     result = interpreter->RunFunction(eval_args.sha, &error);
   }
