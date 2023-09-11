@@ -285,27 +285,30 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->owner()->Migrate(shard_set->pool()->at(flow_id));
 
-  shard_set->pool()->at(flow_id)->Await([this, seqid, &flow, eof_token, rb]() {
+  shard_set->pool()->at(flow_id)->Await([this, seqid, &flow, eof_token]() {
     sf_->journal()->StartInThread();
-    if (seqid.has_value()) {
-      RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(flow.conn->cntx()->reply_builder());
 
+    std::string_view sync_type = "FULL";
+
+    if (seqid.has_value()) {
       if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
         flow.start_partial_sync_at = *seqid;
-        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at
+        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
                 << " and is available.";
+        sync_type = "PARTIAL";
       } else {
-        LOG(INFO) << "Partial sync was requested from LSN=" << *seqid
-                  << " but wasn't available (current_lsn=" << sf_->journal()->GetLsn() << ")";
+        LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
+                  << " that the replication buffer doesn't contain this anymore (current_lsn="
+                  << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+        LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+                     "--shard_repl_backlog_len option";
       }
-      rb->StartArray(2);
-      rb->SendSimpleString((flow.start_partial_sync_at < UINT64_MAX) ? "PARTIAL" : "FULL");
-      rb->SendSimpleString(flow.eof_token);
-    } else {
-      rb->StartArray(2);
-      rb->SendSimpleString("FULL");
-      rb->SendSimpleString(eof_token);
     }
+
+    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(flow.conn->cntx()->reply_builder());
+    rb->StartArray(2);
+    rb->SendSimpleString(sync_type);
+    rb->SendSimpleString(eof_token);
   });
 }
 
@@ -510,9 +513,9 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
 
   // Shard can be null for io thread.
   if (shard != nullptr) {
-    if (flow->start_partial_sync_at < UINT64_MAX)
+    if (flow->start_partial_sync_at.has_value())
       flow->saver->StartIncrementalSnapshotInShard(cntx->GetCancellation(), shard,
-                                                   flow->start_partial_sync_at);
+                                                   *flow->start_partial_sync_at);
     else
       flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }

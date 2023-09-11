@@ -42,7 +42,7 @@ struct FlowInfo {
   std::string eof_token;
   DflyVersion version;
 
-  uint64_t start_partial_sync_at = UINT64_MAX;
+  std::optional<LSN> start_partial_sync_at;
   uint64_t last_acked_lsn;
 
   std::function<void()> cleanup;  // Optional cleanup for cancellation.
