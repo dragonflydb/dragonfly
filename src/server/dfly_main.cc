@@ -731,6 +731,9 @@ void ParseFlagsFromEnv() {
                      << " from environment variable. Error: " << error;
           exit(1);
         }
+      } else {
+        LOG(ERROR) << "unknown environment variable DFLY_" << flag_name;
+        exit(1);
       }
     }
   }
