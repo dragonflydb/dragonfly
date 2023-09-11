@@ -85,8 +85,8 @@ io::ReadonlyFileOrError FileSnapshotStorage::OpenReadFile(const std::string& pat
 #endif
 }
 
-std::string FileSnapshotStorage::LoadPath(const std::string_view& dir,
-                                          const std::string_view& dbfilename) {
+io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(
+    const std::string_view& dir, const std::string_view& dbfilename) {
   if (dbfilename.empty())
     return "";
 
@@ -97,14 +97,14 @@ std::string FileSnapshotStorage::LoadPath(const std::string_view& dir,
     std::error_code file_ec;
     data_folder = fs::canonical(dir, file_ec);
     if (file_ec) {
-      LOG(ERROR) << "Data directory error: " << file_ec.message() << " for dir " << dir;
-      return "";
+      return nonstd::make_unexpected(GenericError{file_ec, "Data directory error"});
     }
   }
 
-  LOG(INFO) << "Data directory is " << data_folder;
+  LOG(INFO) << "Load snapshot: Searching for snapshot in directory: " << data_folder;
 
   fs::path fl_path = data_folder.append(dbfilename);
+  // If we've found an exact match we're done.
   if (fs::exists(fl_path))
     return fl_path.generic_string();
 
@@ -113,7 +113,6 @@ std::string FileSnapshotStorage::LoadPath(const std::string_view& dir,
     fl_path += "*";
   }
   io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
-
   if (short_vec) {
     // io::StatFiles returns a list of sorted files. Because our timestamp format has the same
     // time order and lexicographic order we iterate from the end to find the latest snapshot.
@@ -123,15 +122,19 @@ std::string FileSnapshotStorage::LoadPath(const std::string_view& dir,
     if (it != short_vec->rend())
       return it->name;
   } else {
-    LOG(WARNING) << "Could not stat " << fl_path << ", error " << short_vec.error().message();
+    return nonstd::make_unexpected(
+        GenericError(short_vec.error(), "Could not stat snapshot directory"));
   }
-  return "";
+
+  return nonstd::make_unexpected(GenericError(
+      std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
 }
 
-io::Result<std::vector<std::string>> FileSnapshotStorage::LoadPaths(const std::string& load_path) {
+io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPaths(
+    const std::string& load_path) {
   if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
-    LOG(ERROR) << "Bad filename extension \"" << load_path << "\"";
-    return nonstd::make_unexpected(std::make_error_code(std::errc::invalid_argument));
+    return nonstd::make_unexpected(
+        GenericError(std::make_error_code(std::errc::invalid_argument), "Bad filename extension"));
   }
 
   std::vector<std::string> paths{{load_path}};
@@ -142,8 +145,9 @@ io::Result<std::vector<std::string>> FileSnapshotStorage::LoadPaths(const std::s
     io::Result<io::StatShortVec> files = io::StatFiles(glob);
 
     if (files && files->size() == 0) {
-      LOG(ERROR) << "Cound not find DFS snapshot shard files";
-      return nonstd::make_unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+      return nonstd::make_unexpected(
+          GenericError(std::make_error_code(std::errc::no_such_file_or_directory),
+                       "Cound not find DFS shard files"));
     }
 
     for (auto& fstat : *files) {
@@ -156,7 +160,6 @@ io::Result<std::vector<std::string>> FileSnapshotStorage::LoadPaths(const std::s
     std::error_code ec;
     (void)fs::canonical(path, ec);
     if (ec) {
-      LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
       return nonstd::make_unexpected(ec);
     }
   }
@@ -209,21 +212,22 @@ io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& pa
   return res;
 }
 
-std::string AwsS3SnapshotStorage::LoadPath(const std::string_view& dir,
-                                           const std::string_view& dbfilename) {
+io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(
+    const std::string_view& dir, const std::string_view& dbfilename) {
   if (dbfilename.empty())
     return "";
 
   std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(dir);
   if (!bucket_path) {
-    LOG(ERROR) << "Invalid S3 path: " << dir;
-    return "";
+    return nonstd::make_unexpected(
+        GenericError{std::make_error_code(std::errc::invalid_argument), "Invalid S3 path"});
   }
   auto [bucket_name, prefix] = *bucket_path;
 
   util::fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-  return proactor->Await([&]() -> std::string {
-    LOG(INFO) << "Loading from S3 path s3://" << bucket_name << "/" << prefix;
+  return proactor->Await([&]() -> io::Result<std::string, GenericError> {
+    LOG(INFO) << "Load snapshot: Searching for snapshot in S3 path: " << kS3Prefix << bucket_name
+              << "/" << prefix;
 
     // Create a regex to match the object keys, substituting the timestamp
     // and adding an extension if needed.
@@ -238,36 +242,41 @@ std::string AwsS3SnapshotStorage::LoadPath(const std::string_view& dir,
     // Sort the keys in reverse so the first. Since the timestamp format
     // has lexicographic order, the matching snapshot file will be the latest
     // snapshot.
-    std::vector<std::string> keys = ListObjects(bucket_name, prefix);
-    std::sort(std::rbegin(keys), std::rend(keys));
-    for (const std::string& key : keys) {
+    io::Result<std::vector<std::string>, GenericError> keys = ListObjects(bucket_name, prefix);
+    if (!keys) {
+      return nonstd::make_unexpected(keys.error());
+    }
+
+    std::sort(std::rbegin(*keys), std::rend(*keys));
+    for (const std::string& key : *keys) {
       std::smatch m;
       if (std::regex_match(key, m, re)) {
         return std::string(kS3Prefix) + bucket_name + "/" + key;
       }
     }
 
-    LOG(WARNING) << "Couldn't find a snapshot in S3 bucket " << dir;
-    return "";
+    return nonstd::make_unexpected(GenericError(
+        std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
   });
 }
 
-io::Result<std::vector<std::string>> AwsS3SnapshotStorage::LoadPaths(const std::string& load_path) {
+io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPaths(
+    const std::string& load_path) {
   if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
-    LOG(ERROR) << "Bad filename extension \"" << load_path << "\"";
-    return nonstd::make_unexpected(std::make_error_code(std::errc::invalid_argument));
+    return nonstd::make_unexpected(
+        GenericError(std::make_error_code(std::errc::invalid_argument), "Bad filename extension"));
   }
-
-  std::vector<std::string> paths{{load_path}};
 
   // Find snapshot shard files if we're loading DFS.
   if (absl::EndsWith(load_path, "summary.dfs")) {
     util::fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-    proactor->Await([&]() {
+    return proactor->Await([&]() -> io::Result<std::vector<std::string>, GenericError> {
+      std::vector<std::string> paths{{load_path}};
+
       std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(load_path);
       if (!bucket_path) {
-        LOG(ERROR) << "Invalid S3 path: " << load_path;
-        return;
+        return nonstd::make_unexpected(
+            GenericError{std::make_error_code(std::errc::invalid_argument), "Invalid S3 path"});
       }
       const auto [bucket_name, obj_path] = *bucket_path;
 
@@ -276,39 +285,45 @@ io::Result<std::vector<std::string>> AwsS3SnapshotStorage::LoadPaths(const std::
       // Limit prefix to objects in the same 'directory' as load_path.
       const size_t pos = obj_path.find_last_of('/');
       const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos);
-      const std::vector<std::string> keys = ListObjects(bucket_name, prefix);
-      for (const std::string& key : keys) {
+      const io::Result<std::vector<std::string>, GenericError> keys =
+          ListObjects(bucket_name, prefix);
+      if (!keys) {
+        return nonstd::make_unexpected(keys.error());
+      }
+
+      for (const std::string& key : *keys) {
         std::smatch m;
         if (std::regex_match(key, m, re)) {
           paths.push_back(std::string(kS3Prefix) + bucket_name + "/" + key);
         }
       }
-    });
 
-    if (paths.size() <= 1) {
-      LOG(ERROR) << "Cound not find DFS snapshot shard files";
-      return nonstd::make_unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
-    }
+      if (paths.size() <= 1) {
+        return nonstd::make_unexpected(
+            GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
+                         "Cound not find DFS snapshot shard files"});
+      }
+
+      return paths;
+    });
   }
 
-  return paths;
+  return {{load_path}};
 }
 
-std::vector<std::string> AwsS3SnapshotStorage::ListObjects(const std::string& bucket_name,
-                                                           const std::string& prefix) {
+io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObjects(
+    const std::string& bucket_name, const std::string& prefix) {
   util::cloud::S3Bucket bucket(*aws_, bucket_name);
   std::error_code ec = bucket.Connect(kBucketConnectMs);
   if (ec) {
-    LOG(ERROR) << "Couldn't connect to S3 bucket: " << ec.message();
-    return {};
+    return nonstd::make_unexpected(GenericError{ec, "Couldn't connect to S3 bucket"});
   }
 
   std::vector<std::string> keys;
   ec = bucket.ListAllObjects(
       prefix, [&](size_t sz, std::string_view name) { keys.push_back(std::string(name)); });
   if (ec) {
-    LOG(ERROR) << "Couldn't list objects in S3 bucket: " << ec.message();
-    return {};
+    return nonstd::make_unexpected(GenericError{ec, "Couldn't list objects in S3 bucket"});
   }
 
   return keys;

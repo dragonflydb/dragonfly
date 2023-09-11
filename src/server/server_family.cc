@@ -441,9 +441,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
-  string load_path = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
-  if (!load_path.empty()) {
-    load_result_ = Load(load_path);
+  const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
+  if (load_path_result) {
+    const std::string load_path = *load_path_result;
+    if (!load_path.empty()) {
+      load_result_ = Load(load_path);
+    }
+  } else {
+    if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
+      LOG(WARNING) << "Load snapshot: No snapshot found";
+    } else {
+      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+    }
   }
 
   snapshot_schedule_fb_ =
@@ -499,8 +508,10 @@ struct AggregateLoadResult {
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
 Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
-  io::Result<std::vector<std::string>> paths_result = snapshot_storage_->LoadPaths(load_path);
+  auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
+    LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
+
     Promise<std::error_code> ec_promise;
     ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
