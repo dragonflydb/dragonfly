@@ -9,6 +9,8 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <absl/flags/internal/commandlineflag.h>
+#include <absl/flags/parse.h>
 #include <absl/flags/reflection.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
@@ -702,19 +704,36 @@ void PrintBasicUsageInfo() {
   std::cout << endl;
 }
 
+extern char** environ;
+
 void ParseFlagsFromEnv() {
   const auto& flags = absl::GetAllFlags();
-  for (const auto& flag_entry : flags) {
-    auto& flag_name = flag_entry.first;
-    auto& flag = flag_entry.second;
-    const char* flag_env_value = getenv(absl::StrCat("FLAGS_", flag_name).data());
-    if (flag_env_value != nullptr) {
-      string error;
-      bool success = flag->ParseFrom(flag_env_value, &error);
-      if (!success) {
-        LOG(ERROR) << "could not parse flag " << flag->Name()
-                   << " from environment variable. Error: " << error;
-        exit(1);
+  for (char** env = environ; *env != nullptr; env++) {
+    constexpr string_view kPrefix = "DFLY_";
+    string_view environ_var = *env;
+    if (absl::StartsWith(environ_var, kPrefix)) {
+      // Per 'man environ', environment variables are included with their values
+      // in the format "name=value". Need to strip them apart, in order to work with flags object
+      pair<string_view, string_view> environ_pair =
+          absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), '=');
+      string_view flag_name = environ_pair.first;
+      string_view flag_value = environ_pair.second;
+      const auto entry = flags.find(flag_name);
+      if (entry != flags.end()) {
+        if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {
+          // If already specified in the command line, then just ignore it.
+          // There's an alternative, non-internal method `IsSpecifiedOnCommandLine`
+          // within `flag` object, but it's deprecated.
+          continue;
+        }
+        auto& flag = entry->second;
+        string error;
+        bool success = flag->ParseFrom(flag_value, &error);
+        if (!success) {
+          LOG(ERROR) << "could not parse flag " << flag->Name()
+                     << " from environment variable. Error: " << error;
+          exit(1);
+        }
       }
     }
   }
