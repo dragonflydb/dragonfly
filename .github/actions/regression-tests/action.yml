@@ -32,6 +32,7 @@ runs:
         pip install -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${{github.workspace}}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        echo "DF PATH IS $DRAGONFLY_PATH"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
         pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
@@ -46,7 +47,6 @@ runs:
         cd ${{github.workspace}}/tests
         # used by PyTests
         export DRAGONFLY_PATH="${{github.workspace}}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
-
         pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
         pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
 
@@ -74,7 +74,7 @@ runs:
         fi
 
         job_link="${{github.server_url}}/${{github.repository}}/actions/runs/${{github.run_id}}"
-        message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n $failed_tests \\n Job Link: ${{job_link}}\\n"
+        message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n $failed_tests \\n Job Link: ${job_link}\\n"
 
         curl -s \
           -X POST \
