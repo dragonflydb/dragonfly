@@ -15,7 +15,7 @@
 
 ## 全世界最快的内存数据库
 
-Dragonfly是一种针对现代应用程序负荷需求而构建的内存数据库，完全兼容Redis和Memcached的 API，迁移时无需修改任何代码。相比于这些传统的内存数据库，Dragonfly提供了其25倍的吞吐量，高缓存命中率和低尾延迟，同时Dragonfly还能轻松进行垂直扩展。
+Dragonfly是一种针对现代应用程序负荷需求而构建的内存数据库，完全兼容Redis和Memcached的 API，迁移时无需修改任何代码。相比于这些传统的内存数据库，Dragonfly提供了其25倍的吞吐量，高缓存命中率和低尾延迟，并且对于相同大小的工作负载运行资源最多可减少80%。
 
 ## 目录
 
@@ -24,6 +24,7 @@ Dragonfly是一种针对现代应用程序负荷需求而构建的内存数据�
 - [配置方法](#配置方法)
 - [开发路线和开发现状](#开发路线和开发现状)
 - [设计决策](#设计决策)
+- [开发背景](#开发背景)
 
 ## <a name="基准测试"><a/> 基准测试
 
@@ -71,7 +72,7 @@ Dragonfly在c6gn.16xlarge上达到了每秒380万个查询（QPS），相比于R
 
 ### 内存效率
 
-在接下来的测试中，我们使用 `debug populate 5000000 key 1024` 命令向 Dragonfly 和 Redis 分别写入了约 5GB 的数据。然后我们使用 `memtier` 发送更新流量并使用 "bgsave" 命令启动快照。下图清楚地展示了这两个服务器在内存效率方面的表现。
+在接下来的测试中，我们使用 `debug populate 5000000 key 1024` 命令向 Dragonfly 和 Redis 分别写入了约 5GB 的数据。然后我们使用 `memtier` 发送更新流量并使用 `bgsave` 命令启动快照。下图清楚地展示了这两个服务器在内存效率方面的表现。
 
 <img src="http://static.dragonflydb.io/repo-assets/bgsave-memusage.svg" width="70%" border="0"/>
 
@@ -142,6 +143,7 @@ Dragonfly 支持 Redis 的常见参数。
 ```bash
 ./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
+还可以通过运行 `dragonfly --flagfile <filename>` 从配置文件中获取参数，配置文件的每行应该列出一个参数，并用等号代替键值参数的空格。
 
 要获取更多选项，如日志管理或TLS支持，请运行 `dragonfly --help`。
 

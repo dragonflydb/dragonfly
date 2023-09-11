@@ -1,0 +1,1 @@
+ACL SETUSER kostas ON >mypass +@WRONG

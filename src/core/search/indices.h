@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -54,16 +55,45 @@ struct TagIndex : public BaseStringIndex {
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
 };
 
+struct BaseVectorIndex : public BaseIndex {
+  std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
+
+ protected:
+  BaseVectorIndex(size_t dim, VectorSimilarity sim);
+
+  size_t dim_;
+  VectorSimilarity sim_;
+};
+
 // Index for vector fields.
 // Only supports lookup by id.
-struct VectorIndex : public BaseIndex {
+struct FlatVectorIndex : public BaseVectorIndex {
+  FlatVectorIndex(size_t dim, VectorSimilarity sim);
+
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
-  FtVector Get(DocId doc) const;
+  const float* Get(DocId doc) const;
 
  private:
-  absl::flat_hash_map<DocId, FtVector> entries_;
+  std::vector<float> entries_;
+};
+
+struct HnswlibAdapter;
+
+struct HnswVectorIndex : public BaseVectorIndex {
+  HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity);
+  ~HnswVectorIndex();
+
+  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+
+  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k) const;
+  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k,
+                                           const std::vector<DocId>& allowed) const;
+
+ private:
+  std::unique_ptr<HnswlibAdapter> adapter_;
 };
 
 }  // namespace dfly::search

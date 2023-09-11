@@ -107,8 +107,13 @@ bool ConfigureKeepAlive(int fd) {
     return false;
 
   val = absl::GetFlag(FLAGS_tcp_keepalive);
+#ifdef __APPLE__
+  if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &val, sizeof(val)) < 0)
+    return false;
+#else
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0)
     return false;
+#endif
 
   /* Send next probes after the specified interval. Note that we set the
    * delay as interval / 3, as we send three probes before detecting
@@ -160,6 +165,7 @@ error_code Listener::ConfigureServerSocket(int fd) {
   bool success = ConfigureKeepAlive(fd);
 
   if (!success) {
+#ifndef __APPLE__
     int myerr = errno;
 
     int socket_type;
@@ -170,6 +176,7 @@ error_code Listener::ConfigureServerSocket(int fd) {
         socket_type != AF_UNIX) {
       LOG(WARNING) << "Could not configure keep alive " << SafeErrorMessage(myerr);
     }
+#endif
   }
 
   return error_code{};

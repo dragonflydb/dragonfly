@@ -78,6 +78,7 @@ ABSL_FLAG(bool, multi_exec_squash, false,
 
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
+ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without auth "
           "token needed.");
@@ -626,7 +627,10 @@ optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
 }  // namespace
 
 Service::Service(ProactorPool* pp)
-    : pp_(*pp), server_family_(this), cluster_family_(&server_family_) {
+    : pp_(*pp),
+      acl_family_(&user_registry_),
+      server_family_(this),
+      cluster_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -686,7 +690,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
   if (!tcp_disabled && !listeners.empty()) {
-    acl_family_.Init(listeners.front());
+    acl_family_.Init(listeners.front(), &user_registry_);
   }
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
@@ -1729,13 +1733,13 @@ void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
+  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
+
   if (!cntx->conn_state.exec_info.IsCollecting()) {
     return rb->SendError("EXEC without MULTI");
   }
 
   auto& exec_info = cntx->conn_state.exec_info;
-  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
-
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
   }
@@ -2030,6 +2034,11 @@ GlobalState Service::GetGlobalState() const {
 }
 
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
+  // We set the password for the HTTP service unless it is only enabled on the
+  // admin port and the admin port is password-less.
+  if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
+    base->SetPassword(GetPassword());
+  }
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
   base->RegisterCb("/topkeys", Topkeys);
@@ -2155,7 +2164,11 @@ void Service::RegisterCommands() {
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
+
+#ifndef __APPLE__
   SearchFamily::Register(&registry_);
+#endif
+
   acl_family_.Register(&registry_);
 
   server_family_.Register(&registry_);
