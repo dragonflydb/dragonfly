@@ -715,7 +715,7 @@ void ParseFlagsFromEnv() {
       pair<string_view, string_view> environ_pair =
           absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), '=');
       const auto& [flag_name, flag_value] = environ_pair;
-      const auto entry = flags.find(flag_name);
+      const auto& entry = flags.find(flag_name);
       if (entry != flags.end()) {
         if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {
           // If already specified in the command line, then just ignore it.
@@ -727,13 +727,11 @@ void ParseFlagsFromEnv() {
         string error;
         bool success = flag->ParseFrom(flag_value, &error);
         if (!success) {
-          LOG(ERROR) << "could not parse flag " << flag->Name()
+          LOG(FATAL) << "could not parse flag " << flag->Name()
                      << " from environment variable. Error: " << error;
-          exit(1);
         }
       } else {
-        LOG(ERROR) << "unknown environment variable DFLY_" << flag_name;
-        exit(1);
+        LOG(FATAL) << "unknown environment variable DFLY_" << flag_name;
       }
     }
   }

@@ -94,15 +94,23 @@ async def test_arg_from_environ_overwritten_by_cli(df_local_factory):
     await client.ping()
 
 
-async def test_arg_from_environ(df_local_factory):
-    # Using keys_output_limit flag to test environment variables parsing
-    max_keys = 512
-    os.environ["DFLY_keys_output_limit"] = str(max_keys)
+async def test_arg_from_environ(df_local_factory, export_dfly_password):
+    os.environ["DFLY_requirepass"] = "true"
     dfly = df_local_factory.create()
     dfly.start()
-    client = aioredis.Redis()
-    pipe = client.pipeline()
-    batch_fill_data(pipe, gen_test_data(max_keys * 3))
-    await pipe.execute()
-    keys = await client.keys()
-    assert len(keys) in range(max_keys, max_keys + 512)
+
+    # Expect password form environment variable
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        client = aioredis.Redis()
+        await client.ping()
+
+    client = aioredis.Redis(password=export_dfly_password)
+    await client.ping()
+    dfly.stop()
+
+
+async def test_unknown_dfly_env(df_local_factory, export_dfly_password):
+    os.environ["DFLY_abcdef"] = "xyz"
+    with pytest.raises(Exception):
+        dfly = df_local_factory.create()
+        dfly.start()
