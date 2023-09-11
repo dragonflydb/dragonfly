@@ -1583,3 +1583,42 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
             await task
         except asyncio.exceptions.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
+    replica = df_local_factory.create(port=BASE_PORT)
+    master = df_local_factory.create(port=BASE_PORT + 1)
+    seeder = df_seeder_factory.create(port=master.port)
+
+    df_local_factory.start_all([replica, master])
+    async with replica.client() as c_replica:
+        await seeder.run(target_deviation=0.1)
+
+        proxy = Proxy("localhost", BASE_PORT + 2, "localhost", master.port)
+        task = asyncio.create_task(proxy.start())
+
+        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+        fill_task = asyncio.create_task(seeder.run(target_ops=3000))
+
+        for _ in range(5):
+            await asyncio.sleep(random.randint(0, 10) / 5)
+            proxy.drop_connection()
+
+        seeder.stop()
+        await fill_task
+
+        # Give time to detect dropped connection and reconnect
+        await asyncio.sleep(0.5)
+        await wait_for_replica_status(c_replica, status="up")
+        await wait_available_async(c_replica)
+
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, replica.port)
+        proxy.close()
+        try:
+            await task
+        except asyncio.exceptions.CancelledError:
+            pass

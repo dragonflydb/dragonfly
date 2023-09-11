@@ -659,13 +659,11 @@ std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cnt
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_;
 
-  std::string cmd;
+  std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
+                           master_context_.dfly_session_id, " ", flow_id_);
+  // Try to negotiate a partial sync if possible.
   if (lsns.size() > flow_id_ && master_context_.version > DflyVersion::VER1) {
-    cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ", master_context_.dfly_session_id,
-                 " ", flow_id_, " ", lsns[flow_id_]);
-  } else {
-    cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ", master_context_.dfly_session_id,
-                 " ", flow_id_);
+    absl::StrAppend(&cmd, " ", lsns[flow_id_]);
   }
 
   ResetParser(/*server_mode=*/false);

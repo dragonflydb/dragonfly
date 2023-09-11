@@ -78,11 +78,21 @@ void SliceSnapshot::StartIncremental(const Cancellation* cll, LSN start_lsn) {
           PushSerializedToChannel(false);
           lsn++;
         }
+        // This check is safe, but it is not trivially safe.
+        // We rely here on the fact that JournalSlice::AddLogRecord can
+        // only preempt while holding the callback lock.
+        // That guarantees that if we have processed the last LSN the callback
+        // will only be added after JournalSlice::AddLogRecord has finished
+        // iterating its callbacks and we won't process the record twice.
+        // We have to make sure we don't preempt ourselves before registering the callback!
         if (journal->GetLsn() == (lsn - 1)) {
-          serializer_->SendFullSyncCut();
-          PushSerializedToChannel(true);
+          {
+            FiberAtomicGuard fg;
+            serializer_->SendFullSyncCut();
+          }
           auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
           journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+          PushSerializedToChannel(true);
         } else {
           // We stopped but we didn't manage to send the whole stream.
           Cancel();

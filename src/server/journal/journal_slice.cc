@@ -144,6 +144,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     item->opcode = entry.opcode;
     item->data = "";
   } else {
+    FiberAtomicGuard fg;
     // GetTail gives a pointer to a new tail entry in the buffer, possibly overriding the last entry
     // if the buffer is full.
     item = ring_buffer_->GetTail(true);
