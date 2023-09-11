@@ -726,7 +726,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 }
 
 namespace {
-bool IsReadyToRun(Transaction* tx) {
+bool IsReadyToRunLocally(Transaction* tx) {
   if (tx->IsOOO()) {
     return true;
   }
@@ -752,12 +752,13 @@ void Transaction::ScheduleRemoteCoordination(absl::FunctionRef<void()> cb) {
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
   DCHECK(!IsGlobal());
   DCHECK_NE(ServerState::tlocal()->thread_index(), unique_shard_id_);
+  DCHECK(!cb_ptr_);
 
   BlockingCounter blocker(1);
   auto wrapped_cb = [&]() {
     DCHECK_EQ(ServerState::tlocal()->thread_index(), unique_shard_id_);
 
-    if (IsReadyToRun(this)) {
+    if (IsReadyToRunLocally(this)) {
       PerShardData& sd = shard_data_[SidToId(unique_shard_id_)];
       sd.is_armed.store(false, memory_order_relaxed);
       run_count_.store(0, memory_order_release);

@@ -163,6 +163,9 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
+  // Schedules `db` to run on the target shard for this transaction.
+  // `cb` must not block or otherwise wait.
+  // Transaction must only be using a single shard, which is different from the one called.
   void ScheduleRemoteCoordination(absl::FunctionRef<void()> cb);
 
   // Execute single hop with return value and conclude.
