@@ -30,6 +30,8 @@ class User final {
     // DATATYPE_BITSET commands;
 
     std::optional<bool> is_active{};
+
+    bool is_hashed{false};
   };
 
   /* Used for default user
@@ -67,7 +69,7 @@ class User final {
   void SetIsActive(bool is_active);
 
   // For passwords
-  void SetPasswordHash(std::string_view password);
+  void SetPasswordHash(std::string_view password, bool is_hashed);
 
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64

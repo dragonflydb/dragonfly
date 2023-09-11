@@ -101,6 +101,77 @@ sds StringMap::Find(std::string_view key) {
   return GetValue(str);
 }
 
+std::pair<sds, sds> StringMap::RandomPair() {
+  auto it = begin();
+  it += rand() % Size();
+  return std::make_pair(it->first, it->second);
+}
+
+void StringMap::RandomPairsUnique(unsigned int count, std::vector<sds>& keys,
+                                  std::vector<sds>& vals, bool with_value) {
+  unsigned int total_size = Size();
+  unsigned int index = 0;
+  if (count > total_size)
+    count = total_size;
+
+  auto itr = begin();
+  uint32_t picked = 0, remaining = count;
+  while (picked < count && itr != end()) {
+    double random_double = ((double)rand()) / RAND_MAX;
+    double threshold = ((double)remaining) / (total_size - index);
+    if (random_double <= threshold) {
+      keys.push_back(itr->first);
+      if (with_value) {
+        vals.push_back(itr->second);
+      }
+      remaining--;
+      picked++;
+    }
+    ++itr;
+    index++;
+  }
+
+  DCHECK(keys.size() == count);
+  if (with_value)
+    DCHECK(vals.size() == count);
+}
+
+void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
+                            bool with_value) {
+  using RandomPick = std::pair<unsigned int, unsigned int>;
+  std::vector<RandomPick> picks;
+  unsigned int total_size = Size();
+
+  for (unsigned int i = 0; i < count; ++i) {
+    RandomPick pick{rand() % total_size, i};
+    picks.push_back(pick);
+  }
+
+  std::sort(picks.begin(), picks.end(), [](auto& x, auto& y) { return x.first < y.first; });
+
+  unsigned int index = picks[0].first, pick_index = 0;
+  auto itr = begin();
+  for (unsigned int i = 0; i < index; ++i)
+    ++itr;
+
+  keys.reserve(count);
+  if (with_value)
+    vals.reserve(count);
+
+  while (itr != end() && pick_index < count) {
+    auto [key, val] = *itr;
+    while (pick_index < count && index == picks[pick_index].first) {
+      int store_order = picks[pick_index].second;
+      keys[store_order] = key;
+      if (with_value)
+        vals[store_order] = val;
+      ++pick_index;
+    }
+    ++index;
+    ++itr;
+  }
+}
+
 pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);

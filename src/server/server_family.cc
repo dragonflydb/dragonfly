@@ -315,7 +315,7 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
 
   if (!snapshot_cron_exp.empty() && !save_time.empty()) {
     LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
-    quick_exit(1);
+    exit(1);
   }
 
   string raw_cron_expr;
@@ -411,10 +411,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       used_mem_peak.store(sum, memory_order_relaxed);
   };
 
+// TODO: to addd support on non-linux platforms as well
+#ifdef __linux__
   uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
   uint32_t period_ms = max(1u, 1000 / cache_hz);
+
   stats_caching_task_ =
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
+#endif
 
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
@@ -426,12 +430,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
     aws_ = make_unique<cloud::AWS>("s3");
-    if (auto ec = aws_->Init(); ec) {
+    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return aws_->Init(); });
+    if (ec) {
       LOG(FATAL) << "Failed to initialize AWS " << ec;
     }
+    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(aws_.get());
+  } else if (fq_threadpool_) {
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
+  } else {
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
-  string load_path = detail::InferLoadFile(flag_dir, aws_.get());
+  string load_path = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
   if (!load_path.empty()) {
     load_result_ = Load(load_path);
   }
@@ -461,8 +471,10 @@ void ServerFamily::Shutdown() {
   }
 
   pb_task_->Await([this] {
-    pb_task_->CancelPeriodic(stats_caching_task_);
-    stats_caching_task_ = 0;
+    if (stats_caching_task_) {
+      pb_task_->CancelPeriodic(stats_caching_task_);
+      stats_caching_task_ = 0;
+    }
 
     if (journal_->EnterLameDuck()) {
       auto ec = journal_->Close();
@@ -487,42 +499,14 @@ struct AggregateLoadResult {
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
 Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
-  if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
-    LOG(ERROR) << "Bad filename extension \"" << load_path << "\"";
+  io::Result<std::vector<std::string>> paths_result = snapshot_storage_->LoadPaths(load_path);
+  if (!paths_result) {
     Promise<std::error_code> ec_promise;
-    ec_promise.set_value(make_error_code(errc::invalid_argument));
+    ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
   }
 
-  vector<std::string> paths{{load_path}};
-
-  // Collect all other files in case we're loading dfs.
-  if (absl::EndsWith(load_path, "summary.dfs")) {
-    std::string glob = absl::StrReplaceAll(load_path, {{"summary", "????"}});
-    io::Result<io::StatShortVec> files = io::StatFiles(glob);
-
-    if (files && files->size() == 0) {
-      Promise<std::error_code> ec_promise;
-      ec_promise.set_value(make_error_code(errc::no_such_file_or_directory));
-      return ec_promise.get_future();
-    }
-
-    for (auto& fstat : *files) {
-      paths.push_back(std::move(fstat.name));
-    }
-  }
-
-  // Check all paths are valid.
-  for (const auto& path : paths) {
-    error_code ec;
-    (void)fs::canonical(path, ec);
-    if (ec) {
-      LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
-      Promise<std::error_code> ec_promise;
-      ec_promise.set_value(ec);
-      return ec_promise.get_future();
-    }
-  }
+  std::vector<std::string> paths = *paths_result;
 
   LOG(INFO) << "Loading " << load_path;
 
@@ -610,18 +594,7 @@ void ServerFamily::SnapshotScheduling() {
 
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file) {
   error_code ec;
-  io::ReadonlyFileOrError res;
-
-#ifdef __linux__
-  if (fq_threadpool_) {
-    res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
-  } else {
-    res = OpenRead(rdb_file);
-  }
-#else
-  res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
-#endif
-
+  io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
   if (res) {
     io::FileSource fs(*res);
 
@@ -914,9 +887,9 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  SaveStagesController sc{detail::SaveStagesInputs{new_version, basename, trans, &service_,
-                                                   &is_saving_, fq_threadpool_.get(),
-                                                   &last_save_info_, &save_mu_, &aws_}};
+  SaveStagesController sc{detail::SaveStagesInputs{
+      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
+      &save_mu_, &aws_, snapshot_storage_}};
   return sc.Save();
 }
 
@@ -1366,6 +1339,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
+
+      // PHP Symphony needs this field to work.
+      append("maxmemory_policy", "eviction");
     } else {
       append("cache_mode", "store");
       // Compatible with redis based frameworks.
@@ -1519,6 +1495,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
+#ifndef __APPLE__
   if (should_enter("CPU")) {
     ADD_HEADER("# CPU");
     struct rusage ru, cu, tu;
@@ -1532,6 +1509,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("used_cpu_sys_main_thread", StrCat(tu.ru_stime.tv_sec, ".", tu.ru_stime.tv_usec));
     append("used_cpu_user_main_thread", StrCat(tu.ru_utime.tv_sec, ".", tu.ru_utime.tv_usec));
   }
+#endif
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");

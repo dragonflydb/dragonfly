@@ -63,8 +63,8 @@ std::string MallocStats(bool backing, unsigned tid) {
   uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
   absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
   absl::StrAppend(&str, "total reserved: ", reserved, ", comitted: ", committed, ", used: ", used,
-                  "fragmentation waste: ", (100.0 * (committed - used)) / std::max(1UL, committed),
-                  "%\n");
+                  "fragmentation waste: ",
+                  (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
 
   return str;
 }

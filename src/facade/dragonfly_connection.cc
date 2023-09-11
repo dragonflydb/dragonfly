@@ -8,6 +8,8 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <variant>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -211,8 +213,12 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
   auto* ctx = static_cast<dfly::ConnectionContext*>(self->cntx());
-  if (ctx && msg.username == ctx->authed_username) {
-    ctx->acl_categories = msg.categories;
+  if (ctx) {
+    for (size_t id = 0; id < msg.username.size(); ++id) {
+      if (msg.username[id] == ctx->authed_username) {
+        ctx->acl_categories = msg.categories[id];
+      }
+    }
   }
 }
 
@@ -388,6 +394,9 @@ std::string Connection::LocalBindAddress() const {
 }
 
 string Connection::GetClientInfo(unsigned thread_id) const {
+  CHECK(service_ && socket_);
+  CHECK_LT(unsigned(phase_), NUM_PHASES);
+
   string res;
   auto le = socket_->LocalEndpoint();
   auto re = socket_->RemoteEndpoint();
@@ -396,9 +405,14 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   int cpu = 0;
   socklen_t len = sizeof(cpu);
   getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
-  int my_cpu_id = sched_getcpu();
 
-  static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
+#ifdef __APPLE__
+  int my_cpu_id = -1;  // __APPLE__ does not have sched_getcpu()
+#else
+  int my_cpu_id = sched_getcpu();
+#endif
+
+  static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");
 
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
@@ -849,16 +863,19 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       service_->DispatchManyCommands(absl::MakeSpan(args), cc_.get());
       cc_->async_dispatch = false;
 
+      // Flush strictly before the dispatch queue is cleared so that no sync dispatch can occur
+      if (dispatch_q_.size() == args.size()) {  // Flush if no new messages appeared
+        builder->FlushBatch();
+        builder->SetBatchMode(false);  // in case the next dispatch is sync
+      }
+
+      DCHECK(!cc_->sync_dispatch);
       // Dispatch queue could have grown, so handle strictly as many as we executed
       for (size_t i = 0; i < args.size(); i++) {
         recycle(move(dispatch_q_.front()));
         dispatch_q_.pop_front();
       }
 
-      if (dispatch_q_.empty()) {
-        builder->FlushBatch();
-        builder->SetBatchMode(false);  // in case the next dispatch is sync
-      }
     } else {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
@@ -985,9 +1002,22 @@ void Connection::SendAsync(MessageHandle msg) {
         fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
   }
 
+  auto place_in_dispatch_q = [this](MessageHandle msg) {
+    auto it = dispatch_q_.begin();
+    for (; it < dispatch_q_.end(); ++it) {
+      if (!std::holds_alternative<AclUpdateMessage>(it->handle)) {
+        break;
+      }
+    }
+    dispatch_q_.insert(it, std::move(msg));
+  };
+
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
-    dispatch_q_.push_front(std::move(msg));
+    // We need to reorder the queue, since multiple updates might happen before we
+    // pop the message, invalidating the correct order since we always push at the front
+    place_in_dispatch_q(std::move(msg));
+
   } else {
     dispatch_q_.push_back(std::move(msg));
   }
