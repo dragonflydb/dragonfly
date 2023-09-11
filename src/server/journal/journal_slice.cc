@@ -16,7 +16,8 @@
 #include "base/logging.h"
 #include "server/journal/serializer.h"
 
-ABSL_FLAG(int, shard_changes_log_size, 1 << 16, "The size of the circular changes log per shard");
+ABSL_FLAG(int, shard_repl_backlog_len, 1 << 16,
+          "The length of the circular replication log per shard");
 
 namespace dfly {
 namespace journal {
@@ -52,7 +53,7 @@ void JournalSlice::Init(unsigned index) {
     return;
 
   slice_index_ = index;
-  ring_buffer_.emplace(absl::GetFlag(FLAGS_shard_changes_log_size));
+  ring_buffer_.emplace(absl::GetFlag(FLAGS_shard_repl_backlog_len));
 }
 
 #if 0
@@ -137,7 +138,12 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
 
   JournalItem dummy;
   JournalItem* item;
-  if (entry.opcode != Op::NOOP) {
+  if (entry.opcode == Op::NOOP) {
+    item = &dummy;
+    item->lsn = -1;
+    item->opcode = entry.opcode;
+    item->data = "";
+  } else {
     item = ring_buffer_->GetTail(true);
     item->opcode = entry.opcode;
     item->lsn = lsn_++;
@@ -149,11 +155,6 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     item->data = io::View(ring_serialize_buf_.InputBuffer());
     ring_serialize_buf_.Clear();
     VLOG(1) << "Writing item [" << item->lsn << "]: " << entry.ToString();
-  } else {
-    item = &dummy;
-    item->lsn = -1;
-    item->opcode = entry.opcode;
-    item->data = "";
   }
 
 #if 0

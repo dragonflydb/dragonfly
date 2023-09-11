@@ -2151,7 +2151,10 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
     done++;
 
-    // We don't care about transaction ordering, so we just ignore EXEC entries.
+    // EXEC entries are just for preserving atomicity of transactions. We don't create
+    // transactions and we don't care about atomicity when we're loading an RDB, so skip them.
+    // Currently rdb_save also filters those records out, but we filter them additionally here
+    // for better forward compatibility if we decide to change that.
     if (entry.opcode == journal::Op::EXEC)
       continue;
 
