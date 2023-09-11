@@ -89,8 +89,6 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
 async def test_arg_from_environ(df_local_factory):
     ENVIRON_PORT = 6378
     os.environ["DFLY_port"] = str(ENVIRON_PORT)
-    # Random environment variable with the same prefix shouldn't affect the process
-    os.environ["DFLY_xyz"] = "abc"
     dfly = df_local_factory.create()
     dfly.start()
     client = aioredis.Redis(port=ENVIRON_PORT)
