@@ -1588,8 +1588,25 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   optional<ShardId> sid = GetRemoteShardToRunAt(*tx);
   if (sid.has_value()) {
     // If script runs on a single shard, we run it remotely to save hops.
-    cntx->transaction->ScheduleRemoteCoordination(
-        [&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+    // cntx->transaction->ScheduleRemoteCoordination(
+    //    [&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+    LOG(ERROR) << "XXX switching cmd";
+    // tx->MultiSwitchCmd(registry_.Find("EVAL"));
+    tx->PrepareSquashedMultiHop(registry_.Find("EVAL"), [&](ShardId id) { return id == *sid; });
+    LOG(ERROR) << "XXX scheduling hop on " << *sid;
+    tx->ScheduleSingleHop([&](Transaction* tx, EngineShard*) {
+      LOG(ERROR) << "XXX setting role";
+      Transaction::MultiRole current_role = tx->GetMultiRole();
+      tx->SetMultiRole(Transaction::MultiRole::SQUASHED_STUB);
+      LOG(ERROR) << "XXX running lua";
+      tx->KillCbPtr();
+      result = interpreter->RunFunction(eval_args.sha, &error);
+      LOG(ERROR) << "XXX done running lua";
+      tx->SetMultiRole(current_role);
+      return OpStatus::OK;
+    });
+    // tx->KillRunCount();
+    // tx->UnlockMulti();
   } else {
     result = interpreter->RunFunction(eval_args.sha, &error);
   }

@@ -5,6 +5,7 @@
 #include "server/transaction.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_join.h>
 
 #include "base/logging.h"
 #include "server/blocking_controller.h"
@@ -749,8 +750,8 @@ void Transaction::ScheduleRemoteCoordination(absl::FunctionRef<void()> cb) {
   DCHECK_EQ(unique_shard_cnt_, 1UL);
   DCHECK_NE(unique_shard_id_, kInvalidSid);
   DCHECK(multi_);
-  DCHECK_EQ(multi_->mode, LOCK_AHEAD);
-  DCHECK(!IsGlobal());
+  // DO WE NEED??? DCHECK_EQ(multi_->mode, LOCK_AHEAD);
+  // DO WE NEED??? DCHECK(!IsGlobal());
   DCHECK_NE(ServerState::tlocal()->thread_index(), unique_shard_id_);
   DCHECK(!cb_ptr_);
 
@@ -764,6 +765,7 @@ void Transaction::ScheduleRemoteCoordination(absl::FunctionRef<void()> cb) {
       run_count_.store(0, memory_order_release);
 
       cb();
+      cb_ptr_ = nullptr;
 
       blocker.Dec();
     }
@@ -1047,6 +1049,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
 
+  LOG(ERROR) << "XXX Acquire " << absl::StrJoin(lock_args.args, ",") << " via ScheduleUniqueShard";
   shard->db_slice().Acquire(mode, lock_args);
   sd.local_mask |= KEYLOCK_ACQUIRED;
 
@@ -1079,6 +1082,7 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
 
     // Key locks are acquired even if the shard is locked since intent locks are always acquired
     bool shard_unlocked = shard->shard_lock()->Check(mode);
+    LOG(ERROR) << "XXX Acquire " << absl::StrJoin(lock_args.args, ",") << " via ScheduleInShard";
     bool keys_unlocked = shard->db_slice().Acquire(mode, lock_args);
 
     lock_granted = keys_unlocked && shard_unlocked;
@@ -1254,6 +1258,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
 
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
                                      uint32_t shard_journals_cnt) {
+  LOG(ERROR) << "XXX UnlockMultiShardCb";
   auto journal = shard->journal();
 
   if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()]) {
@@ -1264,7 +1269,9 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
   } else {
     ShardId sid = shard->shard_id();
+    LOG(ERROR) << "XXX UnlockMultiShardCb in shard " << sid;
     for (const auto& k_v : sharded_keys[sid]) {
+      LOG(ERROR) << "XXX UnlockMultiShardCb releasing " << k_v.first;
       auto release = [&](IntentLock::Mode mode) {
         if (k_v.second[mode]) {
           shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second[mode]);

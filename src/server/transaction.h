@@ -163,9 +163,10 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
-  // Schedules `db` to run on the target shard for this transaction.
+  // Schedules `cb` to run on the target shard for this transaction.
   // `cb` must not block or otherwise wait.
   // Transaction must only be using a single shard, which is different from the one called.
+  // Transaction must already be scheduled before calling this function.
   void ScheduleRemoteCoordination(absl::FunctionRef<void()> cb);
 
   // Execute single hop with return value and conclude.
@@ -277,6 +278,22 @@ class Transaction {
 
   MultiMode GetMultiMode() const {
     return multi_->mode;
+  }
+
+  MultiRole GetMultiRole() const {
+    return multi_->role;
+  }
+
+  void SetMultiRole(MultiRole new_role) {
+    multi_->role = new_role;
+  }
+
+  void KillCbPtr() {
+    cb_ptr_ = nullptr;
+  }
+
+  void KillRunCount() {
+    run_count_.store(0, std::memory_order_release);
   }
 
   bool IsGlobal() const;
