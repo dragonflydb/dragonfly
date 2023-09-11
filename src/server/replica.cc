@@ -890,10 +890,10 @@ void DflyShardReplica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Conte
 }
 
 bool DflyShardReplica::InsertTxToSharedMap(const TransactionData& tx_data) {
-  multi_shard_exe_->map_mu.lock();
+  std::unique_lock lk(multi_shard_exe_->map_mu);
   auto [it, was_insert] =
       multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
-  multi_shard_exe_->map_mu.unlock();
+  lk.unlock();
 
   VLOG(2) << "txid: " << tx_data.txid << " unique_shard_cnt_: " << tx_data.shard_cnt
           << " was_insert: " << was_insert;
@@ -938,11 +938,11 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
   }
 
   VLOG(2) << "Execute txid: " << tx_data.txid;
-  multi_shard_exe_->map_mu.lock();
+  std::unique_lock lk(multi_shard_exe_->map_mu);
   auto it = multi_shard_exe_->tx_sync_execution.find(tx_data.txid);
   DCHECK(it != multi_shard_exe_->tx_sync_execution.end());
   auto& multi_shard_data = it->second;
-  multi_shard_exe_->map_mu.unlock();
+  lk.unlock();
 
   VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
   // Wait until shards flows got transaction data and inserted to map.
