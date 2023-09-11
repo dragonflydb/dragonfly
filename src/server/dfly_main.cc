@@ -714,8 +714,7 @@ void ParseFlagsFromEnv() {
       // in the format "name=value". Need to strip them apart, in order to work with flags object
       pair<string_view, string_view> environ_pair =
           absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), '=');
-      string_view flag_name = environ_pair.first;
-      string_view flag_value = environ_pair.second;
+      const auto& [flag_name, flag_value] = environ_pair;
       const auto entry = flags.find(flag_name);
       if (entry != flags.end()) {
         if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {
