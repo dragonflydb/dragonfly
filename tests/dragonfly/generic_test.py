@@ -86,10 +86,23 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
 
 
 @dfly_args({"port": 6377})
-async def test_arg_from_environ(df_local_factory):
-    ENVIRON_PORT = 6378
-    os.environ["DFLY_port"] = str(ENVIRON_PORT)
+async def test_arg_from_environ_overwritten_by_cli(df_local_factory):
+    os.environ["DFLY_port"] = "6378"
     dfly = df_local_factory.create()
     dfly.start()
-    client = aioredis.Redis(port=ENVIRON_PORT)
+    client = aioredis.Redis(port="6377")
     await client.ping()
+
+
+async def test_arg_from_environ(df_local_factory):
+    # Using keys_output_limit flag to test environment variables parsing
+    max_keys = 512
+    os.environ["DFLY_keys_output_limit"] = str(max_keys)
+    dfly = df_local_factory.create()
+    dfly.start()
+    client = aioredis.Redis()
+    pipe = client.pipeline()
+    batch_fill_data(pipe, gen_test_data(max_keys * 3))
+    await pipe.execute()
+    keys = await client.keys()
+    assert len(keys) in range(max_keys, max_keys + 512)
