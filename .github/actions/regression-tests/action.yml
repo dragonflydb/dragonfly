@@ -26,13 +26,19 @@ runs:
     - name: Run PyTests
       shell: bash
       run: |
+        echo "LS"
+        ls -lah
+
+        echo "PWD"
+        pwd
+
         ls -l ${{github.workspace}}/
         cd ${{github.workspace}}/tests
         echo "Current commit is ${{github.sha}}"
         pip install -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${{github.workspace}}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
-        echo "DF PATH IS $DRAGONFLY_PATH"
+        echo "DF PATH IS ${DRAGONFLY_PATH}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
         pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
