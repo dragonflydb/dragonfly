@@ -4,7 +4,7 @@ import redis
 import asyncio
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args, dfly_args
+from . import dfly_multi_test_args, dfly_args, DflyStartException
 from .utility import batch_fill_data, gen_test_data
 
 
@@ -111,6 +111,6 @@ async def test_arg_from_environ(df_local_factory, export_dfly_password):
 
 async def test_unknown_dfly_env(df_local_factory, export_dfly_password):
     os.environ["DFLY_abcdef"] = "xyz"
-    with pytest.raises(Exception):
+    with pytest.raises(DflyStartException):
         dfly = df_local_factory.create()
         dfly.start()
