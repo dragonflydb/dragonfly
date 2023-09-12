@@ -82,8 +82,6 @@ ABSL_FLAG(bool, force_epoll, false,
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
-ABSL_FLAG(bool, dev_env, false, "Disabled flag for running in dev environment.");
-
 using namespace util;
 using namespace facade;
 using namespace io;
@@ -230,7 +228,7 @@ bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
 
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
   // Avoid running dev environments.
-  if (GetFlag(FLAGS_dev_env)) {
+  if (getenv("DFLY_DEV_ENV")) {
     LOG(WARNING) << "Running in dev environment (DFLY_DEV_ENV is set) - version monitoring is "
                     "disabled";
     return;
@@ -714,6 +712,13 @@ void PrintBasicUsageInfo() {
 }
 
 void ParseFlagsFromEnv() {
+  if (getenv("DFLY_PASSWORD")) {
+    LOG(WARNING)
+        << "DFLY_PASSWORD environment variable is being deprecated in favour of DFLY_requirepass";
+  }
+  // Allowed environment variable names that can have
+  // DFLY_ previx, but don't necessirily have an ABSL flag created
+  std::set<std::string_view> allowed_environment_flag_names = {"dev_env", "password"};
   const auto& flags = absl::GetAllFlags();
   for (char** env = environ; *env != nullptr; env++) {
     constexpr string_view kPrefix = "DFLY_";
@@ -721,10 +726,13 @@ void ParseFlagsFromEnv() {
     if (absl::StartsWith(environ_var, kPrefix)) {
       // Per 'man environ', environment variables are included with their values
       // in the format "name=value". Need to strip them apart, in order to work with flags object
-      pair<string_view, string_view> environ_pair =
-          absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), absl::MaxSplits('=', 1));
+      pair<string_view, string_view> environ_pair = absl::StrSplit(
+          absl::AsciiStrToLower(absl::StripPrefix(environ_var, kPrefix)), absl::MaxSplits('=', 1));
       const auto& [flag_name, flag_value] = environ_pair;
-      auto entry = flags.find(absl::AsciiStrToLower(flag_name));
+      if (allowed_environment_flag_names.find(flag_name) != allowed_environment_flag_names.end()) {
+        continue;
+      }
+      auto entry = flags.find(flag_name);
       if (entry != flags.end()) {
         if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {
           continue;

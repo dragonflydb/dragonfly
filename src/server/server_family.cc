@@ -89,10 +89,6 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "Specifies a host and port which point to a target master "
           "to replicate. "
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
-// Need this to remove the old dependency on DFLY_PASSWORD env var
-ABSL_FLAG(string, password, "",
-          "Same as `requirepass`, but has lower precedence. Whenever both are specified, value "
-          "will be taken from `requirepass`");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -961,14 +957,14 @@ bool ServerFamily::AwaitDispatches(absl::Duration timeout,
 }
 
 string GetPassword() {
-  string requirepass_flag = GetFlag(FLAGS_requirepass);
-  if (!requirepass_flag.empty()) {
-    return requirepass_flag;
+  string flag = GetFlag(FLAGS_requirepass);
+  if (!flag.empty()) {
+    return flag;
   }
 
-  string password_flag = GetFlag(FLAGS_password);
-  if (!password_flag.empty()) {
-    return password_flag;
+  const char* env_var = getenv("DFLY_PASSWORD");
+  if (env_var) {
+    return env_var;
   }
 
   return "";
