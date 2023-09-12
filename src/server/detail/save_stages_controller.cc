@@ -6,20 +6,14 @@
 #include "server/detail/save_stages_controller.h"
 
 #include <absl/strings/match.h>
-#include <absl/strings/str_replace.h>
-#include <absl/strings/strip.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "io/file_util.h"
 #include "server/main_service.h"
 #include "server/script_mgr.h"
 #include "server/search/doc_index.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
-#include "util/cloud/s3.h"
-#include "util/fibers/fiber_file.h"
-#include "util/uring/uring_file.h"
 
 using namespace std;
 
@@ -38,37 +32,12 @@ namespace fs = std::filesystem;
 
 namespace {
 
-const size_t kBucketConnectMs = 2000;
-
-#ifdef __linux__
-const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
-#endif
-
-constexpr string_view kS3Prefix = "s3://"sv;
-
 bool IsCloudPath(string_view path) {
   return absl::StartsWith(path, kS3Prefix);
 }
 
-// Returns bucket_name, obj_path for an s3 path.
-optional<pair<string, string>> GetBucketPath(string_view path) {
-  string_view clean = absl::StripPrefix(path, kS3Prefix);
-
-  size_t pos = clean.find('/');
-  if (pos == string_view::npos)
-    return nullopt;
-
-  string bucket_name{clean.substr(0, pos)};
-  string obj_path{clean.substr(pos + 1)};
-  return make_pair(move(bucket_name), move(obj_path));
-}
-
 string FormatTs(absl::Time now) {
   return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
-}
-
-void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement) {
-  *filename = absl::StrReplaceAll(filename->string(), {{"{timestamp}", replacement}});
 }
 
 // Create a directory and all its parents if they don't exist.
@@ -92,32 +61,6 @@ void SetExtension(absl::AlphaNum postfix, string_view extension, fs::path* filen
 void ExtendDfsFilenameWithShard(int shard, string_view extension, fs::path* filename) {
   // dragonfly snapshot.
   SetExtension(absl::Dec(shard, absl::kZeroPad4), extension, filename);
-}
-
-// takes ownership over the file.
-class LinuxWriteWrapper : public io::Sink {
- public:
-  LinuxWriteWrapper(fb2::LinuxFile* lf) : lf_(lf) {
-  }
-
-  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final;
-
-  error_code Close() {
-    return lf_->Close();
-  }
-
- private:
-  unique_ptr<fb2::LinuxFile> lf_;
-  off_t offset_ = 0;
-};
-
-io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
-  io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
-  if (res) {
-    offset_ += *res;
-  }
-
-  return res;
 }
 
 }  // namespace
@@ -151,128 +94,21 @@ GenericError ValidateFilename(const fs::path& filename, bool new_version) {
   return {};
 }
 
-string InferLoadFile(string_view dir, cloud::AWS* aws) {
-  fs::path data_folder;
-  string bucket_name, obj_path;
-
-  if (dir.empty()) {
-    data_folder = fs::current_path();
-  } else {
-    if (IsCloudPath(dir)) {
-      CHECK(aws);
-      auto res = GetBucketPath(dir);
-      if (!res) {
-        LOG(ERROR) << "Invalid S3 path: " << dir;
-        return {};
-      }
-      data_folder = dir;
-      bucket_name = res->first;
-      obj_path = res->second;
-    } else {
-      error_code file_ec;
-      data_folder = fs::canonical(dir, file_ec);
-      if (file_ec) {
-        LOG(ERROR) << "Data directory error: " << file_ec.message() << " for dir " << dir;
-        return {};
-      }
-    }
-  }
-
-  LOG(INFO) << "Data directory is " << data_folder;
-
-  const auto& dbname = GetFlag(FLAGS_dbfilename);
-  if (dbname.empty())
-    return string{};
-
-  if (IsCloudPath(dir)) {
-    cloud::S3Bucket bucket(*aws, bucket_name);
-    ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-    auto ec = proactor->Await([&] { return bucket.Connect(kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Couldn't connect to S3 bucket: " << ec.message();
-      return {};
-    }
-
-    fs::path fl_path{obj_path};
-    fl_path.append(dbname);
-
-    LOG(INFO) << "Loading from s3 path s3://" << bucket_name << "/" << fl_path;
-    // TODO: to load from S3 file.
-    return {};
-  }
-
-  fs::path fl_path = data_folder.append(dbname);
-  if (fs::exists(fl_path))
-    return fl_path.generic_string();
-
-  SubstituteFilenameTsPlaceholder(&fl_path, "*");
-  if (!fl_path.has_extension()) {
-    fl_path += "*";
-  }
-  io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
-
-  if (short_vec) {
-    // io::StatFiles returns a list of sorted files. Because our timestamp format has the same
-    // time order and lexicographic order we iterate from the end to find the latest snapshot.
-    auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
-      return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
-    });
-    if (it != short_vec->rend())
-      return it->name;
-  } else {
-    LOG(WARNING) << "Could not stat " << fl_path << ", error " << short_vec.error().message();
-  }
-  return string{};
-}
-
 GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
                                 const RdbSaver::GlobalData& glob_data) {
-  bool is_direct = false;
   VLOG(1) << "Saving RDB " << path;
 
-  if (IsCloudPath(path)) {
-    DCHECK(aws_);
-
-    optional<pair<string, string>> bucket_path = GetBucketPath(path);
-    if (!bucket_path) {
-      return GenericError("Invalid S3 path");
-    }
-    auto [bucket_name, obj_path] = *bucket_path;
-
-    cloud::S3Bucket bucket(*aws_, bucket_name);
-    error_code ec = bucket.Connect(kBucketConnectMs);
-    if (ec) {
-      return GenericError(ec, "Couldn't connect to S3 bucket");
-    }
-    auto res = bucket.OpenWriteFile(obj_path);
-    if (!res) {
-      return GenericError(res.error(), "Couldn't open file for writing");
-    }
-    io_sink_.reset(*res);
-  } else {
-    if (fq_tp_) {  // EPOLL
-      auto res = util::OpenFiberWriteFile(path, fq_tp_);
-      if (!res)
-        return GenericError(res.error(), "Couldn't open file for writing");
-      io_sink_.reset(*res);
-    } else {
-#ifdef __linux__
-      auto res = OpenLinux(path, kRdbWriteFlags, 0666);
-      if (!res) {
-        return GenericError(
-            res.error(),
-            "Couldn't open file for writing (is direct I/O supported by the file system?)");
-      }
-      is_linux_file_ = true;
-      io_sink_.reset(new LinuxWriteWrapper(res->release()));
-      is_direct = kRdbWriteFlags & O_DIRECT;
-#else
-      LOG(FATAL) << "Linux I/O is not supported on this platform";
-#endif
-    }
+  auto res = snapshot_storage_->OpenWriteFile(path);
+  if (!res) {
+    return res.error();
   }
 
-  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, is_direct));
+  auto [file, file_type] = *res;
+  io_sink_.reset(file);
+
+  is_linux_file_ = file_type & FileType::IO_URING;
+
+  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, file_type | FileType::DIRECT));
 
   return saver_->SaveHeader(move(glob_data));
 }
@@ -431,7 +267,7 @@ GenericError SaveStagesController::InitResources() {
 
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
-    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, aws_->get());
+    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
   return {};
 }
 

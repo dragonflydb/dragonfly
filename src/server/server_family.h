@@ -27,6 +27,12 @@ class AWS;
 
 namespace dfly {
 
+namespace detail {
+
+class SnapshotStorage;
+
+}  // namespace detail
+
 std::string GetPassword();
 
 namespace journal {
@@ -242,6 +248,7 @@ class ServerFamily {
   Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
   std::unique_ptr<util::cloud::AWS> aws_;
+  std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 };
 
 }  // namespace dfly

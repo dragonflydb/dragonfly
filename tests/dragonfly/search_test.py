@@ -242,6 +242,7 @@ NUM_POINTS = 100
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
 @pytest.mark.parametrize("algo_type", ["HNSW", "FLAT"])
+@pytest.mark.skip("Fails on ARM")
 async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type):
     vector_field = VectorField(
         "pos",

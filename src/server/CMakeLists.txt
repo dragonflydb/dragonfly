@@ -35,6 +35,7 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             detail/save_stages_controller.cc
+            detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -88,6 +89,3 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  redis_parser_test snapshot_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test hll_family_test
                  cluster_config_test cluster_family_test user_registry_test acl_family_test)
-
-configure_file(acl/test/wrong.acl ${CMAKE_BINARY_DIR}/wrong.acl COPYONLY)
-configure_file(acl/test/ok.acl ${CMAKE_BINARY_DIR}/ok.acl COPYONLY)

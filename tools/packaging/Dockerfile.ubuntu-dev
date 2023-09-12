@@ -11,8 +11,8 @@ RUN \
   export DEBIAN_FRONTEND=noninteractive && \
   apt update && \
   apt install -q -y autoconf-archive cmake curl git libssl-dev \
-  libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-fiber-dev \
-  libxml2-dev zip libzstd-dev bison
+  libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-context-dev \
+  zip libzstd-dev bison
 
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
   --slave   /usr/bin/g++ g++ /usr/bin/g++-9
