@@ -85,8 +85,8 @@ io::ReadonlyFileOrError FileSnapshotStorage::OpenReadFile(const std::string& pat
 #endif
 }
 
-io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(
-    const std::string_view& dir, const std::string_view& dbfilename) {
+io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(std::string_view dir,
+                                                                    std::string_view dbfilename) {
   if (dbfilename.empty())
     return "";
 
@@ -212,8 +212,8 @@ io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& pa
   return res;
 }
 
-io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(
-    const std::string_view& dir, const std::string_view& dbfilename) {
+io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string_view dir,
+                                                                     std::string_view dbfilename) {
   if (dbfilename.empty())
     return "";
 
@@ -312,7 +312,7 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPat
 }
 
 io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObjects(
-    const std::string& bucket_name, const std::string& prefix) {
+    std::string_view bucket_name, std::string_view prefix) {
   util::cloud::S3Bucket bucket(*aws_, bucket_name);
   std::error_code ec = bucket.Connect(kBucketConnectMs);
   if (ec) {

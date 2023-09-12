@@ -42,8 +42,8 @@ class SnapshotStorage {
   virtual io::ReadonlyFileOrError OpenReadFile(const std::string& path) = 0;
 
   // Returns the path of the RDB file or DFS summary file to load.
-  virtual io::Result<std::string, GenericError> LoadPath(const std::string_view& dir,
-                                                         const std::string_view& dbfilename) = 0;
+  virtual io::Result<std::string, GenericError> LoadPath(std::string_view dir,
+                                                         std::string_view dbfilename) = 0;
 
   // Returns the snapshot paths given the RDB file or DFS summary file path.
   virtual io::Result<std::vector<std::string>, GenericError> LoadPaths(
@@ -59,8 +59,8 @@ class FileSnapshotStorage : public SnapshotStorage {
 
   io::ReadonlyFileOrError OpenReadFile(const std::string& path) override;
 
-  io::Result<std::string, GenericError> LoadPath(const std::string_view& dir,
-                                                 const std::string_view& dbfilename) override;
+  io::Result<std::string, GenericError> LoadPath(std::string_view dir,
+                                                 std::string_view dbfilename) override;
 
   io::Result<std::vector<std::string>, GenericError> LoadPaths(
       const std::string& load_path) override;
@@ -78,8 +78,8 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
   io::ReadonlyFileOrError OpenReadFile(const std::string& path) override;
 
-  io::Result<std::string, GenericError> LoadPath(const std::string_view& dir,
-                                                 const std::string_view& dbfilename) override;
+  io::Result<std::string, GenericError> LoadPath(std::string_view dir,
+                                                 std::string_view dbfilename) override;
 
   io::Result<std::vector<std::string>, GenericError> LoadPaths(
       const std::string& load_path) override;
@@ -87,8 +87,8 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
  private:
   // List the objects in the given bucket with the given prefix. This must
   // run from a proactor.
-  io::Result<std::vector<std::string>, GenericError> ListObjects(const std::string& bucket_name,
-                                                                 const std::string& prefix);
+  io::Result<std::vector<std::string>, GenericError> ListObjects(std::string_view bucket_name,
+                                                                 std::string_view prefix);
 
   util::cloud::AWS* aws_;
 };
