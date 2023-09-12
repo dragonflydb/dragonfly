@@ -152,7 +152,7 @@ void BaseFamilyTest::SetUpTestSuite() {
       "force_epoll",
   };
   for (string_view flag : kEnvFlags) {
-    const char* value = getenv(absl::StrCat("FLAGS_", flag).data());
+    const char* value = getenv(absl::StrCat("DFLY_", flag).data());
     if (value != nullptr) {
       SetTestFlag(flag, value);
     }

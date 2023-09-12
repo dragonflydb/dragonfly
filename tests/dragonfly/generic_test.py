@@ -92,19 +92,21 @@ async def test_arg_from_environ_overwritten_by_cli(df_local_factory):
     dfly.start()
     client = aioredis.Redis(port="6377")
     await client.ping()
+    dfly.stop()
+    del os.environ["DFLY_port"]
 
 
-async def test_arg_from_environ(df_local_factory, export_dfly_password):
-    os.environ["DFLY_requirepass"] = "true"
+async def test_arg_from_environ(df_local_factory):
+    os.environ["DFLY_requirepass"] = "pass"
     dfly = df_local_factory.create()
     dfly.start()
 
-    # Expect password form environment variable
+    # Expect password from environment variable
     with pytest.raises(redis.exceptions.AuthenticationError):
         client = aioredis.Redis()
         await client.ping()
 
-    client = aioredis.Redis(password=export_dfly_password)
+    client = aioredis.Redis(password="pass")
     await client.ping()
     dfly.stop()
 

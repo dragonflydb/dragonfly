@@ -9,7 +9,9 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <absl/flags/internal/commandlineflag.h>
 #include <absl/flags/parse.h>
+#include <absl/flags/reflection.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
@@ -51,6 +53,13 @@
 // Note that SOURCE_PATH_FROM_BUILD_ENV is taken from the build system
 #define BUILD_LOCATION_PATH STRING_MAKE_PP(SOURCE_PATH_FROM_BUILD_ENV)
 
+#ifdef __APPLE__
+#include <crt_externs.h>
+#define environ (*_NSGetEnviron())
+#else
+extern char** environ;
+#endif
+
 using namespace std;
 
 ABSL_DECLARE_FLAG(uint32_t, port);
@@ -72,6 +81,8 @@ ABSL_FLAG(bool, force_epoll, false,
 
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
+
+ABSL_FLAG(bool, dev_env, false, "Disabled flag for running in dev environment.");
 
 using namespace util;
 using namespace facade;
@@ -219,7 +230,7 @@ bool VersionMonitor::IsVersionOutdated(const std::string_view remote,
 
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
   // Avoid running dev environments.
-  if (getenv("DFLY_DEV_ENV")) {
+  if (GetFlag(FLAGS_dev_env)) {
     LOG(WARNING) << "Running in dev environment (DFLY_DEV_ENV is set) - version monitoring is "
                     "disabled";
     return;
@@ -702,8 +713,6 @@ void PrintBasicUsageInfo() {
   std::cout << endl;
 }
 
-extern char** environ;
-
 void ParseFlagsFromEnv() {
   const auto& flags = absl::GetAllFlags();
   for (char** env = environ; *env != nullptr; env++) {
@@ -713,18 +722,15 @@ void ParseFlagsFromEnv() {
       // Per 'man environ', environment variables are included with their values
       // in the format "name=value". Need to strip them apart, in order to work with flags object
       pair<string_view, string_view> environ_pair =
-          absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), '=');
+          absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), absl::MaxSplits('=', 1));
       const auto& [flag_name, flag_value] = environ_pair;
-      const auto& entry = flags.find(flag_name);
+      auto entry = flags.find(absl::AsciiStrToLower(flag_name));
       if (entry != flags.end()) {
         if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {
-          // If already specified in the command line, then just ignore it.
-          // There's an alternative, non-internal method `IsSpecifiedOnCommandLine`
-          // within `flag` object, but it's deprecated.
           continue;
         }
-        auto& flag = entry->second;
         string error;
+        auto& flag = entry->second;
         bool success = flag->ParseFrom(flag_value, &error);
         if (!success) {
           LOG(FATAL) << "could not parse flag " << flag->Name()
