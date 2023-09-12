@@ -1597,11 +1597,13 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     cntx->transaction = stub_tx.get();
     tx->PrepareSquashedMultiHop(registry_.Find("EVAL"), [&](ShardId id) { return id == *sid; });
     tx->ScheduleSingleHop([&](Transaction* tx, EngineShard*) {
+      ++ServerState::tlocal()->stats.eval_remote_coordination;
       result = interpreter->RunFunction(eval_args.sha, &error);
       return OpStatus::OK;
     });
     cntx->transaction = tx;
   } else {
+    ++ServerState::tlocal()->stats.eval_local_coordination;
     interpreter->SetRedisFunc(
         [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
     result = interpreter->RunFunction(eval_args.sha, &error);
