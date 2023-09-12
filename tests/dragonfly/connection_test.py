@@ -64,7 +64,6 @@ Test MONITOR command with basic use case
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4})
 async def test_monitor_command(async_pool):
-    assert 1 == 2
     monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
     await monitor.start()
 
