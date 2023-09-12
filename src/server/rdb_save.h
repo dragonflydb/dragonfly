@@ -188,7 +188,6 @@ class RdbSerializer {
   void AllocateCompressorOnce();
 
   base::IoBuf mem_buf_;
-  base::IoBuf journal_mem_buf_;
   std::string tmp_str_;
   base::PODArray<uint8_t> tmp_buf_;
   DbIndex last_entry_db_index_ = kInvalidDbId;

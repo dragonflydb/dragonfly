@@ -154,7 +154,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
 
     item->data = io::View(ring_serialize_buf_.InputBuffer());
     ring_serialize_buf_.Clear();
-    VLOG(1) << "Writing item [" << item->lsn << "]: " << entry.ToString();
+    VLOG(2) << "Writing item [" << item->lsn << "]: " << entry.ToString();
   }
 
 #if 0
