@@ -696,7 +696,12 @@ void Connection::OnBreakCb(int32_t mask) {
     return;  // we cancelled the poller, which means we do not need to break from anything.
 
   VLOG(1) << "Got event " << mask;
-  CHECK(cc_);
+
+  if (!cc_) {
+    LOG(ERROR) << "Unexpected event " << mask << " " << break_poll_id_;
+    return;
+  }
+
   cc_->conn_closing = true;
   break_poll_id_ = UINT32_MAX;  // do not attempt to cancel it.
 
