@@ -284,32 +284,27 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   flow.version = replica_ptr->version;
 
   cntx->owner()->Migrate(shard_set->pool()->at(flow_id));
+  sf_->journal()->StartInThread();
 
-  shard_set->pool()->at(flow_id)->Await([this, seqid, &flow, eof_token]() {
-    sf_->journal()->StartInThread();
-
-    std::string_view sync_type = "FULL";
-
-    if (seqid.has_value()) {
-      if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
-        flow.start_partial_sync_at = *seqid;
-        VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-                << " and is available.";
-        sync_type = "PARTIAL";
-      } else {
-        LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
-                  << " that the replication buffer doesn't contain this anymore (current_lsn="
-                  << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
-        LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-                     "--shard_repl_backlog_len option";
-      }
+  std::string_view sync_type = "FULL";
+  if (seqid.has_value()) {
+    if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
+      flow.start_partial_sync_at = *seqid;
+      VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+              << " and is available.";
+      sync_type = "PARTIAL";
+    } else {
+      LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
+                << " that the replication buffer doesn't contain this anymore (current_lsn="
+                << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+      LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+                   "--shard_repl_backlog_len option";
     }
+  }
 
-    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(flow.conn->cntx()->reply_builder());
-    rb->StartArray(2);
-    rb->SendSimpleString(sync_type);
-    rb->SendSimpleString(eof_token);
-  });
+  rb->StartArray(2);
+  rb->SendSimpleString(sync_type);
+  rb->SendSimpleString(eof_token);
 }
 
 void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
