@@ -54,13 +54,14 @@ jobs:
         # Mount the artifacts directory as /artifacts in the container
         dockerRunArgs: |
           --volume "${{ github.workspace }}:/src"
+
         # The shell to run commands with in the container
         shell: /bin/bash
         install: |
           export DEBIAN_FRONTEND=noninteractive
           apt update && apt install -q -y autoconf-archive cmake curl git libssl-dev \
-              libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-fiber-dev \
-              libxml2-dev zip libzstd-dev debhelper moreutils bison
+              libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-context-dev \
+              zip libzstd-dev debhelper moreutils bison zlib1g-dev
           update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
                               --slave /usr/bin/g++ g++ /usr/bin/g++-9
         run: |
@@ -96,15 +97,25 @@ jobs:
   build-native:
     runs-on: ubuntu-latest
     needs: create-release
+    strategy:
+      matrix:
+        include:
+          # Build with these flags
+          - name: debian
+            container: ubuntu-dev:20
+          - name: rpm
+            container: fedora:30
     container:
-      image: ghcr.io/romange/ubuntu-dev:20
+      image: ghcr.io/romange/${{ matrix.container }}
     steps:
     - uses: actions/checkout@v3
       with:
         submodules: true
     - name: Configure
       run: |
-          apt update && apt install -y debhelper moreutils pip jq
+          if [ -f /etc/redhat-release ]; then
+            dnf install -y rpm-build libstdc++-static
+          fi
     - name: Build artifacts
       run: |
           # Work around https://github.com/actions/checkout/issues/766
@@ -112,8 +123,15 @@ jobs:
           git describe --always --tags ${{ github.sha }}
           ./tools/release.sh
           # once the build is over, we want to generate a Debian package
-          ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
+          if [ -f /etc/debian_version ]; then
+            ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
+          else
+            echo "TODO: build rpm"
+          fi
+
     - name: Run regression tests
+      # Fedora 30 has older python packages, so this fails during requirements installation.
+      if  : matrix.container != 'fedora:30'
       uses: ./.github/actions/regression-tests
       with:
         dfly-executable: dragonfly-x86_64
@@ -121,12 +139,19 @@ jobs:
         run-only-on-ubuntu-latest: false
         build-folder-name: build-opt
     - name: Save artifacts
+      if  : matrix.container != 'fedora:30' # TODO
       run: |
           # place all artifacts at the same location
           mkdir -p results-artifacts
-          mv build-opt/dragonfly-*tar.gz results-artifacts
-          mv dragonfly_*.deb results-artifacts
+          if [ -f /etc/debian_version ]; then
+            mv build-opt/dragonfly-*tar.gz results-artifacts
+            mv dragonfly_*.deb results-artifacts
+          else
+            echo "TODO: upload rpm"
+            ls *.rpm
+          fi
     - name: Upload
+      if  : matrix.container != 'fedora:30' # TODO
       uses: actions/upload-artifact@v3
       with:
         name: dragonfly-amd64

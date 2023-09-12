@@ -89,6 +89,3 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  redis_parser_test snapshot_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test hll_family_test
                  cluster_config_test cluster_family_test user_registry_test)
-
-configure_file(acl/test/wrong.acl ${CMAKE_BINARY_DIR}/wrong.acl COPYONLY)
-configure_file(acl/test/ok.acl ${CMAKE_BINARY_DIR}/ok.acl COPYONLY)
