@@ -34,7 +34,7 @@ class User final {
 
     bool is_hashed{false};
 
-    using CommandsUpdateType = std::vector<std::tuple<Sign, size_t, uint32_t>>;
+    using CommandsUpdateType = std::vector<std::tuple<Sign, size_t, uint64_t>>;
     CommandsUpdateType commands;
   };
 
