@@ -63,6 +63,15 @@ async def test_connection_name(async_client: aioredis.Redis):
     assert name == "test_conn_name"
 
 
+async def test_get_databases(async_client: aioredis.Redis):
+    """
+    make sure that the config get databases command is working
+    to ensure compatibility with UI frameworks like AnotherRedisDesktopManager
+    """
+    dbnum = await async_client.config_get("databases")
+    assert dbnum == {"databases": "16"}
+
+
 async def test_client_list(df_factory):
     instance = df_factory.create(port=1111, admin_port=1112)
     instance.start()

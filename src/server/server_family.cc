@@ -1101,16 +1101,21 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "GET" && args.size() == 2) {
-    // Send empty response, like Redis does, unless the param is supported
-
-    string_view param = ArgS(args, 1);
-    vector<string> names = config_registry.List(param);
     vector<string> res;
+    string_view param = ArgS(args, 1);
 
-    for (const auto& name : names) {
-      absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
-      res.push_back(name);
-      res.push_back(flag->CurrentValue());
+    // Support 'databases' for backward compatibility.
+    if (param == "databases") {
+      res.emplace_back(param);
+      res.push_back(absl::StrCat(absl::GetFlag(FLAGS_dbnum)));
+    } else {
+      vector<string> names = config_registry.List(param);
+
+      for (const auto& name : names) {
+        absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
+        res.push_back(name);
+        res.push_back(flag->CurrentValue());
+      }
     }
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
