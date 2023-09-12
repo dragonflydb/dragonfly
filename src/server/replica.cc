@@ -292,7 +292,7 @@ std::error_code Replica::HandleCapaDflyResp() {
 
   // If we're syncing a different replication ID, drop the saved LSNs.
   if (master_context_.master_repl_id != ToSV(LastResponseArgs()[0].GetBuf())) {
-    last_journal_LSNs_.clear();
+    last_journal_LSNs_.reset();
   }
   master_context_.master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
   master_context_.dfly_session_id = ToSV(LastResponseArgs()[1].GetBuf());
@@ -463,8 +463,9 @@ error_code Replica::InitiateDflySync() {
     auto partition = Partition(num_df_flows_);
     auto shard_cb = [&](unsigned index, auto*) {
       for (auto id : partition[index]) {
-        auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &cntx_, last_journal_LSNs_,
-                                                  is_full_sync.get()[id]);
+        auto ec = shard_flows_[id]->StartSyncFlow(
+            sync_block, &cntx_, last_journal_LSNs_.has_value() ? &*last_journal_LSNs_ : nullptr,
+            is_full_sync.get()[id]);
         if (ec)
           cntx_.ReportError(ec);
       }
@@ -485,7 +486,7 @@ error_code Replica::InitiateDflySync() {
     if (all) {
       JournalExecutor{&service_}.FlushAll();
     } else if (any) {
-      last_journal_LSNs_.clear();
+      last_journal_LSNs_.reset();
       cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
                         "Won't do a partial sync: some flows must fully resync");
     } else {
@@ -622,10 +623,10 @@ error_code Replica::ConsumeDflyStream() {
 }
 
 void Replica::JoinAllFlows() {
-  last_journal_LSNs_.clear();
+  last_journal_LSNs_.emplace();
   for (auto& flow : shard_flows_) {
     flow->JoinFlow();
-    last_journal_LSNs_.push_back(flow->JournalExecutedCount());
+    last_journal_LSNs_->push_back(flow->JournalExecutedCount());
   }
 }
 
@@ -650,7 +651,7 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
 }
 
 std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cntx,
-                                                std::vector<LSN>& lsns, bool& is_full_sync) {
+                                                std::vector<LSN>* lsns, bool& is_full_sync) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
   RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
@@ -661,8 +662,9 @@ std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cnt
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                            master_context_.dfly_session_id, " ", flow_id_);
   // Try to negotiate a partial sync if possible.
-  if (lsns.size() > flow_id_ && master_context_.version > DflyVersion::VER1) {
-    absl::StrAppend(&cmd, " ", lsns[flow_id_]);
+  if (lsns && master_context_.version > DflyVersion::VER1) {
+    CHECK(flow_id_ < lsns->size());
+    absl::StrAppend(&cmd, " ", (*lsns)[flow_id_]);
   }
 
   ResetParser(/*server_mode=*/false);

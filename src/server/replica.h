@@ -164,7 +164,9 @@ class Replica : ProtocolClient {
   EventCount waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
-  std::vector<LSN> last_journal_LSNs_ = {};
+  // A vector of the last executer LSNs when a replication is interrupted.
+  // Allows partial sync on reconnects.
+  std::optional<std::vector<LSN>> last_journal_LSNs_;
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)
@@ -223,7 +225,7 @@ class DflyShardReplica : public ProtocolClient {
 
   // Start replica initialized as dfly flow.
   // Sets is_full_sync when successful.
-  std::error_code StartSyncFlow(BlockingCounter block, Context* cntx, std::vector<LSN>&,
+  std::error_code StartSyncFlow(BlockingCounter block, Context* cntx, std::vector<LSN>* lsns,
                                 bool& is_full_sync);
 
   // Transition into stable state mode as dfly flow.
