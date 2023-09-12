@@ -1360,9 +1360,10 @@ void ListFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bu
       << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, 1, acl::kLMove}.HFUNC(LMove)
       << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1, acl::kBLMove}
              .SetHandler(BLMove);
-  builder | "LPUSH" | "LPUSHX" | "LPOP" | "RPUSH" | "RPUSHX" | "RPOPR" | "RPOPLPUSH" |
-      "BRPOPLPUSH" | "BLPOP" | "BRPOP" | "LLEN" | "LPOS" | "LPINDEX" | "LINSERT" | "LRANGE" |
-      "LSET" | "LTRIM" | "LREM" | "LMOVE" | "BLMOVE";
+
+  builder | "LPUSH" | "LPUSHX" | "LPOP" | "RPUSH" | "RPUSHX" | "RPOP" | "RPOPLPUSH" | "BRPOPLPUSH" |
+      "BLPOP" | "BRPOP" | "LLEN" | "LPOS" | "LPINDEX" | "LINSERT" | "LRANGE" | "LSET" | "LTRIM" |
+      "LREM" | "LMOVE" | "BLMOVE";
 }
 
 }  // namespace dfly

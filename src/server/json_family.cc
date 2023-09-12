@@ -1826,10 +1826,10 @@ void JsonFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bu
   *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(
       Set);
   builder | "JSON.GET" | "JSON.MGET" | "JSON.TYPE" | "JSON.STRLEN" | "JSON.OBJLEN" | "JSON.ARRLEN" |
-      "JSON.TOGGLE" | "JSON.NUMINCRBY" | "JSON.DEL" | "JSON.FORGET" | "JSON.OBJKEYS" |
-      "JSON.STRAPPEND" | "JSON.CLEAR" | "JSON.ARRPOP" | "JSON.ARRTRIM" | "JSON.ARRTRIM" |
-      "JSON.ARRINSERT" | "JSON.ARRAPPEND" | "JSON.ARRINDEX" | "JSON.DEBUG" | "JSON.RESP" |
-      "JSON.SET";
+      "JSON.TOGGLE" | "JSON.NUMINCRBY" | "JSON.NUMMULTBY" | "JSON.DEL" | "JSON.FORGET" |
+      "JSON.OBJKEYS" | "JSON.STRAPPEND" | "JSON.CLEAR" | "JSON.ARRPOP" | "JSON.ARRTRIM" |
+      "JSON.ARRTRIM" | "JSON.ARRINSERT" | "JSON.ARRAPPEND" | "JSON.ARRINDEX" | "JSON.DEBUG" |
+      "JSON.RESP" | "JSON.SET";
 }
 
 }  // namespace dfly

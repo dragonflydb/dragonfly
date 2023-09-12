@@ -1604,8 +1604,8 @@ void SetFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bui
              .HFUNC(SUnionStore)
       << CI{"SSCAN", CO::READONLY, -3, 1, 1, 1, acl::kSScan}.HFUNC(SScan);
 
-  builder | "SADD" | "SDIFF" | "SINTER" | "SINTERSTORE" | "SMEMBERS" | "SISMEMBER" | "SMISMEMBER" |
-      "SMOVE" | "SREM" | "SCARD" | "SPOP" | "SUNION" | "SUNIONSTORE" | "SSCAN";
+  builder | "SADD" | "SDIFF" | "SDIFFSTORE" | "SINTER" | "SINTERSTORE" | "SMEMBERS" | "SISMEMBER" |
+      "SMISMEMBER" | "SMOVE" | "SREM" | "SCARD" | "SPOP" | "SUNION" | "SUNIONSTORE" | "SSCAN";
 
   if (absl::GetFlag(FLAGS_use_set2)) {
     *registry << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kSAdd}.HFUNC(

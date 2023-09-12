@@ -1507,7 +1507,7 @@ void GenericFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder
 
   builder | "DEL" | "PING" | "ECHO" | "EXISTS" | "TOUCH" | "EXPIRE" | "EXPIREAT" | "PERSIST" |
       "KEYS" | "PEXPIREAT" | "PEXPIRE" | "RENAME" | "RENAMENX" | "SELECT" | "SCAN" | "TTL" |
-      "PTTL" | "TIME" | "TYPE" | "DUMP" | "UNLINK" | "STICK" | "MOVE" | "RESTORE";
+      "PTTL" | "TIME" | "TYPE" | "DUMP" | "UNLINK" | "STICK" | "SORT" | "MOVE" | "RESTORE";
 }
 
 }  // namespace dfly

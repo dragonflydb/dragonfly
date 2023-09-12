@@ -1162,8 +1162,9 @@ void HSetFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bu
       << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kHStrLen}.HFUNC(HStrLen)
       << CI{"HVALS", CO::READONLY, 2, 1, 1, 1, acl::kHVals}.HFUNC(HVals);
 
-  builder | "HDEL" | "HLEN" | "HGET" | "HGETALL" | "HMGET" | "HMSET" | "HINCRBY" | "HINCRBYFLOAT" |
-      "HKEYS" | "HRANDFIELD" | "HSCAN" | "HSET" | "HSETEX" | "HSETNX" | "HSTRLEN" | "HVALS";
+  builder | "HDEL" | "HLEN" | "HEXISTS" | "HGET" | "HGETALL" | "HMGET" | "HMSET" | "HINCRBY" |
+      "HINCRBYFLOAT" | "HKEYS" | "HRANDFIELD" | "HSCAN" | "HSET" | "HSETEX" | "HSETNX" | "HSTRLEN" |
+      "HVALS";
 }
 
 uint32_t HSetFamily::MaxListPackLen() {
