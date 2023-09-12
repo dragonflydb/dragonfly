@@ -1582,32 +1582,28 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
-  interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
 
   Interpreter::RunResult result;
   optional<ShardId> sid = GetRemoteShardToRunAt(*tx);
-  if (sid.has_value()) {
+  if (tx->GetMultiMode() != Transaction::NON_ATOMIC && sid.has_value()) {
     // If script runs on a single shard, we run it remotely to save hops.
-    // cntx->transaction->ScheduleRemoteCoordination(
-    //    [&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
-    LOG(ERROR) << "XXX switching cmd";
-    // tx->MultiSwitchCmd(registry_.Find("EVAL"));
+    interpreter->SetRedisFunc([cntx, this](Interpreter::CallArgs args) {
+      // Disable squashing, as we're using the squashing mechanism to run remotely.
+      args.async = false;
+      CallFromScript(cntx, args);
+    });
+
+    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{cntx->transaction};
+    cntx->transaction = stub_tx.get();
     tx->PrepareSquashedMultiHop(registry_.Find("EVAL"), [&](ShardId id) { return id == *sid; });
-    LOG(ERROR) << "XXX scheduling hop on " << *sid;
     tx->ScheduleSingleHop([&](Transaction* tx, EngineShard*) {
-      LOG(ERROR) << "XXX setting role";
-      Transaction::MultiRole current_role = tx->GetMultiRole();
-      tx->SetMultiRole(Transaction::MultiRole::SQUASHED_STUB);
-      LOG(ERROR) << "XXX running lua";
-      tx->KillCbPtr();
       result = interpreter->RunFunction(eval_args.sha, &error);
-      LOG(ERROR) << "XXX done running lua";
-      tx->SetMultiRole(current_role);
       return OpStatus::OK;
     });
-    // tx->KillRunCount();
-    // tx->UnlockMulti();
+    cntx->transaction = tx;
   } else {
+    interpreter->SetRedisFunc(
+        [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
     result = interpreter->RunFunction(eval_args.sha, &error);
   }
   absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
