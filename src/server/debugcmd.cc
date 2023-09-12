@@ -241,7 +241,7 @@ void DebugCmd::Run(CmdArgList args) {
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
-        "    If SLOTS is specified then create keys only in given slots range."
+        "    If SLOTS is specified then create keys only in given slots range.",
         "OBJHIST",
         "    Prints histogram of object sizes.",
         "STACKTRACE",
