@@ -3,6 +3,7 @@ import redis
 from redis import asyncio as aioredis
 from . import DflyInstanceFactory
 from .utility import disconnect_clients
+import tempfile
 import asyncio
 import os
 from . import dfly_args
@@ -229,11 +230,19 @@ async def test_acl_with_long_running_script(df_server):
     await admin_client.close()
 
 
+def create_temp_file(content, tmp_dir):
+    file = tempfile.NamedTemporaryFile(mode="w", dir=tmp_dir, delete=False)
+    acl = os.path.join(tmp_dir, file.name)
+    file.write(content)
+    file.flush()
+    return acl
+
+
 @pytest.mark.asyncio
 @dfly_args({"port": 1111})
-async def test_bad_acl_file(df_local_factory):
-    path = df_local_factory.params.path
-    acl = os.path.join(os.path.dirname(path), "wrong.acl")
+async def test_bad_acl_file(df_local_factory, tmp_dir):
+    acl = create_temp_file("ACL SETUSER kostas ON >mypass +@WRONG", tmp_dir)
+
     df = df_local_factory.create(aclfile=acl)
 
     df.start()
@@ -248,9 +257,8 @@ async def test_bad_acl_file(df_local_factory):
 
 @pytest.mark.asyncio
 @dfly_args({"port": 1111})
-async def test_good_acl_file(df_local_factory):
-    path = df_local_factory.params.path
-    acl = os.path.join(os.path.dirname(path), "ok.acl")
+async def test_good_acl_file(df_local_factory, tmp_dir):
+    acl = create_temp_file("", tmp_dir)
     df = df_local_factory.create(aclfile=acl)
 
     df.start()
