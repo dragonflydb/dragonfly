@@ -514,8 +514,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   // Shard can be null for io thread.
   if (shard != nullptr) {
     if (flow->start_partial_sync_at.has_value())
-      flow->saver->StartIncrementalSnapshotInShard(cntx->GetCancellation(), shard,
-                                                   *flow->start_partial_sync_at);
+      flow->saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
     else
       flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
@@ -568,7 +567,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
       // Always send original body (with header & without auto async calls) that determines the sha,
       // It's stored only if it's different from the post-processed version.
       string& body = data.orig_body.empty() ? data.body : data.orig_body;
-      script_bodies.push_back(move(body));
+      script_bodies.push_back(std::move(body));
     }
     ec = saver->SaveHeader({script_bodies, {}});
   } else {
@@ -580,7 +579,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
     return;
   }
 
-  if (ec = saver->SaveBody(cntx->GetCancellation(), nullptr); ec) {
+  if (ec = saver->SaveBody(cntx, nullptr); ec) {
     cntx->ReportError(ec);
     return;
   }

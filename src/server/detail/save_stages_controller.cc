@@ -126,7 +126,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, &cll_, shard);
+  saver_->StartSnapshotInShard(false, cll_.GetCancellation(), shard);
   started_ = true;
 }
 

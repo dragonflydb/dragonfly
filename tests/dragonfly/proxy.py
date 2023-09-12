@@ -37,7 +37,7 @@ class Proxy:
 
         try:
             await asyncio.gather(task1, task2)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, ConnectionResetError):
             pass
         finally:
             cleanup()

@@ -61,18 +61,18 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   });
 }
 
-void SliceSnapshot::StartIncremental(const Cancellation* cll, LSN start_lsn) {
+void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
   auto* journal = db_slice_->shard_owner()->journal();
   DCHECK(journal);
 
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
   snapshot_fb_ =
-      fb2::Fiber("incremental_snapshot", [this, journal, cll, lsn = start_lsn]() mutable {
+      fb2::Fiber("incremental_snapshot", [this, journal, cntx, lsn = start_lsn]() mutable {
         // The LSN we get from the replica is the last entry that
         // was processed, so no need to send it.
         lsn++;
-        while (!cll->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+        while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
           // TODO: Should we send multiple entries together?
           serializer_->WriteJournalEntry(journal->GetEntry(lsn));
           PushSerializedToChannel(false);
@@ -95,6 +95,8 @@ void SliceSnapshot::StartIncremental(const Cancellation* cll, LSN start_lsn) {
           PushSerializedToChannel(true);
         } else {
           // We stopped but we didn't manage to send the whole stream.
+          cntx->ReportError(std::make_error_code(errc::state_not_recoverable),
+                            "Partial sync was not successful");
           Cancel();
         }
       });

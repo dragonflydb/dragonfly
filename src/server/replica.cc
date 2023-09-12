@@ -456,7 +456,7 @@ error_code Replica::InitiateDflySync() {
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
-  bool partial_sync = false;
+  std::string_view sync_type = "full";
   {
     // Going out of the way to avoid using std::vector<bool>...
     auto is_full_sync = std::make_unique<bool[]>(num_df_flows_);
@@ -489,7 +489,7 @@ error_code Replica::InitiateDflySync() {
       cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
                         "Won't do a partial sync: some flows must fully resync");
     } else {
-      partial_sync = true;
+      sync_type = "partial";
     }
   }
 
@@ -500,8 +500,7 @@ error_code Replica::InitiateDflySync() {
     return cntx_.ReportError(ec);
   }
 
-  LOG(INFO) << absl::StrCat("Started ", partial_sync ? "partial" : "full", " sync with ",
-                            server().Description());
+  LOG(INFO) << absl::StrCat("Started ", sync_type, " sync with ", server().Description());
 
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
@@ -520,7 +519,7 @@ error_code Replica::InitiateDflySync() {
   // Joining flows and resetting state is done by cleanup.
 
   double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time)) / 1000;
-  LOG(INFO) << "Full sync finished in " << strings::HumanReadableElapsedTime(seconds);
+  LOG(INFO) << sync_type << " sync finished in " << strings::HumanReadableElapsedTime(seconds);
   return cntx_.GetError();
 }
 
@@ -754,10 +753,13 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
     leftover_buf_.reset();
   }
 
-  if (master_context_.version > DflyVersion::VER0) {
-    CHECK(loader.journal_offset());
+  if (auto jo = loader.journal_offset(); jo.has_value()) {
+    this->journal_rec_executed_.store(*jo);
+  } else {
+    if (master_context_.version > DflyVersion::VER0)
+      cntx->ReportError(std::make_error_code(errc::protocol_error),
+                        "Error finding journal offset in stream");
   }
-  this->journal_rec_executed_.store(*loader.journal_offset());
   VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
 }
 

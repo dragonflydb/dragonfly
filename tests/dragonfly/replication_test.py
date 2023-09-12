@@ -1588,8 +1588,8 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
-    replica = df_local_factory.create(port=BASE_PORT)
-    master = df_local_factory.create(port=BASE_PORT + 1)
+    replica = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
+    master = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=4)
     seeder = df_seeder_factory.create(port=master.port)
 
     df_local_factory.start_all([replica, master])
