@@ -17,7 +17,6 @@ inputs:
     required: true
     type: string
 
-
 runs:
   using: "composite"
   # bring back timeouts once composite actions start supporting them
@@ -36,8 +35,6 @@ runs:
 
         pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
 
-
-
     - name: Run PyTests replication test
       if: ${{ inputs.run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
       shell: bash
@@ -50,10 +47,8 @@ runs:
         pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
         pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
 
-
-
     - name: Send notification on failure
-      if: failure()
+      if: failure() && github.ref == 'refs/heads/main'
       shell: bash
       run: |
         get_failed_tests() {
