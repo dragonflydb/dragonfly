@@ -135,7 +135,7 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  Future<std::error_code> Load(const std::string& file_name);
+  Future<GenericError> Load(const std::string& file_name);
 
   // used within tests.
   bool IsSaving() const {
@@ -220,7 +220,7 @@ class ServerFamily {
   void SnapshotScheduling();
 
   Fiber snapshot_schedule_fb_;
-  Future<std::error_code> load_result_;
+  Future<GenericError> load_result_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;
