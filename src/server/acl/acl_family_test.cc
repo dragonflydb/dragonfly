@@ -158,4 +158,31 @@ TEST_F(AclFamilyTest, TestAllCategories) {
   //  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL", "user kostas
   //  off nopass +@NONE"));
 }
+
+TEST_F(AclFamilyTest, TestAllCommands) {
+  TestInitAclFam();
+  const auto& rev_indexer = acl::CommandsRevIndexer();
+  for (const auto& family : rev_indexer) {
+    for (const auto& command_name : family) {
+      auto resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("+", command_name)});
+      EXPECT_THAT(resp, "OK");
+
+      resp = Run({"ACL", "LIST"});
+      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                                                      absl::StrCat("user kostas off nopass +@NONE ",
+                                                                   "+", command_name)));
+
+      resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-", command_name)});
+
+      resp = Run({"ACL", "LIST"});
+      EXPECT_THAT(resp.GetVec(),
+                  UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                                       absl::StrCat("user kostas off nopass ", "+@NONE")));
+
+      resp = Run({"ACL", "DELUSER", "kostas"});
+      EXPECT_THAT(resp, "OK");
+    }
+  }
+}
+
 }  // namespace dfly
