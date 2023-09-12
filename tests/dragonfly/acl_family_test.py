@@ -280,7 +280,6 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     result = await client.execute_command("ACL SAVE")
 
     result = await client.execute_command("ACL LOAD")
-    #    assert result == b"OK"
 
     result = await client.execute_command("ACL LIST")
     assert 2 == len(result)
