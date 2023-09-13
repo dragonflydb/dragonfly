@@ -4,6 +4,10 @@
 
 #include "facade/dragonfly_listener.h"
 
+#include <openssl/err.h>
+
+#include "facade/tls_error.h"
+
 #ifdef DFLY_USE_SSL
 #include <openssl/ssl.h>
 #endif
@@ -58,6 +62,7 @@ using absl::GetFlag;
 namespace {
 
 #ifdef DFLY_USE_SSL
+
 // To connect: openssl s_client -state -crlf -connect 127.0.0.1:6380
 SSL_CTX* CreateSslServerCntx() {
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
@@ -69,13 +74,13 @@ SSL_CTX* CreateSslServerCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
   unsigned mask = SSL_VERIFY_NONE;
 
-  CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+  DFLY_SSL_CHECK(1 == SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
   const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
 
   if (!tls_cert_file.empty()) {
     // TO connect with redis-cli you need both tls-key-file and tls-cert-file
     // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
-    CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+    DFLY_SSL_CHECK(1 == SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
   }
 
   const auto tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
@@ -83,11 +88,11 @@ SSL_CTX* CreateSslServerCntx() {
   if (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()) {
     const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
     const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
-    CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+    DFLY_SSL_CHECK(1 == SSL_CTX_load_verify_locations(ctx, file, dir));
     mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
   }
 
-  CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
+  DFLY_SSL_CHECK(1 == SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
 
   SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
@@ -95,7 +100,7 @@ SSL_CTX* CreateSslServerCntx() {
 
   SSL_CTX_set_verify(ctx, mask, NULL);
 
-  CHECK_EQ(1, SSL_CTX_set_dh_auto(ctx, 1));
+  DFLY_SSL_CHECK(1 == SSL_CTX_set_dh_auto(ctx, 1));
 
   return ctx;
 }
