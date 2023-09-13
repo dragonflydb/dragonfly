@@ -2572,8 +2572,9 @@ constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 }  // namespace acl
 
-void ZSetFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
+void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
+  registry->StartFamily();
   *registry
       << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
       << CI{"BZPOPMIN",
@@ -2630,12 +2631,6 @@ void ZSetFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bu
       << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
       << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1, acl::kGeoDist}.HFUNC(GeoDist);
-
-  builder | "ZADD" | "BZPOPMIN" | "BZPOPMAX" | "ZCARD" | "ZCOUNT" | "ZDIFF" | "ZINCRBY" |
-      "ZINTERSTORE" | "ZINTERCARD" | "ZLEXCOUNT" | "ZPOPMAX" | "ZPOPMIN" | "ZREM" | "ZRANGE" |
-      "ZRANK" | "ZRANGEBYLEX" | "ZRANGEBYSCORE" | "ZSCORE" | "ZMSCORE" | "ZREMRANGEBYRANK" |
-      "ZREMRANGEBYSCORE" | "ZREMRANGEBYLEX" | "ZREVRANGE" | "ZREVRANGEBYLEX" | "ZREVRANGEBYSCORE" |
-      "ZREVRANK" | "ZSCAN" | "ZUNION" | "ZUNIONSTORE" | "GEOADD" | "GEOHASH" | "GEOPOS" | "GEODIST";
 }
 
 }  // namespace dfly

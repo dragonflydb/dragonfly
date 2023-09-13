@@ -607,15 +607,14 @@ constexpr uint32_t kReadOnly = FAST | CONNECTION;
 constexpr uint32_t kReadWrite = FAST | CONNECTION;
 }  // namespace acl
 
-void ClusterFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
+void ClusterFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0,
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
             << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite);
-
-  builder | "CLUSTER" | "DFLYCLUSTER" | "READONLY" | "READWRITE";
 }
 
 }  // namespace dfly

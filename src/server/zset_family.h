@@ -17,7 +17,7 @@ class CommandRegistry;
 
 class ZSetFamily {
  public:
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
   using IndexInterval = std::pair<int32_t, int32_t>;
   using MScoreResponse = std::vector<std::optional<double>>;

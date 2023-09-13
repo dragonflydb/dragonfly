@@ -64,7 +64,7 @@ class StringFamily {
   static void Init(util::ProactorPool* pp);
   static void Shutdown();
 
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
  private:
   static void Append(CmdArgList args, ConnectionContext* cntx);

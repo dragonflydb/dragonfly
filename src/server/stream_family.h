@@ -14,7 +14,7 @@ class ConnectionContext;
 
 class StreamFamily {
  public:
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
  private:
   static void XAdd(CmdArgList args, ConnectionContext* cntx);

@@ -2539,9 +2539,9 @@ constexpr uint32_t kXTrim = WRITE | STREAM | SLOW;
 constexpr uint32_t kXGroupHelp = READ | STREAM | SLOW;
 }  // namespace acl
 
-void StreamFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
+void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-
+  registry->StartFamily();
   *registry
       << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1, acl::kXAdd}.HFUNC(XAdd)
       << CI{"XCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, 1, acl::kXClaim}.HFUNC(XClaim)
@@ -2562,9 +2562,6 @@ void StreamFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder 
       << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, 1, acl::kXTrim}.HFUNC(XTrim)
       << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0, acl::kXGroupHelp}.SetHandler(
              XGroupHelp);
-
-  builder | "XADD" | "XCLAIM" | "XDEL" | "XGROUP" | "XINFO" | "XLEN" | "XPENDING" | "XRANGE" |
-      "XREVRANGE" | "XREAD" | "XREADGROUP" | "XSETID" | "XTRIM" | "_XGROUP_HELP";
 }
 
 }  // namespace dfly

@@ -1795,7 +1795,8 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 // For now I introduced only the JSON category which will be the default.
 // TODO: Add sensible defaults/categories to json commands
 
-void JsonFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
+void JsonFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -3, 1, -2, 1,
                   acl::JSON}
@@ -1825,11 +1826,6 @@ void JsonFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bu
   *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Resp);
   *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(
       Set);
-  builder | "JSON.GET" | "JSON.MGET" | "JSON.TYPE" | "JSON.STRLEN" | "JSON.OBJLEN" | "JSON.ARRLEN" |
-      "JSON.TOGGLE" | "JSON.NUMINCRBY" | "JSON.NUMMULTBY" | "JSON.DEL" | "JSON.FORGET" |
-      "JSON.OBJKEYS" | "JSON.STRAPPEND" | "JSON.CLEAR" | "JSON.ARRPOP" | "JSON.ARRTRIM" |
-      "JSON.ARRTRIM" | "JSON.ARRINSERT" | "JSON.ARRAPPEND" | "JSON.ARRINDEX" | "JSON.DEBUG" |
-      "JSON.RESP" | "JSON.SET";
 }
 
 }  // namespace dfly

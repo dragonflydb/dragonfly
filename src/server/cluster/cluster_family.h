@@ -20,7 +20,7 @@ class ClusterFamily {
  public:
   explicit ClusterFamily(ServerFamily* server_family);
 
-  void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  void Register(CommandRegistry* registry);
 
   // Returns a thread-local pointer.
   ClusterConfig* cluster_config();

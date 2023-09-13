@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
 
@@ -103,9 +104,32 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
     }
     k = it->second;
   }
+
+  builder_ | std::string(cmd.name());
+
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;
+}
+
+void CommandRegistry::StartRegisteringFamilies(acl::CommandsIndexStore* index,
+                                               acl::RevCommandsIndexStore* rindex) {
+  index_ = index;
+  rindex_ = rindex;
+  pos = 0;
+}
+
+void CommandRegistry::StartFamily() {
+  builder_ = acl::CommandTableBuilder(index_, rindex_, pos++);
+}
+
+void CommandRegistry::DoneRegisteringFamilies() {
+  index_ = nullptr;
+  rindex_ = nullptr;
+}
+
+size_t CommandRegistry::GetPos() const {
+  return pos;
 }
 
 namespace CO {

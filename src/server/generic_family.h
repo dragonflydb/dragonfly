@@ -30,7 +30,7 @@ class GenericFamily {
   static void Init(util::ProactorPool* pp);
   static void Shutdown();
 
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
   // Accessed by Service::Exec and Service::Watch as an utility.
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);

@@ -12,6 +12,7 @@
 
 #include "base/function2.hpp"
 #include "facade/command_id.h"
+#include "server/acl/acl_commands_def.h"
 
 namespace dfly {
 
@@ -116,15 +117,17 @@ class CommandId : public facade::CommandId {
 };
 
 class CommandRegistry {
-  absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
-  absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
-
  public:
   CommandRegistry();
 
   void Init(unsigned thread_count);
 
   CommandRegistry& operator<<(CommandId cmd);
+
+  void StartRegisteringFamilies(acl::CommandsIndexStore* index, acl::RevCommandsIndexStore* rindex);
+  void StartFamily();
+  void DoneRegisteringFamilies();
+  size_t GetPos() const;
 
   const CommandId* Find(std::string_view cmd) const {
     auto it = cmd_map_.find(cmd);
@@ -159,6 +162,15 @@ class CommandRegistry {
       cb(k_v.second.name(), src);
     }
   }
+
+ private:
+  absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
+  absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
+
+  acl::CommandsIndexStore* index_;
+  acl::RevCommandsIndexStore* rindex_;
+  acl::CommandTableBuilder builder_;
+  size_t pos;
 };
 
 }  // namespace dfly

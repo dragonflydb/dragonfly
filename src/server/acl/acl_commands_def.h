@@ -115,6 +115,7 @@ using RevCommandsIndexStore = std::vector<RevCommandField>;
 
 class CommandTableBuilder {
  public:
+  CommandTableBuilder() = default;
   CommandTableBuilder(CommandsIndexStore* index, RevCommandsIndexStore* rindex, size_t pos)
       : index_(index), rindex_(rindex), pos_(pos) {
     rindex_->push_back({});
@@ -131,11 +132,11 @@ class CommandTableBuilder {
   }
 
  private:
-  size_t bit_number_ = 0;
-  size_t bits_limit = 0;
-  CommandsIndexStore* index_;
-  RevCommandsIndexStore* rindex_;
-  const size_t pos_;
+  size_t bit_number_{0};
+  size_t bits_limit{0};
+  CommandsIndexStore* index_{nullptr};
+  RevCommandsIndexStore* rindex_{nullptr};
+  size_t pos_{0};
 };
 
 constexpr uint64_t ALL_COMMANDS = std::numeric_limits<uint64_t>::max();

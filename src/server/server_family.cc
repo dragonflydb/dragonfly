@@ -1994,10 +1994,10 @@ constexpr uint32_t kScript = SLOW | SCRIPTING;
 constexpr uint32_t kDfly = ADMIN;
 }  // namespace acl
 
-void ServerFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
+void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
-
+  registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kAuth}.HFUNC(Auth)
       << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::kBGSave}.HFUNC(Save)
@@ -2025,10 +2025,6 @@ void ServerFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder 
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.SetHandler(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_JOURNAL, -2, 0, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, acl::kDfly}.HFUNC(Dfly);
-
-  builder | "AUTH" | "BGSAVE" | "CLIENT" | "CONFIG" | "DBSIZE" | "DEBUG" | "FLUSHDB" | "FLUSHALL" |
-      "INFO" | "HELLO" | "LASTSAVE" | "LATENCY" | "MEMORY" | "SAVE" | "SHUTDOWN" | "SLAVEOF" |
-      "REPLICAOF" | "ROLE" | "SLOWLOG" | "SCRIPT" | "DFLY";
 }
 
 }  // namespace dfly

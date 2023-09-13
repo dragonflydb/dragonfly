@@ -1140,7 +1140,8 @@ constexpr uint32_t kHStrLen = READ | HASH | FAST;
 constexpr uint32_t kHVals = READ | HASH | SLOW;
 }  // namespace acl
 
-void HSetFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
+void HSetFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1, 1, acl::kHDel}.HFUNC(HDel)
       << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kHLen}.HFUNC(HLen)
@@ -1161,10 +1162,6 @@ void HSetFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bu
       << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHSetNx}.HFUNC(HSetNx)
       << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kHStrLen}.HFUNC(HStrLen)
       << CI{"HVALS", CO::READONLY, 2, 1, 1, 1, acl::kHVals}.HFUNC(HVals);
-
-  builder | "HDEL" | "HLEN" | "HEXISTS" | "HGET" | "HGETALL" | "HMGET" | "HMSET" | "HINCRBY" |
-      "HINCRBYFLOAT" | "HKEYS" | "HRANDFIELD" | "HSCAN" | "HSET" | "HSETEX" | "HSETNX" | "HSTRLEN" |
-      "HVALS";
 }
 
 uint32_t HSetFamily::MaxListPackLen() {

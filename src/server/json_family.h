@@ -18,7 +18,7 @@ using facade::RedisReplyBuilder;
 
 class JsonFamily {
  public:
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
  private:
   static void Get(CmdArgList args, ConnectionContext* cntx);

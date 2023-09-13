@@ -26,8 +26,7 @@ class AclFamily final {
  public:
   explicit AclFamily(UserRegistry* registry);
 
-  void Register(CommandRegistry* registry, CommandsIndexStore index, RevCommandsIndexStore rindex,
-                size_t id);
+  void Register(CommandRegistry* registry);
   void Init(facade::Listener* listener, UserRegistry* registry);
 
  private:

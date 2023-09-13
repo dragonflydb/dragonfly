@@ -1325,7 +1325,8 @@ constexpr uint32_t kLMove = WRITE | LIST | SLOW;
 constexpr uint32_t kBLMove = READ | LIST | SLOW | BLOCKING;
 }  // namespace acl
 
-void ListFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder builder) {
+void ListFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPush}.HFUNC(LPush)
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPushX}.HFUNC(LPushX)
@@ -1360,10 +1361,6 @@ void ListFamily::Register(CommandRegistry* registry, acl::CommandTableBuilder bu
       << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, 1, acl::kLMove}.HFUNC(LMove)
       << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1, acl::kBLMove}
              .SetHandler(BLMove);
-
-  builder | "LPUSH" | "LPUSHX" | "LPOP" | "RPUSH" | "RPUSHX" | "RPOP" | "RPOPLPUSH" | "BRPOPLPUSH" |
-      "BLPOP" | "BRPOP" | "LLEN" | "LPOS" | "LPINDEX" | "LINSERT" | "LRANGE" | "LSET" | "LTRIM" |
-      "LREM" | "LMOVE" | "BLMOVE";
 }
 
 }  // namespace dfly

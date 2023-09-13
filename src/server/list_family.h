@@ -18,7 +18,7 @@ class EngineShard;
 
 class ListFamily {
  public:
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
  private:
   static void LPush(CmdArgList args, ConnectionContext* cntx);

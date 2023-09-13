@@ -21,7 +21,7 @@ class HllFamily {
   ///
   /// We are assuming that this would have a valid registry to work on (i.e this do not point to
   /// null!).
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
   static const char kInvalidHllErr[];
 };

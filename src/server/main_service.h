@@ -165,7 +165,7 @@ class Service : public facade::ServiceInterface {
   void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
 
   void RegisterCommands();
-  void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  void Register(CommandRegistry* registry);
 
   base::VarzValue::Map GetVarzStats();
 

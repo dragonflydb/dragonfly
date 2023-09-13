@@ -22,7 +22,7 @@ class EngineShard;
 
 class SetFamily {
  public:
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 
   static uint32_t MaxIntsetEntries();
 

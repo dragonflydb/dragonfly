@@ -22,7 +22,7 @@ class SearchFamily {
   static void FtProfile(CmdArgList args, ConnectionContext* cntx);
 
  public:
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
 };
 
 }  // namespace dfly

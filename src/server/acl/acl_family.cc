@@ -300,8 +300,8 @@ constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 // as separate commands in the registry. This is the least intrusive change because it's very
 // easy to handle that case explicitly in `DispatchCommand`.
 
-void AclFamily::Register(dfly::CommandRegistry* registry, CommandsIndexStore index,
-                         RevCommandsIndexStore rindex, size_t id) {
+void AclFamily::Register(dfly::CommandRegistry* registry) {
+  registry->StartFamily();
   *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
   *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kList}.HFUNC(
       List);
@@ -315,14 +315,6 @@ void AclFamily::Register(dfly::CommandRegistry* registry, CommandsIndexStore ind
       Save);
   *registry << CI{"ACL LOAD", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kLoad}.HFUNC(
       Load);
-
-  CommandTableBuilder builder{&index, &rindex, id};
-  builder | "ACL" | "ACL LIST" | "ACL SETUSER" | "ACL DELUSER" | "ACL WHOAMI" | "ACL SAVE" |
-      "ACL LOAD";
-
-  NumberOfFamilies(id + 1);
-  CommandsIndexer(std::move(index));
-  CommandsRevIndexer(std::move(rindex));
 }
 
 #undef HFUNC

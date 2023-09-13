@@ -21,7 +21,7 @@ using facade::OpStatus;
 
 class HSetFamily {
  public:
-  static void Register(CommandRegistry* registry, acl::CommandTableBuilder builder);
+  static void Register(CommandRegistry* registry);
   static uint32_t MaxListPackLen();
 
   // Does not free lp.
