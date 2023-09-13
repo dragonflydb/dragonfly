@@ -441,9 +441,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
-  string load_path = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
-  if (!load_path.empty()) {
-    load_result_ = Load(load_path);
+  const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
+  if (load_path_result) {
+    const std::string load_path = *load_path_result;
+    if (!load_path.empty()) {
+      load_result_ = Load(load_path);
+    }
+  } else {
+    if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
+      LOG(WARNING) << "Load snapshot: No snapshot found";
+    } else {
+      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+    }
   }
 
   snapshot_schedule_fb_ =
@@ -498,10 +507,12 @@ struct AggregateLoadResult {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
-  io::Result<std::vector<std::string>> paths_result = snapshot_storage_->LoadPaths(load_path);
+Future<GenericError> ServerFamily::Load(const std::string& load_path) {
+  auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
-    Promise<std::error_code> ec_promise;
+    LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
+
+    Promise<GenericError> ec_promise;
     ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
   }
@@ -543,8 +554,8 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  Promise<std::error_code> ec_promise;
-  Future<std::error_code> ec_future = ec_promise.get_future();
+  Promise<GenericError> ec_promise;
+  Future<GenericError> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
