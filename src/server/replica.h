@@ -109,7 +109,10 @@ class Replica : ProtocolClient {
 
   void RedisStreamAcksFb();
 
-  void JoinAllFlows();                // Join all flows if possible.
+  // Joins all the flows when doing sharded replication. This is called in two
+  // places: Once at the end of full sync to join the full sync fibers, and twice
+  // if a stable sync is interrupted to join the cancelled stable sync fibers.
+  void JoinDflyFlows();
   void SetShardStates(bool replica);  // Call SetReplica(replica) on all shards.
 
   // Send DFLY ${kind} to the master instance.

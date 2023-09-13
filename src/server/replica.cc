@@ -418,7 +418,7 @@ error_code Replica::InitiateDflySync() {
 
   absl::Cleanup cleanup = [this]() {
     // We do the following operations regardless of outcome.
-    JoinAllFlows();
+    JoinDflyFlows();
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     state_mask_.fetch_and(~R_SYNCING);
   };
@@ -613,7 +613,12 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
-  JoinAllFlows();
+  JoinDflyFlows();
+
+  last_journal_LSNs_.emplace();
+  for (auto& flow : shard_flows_) {
+    last_journal_LSNs_->push_back(flow->JournalExecutedCount());
+  }
 
   LOG(INFO) << "Exit stable sync";
   // The only option to unblock is to cancel the context.
@@ -622,11 +627,9 @@ error_code Replica::ConsumeDflyStream() {
   return cntx_.GetError();
 }
 
-void Replica::JoinAllFlows() {
-  last_journal_LSNs_.emplace();
+void Replica::JoinDflyFlows() {
   for (auto& flow : shard_flows_) {
     flow->JoinFlow();
-    last_journal_LSNs_->push_back(flow->JournalExecutedCount());
   }
 }
 
