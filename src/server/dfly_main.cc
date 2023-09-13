@@ -9,6 +9,7 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <absl/flags/parse.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
@@ -49,6 +50,13 @@
 // This would create a string value from a "defined" location of the source code
 // Note that SOURCE_PATH_FROM_BUILD_ENV is taken from the build system
 #define BUILD_LOCATION_PATH STRING_MAKE_PP(SOURCE_PATH_FROM_BUILD_ENV)
+
+#ifdef __APPLE__
+#include <crt_externs.h>
+#define environ (*_NSGetEnviron())
+#else
+extern char** environ;
+#endif
 
 using namespace std;
 
@@ -701,6 +709,46 @@ void PrintBasicUsageInfo() {
   std::cout << endl;
 }
 
+void ParseFlagsFromEnv() {
+  if (getenv("DFLY_PASSWORD")) {
+    LOG(WARNING)
+        << "DFLY_PASSWORD environment variable is being deprecated in favour of DFLY_requirepass";
+  }
+  // Allowed environment variable names that can have
+  // DFLY_ prefix, but don't necessarily have an ABSL flag created
+  absl::flat_hash_set<std::string_view> ignored_environment_flag_names = {"DEV_ENV", "PASSWORD"};
+  const auto& flags = absl::GetAllFlags();
+  for (char** env = environ; *env != nullptr; env++) {
+    constexpr string_view kPrefix = "DFLY_";
+    string_view environ_var = *env;
+    if (absl::StartsWith(environ_var, kPrefix)) {
+      // Per 'man environ', environment variables are included with their values
+      // in the format "name=value". Need to strip them apart, in order to work with flags object
+      pair<string_view, string_view> environ_pair =
+          absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), absl::MaxSplits('=', 1));
+      const auto& [flag_name, flag_value] = environ_pair;
+      if (ignored_environment_flag_names.contains(flag_name)) {
+        continue;
+      }
+      auto entry = flags.find(flag_name);
+      if (entry != flags.end()) {
+        if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {
+          continue;
+        }
+        string error;
+        auto& flag = entry->second;
+        bool success = flag->ParseFrom(flag_value, &error);
+        if (!success) {
+          LOG(FATAL) << "could not parse flag " << flag->Name()
+                     << " from environment variable. Error: " << error;
+        }
+      } else {
+        LOG(FATAL) << "unknown environment variable DFLY_" << flag_name;
+      }
+    }
+  }
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
@@ -721,6 +769,7 @@ Usage: dragonfly [FLAGS]
   absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
+  ParseFlagsFromEnv();
 
   PrintBasicUsageInfo();
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
