@@ -715,8 +715,8 @@ void ParseFlagsFromEnv() {
         << "DFLY_PASSWORD environment variable is being deprecated in favour of DFLY_requirepass";
   }
   // Allowed environment variable names that can have
-  // DFLY_ previx, but don't necessirily have an ABSL flag created
-  absl::flat_hash_set<std::string_view> allowed_environment_flag_names = {"DEV_ENV", "PASSWORD"};
+  // DFLY_ prefix, but don't necessarily have an ABSL flag created
+  absl::flat_hash_set<std::string_view> ignored_environment_flag_names = {"DEV_ENV", "PASSWORD"};
   const auto& flags = absl::GetAllFlags();
   for (char** env = environ; *env != nullptr; env++) {
     constexpr string_view kPrefix = "DFLY_";
@@ -727,7 +727,7 @@ void ParseFlagsFromEnv() {
       pair<string_view, string_view> environ_pair =
           absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), absl::MaxSplits('=', 1));
       const auto& [flag_name, flag_value] = environ_pair;
-      if (allowed_environment_flag_names.contains(flag_name)) {
+      if (ignored_environment_flag_names.contains(flag_name)) {
         continue;
       }
       auto entry = flags.find(flag_name);
