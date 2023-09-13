@@ -1496,13 +1496,11 @@ async def test_replicaof_flag_disconnect(df_local_factory):
 @pytest.mark.asyncio
 async def test_df_crash_on_memcached_error(df_local_factory):
     master = df_local_factory.create(
-        port=BASE_PORT,
         memcached_port=11211,
         proactor_threads=2,
     )
 
     replica = df_local_factory.create(
-        port=master.port + 1,
         memcached_port=master.mc_port + 1,
         proactor_threads=2,
     )
