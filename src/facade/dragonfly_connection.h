@@ -169,6 +169,7 @@ class Connection : public util::Connection {
   }
 
   void SetName(std::string name) {
+    util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
     name_ = std::move(name);
   }
 

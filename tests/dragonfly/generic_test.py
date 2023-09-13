@@ -4,7 +4,7 @@ import redis
 import asyncio
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args, dfly_args
+from . import dfly_multi_test_args, dfly_args, DflyStartException
 from .utility import batch_fill_data, gen_test_data
 
 
@@ -83,3 +83,36 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
     await asyncio.gather(
         task1("i1", 2), task1("i2", 3), task2("l1", 2), task2("l1", 2), task2("l1", 5)
     )
+
+
+@dfly_args({"port": 6377})
+async def test_arg_from_environ_overwritten_by_cli(df_local_factory):
+    os.environ["DFLY_port"] = "6378"
+    dfly = df_local_factory.create()
+    dfly.start()
+    client = aioredis.Redis(port="6377")
+    await client.ping()
+    dfly.stop()
+    del os.environ["DFLY_port"]
+
+
+async def test_arg_from_environ(df_local_factory):
+    os.environ["DFLY_requirepass"] = "pass"
+    dfly = df_local_factory.create()
+    dfly.start()
+
+    # Expect password from environment variable
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        client = aioredis.Redis()
+        await client.ping()
+
+    client = aioredis.Redis(password="pass")
+    await client.ping()
+    dfly.stop()
+
+
+async def test_unknown_dfly_env(df_local_factory, export_dfly_password):
+    os.environ["DFLY_abcdef"] = "xyz"
+    with pytest.raises(DflyStartException):
+        dfly = df_local_factory.create()
+        dfly.start()

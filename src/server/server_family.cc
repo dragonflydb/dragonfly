@@ -441,9 +441,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
-  string load_path = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
-  if (!load_path.empty()) {
-    load_result_ = Load(load_path);
+  const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
+  if (load_path_result) {
+    const std::string load_path = *load_path_result;
+    if (!load_path.empty()) {
+      load_result_ = Load(load_path);
+    }
+  } else {
+    if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
+      LOG(WARNING) << "Load snapshot: No snapshot found";
+    } else {
+      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+    }
   }
 
   snapshot_schedule_fb_ =
@@ -498,10 +507,12 @@ struct AggregateLoadResult {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
-  io::Result<std::vector<std::string>> paths_result = snapshot_storage_->LoadPaths(load_path);
+Future<GenericError> ServerFamily::Load(const std::string& load_path) {
+  auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
-    Promise<std::error_code> ec_promise;
+    LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
+
+    Promise<GenericError> ec_promise;
     ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
   }
@@ -543,8 +554,8 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  Promise<std::error_code> ec_promise;
-  Future<std::error_code> ec_future = ec_promise.get_future();
+  Promise<GenericError> ec_promise;
+  Future<GenericError> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
@@ -1102,16 +1113,21 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "GET" && args.size() == 2) {
-    // Send empty response, like Redis does, unless the param is supported
-
-    string_view param = ArgS(args, 1);
-    vector<string> names = config_registry.List(param);
     vector<string> res;
+    string_view param = ArgS(args, 1);
 
-    for (const auto& name : names) {
-      absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
-      res.push_back(name);
-      res.push_back(flag->CurrentValue());
+    // Support 'databases' for backward compatibility.
+    if (param == "databases") {
+      res.emplace_back(param);
+      res.push_back(absl::StrCat(absl::GetFlag(FLAGS_dbnum)));
+    } else {
+      vector<string> names = config_registry.List(param);
+
+      for (const auto& name : names) {
+        absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
+        res.push_back(name);
+        res.push_back(flag->CurrentValue());
+      }
     }
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
@@ -1207,6 +1223,8 @@ Metrics ServerFamily::GetMetrics() const {
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
+    result.eval_io_coordination_cnt += ss->stats.eval_io_coordination_cnt;
+    result.eval_shardlocal_coordination_cnt += ss->stats.eval_shardlocal_coordination_cnt;
 
     service_.mutable_registry()->MergeCallStats(
         index, [&dest_map = result.cmd_stats_map](string_view name, const CmdCallStats& src) {
@@ -1380,6 +1398,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
+    append("eval_io_coordination_total", m.eval_io_coordination_cnt);
+    append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
   }
 
   if (should_enter("TIERED", true)) {
