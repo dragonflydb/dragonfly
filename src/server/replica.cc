@@ -828,8 +828,11 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
 DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext master_context,
                                    uint32_t flow_id, Service* service,
                                    std::shared_ptr<MultiShardExecution> multi_shard_exe)
-    : ProtocolClient(server_context), service_(*service), master_context_(master_context),
-      multi_shard_exe_(multi_shard_exe), flow_id_(flow_id) {
+    : ProtocolClient(server_context),
+      service_(*service),
+      master_context_(master_context),
+      multi_shard_exe_(multi_shard_exe),
+      flow_id_(flow_id) {
   use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
   executor_ = std::make_unique<JournalExecutor>(service);
 }
