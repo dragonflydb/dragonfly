@@ -70,7 +70,7 @@ ABSL_FLAG(string, bind, "",
           "It's not advised due to security implications.");
 ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the file");
 ABSL_FLAG(string, unixsocket, "",
-          "If not empty - specifies path for the Unis socket that will "
+          "If not empty - specifies path for the Unix socket that will "
           "be used for listening for incoming connections.");
 ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal value.");
 ABSL_FLAG(bool, force_epoll, false,
