@@ -1,8 +1,5 @@
-# We have some linking problems with search on Apple
-if (NOT APPLE)
-  add_subdirectory(search)
-  set(SEARCH_LIB query_parser)
-endif()
+add_subdirectory(search)
+set(SEARCH_LIB query_parser)
 
 add_library(dfly_core compact_object.cc dragonfly_core.cc extent_tree.cc
     external_alloc.cc interpreter.cc json_object.cc mi_memory_resource.cc sds_utils.cc

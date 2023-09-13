@@ -75,9 +75,9 @@ jobs:
           submodules: true
       - name: Install dependencies
         run: |
-          brew update && brew install ninja boost openssl automake gcc zstd icu4c bison c-ares \
+          brew update && brew install ninja boost openssl automake gcc zstd bison c-ares \
               autoconf libtool automake
-          brew info icu4c
+          # brew info icu4c
           mkdir -p $GITHUB_WORKSPACE/build
 
       - name: Configure & Build
@@ -88,15 +88,13 @@ jobs:
           which gcc
           which gcc-13
 
-          alias g++=g++-13
-          alias gcc=gcc-13
-
           bison --version
 
-          alias g++
 
           echo "*************************** START BUILDING **************************************"
-          CC=gcc-13 CXX=g++-13 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF  \
-              -DCMAKE_PREFIX_PATH=/usr/local/opt/icu4c
+          CC=gcc-13 CXX=g++-13 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF
+
           ninja ok_backend dfly_core_test dconv_project
+          ninja search_parser_test
           ninja dragonfly
+          ./search_parser_test
