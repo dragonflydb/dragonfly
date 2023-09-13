@@ -540,7 +540,7 @@ class Transaction {
   std::vector<uint32_t> reverse_index_;
 
   RunnableType* cb_ptr_ = nullptr;    // Run on shard threads
-  const CommandId* cid_;              // Underlying command
+  const CommandId* cid_ = nullptr;    // Underlying command
   std::unique_ptr<MultiData> multi_;  // Initialized when the transaction is multi/exec.
 
   TxId txid_{0};

@@ -220,7 +220,9 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
-    : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
+    : queue_(kQueueLen),
+      txq_([](const Transaction* t) { return t->txid(); }),
+      mi_resource_(heap),
       db_slice_(pb->GetIndex(), GetFlag(FLAGS_cache_mode), this) {
   fiber_q_ = MakeFiber([this, index = pb->GetIndex()] {
     ThisFiber::SetName(absl::StrCat("shard_queue", index));
