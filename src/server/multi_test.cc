@@ -378,6 +378,22 @@ TEST_F(MultiTest, Eval) {
   EXPECT_EQ(resp, "12345678912345-works");
   resp = Run({"eval", kGetScore, "1", "z1", "c"});
   EXPECT_EQ(resp, "12.5-works");
+
+  // Multiple calls in a Lua script
+  EXPECT_EQ(Run({"eval",
+                 R"(redis.call('set', 'foo', '42')
+                    return redis.call('get', 'foo'))",
+                 "1", "foo"}),
+            "42");
+
+  auto condition = [&]() { return service_->IsLocked(0, "foo"); };
+  auto fb = ExpectConditionWithSuspension(condition);
+  EXPECT_EQ(Run({"eval",
+                 R"(redis.call('set', 'foo', '42')
+                    return redis.call('get', 'foo'))",
+                 "1", "foo"}),
+            "42");
+  fb.Join();
 }
 
 TEST_F(MultiTest, Watch) {

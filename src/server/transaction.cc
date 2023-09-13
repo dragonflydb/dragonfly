@@ -943,7 +943,7 @@ void Transaction::ExpireBlocking(WaitKeysProvider wcb) {
 }
 
 string_view Transaction::Name() const {
-  return cid_->name();
+  return cid_ ? cid_->name() : "null-command";
 }
 
 ShardId Transaction::GetUniqueShard() const {
