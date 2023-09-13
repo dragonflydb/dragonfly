@@ -110,9 +110,12 @@ async def test_arg_from_environ(df_local_factory):
     await client.ping()
     dfly.stop()
 
+    del os.environ["DFLY_requirepass"]
+
 
 async def test_unknown_dfly_env(df_local_factory, export_dfly_password):
     os.environ["DFLY_abcdef"] = "xyz"
     with pytest.raises(DflyStartException):
         dfly = df_local_factory.create()
         dfly.start()
+    del os.environ["DFLY_abcdef"]
