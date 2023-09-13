@@ -1245,8 +1245,8 @@ Metrics ServerFamily::GetMetrics() const {
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
-    result.eval_local_coordination += ss->stats.eval_local_coordination;
-    result.eval_remote_coordination += ss->stats.eval_remote_coordination;
+    result.eval_io_coordination_cnt += ss->stats.eval_io_coordination_cnt;
+    result.eval_shardlocal_coordination_cnt += ss->stats.eval_shardlocal_coordination_cnt;
 
     service_.mutable_registry()->MergeCallStats(
         index, [&dest_map = result.cmd_stats_map](string_view name, const CmdCallStats& src) {
@@ -1420,8 +1420,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("eval_local_coordination", m.eval_local_coordination);
-    append("eval_remote_coordination", m.eval_remote_coordination);
+    append("eval_io_coordination_cnt", m.eval_io_coordination_cnt);
+    append("eval_shardlocal_coordination_cnt", m.eval_shardlocal_coordination_cnt);
   }
 
   if (should_enter("TIERED", true)) {
