@@ -34,7 +34,9 @@ class User final {
 
     bool is_hashed{false};
 
-    using CommandsUpdateType = std::vector<std::tuple<Sign, size_t, uint64_t>>;
+    using CommandsValueType =
+        std::tuple<Sign, size_t /*index*/, uint64_t /*bit*/, bool /*ALL flag*/>;
+    using CommandsUpdateType = std::vector<CommandsValueType>;
     CommandsUpdateType commands;
   };
 
@@ -72,8 +74,8 @@ class User final {
   void UnsetAclCategories(uint32_t cat);
 
   // For ACL commands
-  void SetAclCommands(size_t index, uint64_t bit_index);
-  void UnsetAclCommands(size_t index, uint64_t bit_index);
+  void SetAclCommands(size_t index, uint64_t bit_index, bool all);
+  void UnsetAclCommands(size_t index, uint64_t bit_index, bool all);
 
   // For is_active flag
   void SetIsActive(bool is_active);

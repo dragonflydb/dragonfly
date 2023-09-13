@@ -139,6 +139,7 @@ class CommandTableBuilder {
 };
 
 constexpr uint64_t ALL_COMMANDS = std::numeric_limits<uint64_t>::max();
+constexpr uint64_t NONE_COMMANDS = std::numeric_limits<uint64_t>::min();
 
 // A variation of meyers singleton
 // This is initialized when the constructor of Service is called.

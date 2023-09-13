@@ -4,6 +4,7 @@
 
 #include "server/acl/helpers.h"
 
+#include <limits>
 #include <vector>
 
 #include "absl/strings/ascii.h"
@@ -123,8 +124,21 @@ std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
   return {};
 }
 
+bool IsIndexAllCommandsFlag(uint32_t index) {
+  return index == std::numeric_limits<uint32_t>::max();
+}
+
 std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) {
   const auto& store = CommandsIndexer();
+  const auto all_commands = std::pair<uint32_t, uint64_t>{std::numeric_limits<uint32_t>::max(), 0};
+  if (command == "+ALL") {
+    return {all_commands, true};
+  }
+
+  if (command == "-ALL") {
+    return {all_commands, false};
+  }
+
   if (absl::StartsWith(command, "+")) {
     auto res = store.find(command.substr(1));
     if (res == store.cend()) {
@@ -209,9 +223,11 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args, bool hashe
     }
 
     using Sign = User::Sign;
-    using Val = std::tuple<Sign, size_t, uint64_t>;
+    using Val = User::UpdateRequest::CommandsValueType;
+    ;
     auto [index, bit] = *cmd;
-    auto val = sign ? Val{Sign::PLUS, index, bit} : Val{Sign::MINUS, index, bit};
+    auto flag = IsIndexAllCommandsFlag(index);
+    auto val = sign ? Val{Sign::PLUS, index, bit, flag} : Val{Sign::MINUS, index, bit, flag};
     req.commands.push_back(val);
   }
 

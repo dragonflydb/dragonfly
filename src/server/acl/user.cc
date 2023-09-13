@@ -38,12 +38,12 @@ void User::Update(UpdateRequest&& req) {
     UnsetAclCategories(category);
   }
 
-  for (auto [sign, index, bit_index] : req.commands) {
+  for (auto [sign, index, bit_index, all] : req.commands) {
     if (sign == Sign::PLUS) {
-      SetAclCommands(index, bit_index);
+      SetAclCommands(index, bit_index, all);
       continue;
     }
-    UnsetAclCommands(index, bit_index);
+    UnsetAclCommands(index, bit_index, all);
   }
 
   if (req.is_active) {
@@ -83,12 +83,24 @@ void User::UnsetAclCategories(uint32_t cat) {
   acl_categories_ ^= cat;
 }
 
-void User::SetAclCommands(size_t index, uint64_t bit_index) {
+void User::SetAclCommands(size_t index, uint64_t bit_index, bool all) {
+  if (all) {
+    for (auto& family : commands_) {
+      family = ALL_COMMANDS;
+    }
+    return;
+  }
   commands_[index] |= bit_index;
 }
 
-void User::UnsetAclCommands(size_t index, uint64_t bit_index) {
-  SetAclCommands(index, bit_index);
+void User::UnsetAclCommands(size_t index, uint64_t bit_index, bool all) {
+  if (all) {
+    for (auto& family : commands_) {
+      family = NONE_COMMANDS;
+    }
+    return;
+  }
+  SetAclCommands(index, bit_index, all);
   commands_[index] ^= bit_index;
 }
 

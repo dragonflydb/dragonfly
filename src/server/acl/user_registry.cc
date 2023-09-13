@@ -81,7 +81,7 @@ void UserRegistry::Init() {
   User::UpdateRequest::CommandsUpdateType tmp(NumberOfFamilies());
   size_t id = 0;
   for (auto& elem : tmp) {
-    elem = {User::Sign::PLUS, id++, acl::ALL_COMMANDS};
+    elem = {User::Sign::PLUS, id++, acl::ALL_COMMANDS, false};
   }
   std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
   User::UpdateRequest req{{}, {acl}, true, false, std::move(tmp)};
