@@ -3,6 +3,8 @@
 //
 #include "server/protocol_client.h"
 
+#include <openssl/err.h>
+
 extern "C" {
 #include "redis/rdb.h"
 }
@@ -51,6 +53,23 @@ using absl::StrCat;
 namespace {
 
 #ifdef DFLY_USE_SSL
+
+void PrintSSLError() {
+  ERR_print_errors_cb(
+      [](const char* str, size_t len, void* u) {
+        LOG(ERROR) << std::string_view(str, len);
+        return 1;
+      },
+      nullptr);
+}
+
+#define SSL_CHECK(condition)                    \
+  if (!(condition)) {                           \
+    LOG(ERROR) << "OpenSSL Error: " #condition; \
+    PrintSSLError();                            \
+    exit(17);                                   \
+  }
+
 static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
   ProtocolClient::SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
@@ -58,11 +77,11 @@ static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
 
   // Load client certificate if given.
   if (!tls_key_file.empty()) {
-    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+    SSL_CHECK(1 == SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
     // We checked that the flag is non empty in ValidateClientTlsFlags.
     const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
 
-    CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+    SSL_CHECK(1 == SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
   }
 
   // Load custom certificate validation if given.
@@ -72,19 +91,19 @@ static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
   const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
   const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
   if (file || dir) {
-    CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+    SSL_CHECK(1 == SSL_CTX_load_verify_locations(ctx, file, dir));
   } else {
-    CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
+    SSL_CHECK(1 == SSL_CTX_set_default_verify_paths(ctx));
   }
 
-  CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
+  SSL_CHECK(1 == SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
   SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
 
   SSL_CTX_set_verify(ctx, mask, NULL);
 
-  CHECK_EQ(1, SSL_CTX_set_dh_auto(ctx, 1));
+  SSL_CHECK(1 == SSL_CTX_set_dh_auto(ctx, 1));
   return ctx;
 }
 #endif
