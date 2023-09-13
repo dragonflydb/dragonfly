@@ -39,6 +39,7 @@ class DebugCmd {
   void Watched();
   void TxAnalysis();
   void ObjHist();
+  void Stacktrace();
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;
