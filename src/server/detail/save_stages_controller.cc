@@ -115,7 +115,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(&cll_, &freq_map_);
+  return saver_->SaveBody(&cntx_, &freq_map_);
 }
 
 error_code RdbSnapshot::Close() {
@@ -126,7 +126,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, cll_.GetCancellation(), shard);
+  saver_->StartSnapshotInShard(false, cntx_.GetCancellation(), shard);
   started_ = true;
 }
 

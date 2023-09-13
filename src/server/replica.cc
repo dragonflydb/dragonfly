@@ -461,11 +461,14 @@ error_code Replica::InitiateDflySync() {
     // Going out of the way to avoid using std::vector<bool>...
     auto is_full_sync = std::make_unique<bool[]>(num_df_flows_);
     auto partition = Partition(num_df_flows_);
+    CHECK(!last_journal_LSNs_ || last_journal_LSNs_->size() == shard_flows_.size());
     auto shard_cb = [&](unsigned index, auto*) {
       for (auto id : partition[index]) {
-        auto ec = shard_flows_[id]->StartSyncFlow(
-            sync_block, &cntx_, last_journal_LSNs_.has_value() ? &*last_journal_LSNs_ : nullptr,
-            is_full_sync.get()[id]);
+        auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &cntx_,
+                                                  last_journal_LSNs_.has_value()
+                                                      ? std::optional((*last_journal_LSNs_)[id])
+                                                      : std::nullopt,
+                                                  is_full_sync.get()[id]);
         if (ec)
           cntx_.ReportError(ec);
       }
@@ -654,7 +657,7 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
 }
 
 std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cntx,
-                                                std::vector<LSN>* lsns, bool& is_full_sync) {
+                                                std::optional<LSN> lsn, bool& is_full_sync) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
   RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
@@ -665,9 +668,8 @@ std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cnt
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                            master_context_.dfly_session_id, " ", flow_id_);
   // Try to negotiate a partial sync if possible.
-  if (lsns && master_context_.version > DflyVersion::VER1) {
-    CHECK(flow_id_ < lsns->size());
-    absl::StrAppend(&cmd, " ", (*lsns)[flow_id_]);
+  if (lsn.has_value() && master_context_.version > DflyVersion::VER1) {
+    absl::StrAppend(&cmd, " ", *lsn);
   }
 
   ResetParser(/*server_mode=*/false);
