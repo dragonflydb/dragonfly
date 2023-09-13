@@ -1420,8 +1420,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("eval_io_coordination_cnt", m.eval_io_coordination_cnt);
-    append("eval_shardlocal_coordination_cnt", m.eval_shardlocal_coordination_cnt);
+    append("eval_io_coordination_total", m.eval_io_coordination_cnt);
+    append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
   }
 
   if (should_enter("TIERED", true)) {
