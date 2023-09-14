@@ -2171,9 +2171,6 @@ void Service::Register(CommandRegistry* registry) {
 }
 
 void Service::RegisterCommands() {
-  acl::CommandsIndexStore index;
-  acl::RevCommandsIndexStore rindex;
-  registry_.StartRegisteringFamilies(&index, &rindex);
   Register(&registry_);
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
@@ -2194,11 +2191,7 @@ void Service::RegisterCommands() {
   cluster_family_.Register(&registry_);
 
   acl_family_.Register(&registry_);
-
-  acl::NumberOfFamilies(registry_.GetPos());
-  acl::CommandsIndexer(std::move(index));
-  acl::CommandsRevIndexer(std::move(rindex));
-  registry_.DoneRegisteringFamilies();
+  acl::BuildIndexers(registry_.GetFamilies());
 
   // Only after all the commands are registered
   registry_.Init(pp_.size());

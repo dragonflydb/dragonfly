@@ -17,7 +17,6 @@
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
-#include "server/acl/acl_commands_def.h"
 
 namespace dfly {
 

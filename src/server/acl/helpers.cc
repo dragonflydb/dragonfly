@@ -124,13 +124,13 @@ std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
   return {};
 }
 
-bool IsIndexAllCommandsFlag(uint32_t index) {
-  return index == std::numeric_limits<uint32_t>::max();
+bool IsIndexAllCommandsFlag(size_t index) {
+  return index == std::numeric_limits<size_t>::max();
 }
 
 std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) {
   const auto& store = CommandsIndexer();
-  const auto all_commands = std::pair<uint32_t, uint64_t>{std::numeric_limits<uint32_t>::max(), 0};
+  const auto all_commands = std::pair<size_t, uint64_t>{std::numeric_limits<size_t>::max(), 0};
   if (command == "+ALL") {
     return {all_commands, true};
   }
@@ -226,8 +226,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args, bool hashe
     using Val = User::UpdateRequest::CommandsValueType;
     ;
     auto [index, bit] = *cmd;
-    auto flag = IsIndexAllCommandsFlag(index);
-    auto val = sign ? Val{Sign::PLUS, index, bit, flag} : Val{Sign::MINUS, index, bit, flag};
+    auto val = sign ? Val{Sign::PLUS, index, bit} : Val{Sign::MINUS, index, bit};
     req.commands.push_back(val);
   }
 

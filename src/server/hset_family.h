@@ -7,7 +7,6 @@
 #include <optional>
 
 #include "facade/op_status.h"
-#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 
 namespace dfly {

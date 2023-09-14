@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 #include "server/engine_shard_set.h"
 

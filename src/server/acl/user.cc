@@ -6,7 +6,10 @@
 
 #include <openssl/sha.h>
 
+#include <limits>
+
 #include "absl/strings/escaping.h"
+#include "server/acl/helpers.h"
 
 namespace dfly::acl {
 
@@ -38,12 +41,12 @@ void User::Update(UpdateRequest&& req) {
     UnsetAclCategories(category);
   }
 
-  for (auto [sign, index, bit_index, all] : req.commands) {
+  for (auto [sign, index, bit_index] : req.commands) {
     if (sign == Sign::PLUS) {
-      SetAclCommands(index, bit_index, all);
+      SetAclCommands(index, bit_index);
       continue;
     }
-    UnsetAclCommands(index, bit_index, all);
+    UnsetAclCommands(index, bit_index);
   }
 
   if (req.is_active) {
@@ -83,8 +86,8 @@ void User::UnsetAclCategories(uint32_t cat) {
   acl_categories_ ^= cat;
 }
 
-void User::SetAclCommands(size_t index, uint64_t bit_index, bool all) {
-  if (all) {
+void User::SetAclCommands(size_t index, uint64_t bit_index) {
+  if (IsIndexAllCommandsFlag(index)) {
     for (auto& family : commands_) {
       family = ALL_COMMANDS;
     }
@@ -93,14 +96,14 @@ void User::SetAclCommands(size_t index, uint64_t bit_index, bool all) {
   commands_[index] |= bit_index;
 }
 
-void User::UnsetAclCommands(size_t index, uint64_t bit_index, bool all) {
-  if (all) {
+void User::UnsetAclCommands(size_t index, uint64_t bit_index) {
+  if (IsIndexAllCommandsFlag(index)) {
     for (auto& family : commands_) {
       family = NONE_COMMANDS;
     }
     return;
   }
-  SetAclCommands(index, bit_index, all);
+  SetAclCommands(index, bit_index);
   commands_[index] ^= bit_index;
 }
 

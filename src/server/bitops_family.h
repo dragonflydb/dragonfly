@@ -14,9 +14,6 @@
 ///     BITOP: https://redis.io/commands/bitop/
 ///     GETBIT: https://redis.io/commands/getbit/
 ///     SETBIT: https://redis.io/commands/setbit/
-
-#include "server/acl/acl_commands_def.h"
-
 namespace dfly {
 class CommandRegistry;
 

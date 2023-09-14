@@ -6,7 +6,6 @@
 
 #include <mimalloc.h>
 
-#include "server/acl/acl_commands_def.h"
 #include "server/acl/user_registry.h"
 
 extern "C" {

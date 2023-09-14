@@ -6,7 +6,6 @@
 
 #include "base/flags.h"
 #include "facade/op_status.h"
-#include "server/acl/acl_commands_def.h"
 #include "server/common.h"
 #include "server/table.h"
 

@@ -28,9 +28,9 @@ std::optional<bool> MaybeParseStatus(std::string_view command);
 using OptCat = std::optional<uint32_t>;
 std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command);
 
-bool IsIndexAllCommandsFlag(uint32_t index);
+bool IsIndexAllCommandsFlag(size_t index);
 
-using OptCommand = std::optional<std::pair<uint32_t, uint64_t>>;
+using OptCommand = std::optional<std::pair<size_t, uint64_t>>;
 std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command);
 
 template <typename T>

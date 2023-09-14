@@ -28,14 +28,12 @@ class User final {
 
     std::vector<std::pair<Sign, uint32_t>> categories;
 
-    // DATATYPE_BITSET commands;
-
     std::optional<bool> is_active{};
 
     bool is_hashed{false};
 
-    using CommandsValueType =
-        std::tuple<Sign, size_t /*index*/, uint64_t /*bit*/, bool /*ALL flag*/>;
+    // If index s numberic_limits::max() then it's a +all flag
+    using CommandsValueType = std::tuple<Sign, size_t /*index*/, uint64_t /*bit*/>;
     using CommandsUpdateType = std::vector<CommandsValueType>;
     CommandsUpdateType commands;
   };
@@ -74,8 +72,8 @@ class User final {
   void UnsetAclCategories(uint32_t cat);
 
   // For ACL commands
-  void SetAclCommands(size_t index, uint64_t bit_index, bool all);
-  void UnsetAclCommands(size_t index, uint64_t bit_index, bool all);
+  void SetAclCommands(size_t index, uint64_t bit_index);
+  void UnsetAclCommands(size_t index, uint64_t bit_index);
 
   // For is_active flag
   void SetIsActive(bool is_active);

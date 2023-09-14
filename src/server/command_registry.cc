@@ -105,31 +105,18 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
     k = it->second;
   }
 
-  builder_ | std::string(cmd.name());
-
+  family_of_commands_.back().push_back(std::string(k));
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;
 }
 
-void CommandRegistry::StartRegisteringFamilies(acl::CommandsIndexStore* index,
-                                               acl::RevCommandsIndexStore* rindex) {
-  index_ = index;
-  rindex_ = rindex;
-  pos = 0;
-}
-
 void CommandRegistry::StartFamily() {
-  builder_ = acl::CommandTableBuilder(index_, rindex_, pos++);
+  family_of_commands_.push_back({});
 }
 
-void CommandRegistry::DoneRegisteringFamilies() {
-  index_ = nullptr;
-  rindex_ = nullptr;
-}
-
-size_t CommandRegistry::GetPos() const {
-  return pos;
+CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
+  return std::move(family_of_commands_);
 }
 
 namespace CO {

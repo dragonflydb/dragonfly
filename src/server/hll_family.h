@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include "server/acl/acl_commands_def.h"
-
 /// @brief This would implement HLL (HyperLogLog, aka PF) related commands: PFADD, PFCOUNT, PFMERGE
 /// For more details about these command see:
 ///     PFADD: https://redis.io/commands/pfadd/
