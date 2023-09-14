@@ -75,6 +75,7 @@ class DflyInstance:
             self._check_status()
             try:
                 self.get_port_from_lsof()
+                logging.debug("Process started after {time.time() - s} seconds")
                 break
             except RuntimeError:
                 time.sleep(0.05)
