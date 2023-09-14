@@ -1541,3 +1541,27 @@ async def test_df_crash_on_memcached_error(df_local_factory):
         memcached_client.set(b"key", b"data", noreply=False)
 
     await c_master.close()
+
+
+@pytest.mark.asyncio
+async def test_df_crash_on_replicaof_flag(df_local_factory):
+    master = df_local_factory.create(
+        port=BASE_PORT,
+        proactor_threads=2,
+    )
+
+    replica = df_local_factory.create(
+        port=master.port + 1, proactor_threads=2, replicaof=f"127.0.0.1:{BASE_PORT}"
+    )
+
+    master.start()
+    replica.start()
+
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+
+    await wait_available_async(c_master)
+    await wait_available_async(c_replica)
+
+    res = await c_replica.execute_command(f"BGSAVE")
+    assert True == res
