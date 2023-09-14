@@ -587,11 +587,17 @@ def gen_certificate(
 class EnvironCntx:
     def __init__(self, **kwargs):
         self.updates = kwargs
-        self.prev = None
+        self.undo = {}
 
     def __enter__(self):
-        self.prev = os.environ.copy()
-        os.environ.update(self.updates)
+        for k, v in self.updates.items():
+            if k in os.environ:
+                self.undo[k] = os.environ[k]
+            os.environ[k] = v
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
-        os.environ, self.prev = self.prev, None
+        for k, v in self.updates.items():
+            if k in self.undo:
+                os.environ[k] = self.undo[k]
+            else:
+                del os.environ[k]
