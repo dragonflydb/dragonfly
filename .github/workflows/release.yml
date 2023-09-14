@@ -126,7 +126,8 @@ jobs:
           if [ -f /etc/debian_version ]; then
             ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
           else
-            echo "TODO: build rpm"
+            echo "Creating package for ${{github.ref_name}}"
+            ./tools/packaging/rpm/build_rpm.sh build-opt/dragonfly-x86_64.tar.gz ${{github.ref_name}}
           fi
 
     - name: Run regression tests
@@ -139,7 +140,6 @@ jobs:
         run-only-on-ubuntu-latest: false
         build-folder-name: build-opt
     - name: Save artifacts
-      if  : matrix.container != 'fedora:30' # TODO
       run: |
           # place all artifacts at the same location
           mkdir -p results-artifacts
@@ -147,11 +147,10 @@ jobs:
             mv build-opt/dragonfly-*tar.gz results-artifacts
             mv dragonfly_*.deb results-artifacts
           else
-            echo "TODO: upload rpm"
-            ls *.rpm
+            ls -l *.rpm
+            mv ./*.rpm ./results-artifacts/
           fi
     - name: Upload
-      if  : matrix.container != 'fedora:30' # TODO
       uses: actions/upload-artifact@v3
       with:
         name: dragonfly-amd64
