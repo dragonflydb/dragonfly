@@ -4,6 +4,7 @@ import subprocess
 import aiohttp
 import logging
 import os
+import psutil
 from typing import Optional
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
@@ -54,6 +55,9 @@ class DflyInstance:
             self._port = None
             self.dynamic_port = True
 
+    def __del__(self):
+        assert self.proc == None
+
     def client(self, *args, **kwargs) -> RedisClient:
         return RedisClient(port=self.port, *args, **kwargs)
 
@@ -74,8 +78,10 @@ class DflyInstance:
         while time.time() - s < delay:
             self._check_status()
             try:
-                self.get_port_from_lsof()
-                logging.debug("Process started after {time.time() - s} seconds")
+                self.get_port_from_psutil()
+                logging.debug(
+                    f"Process started after {time.time() - s:.2f} seconds. port={self.port}"
+                )
                 break
             except RuntimeError:
                 time.sleep(0.05)
@@ -127,7 +133,7 @@ class DflyInstance:
     @property
     def port(self) -> int:
         if self._port is None:
-            self._port = self.get_port_from_lsof()
+            self._port = self.get_port_from_psutil()
         return self._port
 
     @property
@@ -146,20 +152,15 @@ class DflyInstance:
             return int(self.args["memcached_port"])
         return None
 
-    def get_port_from_lsof(self) -> int:
+    def get_port_from_psutil(self) -> int:
         if self.proc is None:
             raise RuntimeError("port is not available yet")
-        try:
-            lsof_output = subprocess.check_output(
-                ["lsof", "-i", "-a", "-p", str(self.proc.pid), "-sTCP:LISTEN", "-P", "-F", "n"],
-                stderr=subprocess.DEVNULL,
-            )
-        except subprocess.CalledProcessError:
-            raise RuntimeError("lsof problem")
+        p = psutil.Process(self.proc.pid)
         ports = set()
-        for line in lsof_output.split(b"\n"):
-            if line.startswith(b"n*:"):
-                ports.add(int(line[3:]))
+        for connection in p.connections():
+            if connection.status == "LISTEN":
+                ports.add(connection.laddr.port)
+
         ports.difference_update({self.admin_port, self.mc_port})
         assert len(ports) < 2, "Open ports detection found too many ports"
         if ports:
