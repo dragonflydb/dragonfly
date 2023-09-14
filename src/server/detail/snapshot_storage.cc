@@ -308,7 +308,7 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPat
     });
   }
 
-  return {{load_path}};
+  return std::vector<std::string>{{load_path}};
 }
 
 io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObjects(
