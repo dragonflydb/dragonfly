@@ -65,6 +65,7 @@ add_third_party(
   reflex
   URL https://github.com/Genivia/RE-flex/archive/refs/tags/v3.3.2.tar.gz
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx --prefix=${THIRD_PARTY_LIB_DIR}/reflex
+          CXX=${CMAKE_CXX_COMPILER} CC=${CMAKE_C_COMPILER}
 )
 
 set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
@@ -96,14 +97,15 @@ add_third_party(
   uni-algo
   URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
 
-  BUILD_IN_SOURCE 1
+  CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=17"
 )
 
 add_third_party(
   hnswlib
   URL https://github.com/nmslib/hnswlib/archive/refs/tags/v0.7.0.tar.gz
 
-  INSTALL_COMMAND cp -RT <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/hnswlib
+  BUILD_COMMAND echo SKIP
+  INSTALL_COMMAND cp -R <SOURCE_DIR>/hnswlib ${THIRD_PARTY_LIB_DIR}/hnswlib/include/
   LIB "none"
 )
 
