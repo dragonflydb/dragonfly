@@ -2541,7 +2541,7 @@ constexpr uint32_t kXGroupHelp = READ | STREAM | SLOW;
 
 void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-
+  registry->StartFamily();
   *registry
       << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1, acl::kXAdd}.HFUNC(XAdd)
       << CI{"XCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, 1, acl::kXClaim}.HFUNC(XClaim)

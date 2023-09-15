@@ -157,6 +157,7 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, facade::Connection* owner)
       : facade::ConnectionContext(stream, owner) {
+    acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
   }
 
   ConnectionContext(const ConnectionContext* owner, Transaction* tx,
@@ -199,6 +200,7 @@ class ConnectionContext : public facade::ConnectionContext {
 
   std::string authed_username{"default"};
   uint32_t acl_categories{acl::ALL};
+  std::vector<uint64_t> acl_commands;
 
  private:
   void EnableMonitoring(bool enable) {

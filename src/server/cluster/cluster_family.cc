@@ -608,6 +608,7 @@ constexpr uint32_t kReadWrite = FAST | CONNECTION;
 }  // namespace acl
 
 void ClusterFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0,
                   acl::kDflyCluster}

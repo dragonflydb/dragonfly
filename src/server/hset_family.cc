@@ -1141,6 +1141,7 @@ constexpr uint32_t kHVals = READ | HASH | SLOW;
 }  // namespace acl
 
 void HSetFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1, 1, acl::kHDel}.HFUNC(HDel)
       << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kHLen}.HFUNC(HLen)

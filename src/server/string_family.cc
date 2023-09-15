@@ -1499,6 +1499,7 @@ constexpr uint32_t kClThrottle = THROTTLE;
 }  // namespace acl
 
 void StringFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1, acl::kSet}.HFUNC(Set)
       << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1, acl::kSetEx}.HFUNC(

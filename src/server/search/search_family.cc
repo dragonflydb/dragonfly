@@ -530,6 +530,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
   // Disable journaling, because no-key-transactional enables it by default
   const uint32_t kReadOnlyMask = CO::NO_KEY_TRANSACTIONAL | CO::NO_AUTOJOURNAL;
 
+  registry->StartFamily();
   *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
             << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtDropIndex)
             << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)

@@ -7,7 +7,6 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 
-
 typedef struct intset intset;
 typedef struct redisObject robj;
 typedef struct dict dict;

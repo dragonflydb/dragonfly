@@ -41,7 +41,7 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
             cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc)
+            acl/validator.cc acl/helpers.cc)
 
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
@@ -88,4 +88,4 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
                  redis_parser_test snapshot_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test hll_family_test
-                 cluster_config_test cluster_family_test user_registry_test)
+                 cluster_config_test cluster_family_test user_registry_test acl_family_test)

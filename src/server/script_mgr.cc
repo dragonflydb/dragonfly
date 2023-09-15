@@ -132,7 +132,7 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(res.error().Format());
 
   // Schedule empty callback inorder to journal command via transaction framework.
-  cntx->transaction->EnableShards(1);
+  cntx->transaction->EnableShards(0);
   cntx->transaction->ScheduleSingleHop([&](auto* t, auto* shard) { return OpStatus::OK; });
 
   return (*cntx)->SendBulkString(res.value());
@@ -151,7 +151,7 @@ void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
   UpdateScriptCaches(key, data);
 
   // Schedule empty callback inorder to journal command via transaction framework.
-  cntx->transaction->EnableShards(1);
+  cntx->transaction->EnableShards(0);
   cntx->transaction->ScheduleSingleHop([&](auto* t, auto* shard) { return OpStatus::OK; });
 
   return (*cntx)->SendOk();

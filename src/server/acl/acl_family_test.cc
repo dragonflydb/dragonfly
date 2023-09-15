@@ -21,6 +21,7 @@ class AclFamilyTest : public BaseFamilyTest {
 };
 
 TEST_F(AclFamilyTest, AclSetUser) {
+  TestInitAclFam();
   auto resp = Run({"ACL", "SETUSER"});
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl setuser' command"));
 
@@ -34,11 +35,12 @@ TEST_F(AclFamilyTest, AclSetUser) {
   EXPECT_THAT(resp, "OK");
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
-  EXPECT_THAT(vec,
-              UnorderedElementsAre("user default on nopass +@ALL", "user vlad off nopass +@NONE"));
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                                        "user vlad off nopass +@NONE"));
 }
 
 TEST_F(AclFamilyTest, AclDelUser) {
+  TestInitAclFam();
   auto resp = Run({"ACL", "DELUSER"});
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
 
@@ -55,10 +57,11 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "LIST"});
-  EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL");
+  EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL +ALL");
 }
 
 TEST_F(AclFamilyTest, AclList) {
+  TestInitAclFam();
   auto resp = Run({"ACL", "LIST", "NONSENSE"});
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl list' command"));
 
@@ -70,12 +73,13 @@ TEST_F(AclFamilyTest, AclList) {
 
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL",
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL",
                                         "user kostas off d74ff0ee8da3b98 +@ADMIN",
                                         "user adi off d74ff0ee8da3b98 +@FAST"));
 }
 
 TEST_F(AclFamilyTest, AclAuth) {
+  TestInitAclFam();
   auto resp = Run({"ACL", "SETUSER", "shahar", ">mypass"});
   EXPECT_THAT(resp, "OK");
 
@@ -94,6 +98,7 @@ TEST_F(AclFamilyTest, AclAuth) {
 }
 
 TEST_F(AclFamilyTest, AclWhoAmI) {
+  TestInitAclFam();
   auto resp = Run({"ACL", "WHOAMI", "WHO"});
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl whoami' command"));
 
@@ -108,6 +113,7 @@ TEST_F(AclFamilyTest, AclWhoAmI) {
 }
 
 TEST_F(AclFamilyTest, TestAllCategories) {
+  TestInitAclFam();
   for (auto& cat : acl::REVERSE_CATEGORY_INDEX_TABLE) {
     if (cat != "_RESERVED") {
       auto resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("+@", cat)});
@@ -115,7 +121,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass +@ALL",
+                  UnorderedElementsAre("user default on nopass +@ALL +ALL",
                                        absl::StrCat("user kostas off nopass ", "+@", cat)));
 
       resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-@", cat)});
@@ -123,7 +129,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass +@ALL",
+                  UnorderedElementsAre("user default on nopass +@ALL +ALL",
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
@@ -152,4 +158,31 @@ TEST_F(AclFamilyTest, TestAllCategories) {
   //  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL", "user kostas
   //  off nopass +@NONE"));
 }
+
+TEST_F(AclFamilyTest, TestAllCommands) {
+  TestInitAclFam();
+  const auto& rev_indexer = acl::CommandsRevIndexer();
+  for (const auto& family : rev_indexer) {
+    for (const auto& command_name : family) {
+      auto resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("+", command_name)});
+      EXPECT_THAT(resp, "OK");
+
+      resp = Run({"ACL", "LIST"});
+      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                                                      absl::StrCat("user kostas off nopass +@NONE ",
+                                                                   "+", command_name)));
+
+      resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-", command_name)});
+
+      resp = Run({"ACL", "LIST"});
+      EXPECT_THAT(resp.GetVec(),
+                  UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                                       absl::StrCat("user kostas off nopass ", "+@NONE")));
+
+      resp = Run({"ACL", "DELUSER", "kostas"});
+      EXPECT_THAT(resp, "OK");
+    }
+  }
+}
+
 }  // namespace dfly
