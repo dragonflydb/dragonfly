@@ -240,6 +240,18 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   return *this;
 }
 
+SearchStats& SearchStats::operator+=(const SearchStats& o) {
+  static_assert(sizeof(SearchStats) == 24);
+  ADD(used_memory);
+  ADD(num_entries);
+
+  DCHECK(num_indices == 0 || num_indices == o.num_indices);
+  num_indices = std::max(num_indices, o.num_indices);
+  return *this;
+}
+
+#undef ADD
+
 OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
   ScanOpts scan_opts;
 

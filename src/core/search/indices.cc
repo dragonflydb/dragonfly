@@ -99,7 +99,8 @@ const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
 }
 
 CompressedSortedSet* BaseStringIndex::GetOrCreate(string_view word) {
-  return &entries_.try_emplace(word, entries_.get_allocator().resource()).first->second;
+  auto* mr = entries_.get_allocator().resource();
+  return &entries_.try_emplace(word, mr).first->second;
 }
 
 void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
@@ -214,7 +215,7 @@ struct HnswlibAdapter {
 HnswVectorIndex::HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity,
                                  pmr::memory_resource* mr)
     : BaseVectorIndex{dim, sim}, adapter_{make_unique<HnswlibAdapter>(dim, sim, capacity)} {
-  void(mr);  // TODO: Patch hnsw to use MR
+  (void)(mr);  // TODO: Patch hnsw to use MR
 }
 
 HnswVectorIndex::~HnswVectorIndex() {

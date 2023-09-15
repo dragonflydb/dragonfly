@@ -116,7 +116,7 @@ class EngineShard {
     return tiered_storage_.get();
   }
 
-  ShardDocIndices* search_indices() {
+  ShardDocIndices* search_indices() const {
     return shard_search_indices_.get();
   }
 

@@ -57,6 +57,7 @@ struct Metrics {
   std::vector<DbStats> db;
   SliceEvents events;
   TieredStats tiered_stats;
+  SearchStats search_stats;
   EngineShard::Stats shard_stats;
 
   size_t uptime = 0;
