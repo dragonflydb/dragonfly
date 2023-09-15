@@ -41,7 +41,7 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
 }
 
 bool CommandId::IsTransactional() const {
-  if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_JOURNAL))
+  if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_TRANSACTIONAL))
     return true;
 
   if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EXEC")
@@ -140,8 +140,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "variadic-keys";
     case NO_AUTOJOURNAL:
       return "custom-journal";
-    case NO_KEY_JOURNAL:
-      return "no-key-journal";
+    case NO_KEY_TRANSACTIONAL:
+      return "no-key-transactional";
   }
   return "unknown";
 }

@@ -345,6 +345,8 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint num_notfound{0};
   vector<DocIndexInfo> infos(shard_set->size());
+
+  cntx->transaction->EnableShards();
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(idx_name);
     if (index == nullptr)
@@ -390,6 +392,7 @@ void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
   atomic_int first{0};
   vector<string> names;
 
+  cntx->transaction->EnableShards();
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     // Using `first` to assign `names` only once without a race
     if (first.fetch_add(1) == 0)
@@ -416,6 +419,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
+  cntx->transaction->EnableShards();
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
@@ -452,6 +456,8 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint total_serialized = 0;
 
   vector<pair<search::AlgorithmProfile, absl::Duration>> results(shard_set->size());
+
+  cntx->transaction->EnableShards();
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
     if (!index)
@@ -521,13 +527,16 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
 void SearchFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
+  // Disable journaling, because no-key-transactional enables it by default
+  const uint32_t kReadOnlyMask = CO::NO_KEY_TRANSACTIONAL | CO::NO_AUTOJOURNAL;
+
   *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
             << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtDropIndex)
-            << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+            << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
             // Underscore same as in RediSearch because it's "temporary" (long time already)
-            << CI{"FT._LIST", CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-            << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
-            << CI{"FT.PROFILE", CO::GLOBAL_TRANS, -4, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
+            << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
+            << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
+            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
 }
 
 }  // namespace dfly

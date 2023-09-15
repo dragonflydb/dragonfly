@@ -170,6 +170,10 @@ class Transaction {
   // Conclude transaction
   void Conclude();
 
+  // Enable shards for no-key-transactional commands
+  // If shard is nullopt, enable all shards
+  void EnableShards(std::optional<ShardId> shard = std::nullopt);
+
   // Called by engine shard to execute a transaction hop.
   // txq_ooo is set to true if the transaction is running out of order
   // not as the tx queue head.
