@@ -5,13 +5,17 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <variant>
 
+#include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "base/flags.h"
@@ -23,15 +27,19 @@
 #include "io/file_util.h"
 #include "io/io.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/acl_log.h"
 #include "server/acl/helpers.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/server_state.h"
+#include "util/proactor_pool.h"
 
 ABSL_FLAG(std::string, aclfile, "", "Path and name to aclfile");
 
 namespace dfly::acl {
 
-AclFamily::AclFamily(UserRegistry* registry) : registry_(registry) {
+AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
+    : registry_(registry), pool_(pool) {
 }
 
 void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
@@ -272,9 +280,68 @@ void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 1) {
+    (*cntx)->SendError(facade::OpStatus::OUT_OF_RANGE);
+  }
+
+  size_t max_output = 10;
+  if (args.size() == 1) {
+    auto option = facade::ToSV(args[0]);
+    if (absl::EqualsIgnoreCase(option, "RESET")) {
+      pool_->AwaitFiberOnAll([](auto index, auto* context) { ServerState::tlocal()->log.Reset(); });
+      (*cntx)->SendOk();
+      return;
+    }
+
+    if (!absl::SimpleAtoi(facade::ToSV(args[0]), &max_output)) {
+      (*cntx)->SendError("Invalid count");
+      return;
+    }
+  }
+
+  std::vector<AclLog::LogType> logs(pool_->size());
+  pool_->AwaitFiberOnAll(
+      [&logs](auto index, auto* context) { logs[index] = ServerState::tlocal()->log.GetLog(); });
+
+  size_t total_entries = 0;
+  for (auto& log : logs) {
+    total_entries += std::min(max_output, log.size());
+  }
+
+  (*cntx)->StartArray(total_entries);
+  for (auto& log : logs) {
+    size_t entry_no = 0;
+    for (auto& entry : log) {
+      if (entry_no++ == max_output) {
+        break;
+      }
+      (*cntx)->StartArray(12);
+      (*cntx)->SendSimpleString("reason");
+      using Reason = AclLog::Reason;
+      std::string reason = entry.reason == Reason::COMMAND ? "COMMAND" : "AUTH";
+      (*cntx)->SendSimpleString(reason);
+      (*cntx)->SendSimpleString("object");
+      (*cntx)->SendSimpleString(entry.object);
+      (*cntx)->SendSimpleString("username");
+      (*cntx)->SendSimpleString(entry.username);
+      (*cntx)->SendSimpleString("age-seconds");
+      auto now_diff = std::chrono::system_clock::now() - entry.entry_creation;
+      auto secs = std::chrono::duration_cast<std::chrono::seconds>(now_diff);
+      auto left_over = now_diff - std::chrono::duration_cast<std::chrono::microseconds>(secs);
+      auto age = absl::StrCat(secs.count(), ".", left_over.count());
+      (*cntx)->SendSimpleString(absl::StrCat(age));
+      (*cntx)->SendSimpleString("client-info");
+      (*cntx)->SendSimpleString(entry.client_info);
+      (*cntx)->SendSimpleString("timestamp-created");
+      (*cntx)->SendLong(entry.entry_creation.time_since_epoch().count());
+    }
+  }
+}
+
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
-inline CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
+CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
   return [=](CmdArgList args, ConnectionContext* cntx) { return (acl->*f)(args, cntx); };
 }
 
@@ -287,6 +354,7 @@ constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kWhoAmI = acl::SLOW;
 constexpr uint32_t kSave = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -312,6 +380,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
       Save);
   *registry << CI{"ACL LOAD", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kLoad}.HFUNC(
       Load);
+  *registry << CI{"ACL LOG", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kLog}.HFUNC(
+      Log);
 
   cmd_registry_ = registry;
 }

@@ -628,7 +628,7 @@ optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
 
 Service::Service(ProactorPool* pp)
     : pp_(*pp),
-      acl_family_(&user_registry_),
+      acl_family_(&user_registry_, pp),
       server_family_(this),
       cluster_family_(&server_family_) {
   CHECK(pp);

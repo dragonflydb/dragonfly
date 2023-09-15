@@ -349,3 +349,26 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     assert "user vlad off nopass +@STRING" in result
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_acl_log(async_client):
+    res = await async_client.execute_command("ACL LOG")
+    assert [] == res
+
+    await async_client.execute_command("ACL SETUSER elon >mars ON +@string +@dangerous")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("AUTH elon wrong")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 1 == len(res)
+
+    res = await async_client.execute_command("AUTH elon mars")
+    res = await async_client.execute_command("SET mykey 22")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("HSET mk kk 22")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 2 == len(res)

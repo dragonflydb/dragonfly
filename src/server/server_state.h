@@ -9,6 +9,7 @@
 
 #include "base/histogram.h"
 #include "core/interpreter.h"
+#include "server/acl/acl_log.h"
 #include "server/acl/user_registry.h"
 #include "server/common.h"
 #include "server/script_mgr.h"
@@ -208,6 +209,8 @@ class ServerState {  // public struct - to allow initialization.
   facade::ConnectionStats connection_stats;
 
   acl::UserRegistry* user_registry;
+
+  acl::AclLog log;
 
  private:
   int64_t live_transactions_ = 0;

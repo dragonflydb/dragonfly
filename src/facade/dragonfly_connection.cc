@@ -431,6 +431,55 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   return res;
 }
 
+string Connection::GetClientInfo() const {
+  auto res = GetClientInfo(0);
+  auto start = res.find("tid");
+  auto end = res.find("irq");
+  res.erase(start, end - start);
+
+  // The following are dummy fields and users should not rely on those unless
+  // we decide to implement them.
+  // This is only done because the redis pyclient parser for the field "client-info"
+  // for the command ACL LOG
+  // is completely *BROKEN* and it literally hardcodes the expected values.
+  // What is more preposterous is that that it actually doesn't conform to the
+  // actual expected values, since it's missing half of them. That is, even for
+  // redis-server, issuing an ACL LOG command via redis-cli and the pyclient
+  // will return different results! An example of ACL LOG ran with redis-cli is:
+  //
+  // "client-info"
+  // 14) "id=3 addr=127.0.0.1:57275 laddr=127.0.0.1:6379 fd=8 name= age=16
+  //      idle=0 flags=N db=0 sub=0 psub=0 ssub=0 multi=-1 qbuf=48 qbuf-free=16842
+  //      argv-mem=25 multi-mem=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0
+  //      tot-mem=18737 events=r cmd=auth user=default redir=-1 resp=2"
+  //
+  // Meanwhile the parser in the pyclient:
+  //
+  //  # Those fields are defined as int in networking.c
+  //  for int_key in {
+  //      "id",
+  //      "age",
+  //      "idle",
+  //      "db",
+  //      "sub",
+  //      "psub",
+  //      "multi",
+  //      "qbuf",
+  //      "qbuf-free",
+  //      "obl",
+  //      "argv-mem",
+  //      "oll",
+  //      "omem",
+  //      "tot-mem",
+  //  }:
+  //  Will omit half of the results....
+
+  absl::StrAppend(&res, " qbuf=0 ", "qbuf-free=0 ", "obl=0 ", "argv-mem=0 ");
+  absl::StrAppend(&res, "oll=0 ", "omem=0 ", "tot-mem=0 ", "multi=0 ");
+  absl::StrAppend(&res, "psub=0 ", "sub=0");
+  return res;
+}
+
 uint32_t Connection::GetClientId() const {
   return id_;
 }
