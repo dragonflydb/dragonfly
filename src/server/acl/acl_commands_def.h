@@ -107,9 +107,6 @@ inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
     "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
     "_RESERVED", "FT_SEARCH", "THROTTLE",  "JSON"};
 
-using BitfieldIndexPar =
-    std::pair<size_t /*index of family in the vector */, uint64_t /*bit index mask*/>;
-using CommandsIndexStore = absl::flat_hash_map<std::string, BitfieldIndexPar>;
 using RevCommandField = std::vector<std::string>;
 using RevCommandsIndexStore = std::vector<RevCommandField>;
 
@@ -125,35 +122,14 @@ inline size_t NumberOfFamilies(size_t number = 0) {
   return number_of_families;
 }
 
-inline const CommandsIndexStore& CommandsIndexer(CommandsIndexStore store = {}) {
-  static CommandsIndexStore index_store = std::move(store);
-  return index_store;
-}
-
 inline const RevCommandsIndexStore& CommandsRevIndexer(RevCommandsIndexStore store = {}) {
   static RevCommandsIndexStore rev_index_store = std::move(store);
   return rev_index_store;
 }
 
 inline void BuildIndexers(std::vector<std::vector<std::string>> families) {
-  acl::CommandsIndexStore index;
-  acl::RevCommandsIndexStore rindex(families.size());
-
   acl::NumberOfFamilies(families.size());
-
-  size_t pos = 0;
-  for (auto& family : families) {
-    size_t bit_number = 0;
-    for (auto& command_name : family) {
-      index[command_name] = {pos, 1ULL << bit_number++};
-      rindex[pos].push_back(std::move(command_name));
-      CHECK_LT(bit_number, size_t(64));
-    }
-    ++pos;
-  }
-
-  acl::CommandsIndexer(std::move(index));
-  acl::CommandsRevIndexer(std::move(rindex));
+  acl::CommandsRevIndexer(std::move(families));
 }
 
 }  // namespace dfly::acl

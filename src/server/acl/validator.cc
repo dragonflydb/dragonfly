@@ -12,11 +12,10 @@ namespace dfly::acl {
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx,
                                                 const facade::CommandId& id) {
-  auto cat_credentials = id.acl_categories();
+  const auto cat_credentials = id.acl_categories();
 
-  const auto& commands = acl::CommandsIndexer();
-  DCHECK(commands.contains(id.name()));
-  auto [index, command_mask] = commands.find(id.name())->second;
+  const size_t index = id.GetFamily();
+  const uint64_t command_mask = id.GetBitIndex();
   DCHECK_LT(index, cntx.acl_commands.size());
 
   return (cntx.acl_categories & cat_credentials) != 0 ||

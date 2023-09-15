@@ -166,6 +166,7 @@ class CommandRegistry {
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
 
   FamiliesVec family_of_commands_;
+  size_t bit_index_;
 };
 
 }  // namespace dfly

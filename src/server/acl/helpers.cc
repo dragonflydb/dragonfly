@@ -128,8 +128,8 @@ bool IsIndexAllCommandsFlag(size_t index) {
   return index == std::numeric_limits<size_t>::max();
 }
 
-std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) {
-  const auto& store = CommandsIndexer();
+std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
+                                                 const CommandRegistry& registry) {
   const auto all_commands = std::pair<size_t, uint64_t>{std::numeric_limits<size_t>::max(), 0};
   if (command == "+ALL") {
     return {all_commands, true};
@@ -140,19 +140,21 @@ std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) {
   }
 
   if (absl::StartsWith(command, "+")) {
-    auto res = store.find(command.substr(1));
-    if (res == store.cend()) {
+    auto res = registry.Find(command.substr(1));
+    if (!res) {
       return {};
     }
-    return {res->second, true};
+    std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->GetBitIndex()};
+    return {cmd, true};
   }
 
   if (absl::StartsWith(command, "-")) {
-    auto res = store.find(command.substr(1));
-    if (res == store.cend()) {
+    auto res = registry.Find(command.substr(1));
+    if (!res) {
       return {};
     }
-    return {res->second, false};
+    std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->GetBitIndex()};
+    return {cmd, false};
   }
 
   return {};
@@ -183,7 +185,9 @@ MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames
 using facade::ErrorReply;
 
 template <typename T>
-std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args, bool hashed) {
+std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
+                                                              const CommandRegistry& registry,
+                                                              bool hashed) {
   User::UpdateRequest req;
 
   for (auto& arg : args) {
@@ -217,7 +221,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args, bool hashe
       continue;
     }
 
-    auto [cmd, sign] = MaybeParseAclCommand(command);
+    auto [cmd, sign] = MaybeParseAclCommand(command, registry);
     if (!cmd) {
       return ErrorReply(absl::StrCat("Unrecognized parameter ", command));
     }
@@ -236,9 +240,10 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args, bool hashe
 using facade::CmdArgList;
 
 template std::variant<User::UpdateRequest, ErrorReply>
-ParseAclSetUser<std::vector<std::string_view>&>(std::vector<std::string_view>&, bool hashed);
+ParseAclSetUser<std::vector<std::string_view>&>(std::vector<std::string_view>&,
+                                                const CommandRegistry& registry, bool hashed);
 
-template std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser<CmdArgList>(CmdArgList args,
-                                                                                   bool hashed);
+template std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser<CmdArgList>(
+    CmdArgList args, const CommandRegistry& registry, bool hashed);
 
 }  // namespace dfly::acl

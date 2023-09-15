@@ -64,6 +64,22 @@ class CommandId {
     return acl_categories_;
   }
 
+  void SetFamily(size_t fam) {
+    family_ = fam;
+  }
+
+  void SetBitIndex(uint64_t bit) {
+    bit_index_ = bit;
+  }
+
+  size_t GetFamily() const {
+    return family_;
+  }
+
+  uint64_t GetBitIndex() const {
+    return bit_index_;
+  }
+
   static uint32_t OptCount(uint32_t mask);
 
  protected:
@@ -74,7 +90,11 @@ class CommandId {
   int8_t first_key_;
   int8_t last_key_;
   int8_t step_key_;
+  // Acl categories
   uint32_t acl_categories_;
+  // Acl commands indices
+  size_t family_;
+  uint64_t bit_index_;
 };
 
 }  // namespace facade

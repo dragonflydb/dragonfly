@@ -13,13 +13,12 @@
 #include "facade/facade_types.h"
 #include "helio/util/proactor_pool.h"
 #include "server/acl/user_registry.h"
+#include "server/command_registry.h"
 #include "server/common.h"
 
 namespace dfly {
 
 class ConnectionContext;
-class CommandRegistry;
-
 namespace acl {
 
 class AclFamily final {
@@ -56,6 +55,8 @@ class AclFamily final {
 
   facade::Listener* main_listener_{nullptr};
   UserRegistry* registry_;
+  CommandRegistry* cmd_registry_;
+  util::ProactorPool* pool_;
 };
 
 }  // namespace acl

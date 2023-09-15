@@ -12,6 +12,7 @@
 
 #include "facade/facade_types.h"
 #include "server/acl/user.h"
+#include "server/command_registry.h"
 
 namespace dfly::acl {
 
@@ -31,10 +32,12 @@ std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command);
 bool IsIndexAllCommandsFlag(size_t index);
 
 using OptCommand = std::optional<std::pair<size_t, uint64_t>>;
-std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command);
+std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
+                                                 const CommandRegistry& registry);
 
 template <typename T>
-std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(T args, bool hashed = false);
+std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
+    T args, const CommandRegistry& registry, bool hashed = false);
 
 using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
 

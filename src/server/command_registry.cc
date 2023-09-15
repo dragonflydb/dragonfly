@@ -106,6 +106,8 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   family_of_commands_.back().push_back(std::string(k));
+  cmd.SetFamily(family_of_commands_.size() - 1);
+  cmd.SetBitIndex(1ULL << bit_index_++);
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;
@@ -113,6 +115,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 
 void CommandRegistry::StartFamily() {
   family_of_commands_.push_back({});
+  bit_index_ = 0;
 }
 
 CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {

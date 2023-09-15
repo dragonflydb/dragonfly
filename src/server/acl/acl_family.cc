@@ -81,7 +81,7 @@ using facade::ErrorReply;
 
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
-  auto req = ParseAclSetUser(args.subspan(1));
+  auto req = ParseAclSetUser(args.subspan(1), *cmd_registry_);
   auto error_case = [cntx](ErrorReply&& error) { (*cntx)->SendError(error); };
   auto update_case = [username, cntx, this](User::UpdateRequest&& req) {
     auto user_with_lock = registry_->MaybeAddAndUpdateWithLock(username, std::move(req));
@@ -219,7 +219,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   std::vector<User::UpdateRequest> requests;
 
   for (auto& cmds : *materialized) {
-    auto req = ParseAclSetUser<std::vector<std::string_view>&>(cmds, true);
+    auto req = ParseAclSetUser<std::vector<std::string_view>&>(cmds, *cmd_registry_, true);
     if (std::holds_alternative<ErrorReply>(req)) {
       auto error = std::move(std::get<ErrorReply>(req));
       LOG(WARNING) << "Error while parsing aclfile: " << error.ToSv();
@@ -252,10 +252,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
 
 bool AclFamily::Load() {
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  if (LoadToRegistryFromFile(acl_file, true)) {
-    return false;
-  }
-  return true;
+  return !LoadToRegistryFromFile(acl_file, true).has_value();
 }
 
 void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
@@ -274,8 +271,6 @@ void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->SendOk();
 }
-
-using CI = dfly::CommandId;
 
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
@@ -301,6 +296,8 @@ constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 // easy to handle that case explicitly in `DispatchCommand`.
 
 void AclFamily::Register(dfly::CommandRegistry* registry) {
+  using CI = dfly::CommandId;
+
   registry->StartFamily();
   *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
   *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kList}.HFUNC(
@@ -315,6 +312,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
       Save);
   *registry << CI{"ACL LOAD", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kLoad}.HFUNC(
       Load);
+
+  cmd_registry_ = registry;
 }
 
 #undef HFUNC
