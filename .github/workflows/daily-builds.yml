@@ -94,7 +94,9 @@ jobs:
           echo "*************************** START BUILDING **************************************"
           CC=gcc-13 CXX=g++-13 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF
 
-          ninja ok_backend dfly_core_test dconv_project
-          ninja search_parser_test
-          ninja dragonfly
-          ./search_parser_test
+          ninja src/all
+
+      - name: Test
+        run: |
+            cd $GITHUB_WORKSPACE/build
+            ctest -V -L DFLY
