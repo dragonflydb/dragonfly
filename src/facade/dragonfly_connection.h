@@ -82,6 +82,7 @@ class Connection : public util::Connection {
   struct AclUpdateMessage {
     std::vector<std::string> username;
     std::vector<uint32_t> categories;
+    std::vector<std::vector<uint64_t>> commands;
   };
 
   struct PipelineMessage {

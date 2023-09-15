@@ -1013,6 +1013,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       cntx->authed_username = username;
       auto cred = registry->GetCredentials(username);
       cntx->acl_categories = cred.acl_categories;
+      cntx->acl_commands = cred.acl_commands;
       return (*cntx)->SendOk();
     }
     return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
@@ -1989,13 +1990,14 @@ constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
+// TODO(check this)
 constexpr uint32_t kDfly = ADMIN;
 }  // namespace acl
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
-
+  registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kAuth}.HFUNC(Auth)
       << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::kBGSave}.HFUNC(Save)

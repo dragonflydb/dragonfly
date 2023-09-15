@@ -116,9 +116,6 @@ class CommandId : public facade::CommandId {
 };
 
 class CommandRegistry {
-  absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
-  absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
-
  public:
   CommandRegistry();
 
@@ -159,6 +156,17 @@ class CommandRegistry {
       cb(k_v.second.name(), src);
     }
   }
+
+  using FamiliesVec = std::vector<std::vector<std::string>>;
+  void StartFamily();
+  FamiliesVec GetFamilies();
+
+ private:
+  absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
+  absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
+
+  FamiliesVec family_of_commands_;
+  size_t bit_index_;
 };
 
 }  // namespace dfly

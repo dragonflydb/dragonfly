@@ -520,7 +520,7 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
 
 void SearchFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-
+  registry->StartFamily();
   *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
             << CI{"FT.DROPINDEX", CO::GLOBAL_TRANS, -2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtDropIndex)
             << CI{"FT.INFO", CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)

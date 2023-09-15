@@ -562,4 +562,8 @@ void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
   CHECK(flag->ParseFrom(new_value, &error)) << "Error: " << error;
 }
 
+void BaseFamilyTest::TestInitAclFam() {
+  service_->TestInit();
+}
+
 }  // namespace dfly

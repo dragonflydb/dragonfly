@@ -1796,6 +1796,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 // TODO: Add sensible defaults/categories to json commands
 
 void JsonFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -3, 1, -2, 1,
                   acl::JSON}

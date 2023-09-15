@@ -5,6 +5,7 @@
 #include "server/conn_context.h"
 
 #include "base/logging.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
@@ -79,6 +80,7 @@ const CommandId* StoredCmd::Cid() const {
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
                                      facade::CapturingReplyBuilder* crb)
     : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
+  acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
   if (tx) {  // If we have a carrier transaction, this context is used for squashing
     DCHECK(owner);
     conn_state.db_index = owner->conn_state.db_index;

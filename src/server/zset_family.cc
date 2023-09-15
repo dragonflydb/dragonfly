@@ -2574,7 +2574,7 @@ constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
-
+  registry->StartFamily();
   *registry
       << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
       << CI{"BZPOPMIN",

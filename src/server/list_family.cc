@@ -1326,6 +1326,7 @@ constexpr uint32_t kBLMove = READ | LIST | SLOW | BLOCKING;
 }  // namespace acl
 
 void ListFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPush}.HFUNC(LPush)
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPushX}.HFUNC(LPushX)
