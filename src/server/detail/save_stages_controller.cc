@@ -98,6 +98,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
                                 const RdbSaver::GlobalData& glob_data) {
   VLOG(1) << "Saving RDB " << path;
 
+  CHECK_NOTNULL(snapshot_storage_);
   auto res = snapshot_storage_->OpenWriteFile(path);
   if (!res) {
     return res.error();
