@@ -420,13 +420,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
 #endif
 
-  // check for '--replicaof' before loading anything
-  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
-    service_.proactor_pool().GetNextProactor()->Await(
-        [this, &flag]() { this->Replicate(flag.host, flag.port); });
-    return;  // DONT load any snapshots
-  }
-
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
     aws_ = make_unique<cloud::AWS>("s3");
@@ -439,6 +432,13 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
+  }
+
+  // check for '--replicaof' before loading anything
+  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
+    service_.proactor_pool().GetNextProactor()->Await(
+        [this, &flag]() { this->Replicate(flag.host, flag.port); });
+    return;  // DONT load any snapshots
   }
 
   const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
