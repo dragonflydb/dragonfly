@@ -52,7 +52,7 @@ struct BaseStringIndex : public BaseIndex {
   static auto WithPmr(absl::flat_hash_map<K, V, H, E, A> m)
       -> absl::flat_hash_map<K, V, H, E, std::pmr::polymorphic_allocator<std::pair<const K, V>>>;
 
-  decltype(WithPmr(absl::flat_hash_map<std::string, CompressedSortedSet>{})) entries_;
+  decltype(WithPmr(absl::flat_hash_map<std::pmr::string, CompressedSortedSet>{})) entries_;
 };
 
 // Index for text fields.

@@ -94,13 +94,14 @@ const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
   else
     word = una::cases::to_lowercase_utf8(str);
 
-  auto it = entries_.find(word);
+  auto* mr = entries_.get_allocator().resource();
+  auto it = entries_.find(pmr::string{word, mr});
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
 CompressedSortedSet* BaseStringIndex::GetOrCreate(string_view word) {
   auto* mr = entries_.get_allocator().resource();
-  return &entries_.try_emplace(word, mr).first->second;
+  return &entries_.try_emplace(pmr::string{word, mr}, mr).first->second;
 }
 
 void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
