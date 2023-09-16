@@ -80,7 +80,10 @@ TEST_F(AclFamilyTest, AclList) {
 
 TEST_F(AclFamilyTest, AclAuth) {
   TestInitAclFam();
-  auto resp = Run({"ACL", "SETUSER", "shahar", ">mypass"});
+  auto resp = Run({"AUTH", "default", R"("")"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "SETUSER", "shahar", ">mypass"});
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"AUTH", "shahar", "wrongpass"});

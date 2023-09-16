@@ -68,10 +68,7 @@ void User::SetPasswordHash(std::string_view password, bool is_hashed) {
 
 bool User::HasPassword(std::string_view password) const {
   if (!password_hash_) {
-    if (password == "nopass") {
-      return true;
-    }
-    return false;
+    return true;
   }
   // hash password and compare
   return *password_hash_ == StringSHA256(password);
