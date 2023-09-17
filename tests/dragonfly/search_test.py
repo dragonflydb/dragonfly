@@ -292,6 +292,40 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type)
     await i3.dropindex()
 
 
+async def test_knn_score_return(async_client: aioredis.Redis):
+    i1 = async_client.ft("i2")
+    vector_field = VectorField(
+        "pos",
+        algorithm="FLAT",
+        attributes={
+            "DIM": 1,
+            "DISTANCE_METRIC": "L2",
+            "INITICAL_CAP": 100,
+        },
+    )
+
+    await i1.create_index(
+        [vector_field],
+        definition=IndexDefinition(index_type=IndexType.HASH),
+    )
+
+    pipe = async_client.pipeline()
+    for i in range(100):
+        pipe.hset(f"k{i}", mapping={"pos": np.array(i, dtype=np.float32).tobytes()})
+    await pipe.execute()
+
+    params = {"vec": np.array([1.0], dtype=np.float32).tobytes()}
+    result = await i1.search("* => [KNN 3 @pos $vec AS distance]", params)
+
+    assert result.total == 3
+    assert [d["distance"] for d in result.docs] == ["0", "1", "1"]
+
+    result = await i1.search(
+        Query("* => [KNN 3 @pos $vec AS distance]").return_fields("pos"), params
+    )
+    assert not any(hasattr(d, "distance") for d in result.docs)
+
+
 @dfly_args({"proactor_threads": 4, "dbfilename": "search-data"})
 async def test_index_persistence(df_server):
     client = aioredis.Redis(port=df_server.port)

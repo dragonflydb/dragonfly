@@ -241,11 +241,11 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
   }
 }
 
-void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchResult> results,
-              ConnectionContext* cntx) {
-  vector<const SerializedSearchDoc*> docs;
-  for (const auto& shard_results : results) {
-    for (const auto& doc : shard_results.docs) {
+void ReplyKnn(size_t knn_limit, string_view knn_score_alias, const SearchParams& params,
+              absl::Span<SearchResult> results, ConnectionContext* cntx) {
+  vector<SerializedSearchDoc*> docs;
+  for (auto& shard_results : results) {
+    for (auto& doc : shard_results.docs) {
       docs.push_back(&doc);
     }
   }
@@ -262,15 +262,24 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
   bool ids_only = params.IdsOnly();
   size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
 
+  // Clear knn score alias if its excluded from return values
+  if (!params.ShouldReturnField(knn_score_alias))
+    knn_score_alias = "";
+
   facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
 
   (*cntx)->StartArray(reply_size);
   (*cntx)->SendLong(docs.size());
   for (auto* doc : absl::MakeSpan(docs).subspan(params.limit_offset, result_count)) {
-    if (ids_only)
+    if (ids_only) {
       (*cntx)->SendBulkString(doc->key);
-    else
-      SendSerializedDoc(*doc, cntx);
+      continue;
+    }
+
+    if (!knn_score_alias.empty())
+      doc->values[knn_score_alias] = absl::StrCat(doc->knn_distance);
+
+    SendSerializedDoc(*doc, cntx);
   }
 }
 
@@ -427,8 +436,8 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   if (index_not_found.load())
     return (*cntx)->SendError(string{index_name} + ": no such index");
 
-  if (auto knn_limit = search_algo.HasKnn(); knn_limit)
-    ReplyKnn(*knn_limit, *params, absl::MakeSpan(docs), cntx);
+  if (auto knn_params = search_algo.HasKnn(); knn_params)
+    ReplyKnn(knn_params->first, knn_params->second, *params, absl::MakeSpan(docs), cntx);
   else
     ReplyWithResults(*params, absl::MakeSpan(docs), cntx);
 }

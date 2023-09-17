@@ -74,12 +74,15 @@ struct AstTagsNode {
 
 // Applies nearest neighbor search to the final result set
 struct AstKnnNode {
-  AstKnnNode(AstNode&& sub, size_t limit, std::string_view field, OwnedFtVector vec);
+  AstKnnNode() = default;
+  AstKnnNode(size_t limit, std::string_view field, OwnedFtVector vec, std::string_view score_alias);
+  AstKnnNode(AstNode&& sub, AstKnnNode&& self);
 
   std::unique_ptr<AstNode> filter;
   size_t limit;
   std::string field;
   OwnedFtVector vec;
+  std::string score_alias;
 };
 
 using NodeVariants =
@@ -98,6 +101,11 @@ using AstExpr = AstNode;
 namespace std {
 
 inline std::ostream& operator<<(std::ostream& os, const dfly::search::AstExpr& ast) {
+  // os << "ast{" << ast->Debug() << "}";
+  return os;
+}
+
+inline std::ostream& operator<<(std::ostream& os, const dfly::search::AstKnnNode& ast) {
   // os << "ast{" << ast->Debug() << "}";
   return os;
 }

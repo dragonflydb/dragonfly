@@ -57,6 +57,7 @@ using namespace std;
   RCURLBR  "}"
   OR_OP    "|"
   KNN      "KNN"
+  AS       "AS"
 ;
 
 %token AND_OP
@@ -75,6 +76,9 @@ using namespace std;
 %nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 
+%nterm <AstKnnNode> knn_query
+%nterm <std::string> opt_knn_alias
+
 %printer { yyo << $$; } <*>;
 
 %%
@@ -82,8 +86,16 @@ using namespace std;
 final_query:
   filter
       { driver->Set(move($1)); }
-  | filter ARROW LBRACKET KNN INT64 FIELD TERM RBRACKET
-      { driver->Set(AstKnnNode(move($1), $5, $6, BytesToFtVector($7))); }
+  | filter ARROW knn_query
+      { driver->Set(AstKnnNode(move($1), move($3))); }
+
+knn_query:
+  LBRACKET KNN INT64 FIELD TERM opt_knn_alias RBRACKET
+    { $$ = AstKnnNode($3, $4, BytesToFtVector($5), $6); }
+
+opt_knn_alias:
+  AS TERM { $$ = move($2); }
+  | { $$ = std::string{}; }
 
 filter:
   search_expr               { $$ = move($1); }
