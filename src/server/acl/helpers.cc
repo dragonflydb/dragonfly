@@ -245,5 +245,4 @@ ParseAclSetUser<std::vector<std::string_view>&>(std::vector<std::string_view>&,
 
 template std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser<CmdArgList>(
     CmdArgList args, const CommandRegistry& registry, bool hashed);
-
 }  // namespace dfly::acl

@@ -19,6 +19,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
+#include "server/acl/acl_log.h"
 #include "util/fibers/pool.h"
 
 using namespace std;
@@ -563,6 +564,7 @@ void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
 }
 
 void BaseFamilyTest::TestInitAclFam() {
+  absl::SetFlag(&FLAGS_acllog_max_len, 0);
   service_->TestInit();
 }
 

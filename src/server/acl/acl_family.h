@@ -23,7 +23,7 @@ namespace acl {
 
 class AclFamily final {
  public:
-  explicit AclFamily(UserRegistry* registry);
+  explicit AclFamily(UserRegistry* registry, util::ProactorPool* pool);
 
   void Register(CommandRegistry* registry);
   void Init(facade::Listener* listener, UserRegistry* registry);
@@ -36,7 +36,9 @@ class AclFamily final {
   void WhoAmI(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Load(CmdArgList args, ConnectionContext* cntx);
+  // Helper function for bootstrap
   bool Load();
+  void Log(CmdArgList args, ConnectionContext* cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads

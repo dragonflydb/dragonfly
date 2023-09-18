@@ -11,6 +11,7 @@
 #include <variant>
 
 #include "facade/facade_types.h"
+#include "server/acl/acl_log.h"
 #include "server/acl/user.h"
 #include "server/command_registry.h"
 
