@@ -51,7 +51,7 @@ class CompressedSortedSet {
   friend struct Iterator;
 
  public:
-  CompressedSortedSet(std::pmr::memory_resource* mr);
+  explicit CompressedSortedSet(std::pmr::memory_resource* mr);
 
   ConstIterator begin() const;
   ConstIterator end() const;

@@ -94,8 +94,7 @@ const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
   else
     word = una::cases::to_lowercase_utf8(str);
 
-  auto* mr = entries_.get_allocator().resource();
-  auto it = entries_.find(pmr::string{word, mr});
+  auto it = entries_.find(word);
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
@@ -214,9 +213,9 @@ struct HnswlibAdapter {
 };
 
 HnswVectorIndex::HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity,
-                                 pmr::memory_resource* mr)
+                                 pmr::memory_resource*)
     : BaseVectorIndex{dim, sim}, adapter_{make_unique<HnswlibAdapter>(dim, sim, capacity)} {
-  (void)(mr);  // TODO: Patch hnsw to use MR
+  // TODO: Patch hnsw to use MR
 }
 
 HnswVectorIndex::~HnswVectorIndex() {

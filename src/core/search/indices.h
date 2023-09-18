@@ -20,7 +20,7 @@ namespace dfly::search {
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
-  NumericIndex(std::pmr::memory_resource* mr);
+  explicit NumericIndex(std::pmr::memory_resource* mr);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -48,11 +48,30 @@ struct BaseStringIndex : public BaseIndex {
  protected:
   CompressedSortedSet* GetOrCreate(std::string_view word);
 
-  template <typename K, typename V, typename H, typename E, typename A>
-  static auto WithPmr(absl::flat_hash_map<K, V, H, E, A> m)
-      -> absl::flat_hash_map<K, V, H, E, std::pmr::polymorphic_allocator<std::pair<const K, V>>>;
+  struct PmrEqual {
+    using is_transparent = void;
+    bool operator()(const std::pmr::string& lhs, const std::pmr::string& rhs) const {
+      return lhs == rhs;
+    }
+    bool operator()(const std::pmr::string& lhs, const std::string_view& rhs) const {
+      return lhs == rhs;
+    }
+  };
 
-  decltype(WithPmr(absl::flat_hash_map<std::pmr::string, CompressedSortedSet>{})) entries_;
+  struct PmrHash {
+    using is_transparent = void;
+    size_t operator()(const std::string_view& sv) const {
+      return absl::Hash<std::string_view>()(sv);
+    }
+    size_t operator()(const std::pmr::string& pmrs) const {
+      return operator()(std::string_view{pmrs.data(), pmrs.size()});
+    }
+  };
+
+  absl::flat_hash_map<
+      std::pmr::string, CompressedSortedSet, PmrHash, PmrEqual,
+      std::pmr::polymorphic_allocator<std::pair<std::pmr::string, CompressedSortedSet>>>
+      entries_;
 };
 
 // Index for text fields.
