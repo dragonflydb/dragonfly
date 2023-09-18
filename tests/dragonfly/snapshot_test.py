@@ -136,19 +136,15 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
         df_args = {"dbfilename": dbfilename, **BASIC_ARGS, "port": 1111}
         if save_type == "rdb":
             df_args["nodf_snapshot_format"] = None
-        df_server = df_local_factory.create(**df_args)
-        df_server.start()
+        with df_local_factory.create(**df_args) as df_server:
+            async with df_server.client() as client:
+                await client.set("TEST", hash(dbfilename))
+                await client.execute_command("SAVE " + save_type)
 
-        client = aioredis.Redis(port=df_server.port)
-        await client.set("TEST", hash(dbfilename))
-        await client.execute_command("SAVE " + save_type)
-        df_server.stop()
-
-        df_server2 = df_local_factory.create(**df_args)
-        df_server2.start()
-        client = aioredis.Redis(port=df_server.port)
-        response = await client.get("TEST")
-        assert response.decode("utf-8") == str(hash(dbfilename))
+        with df_local_factory.create(**df_args) as df_server:
+            async with df_server.client() as client:
+                response = await client.get("TEST")
+                assert response.decode("utf-8") == str(hash(dbfilename))
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "save_schedule": "*:*"})
