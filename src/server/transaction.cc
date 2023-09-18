@@ -1333,7 +1333,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   if (multi_ && multi_->role == SQUASHER)
     return;
 
-  // Logged commands are either write commands or no-key-transactional
+  // Only write commands and/or no-key-transactional commands are logged
   if ((cid_->opt_mask() & CO::WRITE) == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
