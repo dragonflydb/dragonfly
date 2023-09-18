@@ -156,6 +156,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "custom-journal";
     case NO_KEY_TRANSACTIONAL:
       return "no-key-transactional";
+    case NO_KEY_TX_SPAN_ALL:
+      return "no-key-tx-span-all";
   }
   return "unknown";
 }
