@@ -8,7 +8,6 @@ from . import DflyStartException
 async def test_maxclients(df_factory):
     # Needs some authentication
     with df_factory.create(port=1111, maxclients=1, admin_port=1112) as server:
-        print(server)
         async with server.client() as client1:
             assert [b"maxclients", b"1"] == await client1.execute_command("CONFIG GET maxclients")
 
