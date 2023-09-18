@@ -3,7 +3,7 @@ name: Version Release
 on:
   push:
     tags:
-    - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -26,44 +26,44 @@ jobs:
     name: Build aarch64 on ubuntu20.04
     needs: create-release
     steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: true
-    - name: Cache build deps
-      id: cache-deps
-      uses: actions/cache@v3
-      with:
-        path: |
-          ${{github.workspace}}/build-opt/
-          !${{github.workspace}}/build-opt/CMakeCache.txt
-        key: ${{ runner.os }}-release-deps-${{ github.sha }}
-        #restore-keys: |
-        #  ${{ runner.os }}-release-deps-
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Cache build deps
+        id: cache-deps
+        uses: actions/cache@v3
+        with:
+          path: |
+            ${{github.workspace}}/build-opt/
+            !${{github.workspace}}/build-opt/CMakeCache.txt
+          key: ${{ runner.os }}-release-deps-${{ github.sha }}
+          #restore-keys: |
+          #  ${{ runner.os }}-release-deps-
 
-    - uses: uraimo/run-on-arch-action@v2
-      name: Run commands
-      id: runcmd
-      with:
-        arch: aarch64
-        distro: ubuntu20.04
-        githubToken: ${{ github.token }}
-        # Create an artifacts directory
-        setup: |
-          mkdir -p "${PWD}/artifacts"
+      - uses: uraimo/run-on-arch-action@v2
+        name: Run commands
+        id: runcmd
+        with:
+          arch: aarch64
+          distro: ubuntu20.04
+          githubToken: ${{ github.token }}
+          # Create an artifacts directory
+          setup: |
+            mkdir -p "${PWD}/artifacts"
 
-        # Mount the artifacts directory as /artifacts in the container
-        dockerRunArgs: |
-          --volume "${{ github.workspace }}:/src"
-        # The shell to run commands with in the container
-        shell: /bin/bash
-        install: |
-          export DEBIAN_FRONTEND=noninteractive
-          apt update && apt install -q -y autoconf-archive cmake curl git libssl-dev \
-              libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-fiber-dev \
-              libxml2-dev zip libzstd-dev debhelper moreutils bison libicu-dev
-          update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
-                              --slave /usr/bin/g++ g++ /usr/bin/g++-9
-        run: |
+          # Mount the artifacts directory as /artifacts in the container
+          dockerRunArgs: |
+            --volume "${{ github.workspace }}:/src"
+          # The shell to run commands with in the container
+          shell: /bin/bash
+          install: |
+            export DEBIAN_FRONTEND=noninteractive
+            apt update && apt install -q -y autoconf-archive cmake curl git libssl-dev \
+                libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-fiber-dev \
+                libxml2-dev zip libzstd-dev debhelper moreutils bison libicu-dev
+            update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
+                                --slave /usr/bin/g++ g++ /usr/bin/g++-9
+          run: |
             # Work around https://github.com/actions/checkout/issues/766
             git config --global --add safe.directory /src
             cd /src
@@ -79,19 +79,19 @@ jobs:
             ./tools/release.sh
             ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-aarch64
             mv dragonfly_*.deb build-opt/
-    - name: Show the artifact
-      # Items placed in /src/build-opt in the container will be in
-      # ${PWD}/build-opt on the host.
-      run: |
-        echo finished
-        ls -al
-    - name: Upload
-      uses: actions/upload-artifact@v3
-      with:
-        name: dragonfly-aarch64
-        path: |
-          build-opt/dragonfly-*tar.gz
-          build-opt/dragonfly_*.deb
+      - name: Show the artifact
+        # Items placed in /src/build-opt in the container will be in
+        # ${PWD}/build-opt on the host.
+        run: |
+          echo finished
+          ls -al
+      - name: Upload
+        uses: actions/upload-artifact@v3
+        with:
+          name: dragonfly-aarch64
+          path: |
+            build-opt/dragonfly-*tar.gz
+            build-opt/dragonfly_*.deb
 
   build-native:
     runs-on: ubuntu-latest
@@ -99,39 +99,38 @@ jobs:
     container:
       image: ghcr.io/romange/ubuntu-dev:20
     steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: true
-    - name: Configure
-      run: |
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Configure
+        run: |
           apt update && apt install -y debhelper moreutils pip jq
-    - name: Build artifacts
-      run: |
+      - name: Build artifacts
+        run: |
           # Work around https://github.com/actions/checkout/issues/766
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git describe --always --tags ${{ github.sha }}
           ./tools/release.sh
           # once the build is over, we want to generate a Debian package
           ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-x86_64
-    - name: Run regression tests
-      uses: ./.github/actions/regression-tests
-      with:
-        dfly-executable: dragonfly-x86_64
-        gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
-        run-only-on-ubuntu-latest: false
-        build-folder-name: build-opt
-        report-errors: true
-    - name: Save artifacts
-      run: |
+      - name: Run regression tests
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly-x86_64
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          run-only-on-ubuntu-latest: false
+          build-folder-name: build-opt
+      - name: Save artifacts
+        run: |
           # place all artifacts at the same location
           mkdir -p results-artifacts
           mv build-opt/dragonfly-*tar.gz results-artifacts
           mv dragonfly_*.deb results-artifacts
-    - name: Upload
-      uses: actions/upload-artifact@v3
-      with:
-        name: dragonfly-amd64
-        path: results-artifacts/*
+      - name: Upload
+        uses: actions/upload-artifact@v3
+        with:
+          name: dragonfly-amd64
+          path: results-artifacts/*
   publish_release:
     runs-on: ubuntu-latest
     needs: [build-native, build-qemu]

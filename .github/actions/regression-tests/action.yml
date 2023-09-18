@@ -19,9 +19,6 @@ inputs:
   filter:
     required: false
     type: string
-  report-errors:
-    required: true
-    type: string
 
 runs:
   using: "composite"
@@ -41,8 +38,6 @@ runs:
 
         pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
 
-
-
     - name: Run PyTests replication test
       if: ${{ inputs.run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
       shell: bash
@@ -55,9 +50,8 @@ runs:
         pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
         pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
 
-
     - name: Send notification on failure
-      if: failure() && ${{ inputs.run-only-on-ubuntu-latest == 'true'}}
+      if: failure()
       shell: bash
       run: |
         get_failed_tests() {
