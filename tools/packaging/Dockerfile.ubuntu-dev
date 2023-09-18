@@ -1,21 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM ubuntu:20.04 as builder
-
-RUN \
-  rm -f /etc/apt/apt.conf.d/docker-clean; \
-  echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
-
-RUN \
-  --mount=type=cache,target=/var/cache/apt,sharing=locked \
-  --mount=type=cache,target=/var/lib/apt,sharing=locked \
-  export DEBIAN_FRONTEND=noninteractive && \
-  apt update && \
-  apt install -q -y autoconf-archive cmake curl git libssl-dev \
-  libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-context-dev \
-  zip libzstd-dev bison
-
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
-  --slave   /usr/bin/g++ g++ /usr/bin/g++-9
+FROM ghcr.io/romange/ubuntu-dev:20 as builder
 
 WORKDIR /build
 
@@ -26,22 +10,21 @@ RUN make HELIO_RELEASE=y release
 RUN build-opt/dragonfly --version
 
 RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/212b75144bbc06722fbd7661f651390dc47a43d1/su-exec.c && \
-  gcc -Wall -O2 su-exec.c -o su-exec
+    gcc -Wall -O2 su-exec.c -o su-exec
 
 FROM ubuntu:20.04
 
-RUN \
-  --mount=type=tmpfs,target=/var/cache/apt \
-  --mount=type=tmpfs,target=/var/lib/apt \
-  export DEBIAN_FRONTEND=noninteractive && \
-  apt update && \
-  apt install -q -y netcat-openbsd redis-tools libxml2
+RUN --mount=type=tmpfs,target=/var/cache/apt \
+    --mount=type=tmpfs,target=/var/lib/apt/lists \
+    apt update && \
+    apt install -q -y --no-install-recommends netcat-openbsd ca-certificates redis-tools
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
 RUN mkdir /data && chown dfly:dfly /data
 
 VOLUME /data
 WORKDIR /data
+
 COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=builder /build/su-exec /usr/local/bin/
