@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -1213,41 +1214,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
+  CmdArgList sub_args = args.subspan(1);
 
-  if (sub_cmd == "SETNAME" && args.size() == 2) {
-    cntx->conn()->SetName(string{ArgS(args, 1)});
-    return (*cntx)->SendOk();
-  }
-
-  if (sub_cmd == "GETNAME") {
-    auto name = cntx->conn()->GetName();
-    if (!name.empty()) {
-      return (*cntx)->SendBulkString(name);
-    } else {
-      return (*cntx)->SendNull();
-    }
-  }
-
-  if (sub_cmd == "LIST") {
-    vector<string> client_info;
-    absl::base_internal::SpinLock mu;
-
-    // we can not preempt the connection traversal, so we need to use a spinlock.
-    // alternatively we could lock when mutating the connection list, but it seems not important.
-    auto cb = [&](unsigned thread_index, util::Connection* conn) {
-      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-      string info = dcon->GetClientInfo(thread_index);
-      absl::base_internal::SpinLockHolder l(&mu);
-      client_info.push_back(move(info));
-    };
-
-    for (auto* listener : listeners_) {
-      listener->TraverseConnections(cb);
-    }
-
-    string result = absl::StrJoin(move(client_info), "\n");
-    result.append("\n");
-    return (*cntx)->SendBulkString(result);
+  if (sub_cmd == "SETNAME") {
+    return Client_SetName(sub_args, cntx);
+  } else if (sub_cmd == "GETNAME") {
+    return Client_GetName(sub_args, cntx);
+  } else if (sub_cmd == "List") {
+    return Client_List(sub_args, cntx);
+  } else if (sub_cmd == "PAUSE") {
+    return Client_Pause(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -1256,6 +1232,77 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
+}
+
+void ServerFamily::Client_SetName(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 1) {
+    cntx->conn()->SetName(string{ArgS(args, 0)});
+    return (*cntx)->SendOk();
+  } else {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+}
+
+void ServerFamily::Client_GetName(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+  auto name = cntx->conn()->GetName();
+  if (!name.empty()) {
+    return (*cntx)->SendBulkString(name);
+  } else {
+    return (*cntx)->SendNull();
+  }
+}
+
+void ServerFamily::Client_List(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+
+  vector<string> client_info;
+  absl::base_internal::SpinLock mu;
+
+  // we can not preempt the connection traversal, so we need to use a spinlock.
+  // alternatively we could lock when mutating the connection list, but it seems not important.
+  auto cb = [&](unsigned thread_index, util::Connection* conn) {
+    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+    string info = dcon->GetClientInfo(thread_index);
+    absl::base_internal::SpinLockHolder l(&mu);
+    client_info.push_back(std::move(info));
+  };
+
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+
+  string result = absl::StrJoin(client_info, "\n");
+  result.append("\n");
+  return (*cntx)->SendBulkString(result);
+}
+
+void ServerFamily::Client_Pause(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+
+  auto timeout = parser.Next().Int<uint64_t>();
+  enum ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state = parser.Next().Case("WRITE", ClientPause::WRITE).Case("ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return (*cntx)->SendError(err->MakeReply());
+  }
+
+  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+    ServerState::tlocal()->SetPauseState(pause_state, true);
+  });
+
+  (*cntx)->SendOk();
+  ThisFiber::SleepFor(timeout * 1ms);
+
+  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+    ServerState::tlocal()->SetPauseState(pause_state, false);
+  });
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {

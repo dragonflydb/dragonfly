@@ -112,6 +112,25 @@ bool ServerState::AllowInlineScheduling() const {
   return true;
 }
 
+void ServerState::SetPauseState(ClientPause state, bool start) {
+  client_pauses_[int(state)] += (start ? 1 : -1);
+  if (!client_pauses_[int(state)]) {
+    client_pause_ec_.notifyAll();
+  }
+}
+
+void ServerState::AwaitPauseState(bool is_write) {
+  client_pause_ec_.await([is_write, this]() {
+    if (client_pauses_[int(ClientPause::ALL)]) {
+      return false;
+    }
+    if (is_write && client_pauses_[int(ClientPause::WRITE)]) {
+      return false;
+    }
+    return true;
+  });
+}
+
 Interpreter* ServerState::BorrowInterpreter() {
   return interpreter_mgr_.Get();
 }

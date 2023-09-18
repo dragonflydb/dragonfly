@@ -80,6 +80,8 @@ class MonitorsRepo {
   unsigned int global_count_ = 0;  // by global its means that we count the monitor for all threads
 };
 
+enum class ClientPause { WRITE, ALL };
+
 // Present in every server thread. This class differs from EngineShard. The latter manages
 // state around engine shards while the former represents coordinator/connection state.
 // There may be threads that handle engine shards but not IO, there may be threads that handle IO
@@ -218,11 +220,19 @@ class ServerState {  // public struct - to allow initialization.
 
   acl::UserRegistry* user_registry;
 
-  acl::AclLog acl_log;
+  // Starts or ends a `CLIENT PAUSE` command. @state controls whether
+  // this is pausing only writes or every command, @start controls
+  // whether this is starting or ending the pause.
+  void SetPauseState(ClientPause state, bool start);
+  // Awaits until the pause is over and the command can execute.
+  // @is_write controls whether the command is a write command or not.
+  void AwaitPauseState(bool is_write);
 
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
   };
+
+  acl::AclLog acl_log;
 
  private:
   int64_t live_transactions_ = 0;
@@ -236,6 +246,13 @@ class ServerState {  // public struct - to allow initialization.
   ChannelStore* channel_store_;
 
   GlobalState gstate_ = GlobalState::ACTIVE;
+
+  // To support concurrent `CLIENT PAUSE commands` correctly, we store the amount
+  // of current CLIENT PAUSE commands that are in effect. Blocked execution fibers
+  // should subscribe to `client_pause_ec_` through `AwaitPauseState` to be
+  // notified when the break is over.
+  int client_pauses_[2] = {};
+  EventCount client_pause_ec_;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;

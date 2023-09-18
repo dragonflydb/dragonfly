@@ -1067,6 +1067,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
+  etl.AwaitPauseState(/*is_write=*/cid->opt_mask() & CO::WRITE);
+
   etl.RecordCmd();
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {

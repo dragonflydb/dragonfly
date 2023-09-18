@@ -211,6 +211,10 @@ class ServerFamily {
 
   void Auth(CmdArgList args, ConnectionContext* cntx);
   void Client(CmdArgList args, ConnectionContext* cntx);
+  void Client_SetName(CmdArgList args, ConnectionContext* cntx);
+  void Client_GetName(CmdArgList args, ConnectionContext* cntx);
+  void Client_List(CmdArgList args, ConnectionContext* cntx);
+  void Client_Pause(CmdArgList args, ConnectionContext* cntx);
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
