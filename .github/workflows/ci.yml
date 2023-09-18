@@ -118,6 +118,7 @@ jobs:
           ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
       - name: Run regression tests
+        if: matrix.container == 'ubuntu-dev:20'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
