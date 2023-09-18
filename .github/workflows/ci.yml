@@ -37,12 +37,12 @@ jobs:
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
-        compiler: [{cxx: g++, c: gcc}]
+        compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
-            compiler: {cxx: clang++, c: clang}
+            compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
     timeout-minutes: 60
     env:
@@ -97,7 +97,7 @@ jobs:
           ninja src/all
           ${SCCACHE_PATH} --show-stats | tee $GITHUB_STEP_SUMMARY
 
-      - name: Test
+      - name: C++ Unit Tests
         run: |
           cd ${{github.workspace}}/build
           echo Run ctest -V -L DFLY
@@ -117,6 +117,13 @@ jobs:
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
+      - name: Run regression tests
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          run-only-on-ubuntu-latest: false
+          build-folder-name: build
+          filter: "not slow"
       - name: Upload cache log
         uses: actions/upload-artifact@v3
         with:
@@ -136,7 +143,7 @@ jobs:
 
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: "3.9"
           check-latest: true
 
       - name: Chart Rendering Tests
