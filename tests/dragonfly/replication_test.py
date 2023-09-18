@@ -1528,15 +1528,11 @@ async def test_df_crash_on_memcached_error(df_local_factory):
 @pytest.mark.asyncio
 async def test_df_crash_on_replicaof_flag(df_local_factory):
     master = df_local_factory.create(
-        port=BASE_PORT,
         proactor_threads=2,
     )
-
-    replica = df_local_factory.create(
-        port=master.port + 1, proactor_threads=2, replicaof=f"127.0.0.1:{BASE_PORT}"
-    )
-
     master.start()
+
+    replica = df_local_factory.create(proactor_threads=2, replicaof=f"127.0.0.1:{master.port}")
     replica.start()
 
     c_master = aioredis.Redis(port=master.port)
@@ -1550,3 +1546,6 @@ async def test_df_crash_on_replicaof_flag(df_local_factory):
 
     res = await c_replica.execute_command("DBSIZE")
     assert res == 0
+
+    master.stop()
+    replica.stop()
