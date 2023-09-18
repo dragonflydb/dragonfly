@@ -1016,9 +1016,9 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       cntx->acl_commands = cred.acl_commands;
       return (*cntx)->SendOk();
     }
-    auto& log = ServerState::tlocal()->log;
+    auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
-    log.Add(std::string(username), cntx->owner()->GetClientInfo(), "AUTH", Reason::AUTH);
+    log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
     return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
   }
 

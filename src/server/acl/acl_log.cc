@@ -5,21 +5,23 @@
 #include "server/acl/acl_log.h"
 
 #include <chrono>
+#include <iterator>
 
-#include "absl/flags/internal/flag.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/dragonfly_connection.h"
 
 ABSL_FLAG(size_t, acllog_max_len, 32,
-          "Specify the number of log entries. Logs are kept locally for each proactor "
-          "and therefore the total number of entries are acllog_max_len * proactors");
+          "Specify the number of log entries. Logs are kept locally for each thread "
+          "and therefore the total number of entries are acllog_max_len * threads");
 
 namespace dfly::acl {
 
 AclLog::AclLog() : total_entries_allowed_(absl::GetFlag(FLAGS_acllog_max_len)) {
 }
 
-void AclLog::Add(std::string username, std::string client_info, std::string object, Reason reason) {
+void AclLog::Add(const ConnectionContext& cntx, std::string object, Reason reason,
+                 std::string tried_to_auth) {
   if (total_entries_allowed_ == 0) {
     return;
   }
@@ -28,6 +30,15 @@ void AclLog::Add(std::string username, std::string client_info, std::string obje
     log_.pop_back();
   }
 
+  std::string username;
+  // We can't use a conditional here because the result is the common type which is a const-ref
+  if (tried_to_auth.empty()) {
+    username = cntx.authed_username;
+  } else {
+    username = std::move(tried_to_auth);
+  }
+
+  std::string client_info = cntx.owner()->GetClientInfo();
   using clock = std::chrono::system_clock;
   LogEntry entry = {std::move(username), std::move(client_info), std::move(object), reason,
                     clock::now()};
@@ -38,8 +49,10 @@ void AclLog::Reset() {
   log_.clear();
 }
 
-AclLog::LogType AclLog::GetLog() const {
-  return log_;
+AclLog::LogType AclLog::GetLog(size_t number_of_entries) const {
+  auto start = log_.begin();
+  auto end = log_.size() <= number_of_entries ? log_.end() : std::next(start, number_of_entries);
+  return {start, end};
 }
 
 }  // namespace dfly::acl

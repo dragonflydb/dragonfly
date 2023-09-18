@@ -210,7 +210,7 @@ class ServerState {  // public struct - to allow initialization.
 
   acl::UserRegistry* user_registry;
 
-  acl::AclLog log;
+  acl::AclLog acl_log;
 
  private:
   int64_t live_transactions_ = 0;

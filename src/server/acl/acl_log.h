@@ -8,6 +8,11 @@
 #include <deque>
 #include <string>
 
+#include "base/flags.h"
+#include "server/conn_context.h"
+
+ABSL_DECLARE_FLAG(size_t, acllog_max_len);
+
 namespace dfly::acl {
 
 class AclLog {
@@ -22,15 +27,20 @@ class AclLog {
     std::string object;
     Reason reason;
     using TimePoint = std::chrono::time_point<std::chrono::system_clock>;
-    TimePoint entry_creation;
+    TimePoint entry_creation = TimePoint::max();
+
+    friend bool operator<(const LogEntry& lhs, const LogEntry& rhs) {
+      return lhs.entry_creation < rhs.entry_creation;
+    }
   };
 
-  void Add(std::string username, std::string client_info, std::string object, Reason reason);
+  void Add(const ConnectionContext& cntx, std::string object, Reason reason,
+           std::string tried_to_auth = "");
   void Reset();
 
   using LogType = std::deque<LogEntry>;
 
-  LogType GetLog() const;
+  LogType GetLog(size_t number_of_entries) const;
 
  private:
   LogType log_;

@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <deque>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <utility>
@@ -289,7 +291,8 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 1) {
     auto option = facade::ToSV(args[0]);
     if (absl::EqualsIgnoreCase(option, "RESET")) {
-      pool_->AwaitFiberOnAll([](auto index, auto* context) { ServerState::tlocal()->log.Reset(); });
+      pool_->AwaitFiberOnAll(
+          [](auto index, auto* context) { ServerState::tlocal()->acl_log.Reset(); });
       (*cntx)->SendOk();
       return;
     }
@@ -301,41 +304,61 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
   }
 
   std::vector<AclLog::LogType> logs(pool_->size());
-  pool_->AwaitFiberOnAll(
-      [&logs](auto index, auto* context) { logs[index] = ServerState::tlocal()->log.GetLog(); });
+  pool_->AwaitFiberOnAll([&logs, max_output](auto index, auto* context) {
+    logs[index] = ServerState::tlocal()->acl_log.GetLog(max_output);
+  });
 
   size_t total_entries = 0;
   for (auto& log : logs) {
-    total_entries += std::min(max_output, log.size());
+    total_entries += log.size();
+  }
+
+  if (total_entries == 0) {
+    (*cntx)->SendEmptyArray();
+    return;
   }
 
   (*cntx)->StartArray(total_entries);
-  for (auto& log : logs) {
-    size_t entry_no = 0;
-    for (auto& entry : log) {
-      if (entry_no++ == max_output) {
-        break;
+  auto print_element = [cntx](const auto& entry) {
+    (*cntx)->StartArray(12);
+    (*cntx)->SendSimpleString("reason");
+    using Reason = AclLog::Reason;
+    std::string_view reason = entry.reason == Reason::COMMAND ? "COMMAND" : "AUTH";
+    (*cntx)->SendSimpleString(reason);
+    (*cntx)->SendSimpleString("object");
+    (*cntx)->SendSimpleString(entry.object);
+    (*cntx)->SendSimpleString("username");
+    (*cntx)->SendSimpleString(entry.username);
+    (*cntx)->SendSimpleString("age-seconds");
+    auto now_diff = std::chrono::system_clock::now() - entry.entry_creation;
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(now_diff);
+    auto left_over = now_diff - std::chrono::duration_cast<std::chrono::microseconds>(secs);
+    auto age = absl::StrCat(secs.count(), ".", left_over.count());
+    (*cntx)->SendSimpleString(absl::StrCat(age));
+    (*cntx)->SendSimpleString("client-info");
+    (*cntx)->SendSimpleString(entry.client_info);
+    (*cntx)->SendSimpleString("timestamp-created");
+    (*cntx)->SendLong(entry.entry_creation.time_since_epoch().count());
+  };
+
+  auto n_way_minimum = [](const auto& logs) {
+    size_t id = 0;
+    AclLog::LogEntry limit;
+    const AclLog::LogEntry* max = &limit;
+    for (size_t i = 0; i < logs.size(); ++i) {
+      if (!logs[i].empty() && logs[i].front() < *max) {
+        id = i;
+        max = &logs[i].front();
       }
-      (*cntx)->StartArray(12);
-      (*cntx)->SendSimpleString("reason");
-      using Reason = AclLog::Reason;
-      std::string reason = entry.reason == Reason::COMMAND ? "COMMAND" : "AUTH";
-      (*cntx)->SendSimpleString(reason);
-      (*cntx)->SendSimpleString("object");
-      (*cntx)->SendSimpleString(entry.object);
-      (*cntx)->SendSimpleString("username");
-      (*cntx)->SendSimpleString(entry.username);
-      (*cntx)->SendSimpleString("age-seconds");
-      auto now_diff = std::chrono::system_clock::now() - entry.entry_creation;
-      auto secs = std::chrono::duration_cast<std::chrono::seconds>(now_diff);
-      auto left_over = now_diff - std::chrono::duration_cast<std::chrono::microseconds>(secs);
-      auto age = absl::StrCat(secs.count(), ".", left_over.count());
-      (*cntx)->SendSimpleString(absl::StrCat(age));
-      (*cntx)->SendSimpleString("client-info");
-      (*cntx)->SendSimpleString(entry.client_info);
-      (*cntx)->SendSimpleString("timestamp-created");
-      (*cntx)->SendLong(entry.entry_creation.time_since_epoch().count());
     }
+
+    return id;
+  };
+
+  for (size_t i = 0; i < total_entries; ++i) {
+    auto min = n_way_minimum(logs);
+    print_element(logs[min].front());
+    logs[min].pop_front();
   }
 }
 

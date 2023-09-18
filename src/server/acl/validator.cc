@@ -22,10 +22,9 @@ namespace dfly::acl {
                          (cntx.acl_commands[index] & command_mask) != 0;
 
   if (!is_authed) {
-    auto& log = ServerState::tlocal()->log;
+    auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
-    log.Add(cntx.authed_username, cntx.owner()->GetClientInfo(), std::string(id.name()),
-            Reason::COMMAND);
+    log.Add(cntx, std::string(id.name()), Reason::COMMAND);
   }
 
   return is_authed;

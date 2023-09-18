@@ -229,6 +229,7 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
  private:
+  std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)

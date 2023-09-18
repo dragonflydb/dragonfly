@@ -363,12 +363,28 @@ async def test_acl_log(async_client):
 
     res = await async_client.execute_command("ACL LOG")
     assert 1 == len(res)
+    assert res[0]["reason"] == "AUTH"
+    assert res[0]["object"] == "AUTH"
+    assert res[0]["username"] == "elon"
+
+    await async_client.execute_command("ACL LOG RESET")
+    res = await async_client.execute_command("ACL LOG")
+    assert 0 == len(res)
 
     res = await async_client.execute_command("AUTH elon mars")
     res = await async_client.execute_command("SET mykey 22")
 
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command("HSET mk kk 22")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 1 == len(res)
+    assert res[0]["reason"] == "COMMAND"
+    assert res[0]["object"] == "HSET"
+    assert res[0]["username"] == "elon"
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("LPUSH mylist 2")
 
     res = await async_client.execute_command("ACL LOG")
     assert 2 == len(res)
