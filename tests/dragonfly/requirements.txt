@@ -17,3 +17,4 @@ prometheus_client==0.17.0
 aiohttp==3.8.4
 numpy==1.24.3
 pytest-json-report==1.5.0
+psutil==5.9.5

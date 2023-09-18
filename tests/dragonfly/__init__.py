@@ -2,7 +2,10 @@ import pytest
 import time
 import subprocess
 import aiohttp
+import logging
 import os
+import psutil
+from typing import Optional
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 
@@ -37,27 +40,60 @@ class DflyInstance:
     def __init__(self, params: DflyParams, args):
         self.args = args
         self.params = params
-        self.proc = None
+        self.proc: Optional[subprocess.Popen] = None
         self._client: Optional[RedisClient] = None
+
+        self.dynamic_port = False
+        if self.params.existing_port:
+            self._port = self.params.existing_port
+        elif "port" in self.args:
+            self._port = int(self.args["port"])
+        else:
+            # Tell DF to choose a random open port.
+            # We'll find out what port it is using lsof.
+            self.args["port"] = -1
+            self._port = None
+            self.dynamic_port = True
+
+    def __del__(self):
+        assert self.proc == None
 
     def client(self, *args, **kwargs) -> RedisClient:
         return RedisClient(port=self.port, *args, **kwargs)
 
     def start(self):
-        self._start()
+        if self.params.existing_port:
+            return
 
+        self._start()
+        self._wait_for_server()
+
+    def _wait_for_server(self):
         # Give Dragonfly time to start and detect possible failure causes
         # Gdb starts slowly
-        time.sleep(START_DELAY if not self.params.gdb else START_GDB_DELAY)
+        delay = START_DELAY if not self.params.gdb else START_GDB_DELAY
 
-        self._check_status()
+        # Wait until the process is listening on the port.
+        s = time.time()
+        while time.time() - s < delay:
+            self._check_status()
+            try:
+                self.get_port_from_psutil()
+                logging.debug(
+                    f"Process started after {time.time() - s:.2f} seconds. port={self.port}"
+                )
+                break
+            except RuntimeError:
+                time.sleep(0.05)
+        else:
+            raise DflyStartException("Process didn't start listening on port in time")
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
         if proc is None:
             return
 
-        print(f"Stopping instance on {self.port}")
+        logging.debug(f"Stopping instance on {self._port}")
         try:
             if kill:
                 proc.kill()
@@ -72,9 +108,13 @@ class DflyInstance:
     def _start(self):
         if self.params.existing_port:
             return
+
+        if self.dynamic_port:
+            self._port = None
+
         base_args = ["--use_zset_tree"] + [f"--{v}" for v in self.params.args]
         all_args = self.format_args(self.args) + base_args
-        print(f"Starting instance on {self.port} with arguments {all_args} from {self.params.path}")
+        logging.debug(f"Starting instance with arguments {all_args} from {self.params.path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
@@ -92,21 +132,40 @@ class DflyInstance:
 
     @property
     def port(self) -> int:
-        if self.params.existing_port:
-            return self.params.existing_port
-        return int(self.args.get("port", "6379"))
+        if self._port is None:
+            self._port = self.get_port_from_psutil()
+        return self._port
 
     @property
-    def admin_port(self) -> int:
+    def admin_port(self) -> Optional[int]:
         if self.params.existing_admin_port:
             return self.params.existing_admin_port
-        return int(self.args.get("admin_port", "16379"))
+        if "admin_port" in self.args:
+            return int(self.args["admin_port"])
+        return None
 
     @property
-    def mc_port(self) -> int:
+    def mc_port(self) -> Optional[int]:
         if self.params.existing_mc_port:
             return self.params.existing_mc_port
-        return int(self.args.get("memcached_port", "11211"))
+        if "memcached_port" in self.args:
+            return int(self.args["memcached_port"])
+        return None
+
+    def get_port_from_psutil(self) -> int:
+        if self.proc is None:
+            raise RuntimeError("port is not available yet")
+        p = psutil.Process(self.proc.pid)
+        ports = set()
+        for connection in p.connections():
+            if connection.status == "LISTEN":
+                ports.add(connection.laddr.port)
+
+        ports.difference_update({self.admin_port, self.mc_port})
+        assert len(ports) < 2, "Open ports detection found too many ports"
+        if ports:
+            return ports.pop()
+        raise RuntimeError("Couldn't parse port")
 
     @staticmethod
     def format_args(args):
@@ -154,11 +213,8 @@ class DflyInstanceFactory:
         for instance in instances:
             instance._start()
 
-        delay = START_DELAY if not self.params.gdb else START_GDB_DELAY
-        time.sleep(delay * (1 + len(instances) / 2))
-
         for instance in instances:
-            instance._check_status()
+            instance._wait_for_server()
 
     def stop_all(self):
         """Stop all lanched instances."""

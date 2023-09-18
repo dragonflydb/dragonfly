@@ -60,7 +60,7 @@ extern char** environ;
 
 using namespace std;
 
-ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
@@ -354,7 +354,21 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   opts.disable_time_update = false;
   const auto& bind = GetFlag(FLAGS_bind);
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
-  auto port = GetFlag(FLAGS_port);
+
+  int32_t port = GetFlag(FLAGS_port);
+  // The reason for this code is a bit silly. We want to provide a way to
+  // bind any 'random' available port. The way to do that is to call
+  // bind with the argument port 0. However we can't expose this functionality
+  // as is to our users: Since giving --port=0 to redis DISABLES the network
+  // interface that would break users' existing configurations in potentionally
+  // unsafe ways. For that reason the user's --port=-1 means to us 'bind port 0'.
+  if (port == -1) {
+    port = 0;
+  } else if (port < 0 || port > 65535) {
+    LOG(ERROR) << "Bad port number " << port;
+    exit(1);
+  }
+
   auto mc_port = GetFlag(FLAGS_memcached_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
   bool unlink_uds = false;
@@ -427,6 +441,10 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     if (ec) {
       LOG(ERROR) << "Could not open port " << port << ", error: " << ec.message();
       exit(1);
+    }
+
+    if (port == 0) {
+      absl::SetFlag(&FLAGS_port, main_listener->socket()->LocalEndpoint().port());
     }
   }
 

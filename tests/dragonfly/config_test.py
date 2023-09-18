@@ -25,3 +25,5 @@ async def test_maxclients(df_factory):
         assert [b"maxclients", b"3"] == await client1.execute_command("CONFIG GET maxclients")
         async with server.client() as client2:
             await client2.get("test")
+
+    server.stop()

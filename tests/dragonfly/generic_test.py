@@ -5,7 +5,7 @@ import asyncio
 from redis import asyncio as aioredis
 
 from . import dfly_multi_test_args, dfly_args, DflyStartException
-from .utility import batch_fill_data, gen_test_data
+from .utility import batch_fill_data, gen_test_data, EnvironCntx
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})
@@ -22,9 +22,8 @@ class TestKeys:
 @pytest.fixture(scope="function")
 def export_dfly_password() -> str:
     pwd = "flypwd"
-    os.environ["DFLY_PASSWORD"] = pwd
-    yield pwd
-    del os.environ["DFLY_PASSWORD"]
+    with EnvironCntx(DFLY_PASSWORD=pwd):
+        yield pwd
 
 
 async def test_password(df_local_factory, export_dfly_password):
@@ -33,10 +32,10 @@ async def test_password(df_local_factory, export_dfly_password):
 
     # Expect password form environment variable
     with pytest.raises(redis.exceptions.AuthenticationError):
-        client = aioredis.Redis()
+        async with aioredis.Redis(port=dfly.port) as client:
+            await client.ping()
+    async with aioredis.Redis(password=export_dfly_password, port=dfly.port) as client:
         await client.ping()
-    client = aioredis.Redis(password=export_dfly_password)
-    await client.ping()
     dfly.stop()
 
     # --requirepass should take precedence over environment variable
@@ -46,10 +45,10 @@ async def test_password(df_local_factory, export_dfly_password):
 
     # Expect password form flag
     with pytest.raises(redis.exceptions.AuthenticationError):
-        client = aioredis.Redis(password=export_dfly_password)
+        async with aioredis.Redis(port=dfly.port, password=export_dfly_password) as client:
+            await client.ping()
+    async with aioredis.Redis(password=requirepass, port=dfly.port) as client:
         await client.ping()
-    client = aioredis.Redis(password=requirepass)
-    await client.ping()
     dfly.stop()
 
 
@@ -87,35 +86,31 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
 
 @dfly_args({"port": 6377})
 async def test_arg_from_environ_overwritten_by_cli(df_local_factory):
-    os.environ["DFLY_port"] = "6378"
-    dfly = df_local_factory.create()
-    dfly.start()
-    client = aioredis.Redis(port="6377")
-    await client.ping()
-    dfly.stop()
-    del os.environ["DFLY_port"]
+    with EnvironCntx(DFLY_port="6378"):
+        dfly = df_local_factory.create()
+        dfly.start()
+        client = aioredis.Redis(port="6377")
+        await client.ping()
+        dfly.stop()
 
 
 async def test_arg_from_environ(df_local_factory):
-    os.environ["DFLY_requirepass"] = "pass"
-    dfly = df_local_factory.create()
-    dfly.start()
+    with EnvironCntx(DFLY_requirepass="pass"):
+        dfly = df_local_factory.create()
+        dfly.start()
 
-    # Expect password from environment variable
-    with pytest.raises(redis.exceptions.AuthenticationError):
-        client = aioredis.Redis()
+        # Expect password from environment variable
+        with pytest.raises(redis.exceptions.AuthenticationError):
+            client = aioredis.Redis(port=dfly.port)
+            await client.ping()
+
+        client = aioredis.Redis(password="pass", port=dfly.port)
         await client.ping()
-
-    client = aioredis.Redis(password="pass")
-    await client.ping()
-    dfly.stop()
-
-    del os.environ["DFLY_requirepass"]
+        dfly.stop()
 
 
 async def test_unknown_dfly_env(df_local_factory, export_dfly_password):
-    os.environ["DFLY_abcdef"] = "xyz"
-    with pytest.raises(DflyStartException):
-        dfly = df_local_factory.create()
-        dfly.start()
-    del os.environ["DFLY_abcdef"]
+    with EnvironCntx(DFLY_abcdef="xyz"):
+        with pytest.raises(DflyStartException):
+            dfly = df_local_factory.create()
+            dfly.start()
