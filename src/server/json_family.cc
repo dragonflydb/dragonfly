@@ -1375,12 +1375,6 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
       (*cntx)->SendError(kSyntaxErr);
       return;
     }
-
-    if (converted_val->is_object()) {
-      (*cntx)->SendError(kWrongTypeErr);
-      return;
-    }
-
     append_values.emplace_back(converted_val);
   }
 

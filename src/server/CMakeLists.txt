@@ -17,6 +17,7 @@ endif()
 add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc
+            serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc
             )
 cxx_link(dfly_transaction dfly_core strings_lib)
@@ -38,7 +39,6 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
-            serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
             cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)

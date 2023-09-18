@@ -90,7 +90,7 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "to replicate. "
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
 
-ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
@@ -411,14 +411,11 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       used_mem_peak.store(sum, memory_order_relaxed);
   };
 
-// TODO: to addd support on non-linux platforms as well
-#ifdef __linux__
   uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
   uint32_t period_ms = max(1u, 1000 / cache_hz);
 
   stats_caching_task_ =
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
-#endif
 
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {

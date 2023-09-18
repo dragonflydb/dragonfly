@@ -260,14 +260,13 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // transaction.
 // OnJournalEntry registers for changes in journal, the journal change function signature is
 // (const journal::Entry& entry, bool await) In snapshot flow we dont use the await argument.
-void SliceSnapshot::OnJournalEntry(const journal::Entry& entry, bool unused_await_arg) {
-  // We ignore non payload entries like EXEC because we have no transactional ordering during
-  // LOAD phase on replica.
-  if (!entry.HasPayload()) {
+void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg) {
+  // We ignore EXEC and NOOP entries because we they have no meaning during
+  // the LOAD phase on replica.
+  if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC)
     return;
-  }
 
-  serializer_->WriteJournalEntry(entry);
+  serializer_->WriteJournalEntry(item.data);
 
   // This is the only place that flushes in streaming mode
   // once the iterate buckets fiber finished.

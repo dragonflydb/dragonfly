@@ -37,8 +37,8 @@ class TestNotEmulated:
 
 @dfly_args({"cluster_mode": "emulated"})
 class TestEmulated:
-    def test_cluster_slots_command(self, cluster_client: redis.RedisCluster):
-        expected = {(0, 16383): {"primary": ("127.0.0.1", 6379), "replicas": []}}
+    def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
+        expected = {(0, 16383): {"primary": ("127.0.0.1", df_server.port), "replicas": []}}
         res = cluster_client.execute_command("CLUSTER SLOTS")
         assert expected == res
 
@@ -58,8 +58,8 @@ class TestEmulated:
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 class TestEmulatedWithAnnounceIp:
-    def test_cluster_slots_command(self, cluster_client: redis.RedisCluster):
-        expected = {(0, 16383): {"primary": ("127.0.0.2", 6379), "replicas": []}}
+    def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
+        expected = {(0, 16383): {"primary": ("127.0.0.2", df_server.port), "replicas": []}}
         res = cluster_client.execute_command("CLUSTER SLOTS")
         assert expected == res
 
@@ -145,10 +145,10 @@ async def test_cluster_info(async_client):
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 @pytest.mark.asyncio
-async def test_cluster_nodes(async_client):
+async def test_cluster_nodes(df_server, async_client):
     res = await async_client.execute_command("CLUSTER NODES")
     assert len(res) == 1
-    info = res["127.0.0.2:6379"]
+    info = res[f"127.0.0.2:{df_server.port}"]
     assert res is not None
     assert info["connected"] == True
     assert info["epoch"] == "0"

@@ -73,18 +73,16 @@ async def test_get_databases(async_client: aioredis.Redis):
 
 
 async def test_client_list(df_factory):
-    instance = df_factory.create(port=1111, admin_port=1112)
-    instance.start()
-    client = aioredis.Redis(port=instance.port)
-    admin_client = aioredis.Redis(port=instance.admin_port)
+    with df_factory.create(port=1111, admin_port=1112) as instance:
+        client = aioredis.Redis(port=instance.port)
+        admin_client = aioredis.Redis(port=instance.admin_port)
 
-    await client.ping()
-    await admin_client.ping()
-    assert len(await client.execute_command("CLIENT LIST")) == 2
-    assert len(await admin_client.execute_command("CLIENT LIST")) == 2
+        await client.ping()
+        await admin_client.ping()
+        assert len(await client.execute_command("CLIENT LIST")) == 2
+        assert len(await admin_client.execute_command("CLIENT LIST")) == 2
 
-    instance.stop()
-    await disconnect_clients(client, admin_client)
+        await disconnect_clients(client, admin_client)
 
 
 async def test_scan(async_client: aioredis.Redis):
