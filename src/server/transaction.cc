@@ -76,10 +76,7 @@ void Transaction::InitGlobal() {
   DCHECK(!multi_ || (multi_->mode == GLOBAL || multi_->mode == NON_ATOMIC));
 
   global_ = true;
-  unique_shard_cnt_ = shard_set->size();
-  shard_data_.resize(unique_shard_cnt_);
-  for (auto& sd : shard_data_)
-    sd.local_mask = ACTIVE;
+  EnableAllShards();
 }
 
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
@@ -308,7 +305,10 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   }
 
   if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
-    // Shards need to enabled with EnableShards()
+    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+      EnableAllShards();
+    else
+      EnableShard(0);
     return OpStatus::OK;
   }
 
@@ -886,17 +886,14 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
-void Transaction::EnableShards(std::optional<ShardId> sid) {
-  DCHECK(cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL);
+void Transaction::EnableShard(ShardId sid) {
+  unique_shard_cnt_ = 1;
+  unique_shard_id_ = sid;
+  shard_data_.resize(1);
+  shard_data_.front().local_mask |= ACTIVE;
+}
 
-  if (sid) {
-    unique_shard_cnt_ = 1;
-    unique_shard_id_ = *sid;
-    shard_data_.resize(1);
-    shard_data_.front().local_mask |= ACTIVE;
-    return;
-  }
-
+void Transaction::EnableAllShards() {
   unique_shard_cnt_ = shard_set->size();
   unique_shard_id_ = kInvalidSid;
   shard_data_.resize(shard_set->size());

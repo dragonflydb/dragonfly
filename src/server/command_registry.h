@@ -40,6 +40,8 @@ enum CommandOpt : uint32_t {
 
   // Allows commands without keys to respect transaction ordering and enables journaling by default
   NO_KEY_TRANSACTIONAL = 1U << 16,
+  NO_KEY_TX_SPAN_ALL =
+      1U << 17,  // If set, all shards are active for the no-key-transactional command
 };
 
 const char* OptName(CommandOpt fl);
