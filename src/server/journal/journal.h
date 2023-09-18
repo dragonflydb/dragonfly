@@ -39,6 +39,9 @@ class Journal {
   void UnregisterOnChange(uint32_t id);
   bool HasRegisteredCallbacks() const;
 
+  bool IsLSNInBuffer(LSN lsn) const;
+  std::string_view GetEntry(LSN lsn) const;
+
   /*
   void AddCmd(TxId txid, Op opcode, Span args) {
     OpArgs(txid, opcode, args);

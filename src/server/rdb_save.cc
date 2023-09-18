@@ -733,15 +733,10 @@ io::Bytes RdbSerializer::PrepareFlush() {
   return mem_buf_.InputBuffer();
 }
 
-error_code RdbSerializer::WriteJournalEntry(const journal::Entry& entry) {
-  io::BufSink buf_sink{&journal_mem_buf_};
-  JournalWriter writer{&buf_sink};
-  writer.Write(entry);
-
+error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(1));
-  RETURN_ON_ERR(SaveString(io::View(journal_mem_buf_.InputBuffer())));
-  journal_mem_buf_.Clear();
+  RETURN_ON_ERR(SaveString(serialized_entry));
   return error_code{};
 }
 

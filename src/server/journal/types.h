@@ -69,7 +69,13 @@ struct ParsedEntry : public EntryBase {
   std::string ToString() const;
 };
 
-using ChangeCallback = std::function<void(const Entry&, bool await)>;
+struct JournalItem {
+  LSN lsn;
+  Op opcode;
+  std::string data;
+};
+
+using ChangeCallback = std::function<void(const JournalItem&, bool await)>;
 
 }  // namespace journal
 }  // namespace dfly
