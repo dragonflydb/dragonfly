@@ -202,5 +202,13 @@ inline void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db
                                        const PrimeValue& pv) {
 }
 
+inline size_t ShardDocIndices::GetUsedMemory() const {
+  return 0;
+}
+
+inline SearchStats ShardDocIndices::GetStats() const {
+  return {};
+}
+
 #endif  // __APPLE__
 }  // namespace dfly
