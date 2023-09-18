@@ -167,7 +167,7 @@ class ShardDocIndices {
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
   size_t GetUsedMemory() const;
-  SearchStats GetStats() const;
+  SearchStats GetStats() const;  // combines stats for all indices
 
  private:
   MiMemoryResource local_mr_;

@@ -65,7 +65,6 @@ class FieldIndices {
 
   std::vector<TextIndex*> GetAllTextIndices() const;
 
-  // TODO FIX
   const std::vector<DocId>& GetAllDocs() const;
 
   const Schema& GetSchema() const;
