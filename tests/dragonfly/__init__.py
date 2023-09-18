@@ -61,6 +61,13 @@ class DflyInstance:
     def client(self, *args, **kwargs) -> RedisClient:
         return RedisClient(port=self.port, *args, **kwargs)
 
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.stop()
+
     def start(self):
         if self.params.existing_port:
             return

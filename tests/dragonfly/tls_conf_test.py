@@ -19,23 +19,21 @@ async def test_tls_no_key(df_factory):
 
 
 async def test_tls_password(df_factory, with_tls_server_args, gen_ca_cert):
-    server = df_factory.create(requirepass="XXX", **with_tls_server_args)
-    server.start()
-    async with server.client(
-        ssl=True, password="XXX", ssl_ca_certs=gen_ca_cert["ca_cert"]
-    ) as client:
-        await client.ping()
-    server.stop()
+    with df_factory.create(requirepass="XXX", **with_tls_server_args) as server:
+        async with server.client(
+            ssl=True, password="XXX", ssl_ca_certs=gen_ca_cert["ca_cert"]
+        ) as client:
+            await client.ping()
 
 
 async def test_tls_client_certs(
     df_factory, with_ca_tls_server_args, with_tls_client_args, gen_ca_cert
 ):
-    server = df_factory.create(**with_ca_tls_server_args)
-    server.start()
-    async with server.client(**with_tls_client_args, ssl_ca_certs=gen_ca_cert["ca_cert"]) as client:
-        await client.ping()
-    server.stop()
+    with df_factory.create(**with_ca_tls_server_args) as server:
+        async with server.client(
+            **with_tls_client_args, ssl_ca_certs=gen_ca_cert["ca_cert"]
+        ) as client:
+            await client.ping()
 
 
 async def test_client_tls_no_auth(df_factory):
@@ -45,14 +43,12 @@ async def test_client_tls_no_auth(df_factory):
 
 
 async def test_client_tls_password(df_factory):
-    server = df_factory.create(tls_replication=None, masterauth="XXX")
-    server.start()
-    server.stop()
+    with df_factory.create(tls_replication=None, masterauth="XXX"):
+        pass
 
 
 async def test_client_tls_cert(df_factory, with_tls_server_args):
     key_args = with_tls_server_args.copy()
     key_args.pop("tls")
-    server = df_factory.create(tls_replication=None, **key_args)
-    server.start()
-    server.stop()
+    with df_factory.create(tls_replication=None, **key_args):
+        pass
