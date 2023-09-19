@@ -200,4 +200,21 @@ TEST_F(AclFamilyTest, TestUsers) {
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("default", "abhra", "ari"));
 }
 
+TEST_F(AclFamilyTest, TestCat) {
+  TestInitAclFam();
+  auto resp = Run({"ACL", "CAT", "nonsense"});
+  EXPECT_THAT(resp, ErrArg("ERR Unkown category: NONSENSE"));
+
+  resp = Run({"ACL", "CAT"});
+  EXPECT_THAT(resp.GetVec().size(), 24);
+
+  resp = Run({"ACL", "CAT", "STRING"});
+
+  EXPECT_THAT(resp.GetVec(),
+              UnorderedElementsAre("GETSET", "GETRANGE", "INCRBYFLOAT", "GETDEL", "DECRBY",
+                                   "PREPEND", "SETEX", "MSET", "SET", "PSETEX", "SUBSTR", "DECR",
+                                   "STRLEN", "INCR", "INCRBY", "MGET", "GET", "SETNX", "GETEX",
+                                   "APPEND", "MSETNX", "SETRANGE"));
+}
+
 }  // namespace dfly

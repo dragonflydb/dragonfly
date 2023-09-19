@@ -32,6 +32,7 @@
 #include "server/acl/acl_log.h"
 #include "server/acl/helpers.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
@@ -371,6 +372,53 @@ void AclFamily::Users(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 1) {
+    (*cntx)->SendError(facade::OpStatus::SYNTAX_ERR);
+    return;
+  }
+
+  if (args.size() == 1) {
+    ToUpper(&args[0]);
+    std::string_view category = facade::ToSV(args[0]);
+    if (!CATEGORY_INDEX_TABLE.contains(category)) {
+      auto error = absl::StrCat("Unkown category: ", category);
+      (*cntx)->SendError(error);
+      return;
+    }
+
+    const uint32_t cid_mask = CATEGORY_INDEX_TABLE.find(category)->second;
+    std::vector<std::string_view> results;
+    auto cb = [cid_mask, &results](auto name, auto& cid) {
+      if (cid_mask & cid.acl_categories()) {
+        results.push_back(name);
+      }
+    };
+
+    cmd_registry_->Traverse(cb);
+    (*cntx)->StartArray(results.size());
+    for (const auto& command : results) {
+      (*cntx)->SendSimpleString(command);
+    }
+
+    return;
+  }
+
+  size_t total_categories = 0;
+  for (auto& elem : REVERSE_CATEGORY_INDEX_TABLE) {
+    if (elem != "_RESERVED") {
+      ++total_categories;
+    }
+  }
+
+  (*cntx)->StartArray(total_categories);
+  for (auto& elem : REVERSE_CATEGORY_INDEX_TABLE) {
+    if (elem != "_RESERVED") {
+      (*cntx)->SendSimpleString(elem);
+    }
+  }
+}
+
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
 CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
@@ -388,6 +436,7 @@ constexpr uint32_t kSave = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kCat = acl::SLOW;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -417,6 +466,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
       Log);
   *registry << CI{"ACL USERS", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kUsers}
                    .HFUNC(Users);
+  *registry << CI{"ACL CAT", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kCat}.HFUNC(
+      Cat);
 
   cmd_registry_ = registry;
 }
