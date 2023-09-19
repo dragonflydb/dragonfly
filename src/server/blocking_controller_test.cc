@@ -10,7 +10,6 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
-#include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 #include "util/fibers/pool.h"
@@ -22,15 +21,9 @@ using namespace std;
 using namespace std::chrono;
 using namespace testing;
 
-void FakeDependency() {
-  ShardDocIndices sdi;  // fake dependency to enfore linking
-  sdi.GetUsedMemory();
-}
-
 class BlockingControllerTest : public Test {
  protected:
   BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, 1, acl::NONE) {
-    (void)FakeDependency;
   }
   void SetUp() override;
   void TearDown() override;

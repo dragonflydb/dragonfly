@@ -14,7 +14,7 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
 endif()
 
 
-add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc
+add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -28,7 +28,7 @@ if (NOT APPLE)
   cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
 endif()
 
-add_library(dragonfly_lib channel_store.cc command_registry.cc
+add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc json_family.cc
             ${SEARCH_FILES}
