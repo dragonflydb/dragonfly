@@ -33,10 +33,15 @@ enum CommandOpt : uint32_t {
   NOSCRIPT = 1U << 8,
   BLOCKING = 1U << 9,  // implies REVERSE_MAPPING
   HIDDEN = 1U << 10,   // does not show in COMMAND command output
+
   GLOBAL_TRANS = 1U << 12,
 
   NO_AUTOJOURNAL = 1U << 15,  // Skip automatically logging command to journal inside transaction.
-  NO_KEY_JOURNAL = 1U << 16,  // Command with no keys that need to be journaled
+
+  // Allows commands without keys to respect transaction ordering and enables journaling by default
+  NO_KEY_TRANSACTIONAL = 1U << 16,
+  NO_KEY_TX_SPAN_ALL =
+      1U << 17,  // If set, all shards are active for the no-key-transactional command
 };
 
 const char* OptName(CommandOpt fl);
