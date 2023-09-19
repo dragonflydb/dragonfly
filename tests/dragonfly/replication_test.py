@@ -1554,15 +1554,15 @@ async def test_df_crash_on_replicaof_flag(df_local_factory):
 
 @pytest.mark.slow
 async def test_network_disconnect(df_local_factory, df_seeder_factory):
-    replica = df_local_factory.create(port=BASE_PORT)
-    master = df_local_factory.create(port=BASE_PORT + 1)
+    replica = df_local_factory.create()
+    master = df_local_factory.create()
     seeder = df_seeder_factory.create(port=master.port)
 
     df_local_factory.start_all([replica, master])
     async with replica.client() as c_replica:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", BASE_PORT + 2, "localhost", master.port)
+        proxy = Proxy("localhost", 0, "localhost", master.port)
         task = asyncio.create_task(proxy.start())
 
         await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
@@ -1588,15 +1588,15 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
-    replica = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
-    master = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=4)
+    master = df_local_factory.create(proactor_threads=4)
     seeder = df_seeder_factory.create(port=master.port)
 
     df_local_factory.start_all([replica, master])
     async with replica.client() as c_replica:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", BASE_PORT + 2, "localhost", master.port)
+        proxy = Proxy("localhost", 0, "localhost", master.port)
         task = asyncio.create_task(proxy.start())
 
         await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")

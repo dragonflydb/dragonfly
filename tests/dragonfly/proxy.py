@@ -46,6 +46,11 @@ class Proxy:
 
     async def start(self):
         self.server = await asyncio.start_server(self.handle, self.host, self.port)
+
+        if self.port == 0:
+            _, port = self.server.sockets[0].getsockname()[:2]
+            self.port = port
+
         async with self.server:
             await self.server.serve_forever()
 
