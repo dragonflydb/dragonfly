@@ -372,7 +372,6 @@ void AclFamily::Users(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-<<<<<<< HEAD
 void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
     (*cntx)->SendError(facade::OpStatus::SYNTAX_ERR);
@@ -420,8 +419,6 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-=======
->>>>>>> main
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
 CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
@@ -439,10 +436,7 @@ constexpr uint32_t kSave = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-<<<<<<< HEAD
 constexpr uint32_t kCat = acl::SLOW;
-=======
->>>>>>> main
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
