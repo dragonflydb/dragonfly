@@ -217,4 +217,29 @@ TEST_F(AclFamilyTest, TestCat) {
                                    "APPEND", "MSETNX", "SETRANGE"));
 }
 
+TEST_F(AclFamilyTest, TestGetUser) {
+  TestInitAclFam();
+  auto resp = Run({"ACL", "GETUSER", "kostas"});
+  EXPECT_THAT(resp, ErrArg("ERR User: kostas does not exists!"));
+
+  resp = Run({"ACL", "GETUSER", "default"});
+  const auto& vec = resp.GetVec();
+  EXPECT_THAT(vec[0], "flags");
+  EXPECT_THAT(vec[1].GetVec(), UnorderedElementsAre("on", "nopass"));
+  EXPECT_THAT(vec[2], "passwords");
+  EXPECT_TRUE(vec[3].GetVec().empty());
+  EXPECT_THAT(vec[4], "commands");
+  EXPECT_THAT(vec[5], "+@ALL +ALL");
+
+  resp = Run({"ACL", "SETUSER", "kostas", "+@STRING", "+HSET"});
+  resp = Run({"ACL", "GETUSER", "kostas"});
+  const auto& kvec = resp.GetVec();
+  EXPECT_THAT(kvec[0], "flags");
+  EXPECT_THAT(kvec[1].GetVec(), UnorderedElementsAre("off", "nopass"));
+  EXPECT_THAT(kvec[2], "passwords");
+  EXPECT_TRUE(kvec[3].GetVec().empty());
+  EXPECT_THAT(kvec[4], "commands");
+  EXPECT_THAT(kvec[5], "+@STRING +HSET");
+}
+
 }  // namespace dfly

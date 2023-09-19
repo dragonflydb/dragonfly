@@ -419,6 +419,42 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
+  auto username = facade::ToSV(args[0]);
+  const auto registry_with_lock = registry_->GetRegistryWithLock();
+  const auto& registry = registry_with_lock.registry;
+  if (!registry.contains(username)) {
+    auto error = absl::StrCat("User: ", username, " does not exists!");
+    (*cntx)->SendError(error);
+    return;
+  }
+  auto& user = registry.find(username)->second;
+  std::string status = user.IsActive() ? "on" : "off";
+  auto pass = user.Password();
+
+  (*cntx)->StartArray(6);
+
+  (*cntx)->SendSimpleString("flags");
+  const size_t total_elements = (pass != "nopass") ? 1 : 2;
+  (*cntx)->StartArray(total_elements);
+  (*cntx)->SendSimpleString(status);
+  if (total_elements == 2) {
+    (*cntx)->SendSimpleString(pass);
+  }
+
+  (*cntx)->SendSimpleString("passwords");
+  if (pass != "nopass") {
+    (*cntx)->SendSimpleString(pass);
+  } else {
+    (*cntx)->SendEmptyArray();
+  }
+  (*cntx)->SendSimpleString("commands");
+
+  std::string acl = absl::StrCat(AclCatToString(user.AclCategory()), " ",
+                                 AclCommandToString(user.AclCommandsRef()));
+  (*cntx)->SendSimpleString(acl);
+}
+
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
 CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
@@ -437,6 +473,7 @@ constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kCat = acl::SLOW;
+constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -468,6 +505,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
                    .HFUNC(Users);
   *registry << CI{"ACL CAT", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kCat}.HFUNC(
       Cat);
+  *registry << CI{"ACL GETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 2, 0, 0, 0, acl::kGetUser}
+                   .HFUNC(GetUser);
 
   cmd_registry_ = registry;
 }
