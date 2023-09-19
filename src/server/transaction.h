@@ -399,11 +399,11 @@ class Transaction {
   // Init as a global transaction.
   void InitGlobal();
 
-  // Init when command has no keys and it need to use transaction framework
-  void InitNoKey();
-
   // Init with a set of keys.
   void InitByKeys(KeyIndex keys);
+
+  void EnableShard(ShardId sid);
+  void EnableAllShards();
 
   // Build shard index by distributing the arguments by shards based on the key index.
   void BuildShardIndex(KeyIndex keys, bool rev_mapping, std::vector<PerShardCache>* out);
