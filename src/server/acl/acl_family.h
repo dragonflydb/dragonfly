@@ -42,6 +42,7 @@ class AclFamily final {
   void Users(CmdArgList args, ConnectionContext* cntx);
   void Cat(CmdArgList args, ConnectionContext* cntx);
   void GetUser(CmdArgList args, ConnectionContext* cntx);
+  void DryRun(CmdArgList args, ConnectionContext* cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
