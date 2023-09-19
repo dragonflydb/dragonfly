@@ -11,7 +11,7 @@ from redis.asyncio import Redis as RedisClient
 
 from dataclasses import dataclass
 
-START_DELAY = 0.4
+START_DELAY = 0.8
 START_GDB_DELAY = 3.0
 
 
