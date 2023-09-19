@@ -427,6 +427,11 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   if (index_not_found.load())
     return (*cntx)->SendError(string{index_name} + ": no such index");
 
+  for (const auto& res : docs) {
+    if (res.error)
+      return (*cntx)->SendError(std::move(*res.error));
+  }
+
   if (auto knn_limit = search_algo.HasKnn(); knn_limit)
     ReplyKnn(*knn_limit, *params, absl::MakeSpan(docs), cntx);
   else

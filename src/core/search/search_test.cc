@@ -26,6 +26,8 @@ namespace search {
 
 using namespace std;
 
+using ::testing::HasSubstr;
+
 struct MockedDocument : public DocumentAccessor {
  public:
   using Map = absl::flat_hash_map<std::string, std::string>;
@@ -344,6 +346,29 @@ TEST_F(SearchTest, IntegerTerms) {
 
 std::string ToBytes(absl::Span<const float> vec) {
   return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
+}
+
+TEST_F(SearchTest, Errors) {
+  auto schema = MakeSimpleSchema(
+      {{"score", SchemaField::NUMERIC}, {"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
+  FieldIndices indices{schema};
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Non-existent field
+  algo.Init("@cantfindme:[1 10]", &params);
+  EXPECT_THAT(algo.Search(&indices).error, HasSubstr("Invalid field"));
+
+  // Invalid type
+  algo.Init("@even:[1 10]", &params);
+  EXPECT_THAT(algo.Search(&indices).error, HasSubstr("Wrong access type"));
+
+  // Wrong vector index dimensions
+  params["vec"] = ToBytes({1, 2, 3, 4});
+  algo.Init("* => [KNN 5 @pos $vec]", &params);
+  EXPECT_THAT(algo.Search(&indices).error, HasSubstr("Wrong vector index dimensions"));
 }
 
 class KnnTest : public SearchTest, public testing::WithParamInterface<bool /* hnsw */> {};

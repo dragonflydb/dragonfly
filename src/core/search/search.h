@@ -91,6 +91,9 @@ struct SearchResult {
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
+
+  // If an error occurred, last recent one
+  std::string error;
 };
 
 // SearchAlgorithm allows searching field indices with a query
