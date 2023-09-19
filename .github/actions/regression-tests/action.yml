@@ -28,12 +28,12 @@ runs:
     - name: Run PyTests
       shell: bash
       run: |
-        ls -l ${GITHUB_WORKSPACE}/
-        cd ${GITHUB_WORKSPACE}/tests
+        ls -l ${{github.workspace}}/
+        cd ${{github.workspace}}/tests
         echo "Current commit is ${{github.sha}}"
         pip3 install -r dragonfly/requirements.txt
         # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        export DRAGONFLY_PATH="${{github.workspace}}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
         pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
@@ -43,9 +43,9 @@ runs:
       shell: bash
       run: |
         echo "Running PyTests replication test with flag: ${{ inputs.run-only-on-ubuntu-latest }}"
-        cd ${GITHUB_WORKSPACE}/tests
+        cd ${{github.workspace}}/tests
         # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+        export DRAGONFLY_PATH="${{github.workspace}}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
         pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
         pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
@@ -58,7 +58,7 @@ runs:
           local report_file=$1
           echo $(jq -r '.tests[] | select(.outcome == "failed") | .nodeid' "$report_file")
         }
-        cd ${GITHUB_WORKSPACE}/tests
+        cd ${{github.workspace}}/tests
         failed_tests=""
         # The order in of if is important, and expected to be the oposite order of the pytest run.
         # As github runner will not run the next step if the pytest failed, we start from the last
