@@ -42,7 +42,6 @@ static const char kFloatRangeErr[] = "min or max is not a float";
 static const char kLexRangeErr[] = "min or max not valid string range item";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
-constexpr unsigned kMaxListPackValue = 64;
 using MScoreResponse = std::vector<std::optional<double>>;
 
 using ScoredMember = std::pair<std::string, double>;
@@ -163,14 +162,15 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
 
   PrimeIterator& it = add_res.first;
   PrimeValue& pv = it->second;
-
+  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   if (add_res.second || zparams.override) {
-    if (member_len > kMaxListPackValue) {
+    if (member_len > server.max_map_field_len) {
       detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, zs);
     } else {
       unsigned char* lp = lpNew(0);
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+      stats->listpack_blob_cnt++;
     }
 
     if (!add_res.second) {
@@ -942,7 +942,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   OpStatus op_status = OpStatus::OK;
   AddResult aresult;
   detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
-
+  bool is_list_pack = robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK;
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
     tmp_str = sdscpylen(tmp_str, m.second.data(), m.second.size());
@@ -968,6 +968,12 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
       updated++;
     if (!(retflags & ZADD_OUT_NOP))
       processed++;
+  }
+
+  // if we migrated to skip_list - update listpack stats.
+  if (is_list_pack && robj_wrapper->encoding() != OBJ_ENCODING_LISTPACK) {
+    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
+    --stats->listpack_blob_cnt;
   }
 
   op_args.shard->db_slice().PostUpdate(op_args.db_cntx.db_index, *res_it, key);
@@ -1707,6 +1713,7 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   }
   DCHECK(cntx->transaction);
 
+  std::sort(members.begin(), members.end());
   absl::Span memb_sp{members.data(), members.size()};
   ZAddGeneric(key, zparams, memb_sp, cntx);
 }

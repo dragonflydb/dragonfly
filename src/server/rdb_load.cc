@@ -561,7 +561,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   size_t len = ltrace->blob_count() / 2;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = (len <= server.hash_max_listpack_entries);
+  bool keep_lp = (len <= 64);
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -569,7 +569,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       size_t str_len = StrLen(blob.rdb_var);
       lp_size += str_len;
 
-      if (str_len > server.hash_max_listpack_value) {
+      if (str_len > server.max_map_field_len) {
         keep_lp = false;
         return false;
       }
@@ -971,7 +971,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       return;
     }
 
-    if (lpBytes(lp) > HSetFamily::MaxListPackLen()) {
+    if (lpBytes(lp) > server.max_listpack_map_bytes) {
       StringMap* sm = HSetFamily::ConvertToStrMap(lp);
       lpFree(lp);
       pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
@@ -997,7 +997,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
 
     unsigned encoding = OBJ_ENCODING_LISTPACK;
     void* inner;
-    if (lpBytes(lp) > server.zset_max_listpack_entries) {
+    if (lpBytes(lp) >= server.max_listpack_map_bytes) {
       inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp).release();
       lpFree(lp);
       encoding = OBJ_ENCODING_SKIPLIST;

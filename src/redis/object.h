@@ -180,7 +180,6 @@ void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr,
 sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
 int hashTypeGetValue(robj *o, sds field, unsigned char **vstr, unsigned int *vlen, long long *vll);
 robj *hashTypeGetValueObject(robj *o, sds field);
-int hashTypeSet(robj *o, sds field, sds value, int flags);
 robj *hashTypeDup(robj *o);
 int hashTypeGetFromListpack(robj *o, sds field,
                             unsigned char **vstr,

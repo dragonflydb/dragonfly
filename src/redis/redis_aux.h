@@ -71,8 +71,8 @@ typedef struct ServerStub {
   // unused - left so that object.c will compile.
   int maxmemory_policy; /* Policy for key eviction */
 
-  unsigned long page_size;
-  size_t hash_max_listpack_entries, hash_max_listpack_value;
+  size_t max_map_field_len, max_listpack_map_bytes;
+
   size_t zset_max_listpack_entries;
   size_t zset_max_listpack_value;
 
