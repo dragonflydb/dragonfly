@@ -13,7 +13,6 @@
 #include "server/engine_shard_set.h"
 #include "util/cloud/s3.h"
 #include "util/fibers/fiber_file.h"
-#include "util/uring/uring_file.h"
 
 namespace dfly {
 namespace detail {

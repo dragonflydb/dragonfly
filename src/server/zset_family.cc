@@ -926,7 +926,12 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
     return OpStatus::OK;
   }
 
-  OpResult<PrimeIterator> res_it = FindZEntry(zparams, op_args, key, members.front().second.size());
+  // When we have too many members to add, make sure field_len is large enough to use
+  // skiplist encoding.
+  size_t field_len = members.size() > server.zset_max_listpack_entries
+                         ? UINT32_MAX
+                         : members.front().second.size();
+  OpResult<PrimeIterator> res_it = FindZEntry(zparams, op_args, key, field_len);
 
   if (!res_it)
     return res_it.status();
