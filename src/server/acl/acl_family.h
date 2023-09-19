@@ -39,6 +39,7 @@ class AclFamily final {
   // Helper function for bootstrap
   bool Load();
   void Log(CmdArgList args, ConnectionContext* cntx);
+  void Users(CmdArgList args, ConnectionContext* cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
