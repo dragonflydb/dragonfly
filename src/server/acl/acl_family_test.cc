@@ -188,4 +188,16 @@ TEST_F(AclFamilyTest, TestAllCommands) {
   }
 }
 
+TEST_F(AclFamilyTest, TestUsers) {
+  TestInitAclFam();
+  auto resp = Run({"ACL", "SETUSER", "abhra", "ON"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "SETUSER", "ari"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "USERS"});
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("default", "abhra", "ari"));
+}
+
 }  // namespace dfly
