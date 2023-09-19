@@ -164,6 +164,15 @@ void BaseFamilyTest::SetUp() {
   ResetService();
 }
 
+void BaseFamilyTest::TearDown() {
+  CHECK_EQ(NumLocked(), 0U);
+
+  ShutdownService();
+
+  const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
+  LOG(INFO) << "Finishing " << test_info->name();
+}
+
 // Test hook defined in common.cc.
 void TEST_InvalidateLockHashTag();
 
@@ -171,20 +180,19 @@ void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
     TEST_InvalidateLockHashTag();
 
-    service_->Shutdown();
-    service_ = nullptr;
-
-    delete shard_set;
-    shard_set = nullptr;
-
-    pp_->Stop();
+    ShutdownService();
   }
 
+#ifdef __linux__
   if (absl::GetFlag(FLAGS_force_epoll)) {
     pp_.reset(fb2::Pool::Epoll(num_threads_));
   } else {
     pp_.reset(fb2::Pool::IOUring(16, num_threads_));
   }
+#else
+  pp_.reset(fb2::Pool::Epoll(num_threads_));
+#endif
+
   pp_->Run();
   service_ = std::make_unique<Service>(pp_.get());
 
@@ -199,6 +207,28 @@ void BaseFamilyTest::ResetService() {
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
   LOG(INFO) << "Starting " << test_info->name();
+
+  watchdog_fiber_ = pp_->GetNextProactor()->LaunchFiber([this] {
+    if (!watchdog_done_.WaitFor(120s)) {
+      LOG(ERROR) << "Deadlock detected!!!!";
+      absl::SetFlag(&FLAGS_alsologtostderr, true);
+      fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+    }
+  });
+}
+
+void BaseFamilyTest::ShutdownService() {
+  DCHECK(service_);
+
+  service_->Shutdown();
+  service_.reset();
+  delete shard_set;
+  shard_set = nullptr;
+
+  watchdog_done_.Notify();
+  watchdog_fiber_.Join();
+
+  pp_->Stop();
 }
 
 unsigned BaseFamilyTest::NumLocked() {
@@ -212,17 +242,6 @@ unsigned BaseFamilyTest::NumLocked() {
     }
   });
   return count;
-}
-
-void BaseFamilyTest::TearDown() {
-  CHECK_EQ(NumLocked(), 0U);
-
-  service_->Shutdown();
-  service_.reset();
-  pp_->Stop();
-
-  const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
-  LOG(INFO) << "Finishing " << test_info->name();
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
