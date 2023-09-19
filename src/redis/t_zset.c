@@ -56,6 +56,7 @@
  * pointers being only at "level 1". This allows to traverse the list
  * from tail to head, useful for ZREVRANGE. */
 
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,6 +80,36 @@ static char kMaxStrData[] = "\110" "maxstring";
 sds cminstring = kMinStrData + 1;
 sds cmaxstring = kMaxStrData + 1;
 
+
+/* Returns 1 if the double value can safely be represented in long long without
+ * precision loss, in which case the corresponding long long is stored in the out variable. */
+static int double2ll(double d, long long *out) {
+#if (DBL_MANT_DIG >= 52) && (DBL_MANT_DIG <= 63) && (LLONG_MAX == 0x7fffffffffffffffLL)
+    /* Check if the float is in a safe range to be casted into a
+     * long long. We are assuming that long long is 64 bit here.
+     * Also we are assuming that there are no implementations around where
+     * double has precision < 52 bit.
+     *
+     * Under this assumptions we test if a double is inside a range
+     * where casting to long long is safe. Then using two castings we
+     * make sure the decimal part is zero. If all this is true we can use
+     * integer without precision loss.
+     *
+     * Note that numbers above 2^52 and below 2^63 use all the fraction bits as real part,
+     * and the exponent bits are positive, which means the "decimal" part must be 0.
+     * i.e. all double values in that range are representable as a long without precision loss,
+     * but not all long values in that range can be represented as a double.
+     * we only care about the first part here. */
+    if (d < (double)(-LLONG_MAX/2) || d > (double)(LLONG_MAX/2))
+        return 0;
+    long long ll = d;
+    if (ll == d) {
+        *out = ll;
+        return 1;
+    }
+#endif
+    return 0;
+}
 
 int zslLexValueGteMin(sds value, const zlexrangespec *spec);
 int zslLexValueLteMax(sds value, const zlexrangespec *spec);
@@ -1008,17 +1039,25 @@ unsigned char *zzlInsertAt(unsigned char *zl, unsigned char *eptr, sds ele, doub
     unsigned char *sptr;
     char scorebuf[128];
     int scorelen;
-
-    scorelen = d2string(scorebuf,sizeof(scorebuf),score);
+    long long lscore;
+    int score_is_long = double2ll(score, &lscore);
+    if (!score_is_long)
+        scorelen = d2string(scorebuf,sizeof(scorebuf),score);
     if (eptr == NULL) {
         zl = lpAppend(zl,(unsigned char*)ele,sdslen(ele));
-        zl = lpAppend(zl,(unsigned char*)scorebuf,scorelen);
+        if (score_is_long)
+            zl = lpAppendInteger(zl,lscore);
+        else
+            zl = lpAppend(zl,(unsigned char*)scorebuf,scorelen);
     } else {
         /* Insert member before the element 'eptr'. */
         zl = lpInsertString(zl,(unsigned char*)ele,sdslen(ele),eptr,LP_BEFORE,&sptr);
 
         /* Insert score after the member. */
-        zl = lpInsertString(zl,(unsigned char*)scorebuf,scorelen,sptr,LP_AFTER,NULL);
+        if (score_is_long)
+            zl = lpInsertInteger(zl,lscore,sptr,LP_AFTER,NULL);
+        else
+            zl = lpInsertString(zl,(unsigned char*)scorebuf,scorelen,sptr,LP_AFTER,NULL);
     }
     return zl;
 }
@@ -1026,8 +1065,17 @@ unsigned char *zzlInsertAt(unsigned char *zl, unsigned char *eptr, sds ele, doub
 /* Insert (element,score) pair in listpack. This function assumes the element is
  * not yet present in the list. */
 unsigned char *zzlInsert(unsigned char *zl, sds ele, double score) {
-    unsigned char *eptr = lpSeek(zl,0), *sptr;
+    unsigned char *eptr = NULL, *sptr = lpSeek(zl,-1);
     double s;
+
+    // Optimization: check first whether the new element should be the last.
+    if (sptr != NULL) {
+      s = zzlGetScore(sptr);
+      if (s >= score) {
+        // It should not be the last, so fallback to the forward iteration.
+        eptr = lpSeek(zl,0);
+      }
+    }
 
     while (eptr != NULL) {
         sptr = lpNext(zl,eptr);
@@ -1038,13 +1086,11 @@ unsigned char *zzlInsert(unsigned char *zl, sds ele, double score) {
             /* First element with score larger than score for element to be
              * inserted. This means we should take its spot in the list to
              * maintain ordering. */
-            zl = zzlInsertAt(zl,eptr,ele,score);
-            break;
+            return zzlInsertAt(zl,eptr,ele,score);
         } else if (s == score) {
             /* Ensure lexicographical ordering for elements. */
             if (zzlCompareElements(eptr,(unsigned char*)ele,sdslen(ele)) > 0) {
-                zl = zzlInsertAt(zl,eptr,ele,score);
-                break;
+                return zzlInsertAt(zl,eptr,ele,score);
             }
         }
 
@@ -1053,9 +1099,7 @@ unsigned char *zzlInsert(unsigned char *zl, sds ele, double score) {
     }
 
     /* Push on tail of list when it was not yet inserted. */
-    if (eptr == NULL)
-        zl = zzlInsertAt(zl,NULL,ele,score);
-    return zl;
+    return zzlInsertAt(zl,NULL,ele,score);
 }
 
 unsigned char *zzlDeleteRangeByScore(unsigned char *zl, const zrangespec *range, unsigned long *deleted) {

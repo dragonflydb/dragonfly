@@ -17,6 +17,8 @@ class MemoryCmd {
   void Run(CmdArgList args);
 
  private:
+  void Usage(std::string_view key);
+
   ConnectionContext* cntx_;
 };
 

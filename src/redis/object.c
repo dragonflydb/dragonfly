@@ -48,18 +48,6 @@
 #define strtold(a,b) ((long double)strtod((a),(b)))
 #endif
 
-/* Try to release pages back to the OS directly (bypassing the allocator),
- * in an effort to decrease CoW during fork. For small allocations, we can't
- * release any full page, so in an effort to avoid getting the size of the
- * allocation from the allocator (malloc_size) when we already know it's small,
- * we check the size_hint. If the size is not already known, passing a size_hint
- * of 0 will lead the checking the real size of the allocation.
- * Also please note that the size may be not accurate, so in order to make this
- * solution effective, the judgement for releasing memory pages should not be
- * too strict. */
-static void dismissMemory(void* ptr, size_t size_hint) {
-}
-
 /* ===================== Creation and parsing of objects ==================== */
 
 robj *createObject(int type, void *ptr) {
@@ -374,97 +362,6 @@ void decrRefCount(robj *o) {
         if (o->refcount != OBJ_SHARED_REFCOUNT) o->refcount--;
     }
 }
-
-/* See dismissObject() */
-void dismissSds(sds s) {
-    dismissMemory(sdsAllocPtr(s), sdsAllocSize(s));
-}
-
-/* See dismissObject() */
-void dismissStringObject(robj *o) {
-    if (o->encoding == OBJ_ENCODING_RAW) {
-        dismissSds(o->ptr);
-    }
-}
-
-/* See dismissObject() */
-void dismissListObject(robj *o, size_t size_hint) {
-    if (o->encoding == OBJ_ENCODING_QUICKLIST) {
-        quicklist *ql = o->ptr;
-        serverAssert(ql->len != 0);
-        /* We iterate all nodes only when average node size is bigger than a
-         * page size, and there's a high chance we'll actually dismiss something. */
-        if (size_hint / ql->len >= server.page_size) {
-            quicklistNode *node = ql->head;
-            while (node) {
-                if (quicklistNodeIsCompressed(node)) {
-                    dismissMemory(node->entry, ((quicklistLZF*)node->entry)->sz);
-                } else {
-                    dismissMemory(node->entry, node->sz);
-                }
-                node = node->next;
-            }
-        }
-    } else {
-        serverPanic("Unknown list encoding type");
-    }
-}
-
-/* See dismissObject() */
-void dismissSetObject(robj *o, size_t size_hint) {
-    if (o->encoding == OBJ_ENCODING_HT) {
-        dict *set = o->ptr;
-        serverAssert(dictSize(set) != 0);
-        /* We iterate all nodes only when average member size is bigger than a
-         * page size, and there's a high chance we'll actually dismiss something. */
-        if (size_hint / dictSize(set) >= server.page_size) {
-            dictEntry *de;
-            dictIterator *di = dictGetIterator(set);
-            while ((de = dictNext(di)) != NULL) {
-                dismissSds(dictGetKey(de));
-            }
-            dictReleaseIterator(di);
-        }
-
-        /* Dismiss hash table memory. */
-        dismissMemory(set->ht_table[0], DICTHT_SIZE(set->ht_size_exp[0])*sizeof(dictEntry*));
-        dismissMemory(set->ht_table[1], DICTHT_SIZE(set->ht_size_exp[1])*sizeof(dictEntry*));
-    } else if (o->encoding == OBJ_ENCODING_INTSET) {
-        dismissMemory(o->ptr, intsetBlobLen((intset*)o->ptr));
-    } else {
-        serverPanic("Unknown set encoding type");
-    }
-}
-
-
-/* See dismissObject() */
-void dismissHashObject(robj *o, size_t size_hint) {
-    if (o->encoding == OBJ_ENCODING_HT) {
-        dict *d = o->ptr;
-        serverAssert(dictSize(d) != 0);
-        /* We iterate all fields only when average field/value size is bigger than
-         * a page size, and there's a high chance we'll actually dismiss something. */
-        if (size_hint / dictSize(d) >= server.page_size) {
-            dictEntry *de;
-            dictIterator *di = dictGetIterator(d);
-            while ((de = dictNext(di)) != NULL) {
-                /* Only dismiss values memory since the field size
-                 * usually is small. */
-                dismissSds(dictGetVal(de));
-            }
-            dictReleaseIterator(di);
-        }
-
-        /* Dismiss hash table memory. */
-        dismissMemory(d->ht_table[0], DICTHT_SIZE(d->ht_size_exp[0])*sizeof(dictEntry*));
-        dismissMemory(d->ht_table[1], DICTHT_SIZE(d->ht_size_exp[1])*sizeof(dictEntry*));
-    } else if (o->encoding == OBJ_ENCODING_LISTPACK) {
-        dismissMemory(o->ptr, lpBytes((unsigned char*)o->ptr));
-    } else {
-        serverPanic("Unknown hash encoding type");
-    }
-}
-
 
 /* This variant of decrRefCount() gets its argument as void, and is useful
  * as free method in data structures that expect a 'void free_object(void*)'

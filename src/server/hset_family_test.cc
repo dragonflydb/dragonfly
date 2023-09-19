@@ -35,16 +35,6 @@ class HestFamilyTestProtocolVersioned : public HSetFamilyTest,
 INSTANTIATE_TEST_CASE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
                         ::testing::Values("2", "3"));
 
-TEST_F(HSetFamilyTest, Hash) {
-  robj* obj = createHashObject();
-  sds field = sdsnew("field");
-  sds val = sdsnew("value");
-  hashTypeSet(obj, field, val, 0);
-  sdsfree(field);
-  sdsfree(val);
-  decrRefCount(obj);
-}
-
 TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});
   EXPECT_THAT(resp, ErrArg("wrong number"));

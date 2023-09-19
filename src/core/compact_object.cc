@@ -469,8 +469,8 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
       /* check if the element is too large or the list
        * becomes too long *before* executing zzlInsert. */
-      if (zl_len + 1 > server.zset_max_listpack_entries ||
-          sdslen(ele) > server.zset_max_listpack_value || !lpSafeToAdd(lp, sdslen(ele))) {
+      if (zl_len >= server.zset_max_listpack_entries ||
+          sdslen(ele) > server.zset_max_listpack_value) {
         unique_ptr<SortedMap> ss = SortedMap::FromListPack(tl.local_mr, lp);
         lpFree(lp);
         inner_obj_ = ss.release();
