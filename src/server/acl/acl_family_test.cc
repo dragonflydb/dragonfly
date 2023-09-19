@@ -242,4 +242,34 @@ TEST_F(AclFamilyTest, TestGetUser) {
   EXPECT_THAT(kvec[5], "+@STRING +HSET");
 }
 
+TEST_F(AclFamilyTest, TestDryRun) {
+  TestInitAclFam();
+  auto resp = Run({"ACL", "DRYRUN"});
+  EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl dryrun' command"));
+
+  resp = Run({"ACL", "DRYRUN", "default"});
+  EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl dryrun' command"));
+
+  resp = Run({"ACL", "DRYRUN", "default", "get", "more"});
+  EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl dryrun' command"));
+
+  resp = Run({"ACL", "DRYRUN", "kostas", "more"});
+  EXPECT_THAT(resp, ErrArg("ERR User: kostas does not exists!"));
+
+  resp = Run({"ACL", "DRYRUN", "default", "nope"});
+  EXPECT_THAT(resp, ErrArg("ERR Command: NOPE does not exists!"));
+
+  resp = Run({"ACL", "DRYRUN", "default", "SET"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "SETUSER", "kostas", "+GET"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "DRYRUN", "kostas", "GET"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "DRYRUN", "kostas", "SET"});
+  EXPECT_THAT(resp, ErrArg("ERR User: kostas is not allowed to execute command: SET"));
+}
+
 }  // namespace dfly

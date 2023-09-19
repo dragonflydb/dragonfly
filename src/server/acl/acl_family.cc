@@ -31,6 +31,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/helpers.h"
+#include "server/acl/validator.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -455,6 +456,35 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendSimpleString(acl);
 }
 
+void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
+  auto username = facade::ArgS(args, 0);
+  const auto registry_with_lock = registry_->GetRegistryWithLock();
+  const auto& registry = registry_with_lock.registry;
+  if (!registry.contains(username)) {
+    auto error = absl::StrCat("User: ", username, " does not exists!");
+    (*cntx)->SendError(error);
+    return;
+  }
+
+  ToUpper(&args[1]);
+  auto command = facade::ArgS(args, 1);
+  auto* cid = cmd_registry_->Find(command);
+  if (!cid) {
+    auto error = absl::StrCat("Command: ", command, " does not exists!");
+    (*cntx)->SendError(error);
+    return;
+  }
+
+  const auto& user = registry.find(username)->second;
+  if (IsUserAllowedToInvokeCommandGeneric(user.AclCategory(), user.AclCommandsRef(), *cid)) {
+    (*cntx)->SendOk();
+    return;
+  }
+
+  auto error = absl::StrCat("User: ", username, " is not allowed to execute command: ", command);
+  (*cntx)->SendError(error);
+}
+
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
 CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
@@ -474,6 +504,7 @@ constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kCat = acl::SLOW;
 constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kDryRun = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -507,6 +538,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
       Cat);
   *registry << CI{"ACL GETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 2, 0, 0, 0, acl::kGetUser}
                    .HFUNC(GetUser);
+  *registry << CI{"ACL DRYRUN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 3, 0, 0, 0, acl::kDryRun}
+                   .HFUNC(DryRun);
 
   cmd_registry_ = registry;
 }

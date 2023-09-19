@@ -13,13 +13,8 @@ namespace dfly::acl {
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx,
                                                 const facade::CommandId& id) {
-  const auto cat_credentials = id.acl_categories();
-
-  const size_t index = id.GetFamily();
-  const uint64_t command_mask = id.GetBitIndex();
-  DCHECK_LT(index, cntx.acl_commands.size());
-  const bool is_authed = (cntx.acl_categories & cat_credentials) != 0 ||
-                         (cntx.acl_commands[index] & command_mask) != 0;
+  const bool is_authed =
+      IsUserAllowedToInvokeCommandGeneric(cntx.acl_categories, cntx.acl_commands, id);
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
@@ -28,6 +23,16 @@ namespace dfly::acl {
   }
 
   return is_authed;
+}
+
+[[nodiscard]] bool IsUserAllowedToInvokeCommandGeneric(uint32_t acl_cat,
+                                                       const std::vector<uint64_t>& acl_commands,
+                                                       const facade::CommandId& id) {
+  const auto cat_credentials = id.acl_categories();
+  const size_t index = id.GetFamily();
+  const uint64_t command_mask = id.GetBitIndex();
+  DCHECK_LT(index, acl_commands.size());
+  return (acl_cat & cat_credentials) != 0 || (acl_commands[index] & command_mask) != 0;
 }
 
 }  // namespace dfly::acl
