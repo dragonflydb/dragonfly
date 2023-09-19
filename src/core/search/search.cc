@@ -340,6 +340,9 @@ struct BasicSearch {
 
   // Determine node type and call specific search function
   IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
+    if (!error_.empty())
+      return IndexResult{};
+
     ProfileBuilder::Tp start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
 
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
