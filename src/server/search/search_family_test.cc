@@ -118,6 +118,16 @@ TEST_F(SearchFamilyTest, Simple) {
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:this"}), kNoResults);
 }
 
+TEST_F(SearchFamilyTest, Errors) {
+  Run({"ft.create", "i1", "PREFIX", "1", "d:", "SCHEMA", "foo", "TAG", "bar", "TEXT"});
+
+  // Wrong field
+  EXPECT_THAT(Run({"ft.search", "i1", "@whoami:lol"}), ErrArg("Invalid field: whoami"));
+
+  // Wrong field type
+  EXPECT_THAT(Run({"ft.search", "i1", "@foo:lol"}), ErrArg("Wrong access type for field: foo"));
+}
+
 TEST_F(SearchFamilyTest, NoPrefix) {
   Run({"hset", "d:1", "a", "one", "k", "v"});
   Run({"hset", "d:2", "a", "two", "k", "v"});

@@ -116,7 +116,7 @@ struct ProfileBuilder {
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
     };
-    return visit(node_info, static_cast<const NodeVariants&>(node));
+    return visit(node_info, node.Variant());
   }
 
   using Tp = std::chrono::steady_clock::time_point;
@@ -158,10 +158,19 @@ struct BasicSearch {
   // Get casted sub index by field
   template <typename T> T* GetIndex(string_view field) {
     static_assert(is_base_of_v<BaseIndex, T>);
+
     auto index = indices_->GetIndex(field);
-    DCHECK(index) << field;  // TODO: handle not existing error
+    if (!index) {
+      error_ = absl::StrCat("Invalid field: ", field);
+      return nullptr;
+    }
+
     auto* casted_ptr = dynamic_cast<T*>(index);
-    DCHECK(casted_ptr) << field;  // TODO: handle type errors
+    if (!casted_ptr) {
+      error_ = absl::StrCat("Wrong access type for field: ", field);
+      return nullptr;
+    }
+
     return casted_ptr;
   }
 
@@ -224,8 +233,9 @@ struct BasicSearch {
   // "term": access field's text index or unify results from all text indices if no field is set
   IndexResult Search(const AstTermNode& node, string_view active_field) {
     if (!active_field.empty()) {
-      auto* index = GetIndex<TextIndex>(active_field);
-      return index->Matching(node.term);
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        return index->Matching(node.term);
+      return IndexResult{};
     }
 
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
@@ -237,7 +247,9 @@ struct BasicSearch {
   // [range]: access field's numeric index
   IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
-    return GetIndex<NumericIndex>(active_field)->Range(node.lo, node.hi);
+    if (auto* index = GetIndex<NumericIndex>(active_field); index)
+      return index->Range(node.lo, node.hi);
+    return IndexResult{};
   }
 
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
@@ -269,16 +281,14 @@ struct BasicSearch {
 
   // {tags | ...}: Unify results for all tags
   IndexResult Search(const AstTagsNode& node, string_view active_field) {
-    auto* tag_index = GetIndex<TagIndex>(active_field);
-    auto mapping = [tag_index](string_view tag) { return tag_index->Matching(tag); };
-    return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
+    if (auto* tag_index = GetIndex<TagIndex>(active_field); tag_index) {
+      auto mapping = [tag_index](string_view tag) { return tag_index->Matching(tag); };
+      return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
+    }
+    return IndexResult{};
   }
 
-  void SearchKnnFlat(const AstKnnNode& knn, IndexResult&& sub_results) {
-    auto* vec_index = GetIndex<FlatVectorIndex>(knn.field);
-    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second)
-      return;
-
+  void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
     distances_.reserve(sub_results.Size());
     auto cb = [&](auto* set) {
       auto [dim, sim] = vec_index->Info();
@@ -294,11 +304,7 @@ struct BasicSearch {
     distances_.resize(prefix_size);
   }
 
-  void SearchKnnHnsw(const AstKnnNode& knn, IndexResult&& sub_results) {
-    auto* vec_index = GetIndex<HnswVectorIndex>(knn.field);
-    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second)
-      return;
-
+  void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
     if (indices_->GetAllDocs().size() == sub_results.Size())
       distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit);
     else
@@ -310,19 +316,21 @@ struct BasicSearch {
     DCHECK(active_field.empty());
     auto sub_results = SearchGeneric(*knn.filter, active_field);
 
-    const auto& schema = indices_->GetSchema();
-    string_view knn_field = knn.field;
-    if (auto it = schema.field_names.find(knn_field); it != schema.field_names.end())
-      knn_field = it->second;
+    auto* vec_index = GetIndex<BaseVectorIndex>(knn.field);
+    if (!vec_index)
+      return IndexResult{};
 
-    const auto& field_info = schema.fields.at(knn_field);
-    DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
+    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second) {
+      error_ =
+          absl::StrCat("Wrong vector index dimensions, got: ", knn.vec.second, ", expected: ", dim);
+      return IndexResult{};
+    }
 
     distances_.clear();
-    if (get<SchemaField::VectorParams>(field_info.special_params).use_hnsw)
-      SearchKnnHnsw(knn, std::move(sub_results));
+    if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
+      SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
     else
-      SearchKnnFlat(knn, std::move(sub_results));
+      SearchKnnFlat(dynamic_cast<FlatVectorIndex*>(vec_index), knn, std::move(sub_results));
 
     vector<DocId> out(distances_.size());
     for (size_t i = 0; i < distances_.size(); i++)
@@ -332,10 +340,13 @@ struct BasicSearch {
 
   // Determine node type and call specific search function
   IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
+    if (!error_.empty())
+      return IndexResult{};
+
     ProfileBuilder::Tp start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
 
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
-    auto result = visit(cb, static_cast<const NodeVariants&>(node));
+    auto result = visit(cb, node.Variant());
 
     // Top level results don't need to be sorted, because they will be scored, sorted by fields or
     // used by knn
@@ -363,11 +374,13 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    return SearchResult{result.Take(), std::move(knn_distances), std::move(profile)};
+    return SearchResult{result.Take(), std::move(knn_distances), std::move(profile),
+                        std::move(error_)};
   }
 
   const FieldIndices* indices_;
 
+  string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
 
   vector<DocId> tmp_vec_;

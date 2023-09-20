@@ -88,6 +88,10 @@ using NodeVariants =
 
 struct AstNode : public NodeVariants {
   using variant::variant;
+
+  const NodeVariants& Variant() const& {
+    return *this;
+  }
 };
 
 using AstExpr = AstNode;
