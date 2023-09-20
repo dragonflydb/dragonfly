@@ -78,6 +78,10 @@ struct AstKnnNode {
   AstKnnNode(size_t limit, std::string_view field, OwnedFtVector vec, std::string_view score_alias);
   AstKnnNode(AstNode&& sub, AstKnnNode&& self);
 
+  friend std::ostream& operator<<(std::ostream& stream, const AstKnnNode& matrix) {
+    return stream;
+  }
+
   std::unique_ptr<AstNode> filter;
   size_t limit;
   std::string field;
@@ -91,6 +95,10 @@ using NodeVariants =
 
 struct AstNode : public NodeVariants {
   using variant::variant;
+
+  friend std::ostream& operator<<(std::ostream& stream, const AstNode& matrix) {
+    return stream;
+  }
 };
 
 using AstExpr = AstNode;
@@ -98,16 +106,4 @@ using AstExpr = AstNode;
 }  // namespace search
 }  // namespace dfly
 
-namespace std {
-
-inline std::ostream& operator<<(std::ostream& os, const dfly::search::AstExpr& ast) {
-  // os << "ast{" << ast->Debug() << "}";
-  return os;
-}
-
-inline std::ostream& operator<<(std::ostream& os, const dfly::search::AstKnnNode& ast) {
-  // os << "ast{" << ast->Debug() << "}";
-  return os;
-}
-
-}  // namespace std
+namespace std {}  // namespace std

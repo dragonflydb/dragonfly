@@ -59,8 +59,7 @@ const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTy
 
 bool SearchParams::ShouldReturnField(std::string_view field) const {
   auto cb = [field](const auto& entry) { return entry.first == field; };
-  return !return_fields ||
-         find_if(return_fields->begin(), return_fields->end(), cb) != return_fields->end();
+  return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
 optional<search::SchemaField::FieldType> ParseSearchFieldType(string_view name) {
