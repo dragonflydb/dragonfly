@@ -163,6 +163,9 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
+  // Executes `f` on target shard for this tx. `f` must not block.
+  void RunSingleShardMulti(DbIndex dbid, CmdArgList keys, absl::FunctionRef<void()> f);
+
   // Execute single hop with return value and conclude.
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
