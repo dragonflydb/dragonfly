@@ -91,6 +91,8 @@ class BaseFamilyTest : public ::testing::Test {
 
   void ResetService();
 
+  void ShutdownService();
+
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
 
@@ -139,6 +141,8 @@ class BaseFamilyTest : public ::testing::Test {
 
   std::vector<RespVec*> resp_vec_;
   bool single_response_ = true;
+  util::fb2::Fiber watchdog_fiber_;
+  util::fb2::Done watchdog_done_;
 };
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats);
