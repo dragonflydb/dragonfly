@@ -1399,7 +1399,8 @@ async def test_replicaof_flag(df_local_factory):
     c_replica = aioredis.Redis(port=replica.port)
 
     await wait_available_async(c_replica)  # give it time to startup
-    await wait_for_replica_status(c_replica, status="up")  # wait until we have a connection
+    # wait until we have a connection
+    await wait_for_replica_status(c_replica, status="up")
     await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
@@ -1488,7 +1489,7 @@ async def test_replicaof_flag_disconnect(df_local_factory):
     val = await c_replica.get("KEY")
     assert b"VALUE" == val
 
-    await c_replica.replicaof("no", "one")  #  disconnect
+    await c_replica.replicaof("no", "one")  # disconnect
 
     role = await c_replica.role()
     assert role[0] == b"master"
@@ -1552,17 +1553,17 @@ async def test_df_crash_on_replicaof_flag(df_local_factory):
     replica.stop()
 
 
-@pytest.mark.slow
 async def test_network_disconnect(df_local_factory, df_seeder_factory):
-    replica = df_local_factory.create()
-    master = df_local_factory.create()
-    seeder = df_seeder_factory.create(port=master.port)
+    master = df_local_factory.create(proactor_threads=6)
+    replica = df_local_factory.create(proactor_threads=4)
 
     df_local_factory.start_all([replica, master])
+    seeder = df_seeder_factory.create(port=master.port)
+
     async with replica.client() as c_replica:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", 0, "localhost", master.port)
+        proxy = Proxy("localhost", 1111, "localhost", master.port)
         task = asyncio.create_task(proxy.start())
 
         await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
@@ -1584,19 +1585,22 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
         except asyncio.exceptions.CancelledError:
             pass
 
+    master.stop()
+    replica.stop()
+    assert replica.is_in_logs("partial sync finished in")
 
-@pytest.mark.asyncio
-@pytest.mark.slow
+
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
-    replica = df_local_factory.create(proactor_threads=4)
     master = df_local_factory.create(proactor_threads=4)
-    seeder = df_seeder_factory.create(port=master.port)
+    replica = df_local_factory.create(proactor_threads=4)
 
     df_local_factory.start_all([replica, master])
+    seeder = df_seeder_factory.create(port=master.port)
+
     async with replica.client() as c_replica:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", 0, "localhost", master.port)
+        proxy = Proxy("localhost", 1111, "localhost", master.port)
         task = asyncio.create_task(proxy.start())
 
         await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
@@ -1604,7 +1608,7 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
         fill_task = asyncio.create_task(seeder.run(target_ops=3000))
 
         for _ in range(5):
-            await asyncio.sleep(random.randint(0, 10) / 5)
+            await asyncio.sleep(random.randint(5, 10) / 5)
             proxy.drop_connection()
 
         seeder.stop()
@@ -1622,3 +1626,7 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
             await task
         except asyncio.exceptions.CancelledError:
             pass
+
+    master.stop()
+    replica.stop()
+    assert replica.is_in_logs("partial sync finished in")
