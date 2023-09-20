@@ -71,12 +71,17 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
       fb2::Fiber("incremental_snapshot", [this, journal, cntx, lsn = start_lsn]() mutable {
         DCHECK(lsn <= journal->GetLsn()) << "The replica tried to sync from the future.";
 
+        VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
+
         // The replica sends the LSN of the next entry is wants to receive.
         while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
           serializer_->WriteJournalEntry(journal->GetEntry(lsn));
           PushSerializedToChannel(false);
           lsn++;
         }
+
+        VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
+
         // This check is safe, but it is not trivially safe.
         // We rely here on the fact that JournalSlice::AddLogRecord can
         // only preempt while holding the callback lock.

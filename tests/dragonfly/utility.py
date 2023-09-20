@@ -58,7 +58,7 @@ async def wait_available_async(client: aioredis.Redis, timeout=10):
         print("W", end="", flush=True)
         await asyncio.sleep(0.01)
         its += 1
-    raise RuntimeError("Replica did not become available in time!")
+    raise RuntimeError("Client did not become available in time!")
 
 
 class SizeChange(Enum):
@@ -410,6 +410,7 @@ class DflySeeder:
 
         if port is None:
             port = self.port
+        logging.debug(f"Starting capture from {port=}")
         keys = sorted(list(self.gen.keys_and_types()))
 
         captures = await asyncio.gather(

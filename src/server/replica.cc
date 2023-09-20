@@ -421,6 +421,7 @@ error_code Replica::InitiateDflySync() {
     JoinDflyFlows();
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     state_mask_.fetch_and(~R_SYNCING);
+    last_journal_LSNs_.reset();
   };
 
   // Initialize MultiShardExecution.

@@ -1366,13 +1366,17 @@ async def test_tls_replication(
 
 
 # busy wait for 'replica' instance to have replication status 'status'
-async def wait_for_replica_status(replica: aioredis.Redis, status: str, wait_for_seconds=0.01):
-    while True:
+async def wait_for_replica_status(
+    replica: aioredis.Redis, status: str, wait_for_seconds=0.01, timeout=20
+):
+    start = time.time()
+    while (time.time() - start) < timeout:
         await asyncio.sleep(wait_for_seconds)
 
         info = await replica.info("replication")
         if info["master_link_status"] == status:
             return
+    raise RuntimeError("Client did not become available in time!")
 
 
 @pytest.mark.asyncio
@@ -1573,7 +1577,7 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
             proxy.drop_connection()
 
         # Give time to detect dropped connection and reconnect
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
         await wait_for_replica_status(c_replica, status="up")
         await wait_available_async(c_replica)
 
@@ -1591,33 +1595,36 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
 
 
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=4)
+    master = df_local_factory.create(proactor_threads=4, shard_repl_backlog_len=10000)
     replica = df_local_factory.create(proactor_threads=4)
 
     df_local_factory.start_all([replica, master])
     seeder = df_seeder_factory.create(port=master.port)
 
-    async with replica.client() as c_replica:
+    async with replica.client() as c_replica, master.client() as c_master:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", 1111, "localhost", master.port)
+        proxy = Proxy("localhost", 1112, "localhost", master.port)
         task = asyncio.create_task(proxy.start())
 
         await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
-        fill_task = asyncio.create_task(seeder.run(target_ops=3000))
+        fill_task = asyncio.create_task(seeder.run(target_ops=10000))
 
-        for _ in range(5):
-            await asyncio.sleep(random.randint(5, 10) / 5)
+        for _ in range(3):
+            await asyncio.sleep(random.randint(10, 20) / 10)
             proxy.drop_connection()
 
         seeder.stop()
         await fill_task
 
         # Give time to detect dropped connection and reconnect
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
         await wait_for_replica_status(c_replica, status="up")
         await wait_available_async(c_replica)
+
+        logging.debug(await c_replica.execute_command("INFO REPLICATION"))
+        logging.debug(await c_master.execute_command("INFO REPLICATION"))
 
         capture = await seeder.capture()
         assert await seeder.compare(capture, replica.port)
@@ -1630,3 +1637,47 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
     master.stop()
     replica.stop()
     assert replica.is_in_logs("partial sync finished in")
+
+
+async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(proactor_threads=4, shard_repl_backlog_len=1)
+    replica = df_local_factory.create(proactor_threads=4)
+
+    df_local_factory.start_all([replica, master])
+    seeder = df_seeder_factory.create(port=master.port)
+
+    async with replica.client() as c_replica, master.client() as c_master:
+        await seeder.run(target_deviation=0.1)
+
+        proxy = Proxy("localhost", 1113, "localhost", master.port)
+        task = asyncio.create_task(proxy.start())
+
+        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+        fill_task = asyncio.create_task(seeder.run(target_ops=10000))
+
+        for _ in range(3):
+            await asyncio.sleep(random.randint(5, 10) / 10)
+            proxy.drop_connection()
+
+        seeder.stop()
+        await fill_task
+
+        # Give time to detect dropped connection and reconnect
+        await asyncio.sleep(1.0)
+        await wait_for_replica_status(c_replica, status="up")
+        await wait_available_async(c_replica)
+
+        # logging.debug(await c_replica.execute_command("INFO REPLICATION"))
+        # logging.debug(await c_master.execute_command("INFO REPLICATION"))
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, replica.port)
+        proxy.close()
+        try:
+            await task
+        except asyncio.exceptions.CancelledError:
+            pass
+
+    master.stop()
+    replica.stop()
+    assert master.is_in_logs("Partial sync requested from stale LSN")

@@ -11,6 +11,9 @@ class Proxy:
         self.stop_connections = []
         self.server = None
 
+    def __del__(self):
+        self.close()
+
     async def handle(self, reader, writer):
         remote_reader, remote_writer = await asyncio.open_connection(
             self.remote_host, self.remote_port
@@ -23,6 +26,7 @@ class Proxy:
                     break
                 writer.write(data)
                 await writer.drain()
+            writer.close()
 
         task1 = asyncio.ensure_future(forward(reader, remote_writer))
         task2 = asyncio.ensure_future(forward(remote_reader, writer))
@@ -64,6 +68,8 @@ class Proxy:
             cb()
 
     def close(self):
-        self.server.close()
+        if self.server is not None:
+            self.server.close()
+            self.server = None
         for cb in self.stop_connections:
             cb()

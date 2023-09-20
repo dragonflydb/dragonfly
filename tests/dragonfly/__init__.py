@@ -57,6 +57,12 @@ class DflyInstance:
             self._port = None
             self.dynamic_port = True
 
+        # Some tests check the log files, so make sure the log files
+        # exist even when people try to debug their test.
+        if "logtostderr" in self.params.args:
+            self.params.args.remove("logtostderr")
+            self.params.args.append("alsologtostderr")
+
     def __del__(self):
         assert self.proc == None
 
