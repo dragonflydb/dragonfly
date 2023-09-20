@@ -101,7 +101,15 @@ def contains_test_data(itype, res, td_indices):
 @dfly_args({"proactor_threads": 4})
 async def test_management(async_client: aioredis.Redis):
     SCHEMA_1 = [TextField("f1"), NumericField("f2")]
-    SCHEMA_2 = [NumericField("f3"), TagField("f4")]
+    SCHEMA_2 = [
+        NumericField("f3"),
+        TagField("f4"),
+        VectorField(
+            "f5",
+            algorithm="HNSW",
+            attributes={"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "L2", "INITICAL_CAP": 100},
+        ),
+    ]
 
     i1 = async_client.ft("i1")
     i2 = async_client.ft("i2")
@@ -113,7 +121,10 @@ async def test_management(async_client: aioredis.Redis):
     for i in range(10):
         await async_client.hset(f"p1-{i}", mapping={"f1": "ok", "f2": 11})
     for i in range(15):
-        await async_client.hset(f"p2-{i}", mapping={"f3": 12, "f4": "hmm"})
+        await async_client.hset(
+            f"p2-{i}",
+            mapping={"f3": 12, "f4": "hmm", "f5": np.array(0).astype(np.float32).tobytes()},
+        )
 
     assert sorted(await async_client.execute_command("FT._LIST")) == ["i1", "i2"]
 
@@ -129,6 +140,7 @@ async def test_management(async_client: aioredis.Redis):
     assert sorted(i2info["fields"]) == [
         ["identifier", "f3", "attribute", "f3", "type", "NUMERIC"],
         ["identifier", "f4", "attribute", "f4", "type", "TAG"],
+        ["identifier", "f5", "attribute", "f5", "type", "VECTOR"],
     ]
 
     await i1.dropindex()
@@ -299,7 +311,16 @@ async def test_index_persistence(df_server):
     # Build two indices and fill them with data
 
     SCHEMA_1 = [TextField("title"), NumericField("views"), TagField("topic")]
-    SCHEMA_2 = [TextField("name"), NumericField("age"), TagField("job")]
+    SCHEMA_2 = [
+        TextField("name"),
+        NumericField("age"),
+        TagField("job"),
+        VectorField(
+            "pos",
+            algorithm="HNSW",
+            attributes={"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "L2", "INITICAL_CAP": 100},
+        ),
+    ]
 
     i1 = client.ft("i1")
     await i1.create_index(
@@ -323,7 +344,12 @@ async def test_index_persistence(df_server):
     for i in range(200):
         await client.hset(
             f"people-{i}",
-            mapping={"name": f"Name {i}", "age": i, "job": "newsagent" if i % 2 == 0 else "writer"},
+            mapping={
+                "name": f"Name {i}",
+                "age": i,
+                "job": "newsagent" if i % 2 == 0 else "writer",
+                "pos": np.array(i / 200.0).astype(np.float32).tobytes(),
+            },
         )
 
     info_1 = await i1.info()
@@ -361,7 +387,7 @@ async def test_index_persistence(df_server):
     assert info_1["num_docs"] == info_1_new["num_docs"]
     assert info_2["num_docs"] == info_2_new["num_docs"]
 
-    # Check basic queries run
+    # Check basic queries run correctly
 
     assert (await i1.search("@views:[0 90]")).total == 10
     assert (await i1.search("@views:[100 190] @topic:{even}")).total == 5
