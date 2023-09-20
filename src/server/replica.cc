@@ -467,10 +467,11 @@ error_code Replica::InitiateDflySync() {
         auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &cntx_,
                                                   last_journal_LSNs_.has_value()
                                                       ? std::optional((*last_journal_LSNs_)[id])
-                                                      : std::nullopt,
-                                                  is_full_sync.get()[id]);
-        if (ec)
-          cntx_.ReportError(ec);
+                                                      : std::nullopt);
+        if (ec.has_value())
+          is_full_sync[id] = ec.value();
+        else
+          cntx_.ReportError(ec.error());
       }
     };
     // Lock to prevent the error handler from running instantly
@@ -478,22 +479,17 @@ error_code Replica::InitiateDflySync() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
 
-    bool all = true;
-    bool any = false;
-    for (bool is_full : absl::Span<bool>(is_full_sync.get(), num_df_flows_)) {
-      if (is_full)
-        any = true;
-      else
-        all = false;
-    }
-    if (all) {
+    size_t num_full_flows =
+        std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows_, 0);
+
+    if (num_full_flows == num_df_flows_) {
       JournalExecutor{&service_}.FlushAll();
-    } else if (any) {
+    } else if (num_full_flows == 0) {
+      sync_type = "partial";
+    } else {
       last_journal_LSNs_.reset();
       cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
                         "Won't do a partial sync: some flows must fully resync");
-    } else {
-      sync_type = "partial";
     }
   }
 
@@ -656,11 +652,13 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   return std::error_code{};
 }
 
-std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cntx,
-                                                std::optional<LSN> lsn, bool& is_full_sync) {
+io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cntx,
+                                                 std::optional<LSN> lsn) {
+  using nonstd::make_unexpected;
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
-  RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
+  RETURN_ON_ERR_T(make_unexpected,
+                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_;
@@ -674,18 +672,20 @@ std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cnt
 
   ResetParser(/*server_mode=*/false);
   leftover_buf_.emplace(128);
-  RETURN_ON_ERR(SendCommand(cmd));
+  RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
   auto read_resp = ReadRespReply(&*leftover_buf_);
   if (!read_resp.has_value()) {
-    return read_resp.error();
+    return make_unexpected(read_resp.error());
   }
 
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
+  PC_RETURN_ON_BAD_RESPONSE_T(make_unexpected,
+                              CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
 
   string_view flow_directive = ToSV(LastResponseArgs()[0].GetBuf());
   string eof_token;
-  PC_RETURN_ON_BAD_RESPONSE(flow_directive == "FULL" || flow_directive == "PARTIAL");
-  is_full_sync = flow_directive == "FULL";
+  PC_RETURN_ON_BAD_RESPONSE_T(make_unexpected,
+                              flow_directive == "FULL" || flow_directive == "PARTIAL");
+  bool is_full_sync = flow_directive == "FULL";
 
   eof_token = ToSV(LastResponseArgs()[1].GetBuf());
 
@@ -696,7 +696,7 @@ std::error_code DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cnt
   sync_fb_ = fb2::Fiber("shard_full_sync", &DflyShardReplica::FullSyncDflyFb, this,
                         std::move(eof_token), sb, cntx);
 
-  return error_code{};
+  return is_full_sync;
 }
 
 error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {

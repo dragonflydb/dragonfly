@@ -69,11 +69,10 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
 
   snapshot_fb_ =
       fb2::Fiber("incremental_snapshot", [this, journal, cntx, lsn = start_lsn]() mutable {
-        // The LSN we get from the replica is the last entry that
-        // was processed, so no need to send it.
-        lsn++;
+        DCHECK(lsn <= journal->GetLsn()) << "The replica tried to sync from the future.";
+
+        // The replica sends the LSN of the next entry is wants to receive.
         while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
-          // TODO: Should we send multiple entries together?
           serializer_->WriteJournalEntry(journal->GetEntry(lsn));
           PushSerializedToChannel(false);
           lsn++;
@@ -85,7 +84,12 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
         // will only be added after JournalSlice::AddLogRecord has finished
         // iterating its callbacks and we won't process the record twice.
         // We have to make sure we don't preempt ourselves before registering the callback!
-        if (journal->GetLsn() == (lsn - 1)) {
+
+        // TODO: Error handling here didn't close the sockets or something
+
+        // GetLsn() is always the next lsn that we expect to create.
+        if (journal->GetLsn() == lsn) {
+          LOG(ERROR) << journal->IsLSNInBuffer(lsn);
           {
             FiberAtomicGuard fg;
             serializer_->SendFullSyncCut();
@@ -94,9 +98,12 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
           journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
           PushSerializedToChannel(true);
         } else {
+          LOG(ERROR) << journal->IsLSNInBuffer(lsn);
           // We stopped but we didn't manage to send the whole stream.
-          cntx->ReportError(std::make_error_code(errc::state_not_recoverable),
-                            "Partial sync was not successful");
+          cntx->ReportError(
+              std::make_error_code(errc::state_not_recoverable),
+              absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
+                           " was dropped from the buffer. Current lsn=", journal->GetLsn()));
           Cancel();
         }
       });

@@ -228,8 +228,7 @@ class DflyShardReplica : public ProtocolClient {
 
   // Start replica initialized as dfly flow.
   // Sets is_full_sync when successful.
-  std::error_code StartSyncFlow(BlockingCounter block, Context* cntx, std::optional<LSN>,
-                                bool& is_full_sync);
+  io::Result<bool> StartSyncFlow(BlockingCounter block, Context* cntx, std::optional<LSN>);
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(Context* cntx);
