@@ -291,7 +291,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
     if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
       flow.start_partial_sync_at = *seqid;
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
-              << " and is available.";
+              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
       sync_type = "PARTIAL";
     } else {
       LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid

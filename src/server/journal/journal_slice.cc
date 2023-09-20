@@ -16,7 +16,7 @@
 #include "base/logging.h"
 #include "server/journal/serializer.h"
 
-ABSL_FLAG(int, shard_repl_backlog_len, 1 << 10,
+ABSL_FLAG(uint32_t, shard_repl_backlog_len, 1 << 10,
           "The length of the circular replication log per shard");
 
 namespace dfly {
@@ -34,6 +34,14 @@ string ShardName(std::string_view base, unsigned index) {
 */
 
 }  // namespace
+
+uint32_t NextPowerOf2(uint32_t x) {
+  if (x == 0) {
+    return 1;
+  }
+  int log = 32 - __builtin_clz(x - 1);
+  return 1 << log;
+}
 
 #define CHECK_EC(x)                                                                 \
   do {                                                                              \
@@ -53,7 +61,7 @@ void JournalSlice::Init(unsigned index) {
     return;
 
   slice_index_ = index;
-  ring_buffer_.emplace(absl::GetFlag(FLAGS_shard_repl_backlog_len));
+  ring_buffer_.emplace(NextPowerOf2(absl::GetFlag(FLAGS_shard_repl_backlog_len)));
 }
 
 #if 0

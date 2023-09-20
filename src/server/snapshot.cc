@@ -89,7 +89,6 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
 
         // GetLsn() is always the next lsn that we expect to create.
         if (journal->GetLsn() == lsn) {
-          LOG(ERROR) << journal->IsLSNInBuffer(lsn);
           {
             FiberAtomicGuard fg;
             serializer_->SendFullSyncCut();
@@ -98,7 +97,6 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
           journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
           PushSerializedToChannel(true);
         } else {
-          LOG(ERROR) << journal->IsLSNInBuffer(lsn);
           // We stopped but we didn't manage to send the whole stream.
           cntx->ReportError(
               std::make_error_code(errc::state_not_recoverable),
