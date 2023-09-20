@@ -45,19 +45,28 @@ class JournalSlice {
 
   void AddLogRecord(const Entry& entry, bool await);
 
+  // Register a callback that will be called every time a new entry is
+  // added to the journal.
+  // The callback receives the entry and a boolean that indicates whether
+  // awaiting (to apply backpressure) is allowed.
   uint32_t RegisterOnChange(ChangeCallback cb);
   void UnregisterOnChange(uint32_t);
+
   bool HasRegisteredCallbacks() const {
     std::shared_lock lk(cb_mu_);
     return !change_cb_arr_.empty();
   }
 
- private:
-  struct RingItem;
+  /// Returns whether the journal entry with this LSN is available
+  /// from the buffer.
+  bool IsLSNInBuffer(LSN lsn) const;
+  std::string_view GetEntry(LSN lsn) const;
 
+ private:
   // std::string shard_path_;
   // std::unique_ptr<LinuxFile> shard_file_;
-  // std::optional<base::RingBuffer<RingItem>> ring_buffer_;
+  std::optional<base::RingBuffer<JournalItem>> ring_buffer_;
+  base::IoBuf ring_serialize_buf_;
 
   mutable util::SharedMutex cb_mu_;
   std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_ ABSL_GUARDED_BY(cb_mu_);

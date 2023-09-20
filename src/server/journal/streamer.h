@@ -40,7 +40,6 @@ class JournalStreamer : protected BufferedStreamerBase {
   journal::Journal* journal_;
 
   Fiber write_fb_{};
-  JournalWriter writer_{this};
 };
 
 }  // namespace dfly

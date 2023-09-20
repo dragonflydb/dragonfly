@@ -91,6 +91,8 @@ class BaseFamilyTest : public ::testing::Test {
 
   void ResetService();
 
+  void ShutdownService();
+
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
 
@@ -127,6 +129,8 @@ class BaseFamilyTest : public ::testing::Test {
 
   static void SetTestFlag(std::string_view flag_name, std::string_view new_value);
 
+  void TestInitAclFam();
+
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;
   unsigned num_threads_ = 3;
@@ -137,6 +141,8 @@ class BaseFamilyTest : public ::testing::Test {
 
   std::vector<RespVec*> resp_vec_;
   bool single_response_ = true;
+  util::fb2::Fiber watchdog_fiber_;
+  util::fb2::Done watchdog_done_;
 };
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats);

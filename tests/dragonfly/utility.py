@@ -10,6 +10,7 @@ import time
 import difflib
 import json
 import subprocess
+import os
 from enum import Enum
 
 
@@ -581,3 +582,22 @@ def gen_certificate(
     # Use CA's private key to sign dragonfly's CSR and get back the signed certificate
     step2 = rf"openssl x509 -req -in {certificate_request_path} -days 1 -CA {ca_certificate_path} -CAkey {ca_key_path} -CAcreateserial -out {certificate_path}"
     subprocess.run(step2, shell=True)
+
+
+class EnvironCntx:
+    def __init__(self, **kwargs):
+        self.updates = kwargs
+        self.undo = {}
+
+    def __enter__(self):
+        for k, v in self.updates.items():
+            if k in os.environ:
+                self.undo[k] = os.environ[k]
+            os.environ[k] = v
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        for k, v in self.updates.items():
+            if k in self.undo:
+                os.environ[k] = self.undo[k]
+            else:
+                del os.environ[k]

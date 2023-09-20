@@ -1580,6 +1580,7 @@ constexpr uint32_t kSScan = READ | SET | SLOW;
 }  // namespace acl
 
 void SetFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"SADD", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kSAdd}.HFUNC(SAdd)
       << CI{"SDIFF", CO::READONLY, -2, 1, -1, 1, acl::kSDiff}.HFUNC(SDiff)

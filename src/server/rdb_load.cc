@@ -4,6 +4,8 @@
 
 #include "server/rdb_load.h"
 
+#include "absl/strings/escaping.h"
+
 extern "C" {
 
 #include "redis/intset.h"
@@ -559,7 +561,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   size_t len = ltrace->blob_count() / 2;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = (len <= server.hash_max_listpack_entries);
+  bool keep_lp = (len <= 64);
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -567,7 +569,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       size_t str_len = StrLen(blob.rdb_var);
       lp_size += str_len;
 
-      if (str_len > server.hash_max_listpack_value) {
+      if (str_len > server.max_map_field_len) {
         keep_lp = false;
         return false;
       }
@@ -969,7 +971,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       return;
     }
 
-    if (lpBytes(lp) > HSetFamily::MaxListPackLen()) {
+    if (lpBytes(lp) > server.max_listpack_map_bytes) {
       StringMap* sm = HSetFamily::ConvertToStrMap(lp);
       lpFree(lp);
       pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
@@ -995,7 +997,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
 
     unsigned encoding = OBJ_ENCODING_LISTPACK;
     void* inner;
-    if (lpBytes(lp) > server.zset_max_listpack_entries) {
+    if (lpBytes(lp) >= server.max_listpack_map_bytes) {
       inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp).release();
       lpFree(lp);
       encoding = OBJ_ENCODING_SKIPLIST;
@@ -2147,20 +2149,28 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   while (done < num_entries) {
     journal::ParsedEntry entry{};
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
+    done++;
 
-    if (!entry.cmd.cmd_args.empty()) {
-      if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
-          absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {
-        // Applying a flush* operation in the middle of a load can cause out-of-sync deletions of
-        // data that should not be deleted, see https://github.com/dragonflydb/dragonfly/issues/1231
-        // By returning an error we are effectively restarting the replication.
-        return RdbError(errc::unsupported_operation);
-      }
+    // EXEC entries are just for preserving atomicity of transactions. We don't create
+    // transactions and we don't care about atomicity when we're loading an RDB, so skip them.
+    // Currently rdb_save also filters those records out, but we filter them additionally here
+    // for better forward compatibility if we decide to change that.
+    if (entry.opcode == journal::Op::EXEC)
+      continue;
+
+    if (entry.cmd.cmd_args.empty())
+      return RdbError(errc::rdb_file_corrupted);
+
+    if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
+        absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {
+      // Applying a flush* operation in the middle of a load can cause out-of-sync deletions of
+      // data that should not be deleted, see https://github.com/dragonflydb/dragonfly/issues/1231
+      // By returning an error we are effectively restarting the replication.
+      return RdbError(errc::unsupported_operation);
     }
 
+    VLOG(1) << "Executing item: " << entry.ToString();
     ex.Execute(entry.dbid, entry.cmd);
-    VLOG(1) << "Reading item: " << entry.ToString();
-    done++;
   }
 
   return std::error_code{};

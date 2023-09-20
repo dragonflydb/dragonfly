@@ -12,7 +12,7 @@
 #include "server/common.h"
 #include "util/cloud/aws.h"
 #include "util/fibers/fiberqueue_threadpool.h"
-#include "util/uring/uring_file.h"
+#include "util/fibers/uring_file.h"
 
 namespace dfly {
 namespace detail {

@@ -90,7 +90,7 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "to replicate. "
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
 
-ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
@@ -411,14 +411,11 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       used_mem_peak.store(sum, memory_order_relaxed);
   };
 
-// TODO: to addd support on non-linux platforms as well
-#ifdef __linux__
   uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
   uint32_t period_ms = max(1u, 1000 / cache_hz);
 
   stats_caching_task_ =
       pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
-#endif
 
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
@@ -1013,8 +1010,12 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       cntx->authed_username = username;
       auto cred = registry->GetCredentials(username);
       cntx->acl_categories = cred.acl_categories;
+      cntx->acl_commands = cred.acl_commands;
       return (*cntx)->SendOk();
     }
+    auto& log = ServerState::tlocal()->acl_log;
+    using Reason = acl::AclLog::Reason;
+    log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
     return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
   }
 
@@ -1989,13 +1990,14 @@ constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
+// TODO(check this)
 constexpr uint32_t kDfly = ADMIN;
 }  // namespace acl
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
-
+  registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kAuth}.HFUNC(Auth)
       << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::kBGSave}.HFUNC(Save)
@@ -2021,7 +2023,8 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0, acl::kRole}.HFUNC(Role)
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.SetHandler(SlowLog)
-      << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_JOURNAL, -2, 0, 0, 0, acl::kScript}.HFUNC(Script)
+      << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, 0, acl::kScript}.HFUNC(
+             Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, acl::kDfly}.HFUNC(Dfly);
 }
 

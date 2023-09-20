@@ -63,6 +63,8 @@ unsigned char *lpPrepend(unsigned char *lp, const unsigned char *s, uint32_t sle
 unsigned char *lpPrependInteger(unsigned char *lp, long long lval);
 unsigned char *lpAppend(unsigned char *lp, const unsigned char *s, uint32_t slen);
 unsigned char *lpAppendInteger(unsigned char *lp, long long lval);
+unsigned char *lpInsertInteger(unsigned char *lp, long long lval, unsigned char *p, int where,
+                               unsigned char **newp);
 unsigned char *lpReplace(unsigned char *lp, unsigned char **p, const unsigned char *s, uint32_t slen);
 unsigned char *lpReplaceInteger(unsigned char *lp, unsigned char **p, long long lval);
 unsigned char *lpDelete(unsigned char *lp, unsigned char *p, unsigned char **newp);

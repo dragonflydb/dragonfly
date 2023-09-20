@@ -4,6 +4,7 @@
 
 #include "server/acl/user_registry.h"
 
+#include <limits>
 #include <mutex>
 
 #include "core/fibers.h"
@@ -11,12 +12,6 @@
 #include "server/acl/acl_commands_def.h"
 
 namespace dfly::acl {
-
-UserRegistry::UserRegistry() {
-  std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
-  User::UpdateRequest req{{}, {acl}, true};
-  MaybeAddAndUpdate("default", std::move(req));
-}
 
 void UserRegistry::MaybeAddAndUpdate(std::string_view username, User::UpdateRequest req) {
   std::unique_lock<util::SharedMutex> lock(mu_);
@@ -35,7 +30,7 @@ UserRegistry::UserCredentials UserRegistry::GetCredentials(std::string_view user
   if (it == registry_.end()) {
     return {};
   }
-  return {it->second.AclCategory()};
+  return {it->second.AclCategory(), it->second.AclCommands()};
 }
 
 bool UserRegistry::IsUserActive(std::string_view username) const {
@@ -79,6 +74,18 @@ UserRegistry::UserWithWriteLock UserRegistry::MaybeAddAndUpdateWithLock(std::str
   auto& user = registry_[username];
   user.Update(std::move(req));
   return {std::move(lock), user, exists};
+}
+
+void UserRegistry::Init() {
+  // Add default user
+  User::UpdateRequest::CommandsUpdateType tmp(NumberOfFamilies());
+  size_t id = 0;
+  for (auto& elem : tmp) {
+    elem = {User::Sign::PLUS, id++, acl::ALL_COMMANDS};
+  }
+  std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
+  User::UpdateRequest req{{}, {acl}, true, false, std::move(tmp)};
+  MaybeAddAndUpdate("default", std::move(req));
 }
 
 }  // namespace dfly::acl

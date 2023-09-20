@@ -370,6 +370,18 @@ template <typename Comp>
 auto BPTreeNode<T>::BSearch(KeyT key, Comp&& cmp_op) const -> SearchResult {
   uint16_t lo = 0;
   uint16_t hi = num_items_;
+  assert(hi > 0);
+
+  // optimization: check the last item first.
+  int cmp_res = cmp_op(key, Key(hi - 1));
+  if (cmp_res >= 0) {
+    return cmp_res > 0 ? SearchResult{.index = hi, .found = false}
+                       : SearchResult{.index = uint16_t(hi - 1), .found = true};
+  }
+
+  // key < Key(hi - 1)
+
+  --hi;
   while (lo < hi) {
     uint16_t mid = (lo + hi) >> 1;
     assert(mid < hi);
@@ -389,7 +401,7 @@ auto BPTreeNode<T>::BSearch(KeyT key, Comp&& cmp_op) const -> SearchResult {
   }
   assert(lo == hi);
 
-  return {.index = hi, .found = 0};
+  return {.index = hi, .found = false};
 }
 
 template <typename T> void BPTreeNode<T>::ShiftRight(unsigned index) {

@@ -16,7 +16,7 @@ class Service;
 // JournalExecutor allows executing journal entries.
 class JournalExecutor {
  public:
-  JournalExecutor(Service* service);
+  explicit JournalExecutor(Service* service);
   ~JournalExecutor();
 
   JournalExecutor(JournalExecutor&&) = delete;

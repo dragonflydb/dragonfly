@@ -20,7 +20,7 @@ namespace dfly {
 namespace {
 // Build a CmdData from parts passed to absl::StrCat.
 template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... parts) {
-  vector<string> raw_parts{absl::StrCat(forward<Ts>(parts))...};
+  vector<string> raw_parts{absl::StrCat(std::forward<Ts>(parts))...};
 
   auto cmd_str = accumulate(raw_parts.begin(), raw_parts.end(), std::string{});
   auto buf = make_unique<char[]>(cmd_str.size());
@@ -28,8 +28,8 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
 
   CmdArgVec slice_parts{};
   size_t start = 0;
-  for (auto part : raw_parts) {
-    slice_parts.push_back(MutableSlice{buf.get() + start, part.size()});
+  for (const auto& part : raw_parts) {
+    slice_parts.emplace_back(buf.get() + start, part.size());
     start += part.size();
   }
 
@@ -38,8 +38,9 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
 }  // namespace
 
 JournalExecutor::JournalExecutor(Service* service)
-    : service_{service}, reply_builder_{facade::ReplyMode::NONE}, conn_context_{nullptr, nullptr,
-                                                                                &reply_builder_} {
+    : service_{service},
+      reply_builder_{facade::ReplyMode::NONE},
+      conn_context_{nullptr, nullptr, &reply_builder_} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
 }

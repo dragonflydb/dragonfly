@@ -82,6 +82,7 @@ class Connection : public util::Connection {
   struct AclUpdateMessage {
     std::vector<std::string> username;
     std::vector<uint32_t> categories;
+    std::vector<std::vector<uint64_t>> commands;
   };
 
   struct PipelineMessage {
@@ -155,6 +156,7 @@ class Connection : public util::Connection {
   bool IsCurrentlyDispatching() const;
 
   std::string GetClientInfo(unsigned thread_id) const;
+  std::string GetClientInfo() const;
   std::string RemoteEndpointStr() const;
   std::string RemoteEndpointAddress() const;
   std::string LocalBindAddress() const;
@@ -227,6 +229,7 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
  private:
+  std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)

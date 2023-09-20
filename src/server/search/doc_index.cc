@@ -174,6 +174,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   auto& db_slice = op_args.shard->db_slice();
   auto search_results = search_algo->Search(&indices_);
 
+  if (!search_results.error.empty())
+    return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
+
   size_t serialize_count = min(search_results.ids.size(), params.limit_offset + params.limit_total);
   vector<SerializedSearchDoc> out;
   out.reserve(serialize_count);

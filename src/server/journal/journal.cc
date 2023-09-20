@@ -96,6 +96,14 @@ bool Journal::HasRegisteredCallbacks() const {
   return journal_slice.HasRegisteredCallbacks();
 }
 
+bool Journal::IsLSNInBuffer(LSN lsn) const {
+  return journal_slice.IsLSNInBuffer(lsn);
+}
+
+std::string_view Journal::GetEntry(LSN lsn) const {
+  return journal_slice.GetEntry(lsn);
+}
+
 LSN Journal::GetLsn() const {
   return journal_slice.cur_lsn();
 }

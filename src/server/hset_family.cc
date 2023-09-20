@@ -31,7 +31,6 @@ using absl::SimpleAtoi;
 
 namespace {
 
-constexpr size_t kMaxListPackLen = 1024;
 using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
@@ -39,12 +38,12 @@ enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
   size_t sum = 0;
   for (auto s : args) {
-    if (s.size() > server.hash_max_listpack_value)
+    if (s.size() > server.max_map_field_len)
       return false;
     sum += s.size();
   }
 
-  return lpBytes(const_cast<uint8_t*>(lp)) + sum < kMaxListPackLen;
+  return lpBytes(const_cast<uint8_t*>(lp)) + sum < server.max_listpack_map_bytes;
 }
 
 using container_utils::GetStringMap;
@@ -182,7 +181,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
       lpb = lpBytes(lp);
       stats->listpack_bytes -= lpb;
 
-      if (lpb >= kMaxListPackLen) {
+      if (lpb >= server.max_listpack_map_bytes) {
         stats->listpack_blob_cnt--;
         StringMap* sm = HSetFamily::ConvertToStrMap(lp);
         pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
@@ -1141,6 +1140,7 @@ constexpr uint32_t kHVals = READ | HASH | SLOW;
 }  // namespace acl
 
 void HSetFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1, 1, acl::kHDel}.HFUNC(HDel)
       << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kHLen}.HFUNC(HLen)
@@ -1161,10 +1161,6 @@ void HSetFamily::Register(CommandRegistry* registry) {
       << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHSetNx}.HFUNC(HSetNx)
       << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kHStrLen}.HFUNC(HStrLen)
       << CI{"HVALS", CO::READONLY, 2, 1, 1, 1, acl::kHVals}.HFUNC(HVals);
-}
-
-uint32_t HSetFamily::MaxListPackLen() {
-  return kMaxListPackLen;
 }
 
 StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {

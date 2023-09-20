@@ -10,6 +10,7 @@
 
 #include <variant>
 
+#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -217,6 +218,7 @@ void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
     for (size_t id = 0; id < msg.username.size(); ++id) {
       if (msg.username[id] == ctx->authed_username) {
         ctx->acl_categories = msg.categories[id];
+        ctx->acl_commands = msg.commands[id];
       }
     }
   }
@@ -393,11 +395,11 @@ std::string Connection::LocalBindAddress() const {
   return le.address().to_string();
 }
 
-string Connection::GetClientInfo(unsigned thread_id) const {
+std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() const {
   CHECK(service_ && socket_);
   CHECK_LT(unsigned(phase_), NUM_PHASES);
 
-  string res;
+  string before;
   auto le = socket_->LocalEndpoint();
   auto re = socket_->RemoteEndpoint();
   time_t now = time(nullptr);
@@ -415,19 +417,48 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");
 
-  absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
-  absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
-  absl::StrAppend(&res, " fd=", socket_->native_handle(), " name=", name_);
-  absl::StrAppend(&res, " tid=", thread_id, " irqmatch=", int(cpu == my_cpu_id));
-  absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
-  absl::StrAppend(&res, " phase=", PHASE_NAMES[phase_]);
+  absl::StrAppend(&before, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
+  absl::StrAppend(&before, " laddr=", le.address().to_string(), ":", le.port());
+  absl::StrAppend(&before, " fd=", socket_->native_handle(), " name=", name_);
+
+  string after;
+  absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
+  absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
+  absl::StrAppend(&after, " phase=", PHASE_NAMES[phase_]);
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get());
-    absl::StrAppend(&res, " ", cc_info);
+    absl::StrAppend(&after, " ", cc_info);
   }
 
-  return res;
+  return {std::move(before), std::move(after)};
+}
+
+string Connection::GetClientInfo(unsigned thread_id) const {
+  auto [before, after] = GetClientInfoBeforeAfterTid();
+  absl::StrAppend(&before, " tid=", thread_id);
+  absl::StrAppend(&before, after);
+  return before;
+}
+
+string Connection::GetClientInfo() const {
+  auto [before, after] = GetClientInfoBeforeAfterTid();
+  absl::StrAppend(&before, after);
+  // The following are dummy fields and users should not rely on those unless
+  // we decide to implement them.
+  // This is only done because the redis pyclient parser for the field "client-info"
+  // for the command ACL LOG hardcodes the expected values. This behaviour does not
+  // conform to the actual expected values, since it's missing half of them.
+  // That is, even for redis-server, issuing an ACL LOG command via redis-cli and the pyclient
+  // will return different results! For example, the fields:
+  // addr=127.0.0.1:57275
+  // laddr=127.0.0.1:6379
+  // are missing from the pyclient.
+
+  absl::StrAppend(&before, " qbuf=0 ", "qbuf-free=0 ", "obl=0 ", "argv-mem=0 ");
+  absl::StrAppend(&before, "oll=0 ", "omem=0 ", "tot-mem=0 ", "multi=0 ");
+  absl::StrAppend(&before, "psub=0 ", "sub=0");
+  return before;
 }
 
 uint32_t Connection::GetClientId() const {
@@ -989,7 +1020,7 @@ void Connection::SendMonitorMessageAsync(string msg) {
 }
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
-  SendAsync({msg});
+  SendAsync({std::move(msg)});
 }
 
 void Connection::SendAsync(MessageHandle msg) {
@@ -1009,11 +1040,9 @@ void Connection::SendAsync(MessageHandle msg) {
 
   auto place_in_dispatch_q = [this](MessageHandle msg) {
     auto it = dispatch_q_.begin();
-    for (; it < dispatch_q_.end(); ++it) {
-      if (!std::holds_alternative<AclUpdateMessage>(it->handle)) {
-        break;
-      }
-    }
+    const auto end = dispatch_q_.end();
+    while (it < end && std::holds_alternative<AclUpdateMessage>(it->handle))
+      ++it;
     dispatch_q_.insert(it, std::move(msg));
   };
 

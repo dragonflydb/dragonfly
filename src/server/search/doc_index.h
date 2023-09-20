@@ -30,10 +30,21 @@ struct SerializedSearchDoc {
 };
 
 struct SearchResult {
+  SearchResult() = default;
+
+  SearchResult(std::vector<SerializedSearchDoc> docs, size_t total_hits,
+               std::optional<search::AlgorithmProfile> profile)
+      : docs{std::move(docs)}, total_hits{total_hits}, profile{std::move(profile)} {
+  }
+
+  SearchResult(facade::ErrorReply error) : error{std::move(error)} {
+  }
+
   std::vector<SerializedSearchDoc> docs;
   size_t total_hits;
-
   std::optional<search::AlgorithmProfile> profile;
+
+  std::optional<facade::ErrorReply> error;
 };
 
 struct SearchParams {

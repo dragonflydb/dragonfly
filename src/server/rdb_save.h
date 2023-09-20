@@ -158,7 +158,7 @@ class RdbSerializer {
   }
 
   // Write journal entry as an embedded journal blob.
-  std::error_code WriteJournalEntry(const journal::Entry& entry);
+  std::error_code WriteJournalEntry(std::string_view entry);
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
 
@@ -188,7 +188,6 @@ class RdbSerializer {
   void AllocateCompressorOnce();
 
   base::IoBuf mem_buf_;
-  base::IoBuf journal_mem_buf_;
   std::string tmp_str_;
   base::PODArray<uint8_t> tmp_buf_;
   DbIndex last_entry_db_index_ = kInvalidDbId;

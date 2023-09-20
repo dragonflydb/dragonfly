@@ -27,7 +27,7 @@
 
 ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
 
-ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(int32_t, port);
 
 namespace dfly {
 namespace {
@@ -608,6 +608,7 @@ constexpr uint32_t kReadWrite = FAST | CONNECTION;
 }  // namespace acl
 
 void ClusterFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0,
                   acl::kDflyCluster}

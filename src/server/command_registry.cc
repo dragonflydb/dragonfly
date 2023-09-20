@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/error.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
 
@@ -41,7 +42,7 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
 }
 
 bool CommandId::IsTransactional() const {
-  if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_JOURNAL))
+  if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_TRANSACTIONAL))
     return true;
 
   if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EXEC")
@@ -103,9 +104,22 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
     }
     k = it->second;
   }
+
+  family_of_commands_.back().push_back(std::string(k));
+  cmd.SetFamily(family_of_commands_.size() - 1);
+  cmd.SetBitIndex(1ULL << bit_index_++);
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;
+}
+
+void CommandRegistry::StartFamily() {
+  family_of_commands_.push_back({});
+  bit_index_ = 0;
+}
+
+CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
+  return std::move(family_of_commands_);
 }
 
 namespace CO {
@@ -140,8 +154,10 @@ const char* OptName(CO::CommandOpt fl) {
       return "variadic-keys";
     case NO_AUTOJOURNAL:
       return "custom-journal";
-    case NO_KEY_JOURNAL:
-      return "no-key-journal";
+    case NO_KEY_TRANSACTIONAL:
+      return "no-key-transactional";
+    case NO_KEY_TX_SPAN_ALL:
+      return "no-key-tx-span-all";
   }
   return "unknown";
 }

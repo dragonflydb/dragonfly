@@ -13,18 +13,17 @@
 #include "facade/facade_types.h"
 #include "helio/util/proactor_pool.h"
 #include "server/acl/user_registry.h"
+#include "server/command_registry.h"
 #include "server/common.h"
 
 namespace dfly {
 
 class ConnectionContext;
-class CommandRegistry;
-
 namespace acl {
 
 class AclFamily final {
  public:
-  explicit AclFamily(UserRegistry* registry);
+  explicit AclFamily(UserRegistry* registry, util::ProactorPool* pool);
 
   void Register(CommandRegistry* registry);
   void Init(facade::Listener* listener, UserRegistry* registry);
@@ -37,12 +36,20 @@ class AclFamily final {
   void WhoAmI(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Load(CmdArgList args, ConnectionContext* cntx);
-  void Load();
+  // Helper function for bootstrap
+  bool Load();
+  void Log(CmdArgList args, ConnectionContext* cntx);
+  void Users(CmdArgList args, ConnectionContext* cntx);
+  void Cat(CmdArgList args, ConnectionContext* cntx);
+  void GetUser(CmdArgList args, ConnectionContext* cntx);
+  void DryRun(CmdArgList args, ConnectionContext* cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
+  using NestedVector = std::vector<std::vector<uint64_t>>;
   void StreamUpdatesToAllProactorConnections(const std::vector<std::string>& user,
-                                             const std::vector<uint32_t>& update_cat);
+                                             const std::vector<uint32_t>& update_cat,
+                                             const NestedVector& update_commands);
 
   // Helper function that closes all open connection from the deleted user
   void EvictOpenConnectionsOnAllProactors(std::string_view user);
@@ -54,6 +61,8 @@ class AclFamily final {
 
   facade::Listener* main_listener_{nullptr};
   UserRegistry* registry_;
+  CommandRegistry* cmd_registry_;
+  util::ProactorPool* pool_;
 };
 
 }  // namespace acl

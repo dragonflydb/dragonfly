@@ -294,7 +294,7 @@ constexpr uint32_t kPFMerge = WRITE | HYPERLOGLOG | SLOW;
 
 void HllFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-
+  registry->StartFamily();
   *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
             << CI{"PFCOUNT", CO::WRITE, -2, 1, -1, 1, acl::kPFCount}.SetHandler(PFCount)
             << CI{"PFMERGE", CO::WRITE, -2, 1, -1, 1, acl::kPFMerge}.SetHandler(PFMerge);

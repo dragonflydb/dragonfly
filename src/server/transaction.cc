@@ -76,18 +76,7 @@ void Transaction::InitGlobal() {
   DCHECK(!multi_ || (multi_->mode == GLOBAL || multi_->mode == NON_ATOMIC));
 
   global_ = true;
-  unique_shard_cnt_ = shard_set->size();
-  shard_data_.resize(unique_shard_cnt_);
-  for (auto& sd : shard_data_)
-    sd.local_mask = ACTIVE;
-}
-
-void Transaction::InitNoKey() {
-  // No key command will use the first shard.
-  unique_shard_cnt_ = 1;
-  unique_shard_id_ = 0;
-  shard_data_.resize(1);
-  shard_data_.front().local_mask |= ACTIVE;
+  EnableAllShards();
 }
 
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
@@ -315,8 +304,11 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     return OpStatus::OK;
   }
 
-  if ((cid_->opt_mask() & CO::NO_KEY_JOURNAL) > 0) {
-    InitNoKey();
+  if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
+    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+      EnableAllShards();
+    else
+      EnableShard(0);
     return OpStatus::OK;
   }
 
@@ -894,6 +886,21 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
+void Transaction::EnableShard(ShardId sid) {
+  unique_shard_cnt_ = 1;
+  unique_shard_id_ = sid;
+  shard_data_.resize(1);
+  shard_data_.front().local_mask |= ACTIVE;
+}
+
+void Transaction::EnableAllShards() {
+  unique_shard_cnt_ = shard_set->size();
+  unique_shard_id_ = kInvalidSid;
+  shard_data_.resize(shard_set->size());
+  for (auto& sd : shard_data_)
+    sd.local_mask |= ACTIVE;
+}
+
 void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK(!IsAtomicMulti());
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
@@ -956,7 +963,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   res.db_index = db_index_;
   res.key_step = cid_->key_arg_step();
   res.args = GetShardArgs(sid);
-  DCHECK(!res.args.empty() || (cid_->opt_mask() & CO::NO_KEY_JOURNAL));
+  DCHECK(!res.args.empty() || (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL));
 
   return res;
 }
@@ -1326,18 +1333,13 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   if (multi_ && multi_->role == SQUASHER)
     return;
 
-  bool journal_by_cmd_mask = true;
-  if ((cid_->opt_mask() & CO::NO_KEY_JOURNAL) > 0) {
-    journal_by_cmd_mask = true;  // Enforce journaling for commands that dont change the db.
-  } else if ((cid_->opt_mask() & CO::WRITE) == 0) {
-    journal_by_cmd_mask = false;  // Non-write command are not journaled.
-  } else if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 &&
-             !renabled_auto_journal_.load(memory_order_relaxed)) {
-    journal_by_cmd_mask = false;  // Command disabled auto journal.
-  }
-  if (!journal_by_cmd_mask) {
+  // Only write commands and/or no-key-transactional commands are logged
+  if ((cid_->opt_mask() & CO::WRITE) == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
-  }
+
+  // If autojournaling was disabled and not re-enabled, skip it
+  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !renabled_auto_journal_.load(memory_order_relaxed))
+    return;
 
   auto journal = shard->journal();
   if (journal == nullptr)

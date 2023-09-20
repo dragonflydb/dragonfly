@@ -96,8 +96,13 @@ using NodeVariants =
 struct AstNode : public NodeVariants {
   using variant::variant;
 
+
   friend std::ostream& operator<<(std::ostream& stream, const AstNode& matrix) {
     return stream;
+  }
+
+  const NodeVariants& Variant() const& {
+    return *this;
   }
 };
 

@@ -65,7 +65,9 @@ struct MaxMemoryFlag {
 static bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err);
 static std::string AbslUnparseFlag(const MaxMemoryFlag& flag);
 
-ABSL_FLAG(uint32_t, port, 6379, "Redis port");
+ABSL_FLAG(int32_t, port, 6379,
+          "Redis port. 0 disables the port, -1 will bind on a random available port.");
+
 ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
@@ -628,7 +630,7 @@ optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
 
 Service::Service(ProactorPool* pp)
     : pp_(*pp),
-      acl_family_(&user_registry_),
+      acl_family_(&user_registry_, pp),
       server_family_(this),
       cluster_family_(&server_family_) {
   CHECK(pp);
@@ -2139,10 +2141,10 @@ constexpr uint32_t kPubSub = SLOW;
 constexpr uint32_t kCommand = SLOW | CONNECTION;
 }  // namespace acl
 
-void Service::RegisterCommands() {
+void Service::Register(CommandRegistry* registry) {
   using CI = CommandId;
-
-  registry_
+  registry->StartFamily();
+  *registry
       << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kMulti}.HFUNC(Multi)
       << CI{"WATCH", CO::LOADING, -2, 1, -1, 1, acl::kWatch}.HFUNC(Watch)
@@ -2168,7 +2170,10 @@ void Service::RegisterCommands() {
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0, acl::kMonitor}.MFUNC(Monitor)
       << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
       << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0, acl::kCommand}.MFUNC(Command);
+}
 
+void Service::RegisterCommands() {
+  Register(&registry_);
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);
@@ -2184,14 +2189,16 @@ void Service::RegisterCommands() {
   SearchFamily::Register(&registry_);
 #endif
 
-  acl_family_.Register(&registry_);
-
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
+
+  acl_family_.Register(&registry_);
+  acl::BuildIndexers(registry_.GetFamilies());
 
   // Only after all the commands are registered
   registry_.Init(pp_.size());
 
+  using CI = CommandId;
   if (VLOG_IS_ON(1)) {
     LOG(INFO) << "Multi-key commands are: ";
     registry_.Traverse([](std::string_view key, const CI& cid) {
@@ -2212,6 +2219,10 @@ void Service::RegisterCommands() {
       }
     });
   }
+}
+
+void Service::TestInit() {
+  acl_family_.Init(nullptr, &user_registry_);
 }
 
 void SetMaxMemoryFlag(uint64_t value) {
