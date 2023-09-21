@@ -27,7 +27,7 @@
 
 using namespace std;
 
-ABSL_FLAG(bool, tcp_nodelay, false,
+ABSL_FLAG(bool, tcp_nodelay, true,
           "Configures dragonfly connections with socket option TCP_NODELAY");
 ABSL_FLAG(bool, primary_port_http_enabled, true,
           "If true allows accessing http console on main TCP port");
