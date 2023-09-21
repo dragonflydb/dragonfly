@@ -90,8 +90,6 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
         // iterating its callbacks and we won't process the record twice.
         // We have to make sure we don't preempt ourselves before registering the callback!
 
-        // TODO: Error handling here didn't close the sockets or something
-
         // GetLsn() is always the next lsn that we expect to create.
         if (journal->GetLsn() == lsn) {
           {

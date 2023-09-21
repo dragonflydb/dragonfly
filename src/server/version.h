@@ -20,12 +20,12 @@ enum class DflyVersion {
   //         ver <= 1.3
   VER0,
 
-  // 1.4  <= ver <= 1.9
+  // 1.4  <= ver <= 1.10
   // - Supports receiving ACKs from replicas
   // - Sends version back on REPLCONF capa dragonfly
   VER1,
 
-  // 1.10 <= ver
+  // 1.11 <= ver
   // Supports limited partial sync
   VER2,
 
