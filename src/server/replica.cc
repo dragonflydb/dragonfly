@@ -501,7 +501,7 @@ error_code Replica::InitiateDflySync() {
     return cntx_.ReportError(ec);
   }
 
-  LOG(INFO) << absl::StrCat("Started ", sync_type, " sync with ", server().Description());
+  LOG(INFO) << "Started " << sync_type << " sync with " << server().Description();
 
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
