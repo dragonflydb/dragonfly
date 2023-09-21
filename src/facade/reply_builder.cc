@@ -85,6 +85,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   }
 
   if (ec) {
+    DVLOG(1) << "Error writing to stream: " << ec.message();
     ec_ = ec;
   }
 }
@@ -130,7 +131,7 @@ void SinkReplyBuilder::StopAggregate() {
   DVLOG(1) << "StopAggregate";
   should_aggregate_ = false;
 
-  if (should_batch_ || batch_.empty())
+  if (should_batch_)
     return;
 
   FlushBatch();
@@ -142,10 +143,15 @@ void SinkReplyBuilder::SetBatchMode(bool batch) {
 }
 
 void SinkReplyBuilder::FlushBatch() {
+  if (batch_.empty())
+    return;
+
   error_code ec = sink_->Write(io::Buffer(batch_));
   batch_.clear();
-  if (ec)
+  if (ec) {
+    DVLOG(1) << "Error flushing to stream: " << ec.message();
     ec_ = ec;
+  }
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
