@@ -1225,6 +1225,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
     result.eval_io_coordination_cnt += ss->stats.eval_io_coordination_cnt;
     result.eval_shardlocal_coordination_cnt += ss->stats.eval_shardlocal_coordination_cnt;
+    result.cancled_tx_schedule_cnt += ss->stats.cancled_tx_schedule_cnt;
 
     service_.mutable_registry()->MergeCallStats(
         index, [&dest_map = result.cmd_stats_map](string_view name, const CmdCallStats& src) {
@@ -1400,6 +1401,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
     append("eval_io_coordination_total", m.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
+    append("cancle_tx_schedule", m.cancled_tx_schedule_cnt);
   }
 
   if (should_enter("TIERED", true)) {

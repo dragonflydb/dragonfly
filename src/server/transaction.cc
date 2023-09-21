@@ -551,16 +551,9 @@ void Transaction::ScheduleInternal() {
   // on the context. For regular multi-transactions we can actually inspect all commands.
   // For eval-like transactions - we can decided based on the command flavor (EVAL/EVALRO) or
   // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
-  IntentLock::Mode mode = Mode();
-
   if (span_all) {
     is_active = [](uint32_t) { return true; };
     num_shards = shard_set->size();
-
-    // Lock shards
-    auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
-    shard_set->RunBriefInParallel(std::move(cb));
-    VLOG(1) << "Global shard lock acquired";
   } else {
     num_shards = unique_shard_cnt_;
     DCHECK_GT(num_shards, 0u);
@@ -601,6 +594,7 @@ void Transaction::ScheduleInternal() {
     }
 
     VLOG(2) << "Cancelling " << DebugId();
+    ServerState::tlocal()->stats.cancled_tx_schedule_cnt += 1;
 
     atomic_bool should_poll_execution{false};
     auto cancel = [&](EngineShard* shard) {
@@ -1047,6 +1041,11 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
     return {false, false};
   }
 
+  if (IsGlobal()) {
+    shard->shard_lock()->Acquire(mode);
+    VLOG(1) << "Global shard lock acquired";
+  }
+
   TxQueue::Iterator it = txq->Insert(this);
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
   sd.pq_pos = it;
@@ -1079,6 +1078,9 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
     DCHECK(lock_args.args.size() > 0);
     shard->db_slice().Release(mode, lock_args);
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
+  }
+  if (IsGlobal()) {
+    shard->shard_lock()->Release(Mode());
   }
 
   if (pos == head && !txq->Empty()) {
