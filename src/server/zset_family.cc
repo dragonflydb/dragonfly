@@ -1705,40 +1705,43 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   absl::InlinedVector<ScoredMemberView, 4> members;
 
   unsigned num_members = (args.size() - i) / 2;
-  bool unique_members = true;
+
+  // We sort the fields if the expected encoding could be listpack.
+  bool to_sort_fields = false;
 
   if (num_members > 2) {
-    members_set.reserve(num_members);
     members.reserve(num_members);
+
+    members_set.reserve(num_members);
+    to_sort_fields = true;
   }
 
   for (; i < args.size(); i += 2) {
     string_view cur_arg = ArgS(args, i);
     double val = 0;
 
+    // Parse the score. Treats Nan as invalid double.
     if (!ParseDouble(cur_arg, &val)) {
       VLOG(1) << "Bad score:" << cur_arg << "|";
       return (*cntx)->SendError(kInvalidFloatErr);
     }
-    if (isnan(val)) {
-      return (*cntx)->SendError(kScoreNaN);
-    }
+
     string_view member = ArgS(args, i + 1);
-    if (unique_members && num_members > 2) {
+    if (to_sort_fields) {
       auto [_, inserted] = members_set.insert(member);
-      unique_members &= inserted;
+      to_sort_fields &= inserted;
     }
     members.emplace_back(val, member);
   }
   DCHECK(cntx->transaction);
 
-  if (unique_members) {
+  if (to_sort_fields) {
     if (num_members == 2) {  // fix unique_members for this special case.
       if (members[0].second == members[1].second) {
-        unique_members = false;
+        to_sort_fields = false;
       }
     }
-    if (unique_members) {
+    if (to_sort_fields) {
       std::sort(members.begin(), members.end());
     }
   }

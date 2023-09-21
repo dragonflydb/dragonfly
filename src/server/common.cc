@@ -195,6 +195,7 @@ bool ParseDouble(string_view src, double* value) {
     *value = HUGE_VAL;
   } else {
     fast_float::from_chars_result result = fast_float::from_chars(src.data(), src.end(), *value);
+    // nan double could be sent as "nan" with any case.
     if (int(result.ec) != 0 || result.ptr != src.end() || isnan(*value))
       return false;
   }
