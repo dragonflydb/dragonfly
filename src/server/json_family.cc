@@ -405,8 +405,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
   }
 
   json_options options;
-  if (indent || new_line || space) {
-    should_format = true;
+  if (should_format) {
     options.spaces_around_comma(spaces_option::no_spaces)
         .spaces_around_colon(spaces_option::no_spaces)
         .object_array_line_splits(line_split_kind::multi_line)
