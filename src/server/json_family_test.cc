@@ -110,9 +110,7 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
   EXPECT_EQ(resp, R"(["New York","NY","21 2nd Street","10021-3100"])");
 
   resp = Run({"JSON.GET", "json", "$.firstName", "$.age", "$.lastName"});
-  EXPECT_EQ(
-      resp,
-      R"({"$.age":"{\"$.firstName\":\"{}\"}","$.firstName":"{}","$.lastName":"{\"$.age\":\"{\\\"$.firstName\\\":\\\"{}\\\"}\",\"$.firstName\":\"{}\"}"})");
+  EXPECT_EQ(resp, R"({"$.age":[27],"$.firstName":["John"],"$.lastName":["Smith"]})");
 
   resp = Run({"JSON.GET", "json", "$.spouse.*"});
   EXPECT_EQ(resp, "[]");

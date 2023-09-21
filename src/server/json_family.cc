@@ -390,7 +390,7 @@ void SendJsonValue(ConnectionContext* cntx, const JsonType& j) {
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
-                       vector<pair<string_view, JsonExpression>> expressions,
+                       vector<pair<string_view, JsonExpression>> expressions, bool should_format,
                        const OptString& indent, const OptString& new_line, const OptString& space) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
@@ -404,9 +404,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
     return json_entry.to_string();
   }
 
-  bool should_format = false;
   json_options options;
-
   if (indent || new_line || space) {
     should_format = true;
     options.spaces_around_comma(spaces_option::no_spaces)
@@ -431,19 +429,27 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
 
   if (expressions.size() == 1) {
     json out = expressions[0].second.evaluate(json_entry);
-    json_printable jp(out, options, should_format ? indenting::indent : indenting::no_indent);
-    std::stringstream ss;
-    jp.dump(ss);
-    return ss.str();
+    if (should_format) {
+      json_printable jp(out, options, indenting::indent);
+      std::stringstream ss;
+      jp.dump(ss);
+      return ss.str();
+    }
+
+    return out.as<string>();
   }
 
   json out;
   for (auto& expr : expressions) {
     json eval = expr.second.evaluate(json_entry);
-    json_printable jp(out, options, should_format ? indenting::indent : indenting::no_indent);
-    std::stringstream ss;
-    jp.dump(ss);
-    out[expr.first] = ss.str();
+    if (should_format) {
+      json_printable jp(out, options, indenting::indent);
+      std::stringstream ss;
+      jp.dump(ss);
+      out[expr.first] = ss.str();
+    } else {
+      out[expr.first] = eval;
+    }
   }
 
   return out.as<string>();
@@ -1823,8 +1829,10 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     expressions.emplace_back(param, move(expr));
   }
 
+  bool should_format = (indent || new_line || space);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGet(t->GetOpArgs(shard), key, move(expressions), indent, new_line, space);
+    return OpGet(t->GetOpArgs(shard), key, move(expressions), should_format, indent, new_line,
+                 space);
   };
 
   Transaction* trans = cntx->transaction;
