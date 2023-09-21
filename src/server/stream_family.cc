@@ -144,6 +144,11 @@ inline string NoGroupError(string_view key, string_view cgroup) {
   return absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'");
 }
 
+inline string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
+  return absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'",
+                      suffix);
+}
+
 inline const uint8_t* SafePtr(MutableSlice field) {
   return field.empty() ? reinterpret_cast<const uint8_t*>("")
                        : reinterpret_cast<const uint8_t*>(field.data());
@@ -2267,11 +2272,14 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
   for (auto& [stream, requested_sitem] : opts->stream_ids) {
     if (auto last_id_it = last_ids->find(stream); last_id_it != last_ids->end()) {
       streamID last_id = last_id_it->second;
-
       if (opts->read_group && !requested_sitem.group) {
         // if the group associated with the key is not found,
-        // we will not read entries from the key.
-        continue;
+        // return NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here...
+        // However, we could actually report more precise error message...
+        (*cntx)->SendError(
+            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
+        return;
       }
 
       // Resolve $ to the last ID in the stream.
@@ -2288,19 +2296,34 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
         if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
           block = false;
           opts->serve_history = true;
-          continue;
+          // continue;
+        } else {
+          requested_sitem.id.val = requested_sitem.group->last_id;
+          streamIncrID(&requested_sitem.id.val);
         }
-        requested_sitem.id.val = requested_sitem.group->last_id;
-        streamIncrID(&requested_sitem.id.val);
+        continue;
       }
 
       if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
         block = false;
       }
+    } else {
+      // if the key is not found,
+      // return NoGroupOrKey error.
+      // We are simply mimicking Redis' error message here...
+      // However, we could actually report more precise error message...
+      string error_msg = NoGroupOrKey(stream, opts->group_name);
+      if (opts->read_group) {
+        error_msg += " in XREADGROUP with GROUP option";
+      }
+      (*cntx)->SendError(error_msg);
+      return;
     }
   }
 
+  block = true;
   if (block) {
+    //(*cntx)->SendError("BLOCK SET!");
     return XReadBlock(*opts, cntx);
   }
 
