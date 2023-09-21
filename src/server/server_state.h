@@ -94,6 +94,7 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t ooo_tx_cnt = 0;
     uint64_t eval_io_coordination_cnt = 0;
     uint64_t eval_shardlocal_coordination_cnt = 0;
+    uint64_t tx_schedule_cancel_cnt = 0;
   };
 
   static ServerState* tlocal() {
