@@ -1703,7 +1703,15 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
 
   absl::flat_hash_set<string_view> members_set;
   absl::InlinedVector<ScoredMemberView, 4> members;
+
+  unsigned num_members = (args.size() - i) / 2;
   bool unique_members = true;
+
+  if (num_members > 2) {
+    members_set.reserve(num_members);
+    members.reserve(num_members);
+  }
+
   for (; i < args.size(); i += 2) {
     string_view cur_arg = ArgS(args, i);
     double val = 0;
@@ -1716,14 +1724,23 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
       return (*cntx)->SendError(kScoreNaN);
     }
     string_view member = ArgS(args, i + 1);
-    auto [_, inserted] = members_set.insert(member);
-    unique_members &= inserted;
+    if (unique_members && num_members > 2) {
+      auto [_, inserted] = members_set.insert(member);
+      unique_members &= inserted;
+    }
     members.emplace_back(val, member);
   }
   DCHECK(cntx->transaction);
 
   if (unique_members) {
-    std::sort(members.begin(), members.end());
+    if (num_members == 2) {  // fix unique_members for this special case.
+      if (members[0].second == members[1].second) {
+        unique_members = false;
+      }
+    }
+    if (unique_members) {
+      std::sort(members.begin(), members.end());
+    }
   }
 
   absl::Span memb_sp{members.data(), members.size()};
