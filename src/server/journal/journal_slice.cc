@@ -33,8 +33,6 @@ string ShardName(std::string_view base, unsigned index) {
 }
 */
 
-}  // namespace
-
 uint32_t NextPowerOf2(uint32_t x) {
   if (x < 2) {
     return 1;
@@ -42,6 +40,8 @@ uint32_t NextPowerOf2(uint32_t x) {
   int log = 32 - __builtin_clz(x - 1);
   return 1 << log;
 }
+
+}  // namespace
 
 #define CHECK_EC(x)                                                                 \
   do {                                                                              \
