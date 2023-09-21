@@ -594,7 +594,7 @@ void Transaction::ScheduleInternal() {
     }
 
     VLOG(2) << "Cancelling " << DebugId();
-    ServerState::tlocal()->stats.cancled_tx_schedule_cnt += 1;
+    ServerState::tlocal()->stats.tx_schedule_cancel_cnt += 1;
 
     atomic_bool should_poll_execution{false};
     auto cancel = [&](EngineShard* shard) {
