@@ -2321,9 +2321,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
     }
   }
 
-  block = true;
   if (block) {
-    //(*cntx)->SendError("BLOCK SET!");
     return XReadBlock(*opts, cntx);
   }
 
