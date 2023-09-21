@@ -6,7 +6,7 @@ inputs:
     required: true
     type: string
   gspace-secret:
-    required: true
+    required: false
     type: string
   run-only-on-ubuntu-latest:
     # 'true' or 'false' cause boolean
@@ -15,6 +15,9 @@ inputs:
     type: string
   build-folder-name:
     required: true
+    type: string
+  filter:
+    required: false
     type: string
 
 runs:
@@ -33,7 +36,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
+        pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
 
     - name: Run PyTests replication test
       if: ${{ inputs.run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
@@ -44,8 +47,8 @@ runs:
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
-        pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
-        pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
+        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
+        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'
