@@ -136,15 +136,15 @@ const uint32_t STREAM_ITEM_FLAG_NONE = 0;              /* No special flags. */
 const uint32_t STREAM_ITEM_FLAG_DELETED = (1 << 0);    /* Entry is deleted. Skip it. */
 const uint32_t STREAM_ITEM_FLAG_SAMEFIELDS = (1 << 1); /* Same fields as master entry. */
 
-inline string StreamIdRepr(const streamID& id) {
+string StreamIdRepr(const streamID& id) {
   return absl::StrCat(id.ms, "-", id.seq);
 };
 
-inline string NoGroupError(string_view key, string_view cgroup) {
+string NoGroupError(string_view key, string_view cgroup) {
   return absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'");
 }
 
-inline string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
+string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
   return absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'",
                       suffix);
 }
@@ -2277,10 +2277,9 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
 
       if (opts->read_group && !requested_sitem.group) {
         // if the group associated with the key is not found,
-        // return NoGroupOrKey error.
-        // We are simply mimicking Redis' error message here...
-        // However, we could actually report more precise error message...
-        // continue;
+        // send NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here.
+        // However, we could actually report more precise error message.
         cntx->transaction->Conclude();
         cntx->SendError(NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
         return;
@@ -2311,10 +2310,9 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
       }
     } else {
       if (opts->read_group) {
-        // if the key is not found,
-        // return NoGroupOrKey error.
-        // We are simply mimicking Redis' error message here...
-        // However, we could actually report more precise error message...
+        // if the key is not found, send NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here.
+        // However, we could actually report more precise error message.
         string error_msg =
             NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option");
         cntx->transaction->Conclude();

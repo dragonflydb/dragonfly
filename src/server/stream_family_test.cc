@@ -226,22 +226,30 @@ TEST_F(StreamFamilyTest, XReadGroup) {
 
   // No Group
   resp = Run({"xreadgroup", "group", "nogroup", "alice", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+  EXPECT_THAT(
+      resp,
+      ErrArg("No such key 'foo' or consumer group 'nogroup' in XREADGROUP with GROUP option"));
 
   // '>' gives the null array result if group doesn't exist
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "mystream", ">"});
-  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+  EXPECT_THAT(
+      resp,
+      ErrArg("No such key 'mystream' or consumer group 'group' in XREADGROUP with GROUP option"));
 
   Run({"xadd", "foo", "1-*", "k7", "v7"});
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "mystream", "foo", ">", ">"});
   // returns no group error as "group" was not created for mystream.
-  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+  EXPECT_THAT(
+      resp,
+      ErrArg("No such key 'mystream' or consumer group 'group' in XREADGROUP with GROUP option"));
 
   // returns no group error when key doesn't exists
   // this is how Redis' behave
   resp = Run({"xreadgroup", "group", "group", "consumer", "count", "10", "block", "5000", "streams",
               "nostream", ">"});
-  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+  EXPECT_THAT(
+      resp,
+      ErrArg("No such key 'nostream' or consumer group 'group' in XREADGROUP with GROUP option"));
 
   // block on empty stream via xgroup create.
   Run({"xgroup", "create", "emptystream", "group", "0", "mkstream"});
