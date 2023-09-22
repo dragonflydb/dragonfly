@@ -113,7 +113,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
                                 bool rev_mapping) {
   args_.reserve(num_args);
   if (rev_mapping)
-    reverse_index_.reserve(args_.size());
+    reverse_index_.reserve(num_args);
 
   // Store the concatenated per-shard arguments from the shard index inside args_
   // and make each shard data point to its own sub-span inside args_.
