@@ -306,6 +306,11 @@ class Transaction {
 
   std::string DebugId() const;
 
+  // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
+  // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
+  // to it must not block.
+  void PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args);
+
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
   // journal command, multiple journal entries may be necessary. In this case, call with set
   // multi_commands to true and  call the FinishLogJournalOnShard function after logging the final

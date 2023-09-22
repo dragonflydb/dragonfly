@@ -54,7 +54,12 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
 
 Transaction::Transaction(const Transaction* parent)
     : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
-  multi_->mode = parent->multi_->mode;
+  if (parent->multi_) {
+    multi_->mode = parent->multi_->mode;
+  } else {
+    // Use squashing mechanism for inline execution of single-shard EVAL
+    multi_->mode = LOCK_AHEAD;
+  }
   multi_->role = SQUASHED_STUB;
 
   time_now_ms_ = parent->time_now_ms_;
@@ -403,6 +408,15 @@ string Transaction::DebugId() const {
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
 
   return StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
+}
+
+void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args) {
+  multi_.reset();
+  InitBase(db, args);
+  EnableShard(sid);
+  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
+  CHECK(key_index);
+  StoreKeysInArgs(*key_index, false);
 }
 
 // Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
