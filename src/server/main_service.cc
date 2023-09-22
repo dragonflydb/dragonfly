@@ -1537,7 +1537,7 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::Scrip
     return false;
   }
 
-  if (tx->GetMultiMode() != Transaction::NOT_DETERMINED) {
+  if (tx.GetMultiMode() != Transaction::NOT_DETERMINED) {
     // We may be running EVAL under MULTI. Currently RunSingleShardMulti() will attempt to lock
     // keys, in which case will be already locked by MULTI. We could optimize this path as well
     // though.
