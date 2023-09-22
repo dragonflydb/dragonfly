@@ -165,9 +165,9 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   Run({"xadd", "foo", "1-*", "k3", "v3"});
   Run({"xadd", "bar", "1-*", "k4", "v4"});
 
-  Run({"xadd", "mystream", "k1", "v1"});
-  Run({"xadd", "mystream", "k2", "v2"});
-  Run({"xadd", "mystream", "k3", "v3"});
+  Run({"xadd", "mystream", "1-*", "k1", "v1"});
+  Run({"xadd", "mystream", "1-*", "k2", "v2"});
+  Run({"xadd", "mystream", "1-*", "k3", "v3"});
 
   Run({"xgroup", "create", "foo", "group", "0"});
   Run({"xgroup", "create", "bar", "group", "0"});
@@ -226,17 +226,30 @@ TEST_F(StreamFamilyTest, XReadGroup) {
 
   // No Group
   resp = Run({"xreadgroup", "group", "nogroup", "alice", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 
   // '>' gives the null array result if group doesn't exist
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "mystream", ">"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 
   Run({"xadd", "foo", "1-*", "k7", "v7"});
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "mystream", "foo", ">", ">"});
-  // Only entries of 'foo' is read
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(1)));
+  // returns no group error as "group" was not created for mystream.
+  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+
+  // returns no group error when key doesn't exists
+  // this is how Redis' behave
+  resp = Run({"xreadgroup", "group", "group", "consumer", "count", "10", "block", "5000", "streams",
+              "nostream", ">"});
+  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+
+  // block on empty stream via xgroup create.
+  Run({"xgroup", "create", "emptystream", "group", "0", "mkstream"});
+  auto before = absl::Now();
+  resp = Run({"xreadgroup", "group", "group", "consumer", "count", "10", "block", "1000", "streams",
+              "emptystream", ">"});
+  EXPECT_GE(absl::Now() - before, absl::Seconds(1));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
 TEST_F(StreamFamilyTest, XReadBlock) {

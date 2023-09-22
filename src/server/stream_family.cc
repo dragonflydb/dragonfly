@@ -771,9 +771,10 @@ OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
     CompactObj& cobj = (*res_it)->second;
     stream* s = (stream*)cobj.RObjPtr();
 
-    streamID last_id;
-    streamLastValidID(s, &last_id);
-
+    streamID last_id = s->last_id;
+    if (s->length) {
+      streamLastValidID(s, &last_id);
+    }
     last_ids.emplace_back(key, last_id);
   }
 
@@ -889,6 +890,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
 
   CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
+
   streamID id;
   ParsedStreamId parsed_id;
   if (opts.id == "$") {
@@ -2272,11 +2274,14 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
   for (auto& [stream, requested_sitem] : opts->stream_ids) {
     if (auto last_id_it = last_ids->find(stream); last_id_it != last_ids->end()) {
       streamID last_id = last_id_it->second;
+
       if (opts->read_group && !requested_sitem.group) {
         // if the group associated with the key is not found,
         // return NoGroupOrKey error.
         // We are simply mimicking Redis' error message here...
         // However, we could actually report more precise error message...
+        // continue;
+        cntx->transaction->Conclude();
         (*cntx)->SendError(
             NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
         return;
@@ -2296,28 +2301,31 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
         if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
           block = false;
           opts->serve_history = true;
-          // continue;
-        } else {
-          requested_sitem.id.val = requested_sitem.group->last_id;
-          streamIncrID(&requested_sitem.id.val);
+          continue;
         }
-        continue;
+
+        requested_sitem.id.val = requested_sitem.group->last_id;
+        streamIncrID(&requested_sitem.id.val);
       }
+
+      // std::cout << last_id.ms << "-" << last_id.seq << std::endl;
+      // std::cout << requested_sitem.id.val.ms << "-" << requested_sitem.id.val.seq << std::endl;
 
       if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
         block = false;
       }
     } else {
-      // if the key is not found,
-      // return NoGroupOrKey error.
-      // We are simply mimicking Redis' error message here...
-      // However, we could actually report more precise error message...
-      string error_msg = NoGroupOrKey(stream, opts->group_name);
       if (opts->read_group) {
-        error_msg += " in XREADGROUP with GROUP option";
+        // if the key is not found,
+        // return NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here...
+        // However, we could actually report more precise error message...
+        string error_msg =
+            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option");
+        cntx->transaction->Conclude();
+        (*cntx)->SendError(error_msg);
+        return;
       }
-      (*cntx)->SendError(error_msg);
-      return;
     }
   }
 
