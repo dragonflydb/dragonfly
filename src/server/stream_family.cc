@@ -2303,13 +2303,9 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
           opts->serve_history = true;
           continue;
         }
-
         requested_sitem.id.val = requested_sitem.group->last_id;
         streamIncrID(&requested_sitem.id.val);
       }
-
-      // std::cout << last_id.ms << "-" << last_id.seq << std::endl;
-      // std::cout << requested_sitem.id.val.ms << "-" << requested_sitem.id.val.seq << std::endl;
 
       if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
         block = false;
