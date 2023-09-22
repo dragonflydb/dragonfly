@@ -209,10 +209,17 @@ void BaseFamilyTest::ResetService() {
   LOG(INFO) << "Starting " << test_info->name();
 
   watchdog_fiber_ = pp_->GetNextProactor()->LaunchFiber([this] {
+    ThisFiber::SetName("Watchdog");
+
     if (!watchdog_done_.WaitFor(120s)) {
       LOG(ERROR) << "Deadlock detected!!!!";
       absl::SetFlag(&FLAGS_alsologtostderr, true);
-      fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+      fb2::Mutex m;
+      shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+        std::unique_lock lk(m);
+        LOG(ERROR) << "Proactor " << index << ":\n";
+        fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+      });
     }
   });
 }
