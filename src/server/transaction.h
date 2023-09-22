@@ -31,6 +31,11 @@ using facade::OpStatus;
 // Central building block of the transactional framework.
 //
 // Use it to run callbacks on the shard threads - such dispatches are called hops.
+//
+// Callbacks are not allowed to keep any possibly dangling pointers to data within the shards - it
+// must be copied explicitly. The callbacks running on different threads should also never pass any
+// messages or wait for each other, as it would block the execution of other transactions.
+//
 // The shards to run on are determined by the keys of the underlying command.
 // Global transactions run on all shards.
 //
