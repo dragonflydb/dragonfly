@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
@@ -84,6 +85,16 @@ string DocIndexInfo::BuildRestoreCommand() const {
   for (const auto& [fident, finfo] : base_index.schema.fields) {
     absl::StrAppend(&out, " ", fident, " AS ", finfo.short_name, " ",
                     SearchFieldTypeToString(finfo.type));
+
+    Overloaded info{
+        [](monostate) {},
+        [out = &out](const search::SchemaField::VectorParams& params) {
+          auto sim = params.sim == search::VectorSimilarity::L2 ? "L2" : "COSINE";
+          absl::StrAppend(out, " ", params.use_hnsw ? "HNSW" : "FLAT", " 6 ", "DIM ", params.dim,
+                          " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
+        },
+    };
+    visit(info, finfo.special_params);
   }
 
   return out;
