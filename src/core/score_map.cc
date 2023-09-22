@@ -60,24 +60,26 @@ pair<void*, bool> ScoreMap::AddOrUpdate(string_view field, double value) {
 }
 
 std::pair<void*, bool> ScoreMap::AddOrSkip(std::string_view field, double value) {
-  void* obj = FindInternal(&field, 1);  // 1 - string_view
+  uint64_t hashcode = Hash(&field, 1);
+  void* obj = FindInternal(&field, hashcode, 1);  // 1 - string_view
 
   if (obj)
     return {obj, false};
 
-  return AddOrUpdate(field, value);
+  void* newkey = AllocateScored(field, value);
+  DenseSet::AddUnique(newkey, false, hashcode);
+  return {newkey, true};
 }
 
-bool ScoreMap::Erase(string_view key) {
-  return EraseInternal(&key, 1);
+void* ScoreMap::AddUnique(std::string_view field, double value) {
+  void* newkey = AllocateScored(field, value);
+  DenseSet::AddUnique(newkey, false, Hash(&field, 1));
+  return newkey;
 }
 
-void ScoreMap::Clear() {
-  ClearInternal();
-}
-
-std::optional<double> ScoreMap::Find(std::string_view key) {
-  sds str = (sds)FindInternal(&key, 1);
+std::optional<double> ScoreMap::Find(std::string_view field) {
+  uint64_t hashcode = Hash(&field, 1);
+  sds str = (sds)FindInternal(&field, hashcode, 1);
   if (!str)
     return nullopt;
 

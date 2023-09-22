@@ -31,11 +31,17 @@ class StringSet : public DenseSet {
   // Used currently by rdb_load. Returns true if elem was added.
   bool AddSds(sds elem);
 
-  bool Erase(std::string_view s1);
+  bool Erase(std::string_view str) {
+    return EraseInternal(&str, 1);
+  }
 
-  bool Contains(std::string_view s1) const;
+  bool Contains(std::string_view s1) const {
+    return FindInternal(&s1, Hash(&s1, 1), 1) != nullptr;
+  }
 
-  void Clear();
+  void Clear() {
+    ClearInternal();
+  }
 
   std::optional<std::string> Pop();
 
