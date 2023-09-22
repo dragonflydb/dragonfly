@@ -335,6 +335,19 @@ auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
     return dptr;
   }
 
+  AddUnique(ptr, has_ttl, hc);
+  return nullptr;
+}
+
+// Assumes that the object does not exist in the set.
+void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
+  if (entries_.empty()) {
+    capacity_log_ = kMinSizeShift;
+    entries_.resize(kMinSize);
+  }
+
+  uint32_t bucket_id = BucketId(hashcode);
+
   DCHECK_LT(bucket_id, entries_.size());
 
   // Try insert into flat surface first. Also handle the grow case
@@ -342,13 +355,13 @@ auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
   for (unsigned j = 0; j < 2; ++j) {
     ChainVectorIterator list = FindEmptyAround(bucket_id);
     if (list != entries_.end()) {
-      obj_malloc_used_ += PushFront(list, ptr, has_ttl);
+      obj_malloc_used_ += PushFront(list, obj, has_ttl);
       if (std::distance(entries_.begin(), list) != bucket_id) {
         list->SetDisplaced(std::distance(entries_.begin() + bucket_id, list));
       }
       ++num_used_buckets_;
       ++size_;
-      return nullptr;
+      return;
     }
 
     if (size_ < entries_.size()) {
@@ -356,7 +369,7 @@ auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
     }
 
     Grow();
-    bucket_id = BucketId(hc);
+    bucket_id = BucketId(hashcode);
   }
 
   DCHECK(!entries_[bucket_id].IsEmpty());
@@ -371,7 +384,7 @@ auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
    * unlink it and repeat the steps
    */
 
-  DensePtr to_insert(ptr);
+  DensePtr to_insert(obj);
   if (has_ttl)
     to_insert.SetTtl(true);
 
@@ -389,11 +402,10 @@ auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
 
   ChainVectorIterator list = entries_.begin() + bucket_id;
   PushFront(list, to_insert);
-  obj_malloc_used_ += ObjectAllocSize(ptr);
+  obj_malloc_used_ += ObjectAllocSize(obj);
   DCHECK(!entries_[bucket_id].IsDisplaced());
 
   ++size_;
-  return nullptr;
 }
 
 auto DenseSet::Find(const void* ptr, uint32_t bid, uint32_t cookie) -> pair<DensePtr*, DensePtr*> {

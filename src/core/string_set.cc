@@ -68,18 +68,6 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
   return true;
 }
 
-bool StringSet::Erase(string_view str) {
-  return EraseInternal(&str, 1);
-}
-
-bool StringSet::Contains(string_view s1) const {
-  return FindInternal(&s1, 1) != nullptr;
-}
-
-void StringSet::Clear() {
-  ClearInternal();
-}
-
 std::optional<std::string> StringSet::Pop() {
   sds str = (sds)PopInternal();
 
