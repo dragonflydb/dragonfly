@@ -1415,7 +1415,7 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
 
 void CreateGroup(CmdArgList args, string_view key, ConnectionContext* cntx) {
   if (args.size() < 2)
-    return (*cntx)->SendError(UnknownSubCmd("CREATE", "XGROUP"));
+    return cntx->SendError(UnknownSubCmd("CREATE", "XGROUP"));
 
   CreateOpts opts;
   opts.gname = ArgS(args, 0);
@@ -2261,7 +2261,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
     cntx->transaction->Conclude();
 
     if (last_ids.status() == OpStatus::WRONG_TYPE) {
-      (*cntx)->SendError(kWrongTypeErr);
+      cntx->SendError(kWrongTypeErr);
       return;
     }
 
@@ -2282,8 +2282,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
         // However, we could actually report more precise error message...
         // continue;
         cntx->transaction->Conclude();
-        (*cntx)->SendError(
-            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
+        cntx->SendError(NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
         return;
       }
 
@@ -2319,7 +2318,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
         string error_msg =
             NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option");
         cntx->transaction->Conclude();
-        (*cntx)->SendError(error_msg);
+        cntx->SendError(error_msg);
         return;
       }
     }
