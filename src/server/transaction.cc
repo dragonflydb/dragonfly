@@ -54,7 +54,12 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
 
 Transaction::Transaction(const Transaction* parent)
     : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
-  multi_->mode = parent->multi_->mode;
+  if (parent->multi_) {
+    multi_->mode = parent->multi_->mode;
+  } else {
+    // Use squashing mechanism for inline execution of single-shard EVAL
+    multi_->mode = LOCK_AHEAD;
+  }
   multi_->role = SQUASHED_STUB;
 
   time_now_ms_ = parent->time_now_ms_;
@@ -367,86 +372,6 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
   ScheduleInternal();
 }
 
-void Transaction::RunSingleShardMulti(DbIndex dbid, CmdArgList keys, absl::FunctionRef<void()> f) {
-  DCHECK(multi_);
-  DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
-
-  multi_->mode = LOCK_AHEAD;
-  InitBase(dbid, keys);
-  InitByKeys(KeyIndex::Range(0, keys.size()));
-
-  CHECK_EQ(unique_shard_cnt_, 1UL);
-  const ShardId sid = unique_shard_id_;
-
-  CommandId cid("fake", 0, 0, 0, 0, 0, 0);
-  PrepareSquashedMultiHop(&cid, [&](ShardId id) { return id == sid; });
-  unique_shard_id_ = sid;  // Reset be above call
-
-  vector<string_view> args;
-  args.reserve(keys.size());
-  for (const auto& key : keys) {
-    args.emplace_back(key.data(), key.size());
-  }
-  KeyLockArgs lock_args{dbid, args};
-
-  BlockingCounter bc{1};
-  bool release_keys = false;
-  std::function<OpStatus(Transaction*, EngineShard*)> f_wrapper =
-      [&, bc](Transaction*, EngineShard* shard) mutable {
-        f();
-
-        if (release_keys) {
-          shard->db_slice().Release(Mode(), lock_args);
-        }
-
-        bc.Dec();
-        return OpStatus::OK;
-      };
-  RunnableType f_runnable = f_wrapper;
-
-  auto cb = [&, this]() {
-    auto* ss = ServerState::tlocal();
-    CHECK_EQ(ss->thread_index(), unique_shard_id_);
-    auto mode = Mode();
-
-    auto* shard = EngineShard::tlocal();
-    auto& sd = shard_data_[SidToId(unique_shard_id_)];
-    DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
-
-    // Fast path - for uncontended keys, just run the callback.
-    // That applies for single key operations like set, get, lpush etc.
-    if (shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode) &&
-        ss->AllowInlineScheduling()) {
-      f_runnable(this, shard);
-    } else {
-      cb_ptr_ = &f_runnable;
-
-      DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
-
-      shard->db_slice().Acquire(mode, lock_args);
-      release_keys = true;
-      sd.local_mask |= KEYLOCK_ACQUIRED;
-
-      txid_ = op_seq.fetch_add(1, memory_order_relaxed);
-      sd.pq_pos = shard->txq()->Insert(this);
-      sd.is_armed.store(true, memory_order_relaxed);
-      run_count_.store(1, memory_order_release);
-
-      shard->PollExecution("RunSingleShardMulti", nullptr);
-    }
-  };
-
-  if (ServerState::tlocal()->thread_index() == unique_shard_id_) {
-    DVLOG(2) << "Inline running a single shard multi locked-ahead transaction";
-    cb();
-  } else {
-    DVLOG(2) << "Scheduling running a single shard multi locked-ahead transaction";
-    shard_set->Add(unique_shard_id_, std::move(cb));  // serves as a barrier.
-  }
-
-  bc.Wait();
-}
-
 void Transaction::StartMultiNonAtomic() {
   DCHECK(multi_);
   multi_->mode = NON_ATOMIC;
@@ -483,6 +408,15 @@ string Transaction::DebugId() const {
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
 
   return StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
+}
+
+void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args) {
+  multi_.reset();
+  InitBase(db, args);
+  EnableShard(sid);
+  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
+  CHECK(key_index);
+  StoreKeysInArgs(*key_index, false);
 }
 
 // Runs in the dbslice thread. Returns true if the transaction continues running in the thread.

@@ -1422,7 +1422,7 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ev_args.args = args.subspan(2 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(ev_args, interpreter, cntx);
+  EvalInternal(args, ev_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
@@ -1528,7 +1528,7 @@ std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const 
 }
 
 static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::ScriptParams& params,
-                                   Transaction* tx) {
+                                   const Transaction& tx) {
   if (!sid.has_value()) {
     return false;
   }
@@ -1547,7 +1547,7 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::Scrip
   return true;
 }
 
-void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
+void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
 
@@ -1594,7 +1594,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   Interpreter::RunResult result;
 
-  if (CanRunSingleShardMulti(sid, *params, tx)) {
+  if (CanRunSingleShardMulti(sid, *params, *tx)) {
     // If script runs on a single shard, we run it remotely to save hops.
     interpreter->SetRedisFunc([cntx, tx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
@@ -1602,13 +1602,17 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
       CallFromScript(cntx, args);
     });
 
-    tx->RunSingleShardMulti(cntx->db_index(), eval_args.keys, [&]() {
-      ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
-      boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx};
-      cntx->transaction = stub_tx.get();
+    ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
+    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx};
+    cntx->transaction = stub_tx.get();
+
+    tx->PrepareMultiForScheduleSingleHop(*sid, 0, args);
+    tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       result = interpreter->RunFunction(eval_args.sha, &error);
-      cntx->transaction = tx;
+      return OpStatus::OK;
     });
+
+    cntx->transaction = tx;
   } else {
     optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
     if (!scheduled) {

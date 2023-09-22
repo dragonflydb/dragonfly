@@ -163,9 +163,6 @@ class Transaction {
   // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
-  // Executes `f` on target shard for this tx. `f` must not block.
-  void RunSingleShardMulti(DbIndex dbid, CmdArgList keys, absl::FunctionRef<void()> f);
-
   // Execute single hop with return value and conclude.
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
@@ -303,6 +300,11 @@ class Transaction {
   }
 
   std::string DebugId() const;
+
+  // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
+  // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
+  // to it must not block.
+  void PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args);
 
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
   // journal command, multiple journal entries may be necessary. In this case, call with set
