@@ -305,7 +305,7 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type)
 
 
 async def test_knn_score_return(async_client: aioredis.Redis):
-    i1 = async_client.ft("i2")
+    i1 = async_client.ft("i1")
     vector_field = VectorField(
         "pos",
         algorithm="FLAT",
@@ -336,6 +336,8 @@ async def test_knn_score_return(async_client: aioredis.Redis):
         Query("* => [KNN 3 @pos $vec AS distance]").return_fields("pos"), params
     )
     assert not any(hasattr(d, "distance") for d in result.docs)
+
+    await i1.dropindex()
 
 
 @dfly_args({"proactor_threads": 4, "dbfilename": "search-data"})

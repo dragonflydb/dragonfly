@@ -903,7 +903,7 @@ void Transaction::EnableShard(ShardId sid) {
 
 void Transaction::EnableAllShards() {
   unique_shard_cnt_ = shard_set->size();
-  unique_shard_id_ = kInvalidSid;
+  unique_shard_id_ = unique_shard_cnt_ == 1 ? 0 : kInvalidSid;
   shard_data_.resize(shard_set->size());
   for (auto& sd : shard_data_)
     sd.local_mask |= ACTIVE;
