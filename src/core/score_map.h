@@ -85,10 +85,14 @@ class ScoreMap : public DenseSet {
   // false, if already exists. In that case no update is done.
   std::pair<void*, bool> AddOrSkip(std::string_view field, double value);
 
-  bool Erase(std::string_view s1);
+  void* AddUnique(std::string_view field, double value);
 
-  bool Erase(sds s1) {
-    return EraseInternal(s1, 0);
+  bool Erase(std::string_view field) {
+    return EraseInternal(&field, 1);
+  }
+
+  bool Erase(sds field) {
+    return EraseInternal(field, 0);
   }
 
   /// @brief  Returns value of the key or nullptr if key not found.
@@ -98,10 +102,12 @@ class ScoreMap : public DenseSet {
 
   // returns the internal object if found, otherwise nullptr.
   void* FindObj(sds ele) {
-    return FindInternal(ele, 0);
+    return FindInternal(ele, Hash(ele, 0), 0);
   }
 
-  void Clear();
+  void Clear() {
+    ClearInternal();
+  }
 
   iterator begin() {
     return iterator{this, false};

@@ -37,12 +37,12 @@ jobs:
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
-        compiler: [{cxx: g++, c: gcc}]
+        compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
-            compiler: {cxx: clang++, c: clang}
+            compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
     timeout-minutes: 60
     env:
@@ -65,7 +65,7 @@ jobs:
         run: |
           uname -a
           cmake --version
-          mkdir -p ${{github.workspace}}/build
+          mkdir -p ${GITHUB_WORKSPACE}/build
 
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.3
@@ -81,7 +81,7 @@ jobs:
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
-          cmake -B ${{github.workspace}}/build \
+          cmake -B ${GITHUB_WORKSPACE}/build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
             -GNinja \
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
@@ -89,17 +89,17 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
             -L
-          cd ${{github.workspace}}/build && pwd
+          cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
       - name: Build
         run: |
-          cd ${{github.workspace}}/build
+          cd ${GITHUB_WORKSPACE}/build
           ninja src/all
           ${SCCACHE_PATH} --show-stats | tee $GITHUB_STEP_SUMMARY
 
-      - name: Test
+      - name: C++ Unit Tests
         run: |
-          cd ${{github.workspace}}/build
+          cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
@@ -117,6 +117,14 @@ jobs:
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
+      - name: Run regression tests
+        if: matrix.container == 'ubuntu-dev:20'
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly
+          run-only-on-ubuntu-latest: true
+          build-folder-name: build
+          filter: "not slow"
       - name: Upload cache log
         uses: actions/upload-artifact@v3
         with:
@@ -136,7 +144,7 @@ jobs:
 
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: "3.9"
           check-latest: true
 
       - name: Chart Rendering Tests

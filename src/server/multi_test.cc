@@ -548,7 +548,8 @@ TEST_F(MultiTest, EvalOOO) {
   }
 
   auto metrics = GetMetrics();
-  EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
+  EXPECT_EQ(1 + 2 * kTimes,
+            metrics.eval_io_coordination_cnt + metrics.eval_shardlocal_coordination_cnt);
 }
 
 // Run MULTI/EXEC commands in parallel, where each command is:

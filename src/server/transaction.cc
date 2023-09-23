@@ -54,7 +54,12 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
 
 Transaction::Transaction(const Transaction* parent)
     : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
-  multi_->mode = parent->multi_->mode;
+  if (parent->multi_) {
+    multi_->mode = parent->multi_->mode;
+  } else {
+    // Use squashing mechanism for inline execution of single-shard EVAL
+    multi_->mode = LOCK_AHEAD;
+  }
   multi_->role = SQUASHED_STUB;
 
   time_now_ms_ = parent->time_now_ms_;
@@ -113,7 +118,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
                                 bool rev_mapping) {
   args_.reserve(num_args);
   if (rev_mapping)
-    reverse_index_.reserve(args_.size());
+    reverse_index_.reserve(num_args);
 
   // Store the concatenated per-shard arguments from the shard index inside args_
   // and make each shard data point to its own sub-span inside args_.
@@ -405,6 +410,15 @@ string Transaction::DebugId() const {
   return StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
 }
 
+void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args) {
+  multi_.reset();
+  InitBase(db, args);
+  EnableShard(sid);
+  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
+  CHECK(key_index);
+  StoreKeysInArgs(*key_index, false);
+}
+
 // Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
 bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(run_count_.load(memory_order_relaxed), 0u);
@@ -551,16 +565,9 @@ void Transaction::ScheduleInternal() {
   // on the context. For regular multi-transactions we can actually inspect all commands.
   // For eval-like transactions - we can decided based on the command flavor (EVAL/EVALRO) or
   // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
-  IntentLock::Mode mode = Mode();
-
   if (span_all) {
     is_active = [](uint32_t) { return true; };
     num_shards = shard_set->size();
-
-    // Lock shards
-    auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
-    shard_set->RunBriefInParallel(std::move(cb));
-    VLOG(1) << "Global shard lock acquired";
   } else {
     num_shards = unique_shard_cnt_;
     DCHECK_GT(num_shards, 0u);
@@ -601,6 +608,7 @@ void Transaction::ScheduleInternal() {
     }
 
     VLOG(2) << "Cancelling " << DebugId();
+    ServerState::tlocal()->stats.tx_schedule_cancel_cnt += 1;
 
     atomic_bool should_poll_execution{false};
     auto cancel = [&](EngineShard* shard) {
@@ -1047,6 +1055,11 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
     return {false, false};
   }
 
+  if (IsGlobal()) {
+    shard->shard_lock()->Acquire(mode);
+    VLOG(1) << "Global shard lock acquired";
+  }
+
   TxQueue::Iterator it = txq->Insert(this);
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
   sd.pq_pos = it;
@@ -1079,6 +1092,9 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
     DCHECK(lock_args.args.size() > 0);
     shard->db_slice().Release(mode, lock_args);
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
+  }
+  if (IsGlobal()) {
+    shard->shard_lock()->Release(Mode());
   }
 
   if (pos == head && !txq->Empty()) {

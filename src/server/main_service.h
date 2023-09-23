@@ -154,7 +154,8 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
-  void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
+  void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
+                    ConnectionContext* cntx);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
                ConnectionContext* cntx);
 

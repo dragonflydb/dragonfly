@@ -31,6 +31,11 @@ using facade::OpStatus;
 // Central building block of the transactional framework.
 //
 // Use it to run callbacks on the shard threads - such dispatches are called hops.
+//
+// Callbacks are not allowed to keep any possibly dangling pointers to data within the shards - it
+// must be copied explicitly. The callbacks running on different threads should also never pass any
+// messages or wait for each other, as it would block the execution of other transactions.
+//
 // The shards to run on are determined by the keys of the underlying command.
 // Global transactions run on all shards.
 //
@@ -300,6 +305,11 @@ class Transaction {
   }
 
   std::string DebugId() const;
+
+  // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
+  // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
+  // to it must not block.
+  void PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args);
 
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
   // journal command, multiple journal entries may be necessary. In this case, call with set

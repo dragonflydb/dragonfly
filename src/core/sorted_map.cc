@@ -435,13 +435,11 @@ int SortedMap::DfImpl::Add(double score, sds ele, int in_flags, int* out_flags, 
       return 1;
     }
 
-    auto [newk, added] = score_map->AddOrUpdate(string_view{ele, sdslen(ele)}, score);
-    DCHECK(added);
+    obj = score_map->AddUnique(string_view{ele, sdslen(ele)}, score);
 
     *out_flags = ZADD_OUT_ADDED;
     *newscore = score;
-    obj = newk;
-    added = score_tree->Insert(obj);
+    bool added = score_tree->Insert(obj);
     DCHECK(added);
 
     return 1;
