@@ -530,15 +530,14 @@ async def test_rewrites(df_local_factory):
     async def get_next_command():
         mcmd = (await m_replica.next_command())["command"]
         # skip select command
-        if mcmd == "SELECT 0":
-            print("Got:", mcmd)
+        while mcmd == "SELECT 0" or mcmd.startswith("CLIENT SETINFO"):
             mcmd = (await m_replica.next_command())["command"]
         print("Got:", mcmd)
         return mcmd
 
     async def is_match_rsp(rx):
         mcmd = await get_next_command()
-        print("Regex:", rx)
+        print(mcmd, rx)
         return re.match(rx, mcmd)
 
     async def skip_cmd():
