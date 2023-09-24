@@ -12,7 +12,7 @@ from redis.asyncio import Redis as RedisClient
 from dataclasses import dataclass
 
 START_DELAY = 0.8
-START_GDB_DELAY = 3.0
+START_GDB_DELAY = 5.0
 
 
 @dataclass
@@ -163,6 +163,12 @@ class DflyInstance:
         if self.proc is None:
             raise RuntimeError("port is not available yet")
         p = psutil.Process(self.proc.pid)
+
+        # If running with gdb, look for port on child
+        children = p.children()
+        if len(children) == 1 and children[0].name() == "dragonfly":
+            p = children[0]
+
         ports = set()
         for connection in p.connections():
             if connection.status == "LISTEN":
