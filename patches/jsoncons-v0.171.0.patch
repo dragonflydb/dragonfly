@@ -1,0 +1,110 @@
+diff --git a/include/jsoncons/json_encoder.hpp b/include/jsoncons/json_encoder.hpp
+index 6a1daba63..d20673171 100644
+--- a/include/jsoncons/json_encoder.hpp
++++ b/include/jsoncons/json_encoder.hpp
+@@ -355,6 +355,7 @@ namespace detail {
+                     colon_str_.push_back(':');
+                     break;
+             }
++            colon_str_.append(options.after_key_chars());
+             switch (options.spaces_around_comma())
+             {
+                 case spaces_option::space_after:
+@@ -1021,9 +1022,9 @@ namespace detail {
+             sink_.append(options_.new_line_chars().data(),options_.new_line_chars().length());
+             for (int i = 0; i < indent_amount_; ++i)
+             {
+-                sink_.push_back(' ');
++                sink_.append(options_.indent_chars().data(), options_.indent_chars().length());
+             }
+-            column_ = indent_amount_;
++            column_ = indent_amount_ * options_.new_line_chars().length();
+         }
+ 
+         void new_line(std::size_t len)
+@@ -1031,7 +1032,7 @@ namespace detail {
+             sink_.append(options_.new_line_chars().data(),options_.new_line_chars().length());
+             for (std::size_t i = 0; i < len; ++i)
+             {
+-                sink_.push_back(' ');
++                sink_.append(options_.indent_chars().data(), options_.indent_chars().length());
+             }
+             column_ = len;
+         }
+diff --git a/include/jsoncons/json_options.hpp b/include/jsoncons/json_options.hpp
+index 58dcf3ba3..74d5ab217 100644
+--- a/include/jsoncons/json_options.hpp
++++ b/include/jsoncons/json_options.hpp
+@@ -425,6 +425,8 @@ private:
+     uint8_t indent_size_;
+     std::size_t line_length_limit_;
+     string_type new_line_chars_;
++    string_type after_key_chars_;
++    string_type indent_chars_;
+ public:
+     basic_json_encode_options()
+         : escape_all_non_ascii_(false),
+@@ -445,6 +447,7 @@ public:
+           line_length_limit_(line_length_limit_default)
+     {
+         new_line_chars_.push_back('\n');
++        indent_chars_.push_back('\t');
+     }
+ 
+     basic_json_encode_options(const basic_json_encode_options&) = default;
+@@ -467,7 +470,9 @@ public:
+           precision_(other.precision_),
+           indent_size_(other.indent_size_),
+           line_length_limit_(other.line_length_limit_),
+-          new_line_chars_(std::move(other.new_line_chars_))
++          new_line_chars_(std::move(other.new_line_chars_)),
++          after_key_chars_(std::move(other.after_key_chars_)),
++          indent_chars_(std::move(other.indent_chars))
+     {
+     }
+ 
+@@ -515,6 +520,16 @@ public:
+         return new_line_chars_;
+     }
+ 
++    string_type after_key_chars() const
++    {
++        return after_key_chars_;
++    }
++
++    string_type indent_chars() const
++    {
++        return indent_chars_;
++    }
++
+     std::size_t line_length_limit() const 
+     {
+         return line_length_limit_;
+@@ -599,6 +614,8 @@ public:
+     using basic_json_encode_options<CharT>::pad_inside_object_braces;
+     using basic_json_encode_options<CharT>::pad_inside_array_brackets;
+     using basic_json_encode_options<CharT>::new_line_chars;
++    using basic_json_encode_options<CharT>::after_key_chars;
++    using basic_json_encode_options<CharT>::indent_chars;
+     using basic_json_encode_options<CharT>::line_length_limit;
+     using basic_json_encode_options<CharT>::float_format;
+     using basic_json_encode_options<CharT>::precision;
+@@ -761,6 +778,18 @@ public:
+         return *this;
+     }
+ 
++    basic_json_options& after_key_chars(const string_type& value)
++    {
++        this->after_key_chars_ = value;
++        return *this;
++    }
++
++    basic_json_options& indent_chars(const string_type& value)
++    {
++        this->indent_chars_ = value;
++        return *this;
++    }
++
+     basic_json_options& lossless_number(bool value) 
+     {
+         this->lossless_number_ = value;
