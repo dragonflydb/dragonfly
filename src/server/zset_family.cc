@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
+#include "redis/zmalloc.h"
 #include "redis/zset.h"
 }
 
@@ -915,6 +916,14 @@ struct AddResult {
   bool is_nan = false;
 };
 
+size_t EstimateListpackMinBytes(ScoredMemberSpan members) {
+  size_t bytes = members.size() * 2;  // at least 2 bytes per score;
+  for (const auto& member : members) {
+    bytes += (member.second.size() + 1);  // string + at least 1 byte for string header.
+  }
+  return bytes;
+}
+
 OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_view key,
                           ScoredMemberSpan members) {
   DCHECK(!members.empty() || zparams.override);
@@ -948,6 +957,23 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   AddResult aresult;
   detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
   bool is_list_pack = robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK;
+
+  // opportunistically reserve space if multiple entries are about to be added.
+  if ((zparams.flags & ZADD_IN_XX) == 0 && members.size() > 2) {
+    if (is_list_pack) {
+      uint8_t* zl = (uint8_t*)robj_wrapper->inner_obj();
+      size_t malloc_reserved = zmalloc_size(zl);
+      size_t min_sz = EstimateListpackMinBytes(members);
+      if (min_sz > malloc_reserved) {
+        zl = (uint8_t*)zrealloc(zl, min_sz);
+        robj_wrapper->set_inner_obj(zl);
+      }
+    } else {
+      detail::SortedMap* sm = (detail::SortedMap*)robj_wrapper->inner_obj();
+      sm->Reserve(members.size());
+    }
+  }
+
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
     tmp_str = sdscpylen(tmp_str, m.second.data(), m.second.size());
