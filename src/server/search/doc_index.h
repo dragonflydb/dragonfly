@@ -25,31 +25,39 @@ using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*v
 std::optional<search::SchemaField::FieldType> ParseSearchFieldType(std::string_view name);
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
-struct SerializedSearchDoc {
-  std::string key;
-  SearchDocData values;
+struct DocResult {
+  struct SerializedValue {
+    std::string key;
+    SearchDocData values;
+  };
+
+  struct DocReference {
+    ShardId shard_id;
+    search::DocId doc_id;
+    bool requested;
+  };
+
+  std::variant<SerializedValue, DocReference> value;
   search::ResultScore score;
 
-  bool operator<(const SerializedSearchDoc& other) const;
-  bool operator>=(const SerializedSearchDoc& other) const;
+  bool operator<(const DocResult& other) const;
+  bool operator>=(const DocResult& other) const;
 };
 
 struct SearchResult {
-  SearchResult() = default;
+  size_t write_epoch = 0;  // Write epoch of the index during on the result was created
 
-  SearchResult(size_t total_hits, std::vector<SerializedSearchDoc> docs,
-               std::optional<search::AlgorithmProfile> profile)
-      : total_hits{total_hits}, docs{std::move(docs)}, profile{std::move(profile)} {
-  }
+  size_t total_hits = 0;        // total number of hits in shard
+  std::vector<DocResult> docs;  // serialized documents of first hits
 
-  SearchResult(facade::ErrorReply error) : error{std::move(error)} {
-  }
+  // After combining results from multiple shards and accumulating more documents than initially
+  // requested, only a subset of all documents will be sent back to the client,
+  // so it doesn't make sense to serialize strictly all documents in every shard ahead.
+  // Instead, only documents up to a probablistic bound are serialized, the
+  // leftover ids and scores are stored in the cutoff tail for use in the "unlikely" scenario.
+  // size_t num_cutoff = 0;
 
-  size_t total_hits;
-  std::vector<SerializedSearchDoc> docs;
   std::optional<search::AlgorithmProfile> profile;
-
-  std::optional<facade::ErrorReply> error;
 };
 
 struct SearchParams {
@@ -60,6 +68,10 @@ struct SearchParams {
   // the whole result set
   size_t limit_offset = 0;
   size_t limit_total = 10;
+
+  // Total number of shards, used in probabilistic queries
+  size_t num_shards = 0;
+  bool enable_cutoff = false;
 
   // Set but empty means no fields should be returned
   std::optional<FieldReturnList> return_fields;
@@ -123,8 +135,12 @@ class ShardDocIndex {
   ShardDocIndex(std::shared_ptr<DocIndex> index);
 
   // Perform search on all indexed documents and return results.
-  SearchResult Search(const OpArgs& op_args, const SearchParams& params,
-                      search::SearchAlgorithm* search_algo) const;
+  io::Result<SearchResult, facade::ErrorReply> Search(const OpArgs& op_args,
+                                                      const SearchParams& params,
+                                                      search::SearchAlgorithm* search_algo) const;
+
+  bool Refill(const OpArgs& op_args, const SearchParams& params,
+              search::SearchAlgorithm* search_algo, SearchResult* result) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
   std::vector<absl::flat_hash_map<std::string, search::SortableValue>> SearchForAggregator(
@@ -142,8 +158,12 @@ class ShardDocIndex {
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
+  void Serialize(const OpArgs& op_args, const SearchParams& params,
+                 absl::Span<DocResult> docs) const;
+
  private:
   std::shared_ptr<const DocIndex> base_;
+  size_t write_epoch_;
   search::FieldIndices indices_;
   DocKeyIndex key_index_;
 };

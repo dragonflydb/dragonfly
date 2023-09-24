@@ -378,6 +378,9 @@ class Transaction {
            " local_res=" + std::to_string(int(local_result_));
   }
 
+  void EnableShard(ShardId sid);
+  void EnableAllShards();
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
@@ -494,9 +497,6 @@ class Transaction {
 
   // Init with a set of keys.
   void InitByKeys(const KeyIndex& keys);
-
-  void EnableShard(ShardId sid);
-  void EnableAllShards();
 
   // Build shard index by distributing the arguments by shards based on the key index.
   void BuildShardIndex(const KeyIndex& keys, std::vector<PerShardCache>* out);

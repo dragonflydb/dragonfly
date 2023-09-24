@@ -14,6 +14,7 @@
 
 namespace facade {
 
+class ConnectionContext;
 struct CaptureVisitor;
 
 // CapturingReplyBuilder allows capturing replies and retrieveing them with Take().
@@ -66,6 +67,16 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
   struct SimpleString : public std::string {};  // SendSimpleString
   struct BulkString : public std::string {};    // SendBulkString
+
+ public:
+  struct ScopeCapture {
+    ScopeCapture(CapturingReplyBuilder* crb, ConnectionContext* cntx);
+    ~ScopeCapture();
+
+   private:
+    SinkReplyBuilder* old_;
+    ConnectionContext* cntx_;
+  };
 
   CapturingReplyBuilder(ReplyMode mode = ReplyMode::FULL)
       : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {

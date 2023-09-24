@@ -363,101 +363,261 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   return params;
 }
 
-void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
+void SendSerializedDoc(const DocResult::SerializedValue& value, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(doc.key);
-  rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
-  for (const auto& [k, v] : doc.values) {
+  rb->SendBulkString(value.key);
+  rb->StartCollection(value.values.size(), RedisReplyBuilder::MAP);
+  for (const auto& [k, v] : value.values) {
     rb->SendBulkString(k);
     rb->SendBulkString(v);
   }
 }
 
-void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> results,
-                      ConnectionContext* cntx) {
-  size_t total_count = 0;
-  for (const auto& shard_docs : results)
-    total_count += shard_docs.total_hits;
+struct MultishardSearch {
+  MultishardSearch(ConnectionContext* cntx, std::string_view index_name,
+                   search::SearchAlgorithm* search_algo, SearchParams params)
+      : cntx_{cntx},
+        index_name_{index_name},
+        search_algo_{search_algo},
+        params_{std::move(params)} {
+    sharded_results_.resize(shard_set->size());
+    if (search_algo_->IsProfilingEnabled())
+      sharded_times_.resize(shard_set->size());
+  }
 
-  size_t result_count =
-      min(total_count - min(total_count, params.limit_offset), params.limit_total);
+  void RunAndReply() {
+    params_.enable_cutoff = true;
+    params_.num_shards = shard_set->size();
 
-  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
+    if (auto err = RunSearch(); err)
+      return (*cntx_)->SendError(std::move(*err));
 
-  bool ids_only = params.IdsOnly();
-  size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
+    auto incomplete_shards = BuildOrder();
+    if (incomplete_shards.empty())
+      return Reply();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(reply_size);
   rb->SendLong(total_count);
+    params_.enable_cutoff = false;
 
-  size_t sent = 0;
-  size_t to_skip = params.limit_offset;
-  for (const auto& shard_docs : results) {
-    for (const auto& serialized_doc : shard_docs.docs) {
-      // Scoring is not implemented yet, so we just cut them in the order they were retrieved
-      if (to_skip > 0) {
-        to_skip--;
+    //VLOG(0) << "Failed completness check, refilling";
+
+    auto refill_res = RunRefill();
+    if (!refill_res.has_value())
+      return (*cntx_)->SendError(std::move(refill_res.error()));
+
+    if (bool no_reordering = refill_res.value(); no_reordering)
+      return Reply();
+
+    //VLOG(0) << "Failed refill, rebuilding";
+
+    if (auto incomplete_shards = BuildOrder(); incomplete_shards.empty())
+      return Reply();
+
+    //VLOG(0) << "Failed rebuild, re-searching";
+
+    if (auto err = RunSearch(); err)
+      return (*cntx_)->SendError(std::move(*err));
+    incomplete_shards = BuildOrder();
+    DCHECK(incomplete_shards.empty());
+    Reply();
+  }
+
+  struct ProfileInfo {
+    size_t total = 0;
+    size_t serialized = 0;
+    size_t cutoff = 0;
+    size_t hops = 0;
+    std::vector<pair<search::AlgorithmProfile, absl::Duration>> profiles;
+  };
+
+  ProfileInfo GetProfileInfo() {
+    ProfileInfo info;
+    info.hops = hops_;
+
+    for (size_t i = 0; i < sharded_results_.size(); i++) {
+      const auto& sd = sharded_results_[i];
+      size_t serialized = count_if(sd.docs.begin(), sd.docs.end(), [](const auto& doc_res) {
+        return holds_alternative<DocResult::SerializedValue>(doc_res.value);
+      });
+
+      info.total += sd.total_hits;
+      info.serialized += serialized;
+      info.cutoff += sd.docs.size() - serialized;
+
+      DCHECK(sd.profile);
+      info.profiles.push_back({std::move(*sd.profile), sharded_times_[i]});
+    }
+
+    return info;
+  }
+
+ private:
+  void Reply() {
+    size_t total_count = 0;
+    for (const auto& shard_docs : sharded_results_)
+      total_count += shard_docs.total_hits;
+
+    auto agg_info = search_algo_->HasAggregation();
+    if (agg_info && agg_info->limit)
+      total_count = min(total_count, *agg_info->limit);
+
+    if (agg_info && !params_.ShouldReturnField(agg_info->alias))
+      agg_info->alias = ""sv;
+
+    size_t result_count =
+        min(total_count - min(total_count, params_.limit_offset), params_.limit_total);
+
+    facade::SinkReplyBuilder::ReplyAggregator agg{cntx_->reply_builder()};
+
+    bool ids_only = params_.IdsOnly();
+    size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
+
+    VLOG(0) << "Reply size " << reply_size << " total count " << total_count;
+
+    (*cntx_)->StartArray(reply_size);
+    (*cntx_)->SendLong(total_count);
+
+    for (size_t i = params_.limit_offset; i < ordered_docs_.size(); i++) {
+      auto& value = get<DocResult::SerializedValue>(ordered_docs_[i]->value);
+      if (ids_only) {
+        (*cntx_)->SendBulkString(value.key);
         continue;
       }
 
-      if (sent++ >= result_count)
-        return;
+      if (agg_info && !agg_info->alias.empty())
+        value.values[agg_info->alias] = absl::StrCat(get<float>(ordered_docs_[i]->score));
 
       if (ids_only)
         rb->SendBulkString(serialized_doc.key);
+      SendSerializedDoc(value, cntx_);
+    }
+  }
+
+  template <typename F> optional<facade::ErrorReply> RunHandler(F&& f) {
+    hops_++;
+    AggregateValue<optional<facade::ErrorReply>> err;
+    cntx_->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      optional<absl::Time> start;
+      if (search_algo_->IsProfilingEnabled())
+        start = absl::Now();
+
+      if (auto* index = es->search_indices()->GetIndex(index_name_); index)
+        err = f(es, index);
       else
-        SendSerializedDoc(serialized_doc, cntx);
-    }
-  }
-}
+        err = facade::ErrorReply(string{index_name_} + ": no such index");
 
-void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
-                 absl::Span<SearchResult> results, ConnectionContext* cntx) {
-  size_t total = 0;
-  vector<SerializedSearchDoc*> docs;
-  for (auto& shard_results : results) {
-    total += shard_results.total_hits;
-    for (auto& doc : shard_results.docs) {
-      docs.push_back(&doc);
-    }
+      if (start.has_value())
+        sharded_times_[es->shard_id()] += (absl::Now() - *start);
+
+      return OpStatus::OK;
+    });
+    return *err;
   }
 
-  size_t agg_limit = agg.limit.value_or(total);
-  size_t prefix = min(params.limit_offset + params.limit_total, agg_limit);
+  optional<facade::ErrorReply> RunSearch() {
+    cntx_->transaction->Refurbish();
 
-  partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
-               [desc = agg.descending](const auto* l, const auto* r) {
-                 return desc ? (*l >= *r) : (*l < *r);
-               });
+    return RunHandler([this](EngineShard* es, ShardDocIndex* index) -> optional<ErrorReply> {
+      auto res = index->Search(cntx_->transaction->GetOpArgs(es), params_, search_algo_);
+      if (!res.has_value())
+        return std::move(res.error());
+      sharded_results_[es->shard_id()] = std::move(res.value());
+      return nullopt;
+    });
+  }
 
-  docs.resize(min(docs.size(), agg_limit));
+  io::Result<bool, facade::ErrorReply> RunRefill() {
+    cntx_->transaction->Refurbish();
 
-  size_t start_idx = min(params.limit_offset, docs.size());
-  size_t result_count = min(docs.size() - start_idx, params.limit_total);
-  bool ids_only = params.IdsOnly();
-  size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
+    atomic_uint failed_refills = 0;
+    auto err = RunHandler([this, &failed_refills](EngineShard* es, ShardDocIndex* index) {
+      bool refilled = index->Refill(cntx_->transaction->GetOpArgs(es), params_, search_algo_,
+                                    &sharded_results_[es->shard_id()]);
+      if (!refilled)
+        failed_refills.fetch_add(1u);
+      return nullopt;
+    });
 
-  // Clear score alias if it's excluded from return values
-  if (!params.ShouldReturnField(agg.alias))
-    agg.alias = "";
+    if (err)
+      return nonstd::make_unexpected(std::move(*err));
+    return failed_refills == 0;
+  }
 
-  facade::SinkReplyBuilder::ReplyAggregator agg_reply{cntx->reply_builder()};
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(reply_size);
-  rb->SendLong(min(total, agg_limit));
-  for (auto* doc : absl::MakeSpan(docs).subspan(start_idx, result_count)) {
-    if (ids_only) {
-      rb->SendBulkString(doc->key);
-      continue;
+  absl::flat_hash_set<ShardId> BuildOrder() {
+    ordered_docs_.clear();
+    if (auto agg = search_algo_->HasAggregation(); agg) {
+      BuildSortedOrder(*agg);
+    } else {
+      BuildLinearOrder();
+    }
+    return VerifyOrderCompletness();
+  }
+
+  void BuildLinearOrder() {
+    size_t required = params_.limit_offset + params_.limit_total;
+
+    VLOG(0) << "Linear order";
+    for (auto& shard_result : sharded_results_)
+      VLOG(0) << "|->source " << shard_result.docs.size();
+
+    for (size_t idx = 0;; idx++) {
+      bool added = false;
+      for (auto& shard_result : sharded_results_) {
+        if (idx < shard_result.docs.size() && ordered_docs_.size() < required) {
+          ordered_docs_.push_back(&shard_result.docs[idx]);
+          added = true;
+        }
+      }
+      if (!added)
+        return;
+    }
+  }
+
+  void BuildSortedOrder(search::AggregationInfo agg) {
+    for (auto& shard_result : sharded_results_) {
+      for (auto& doc : shard_result.docs) {
+        ordered_docs_.push_back(&doc);
+      }
     }
 
-    if (!agg.alias.empty() && holds_alternative<float>(doc->score))
-      doc->values[agg.alias] = absl::StrCat(get<float>(doc->score));
+    size_t agg_limit = agg.limit.value_or(ordered_docs_.size());
+    size_t prefix = min(params_.limit_offset + params_.limit_total, agg_limit);
 
-    SendSerializedDoc(*doc, cntx);
+    partial_sort(ordered_docs_.begin(), ordered_docs_.begin() + min(ordered_docs_.size(), prefix),
+                 ordered_docs_.end(), [desc = agg.descending](const auto* l, const auto* r) {
+                   return desc ? (l->score >= r->score) : (l->score < r->score);
+                 });
+
+    ordered_docs_.resize(min(ordered_docs_.size(), prefix));
   }
-}
+
+  absl::flat_hash_set<ShardId> VerifyOrderCompletness() {
+    VLOG(0) << "Verifying order completness of " << ordered_docs_.size();
+    absl::flat_hash_set<ShardId> incomplete_shards;
+    for (auto* doc : ordered_docs_) {
+      if (auto* ref = get_if<DocResult::DocReference>(&doc->value); ref) {
+        incomplete_shards.insert(ref->shard_id);
+        ref->requested = true;
+      }
+    }
+    VLOG(0) << "Num incomplete shards " << incomplete_shards.size();
+    return incomplete_shards;
+  }
+
+ private:
+  ConnectionContext* cntx_;
+  std::string_view index_name_;
+  search::SearchAlgorithm* search_algo_;
+  SearchParams params_;
+
+  size_t hops_ = 0;
+
+  std::vector<absl::Duration> sharded_times_;
+  std::vector<DocResult*> ordered_docs_;
+  std::vector<SearchResult> sharded_results_;
+};
 
 }  // namespace
 
@@ -691,30 +851,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   if (!search_algo.Init(query_str, &params->query_params, sort_opt))
     return cntx->SendError("Query syntax error");
 
-  // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
-  atomic<bool> index_not_found{false};
-  vector<SearchResult> docs(shard_set->size());
-
-  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
-    else
-      index_not_found.store(true, memory_order_relaxed);
-    return OpStatus::OK;
-  });
-
-  if (index_not_found.load())
-    return cntx->SendError(string{index_name} + ": no such index");
-
-  for (const auto& res : docs) {
-    if (res.error)
-      return cntx->SendError(*res.error);
-  }
-
-  if (auto agg = search_algo.HasAggregation(); agg)
-    ReplySorted(std::move(*agg), *params, absl::MakeSpan(docs), cntx);
-  else
-    ReplyWithResults(*params, absl::MakeSpan(docs), cntx);
+  MultishardSearch{cntx, index_name, &search_algo, std::move(*params)}.RunAndReply();
 }
 
 void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
@@ -733,43 +870,41 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   search_algo.EnableProfiling();
 
   absl::Time start = absl::Now();
-  atomic_uint total_docs = 0;
-  atomic_uint total_serialized = 0;
 
-  vector<pair<search::AlgorithmProfile, absl::Duration>> results(shard_set->size());
+  CapturingReplyBuilder crb{facade::ReplyMode::ONLY_ERR};
+  MultishardSearch mss{cntx, index_name, &search_algo, std::move(*params)};
 
-  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(index_name);
-    if (!index)
-      return OpStatus::OK;
+  {
+    CapturingReplyBuilder::ScopeCapture capture{&crb, cntx};
+    mss.RunAndReply();
+  }
 
-    auto shard_start = absl::Now();
-    auto res = index->Search(t->GetOpArgs(es), *params, &search_algo);
-
-    total_docs.fetch_add(res.total_hits);
-    total_serialized.fetch_add(res.docs.size());
-
-    DCHECK(res.profile);
-    results[es->shard_id()] = {std::move(*res.profile), absl::Now() - shard_start};
-
-    return OpStatus::OK;
-  });
+  auto reply = crb.Take();
+  if (auto err = CapturingReplyBuilder::GetError(reply); err)
+    return (*cntx)->SendError(err->first, err->second);
 
   auto took = absl::Now() - start;
+
+  auto profile = mss.GetProfileInfo();
+
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(results.size() + 1);
+  rb->StartArray(profile.profiles.size() + 1);
 
   // General stats
-  rb->StartCollection(3, RedisReplyBuilder::MAP);
+  rb->StartCollection(5, RedisReplyBuilder::MAP);
   rb->SendBulkString("took");
   rb->SendLong(absl::ToInt64Microseconds(took));
   rb->SendBulkString("hits");
-  rb->SendLong(total_docs);
+  rb->SendLong(profile.total);
   rb->SendBulkString("serialized");
-  rb->SendLong(total_serialized);
+  rb->SendLong(profile.serialized);
+  rb->SendSimpleString("cutoff");
+  rb->SendLong(profile.cutoff);
+  rb->SendSimpleString("hops");
+  rb->SendLong(profile.hops);
 
   // Per-shard stats
-  for (const auto& [profile, shard_took] : results) {
+  for (const auto& [profile, shard_took] : profile.profiles) {
     rb->StartCollection(2, RedisReplyBuilder::MAP);
     rb->SendBulkString("took");
     rb->SendLong(absl::ToInt64Microseconds(shard_took));

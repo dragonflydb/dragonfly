@@ -1671,13 +1671,6 @@ void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendOk();
 }
 
-template <typename F> void WithReplies(CapturingReplyBuilder* crb, ConnectionContext* cntx, F&& f) {
-  SinkReplyBuilder* old_rrb = nullptr;
-  old_rrb = cntx->Inject(crb);
-  f();
-  cntx->Inject(old_rrb);
-}
-
 optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                                      bool force) {
   auto& info = cntx->conn_state.script_info;
@@ -1693,9 +1686,10 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   cntx->transaction->MultiSwitchCmd(eval_cid);
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
-  WithReplies(&crb, cntx, [&] {
+  {
+    CapturingReplyBuilder::ScopeCapture capture{&crb, cntx};
     MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx, this, true, true);
-  });
+  }
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();

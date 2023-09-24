@@ -603,7 +603,8 @@ TEST_F(SearchFamilyTest, FtProfile) {
   const auto& top_level = resp.GetVec();
   EXPECT_EQ(top_level.size(), shard_set->size() + 1);
 
-  EXPECT_THAT(top_level[0].GetVec(), ElementsAre("took", _, "hits", _, "serialized", _));
+  EXPECT_THAT(top_level[0].GetVec(),
+              ElementsAre("took", _, "hits", _, "serialized", _, "cutoff", _, "hops", _));
 
   for (size_t sid = 0; sid < shard_set->size(); sid++) {
     const auto& shard_resp = top_level[sid + 1].GetVec();
@@ -614,6 +615,153 @@ TEST_F(SearchFamilyTest, FtProfile) {
     EXPECT_EQ(tree[1].GetVec().size(), 3);
   }
 }
+
+vector<vector<string>> FillShard(ShardId sid, string_view prefix, size_t num) {
+  vector<vector<string>> out;
+  size_t entries = 0, idx = 0;
+  while (entries < num) {
+    auto key = absl::StrCat(prefix, idx++);
+    if (Shard(key, shard_set->size()) == sid) {
+      out.emplace_back(vector<string>{"hset", key, "idx", to_string(idx)});
+      entries++;
+    }
+  }
+  return out;
+}
+
+// Check basic multi shard search cuts off a big portion of the results
+TEST_F(SearchFamilyTest, MultiShardBalanced) {
+  Run({"ft.create", "i1", "schema", "idx", "numeric"});
+
+  // Fill two shards with 100 values each
+  for (auto cmd : FillShard(0, "doc0-", 100))
+    Run(absl::MakeSpan(cmd));
+  for (auto cmd : FillShard(1, "doc1-", 100))
+    Run(absl::MakeSpan(cmd));
+
+  auto resp = Run({"ft.profile", "i1", "SEARCH", "QUERY", "*", "LIMIT", "0", "50"});
+
+  auto stats = resp.GetVec()[0].GetVec();
+
+  // Make sure no refill was needed
+  EXPECT_EQ(stats[8], "hops");
+  EXPECT_THAT(stats[9], IntArg(1));
+
+  // Make sure at least around half of serialization was cut off
+  EXPECT_EQ(stats[4], "serialized");
+  EXPECT_LE(stats[5].GetInt(), 55);
+  EXPECT_EQ(stats[6], "cutoff");
+  EXPECT_GE(stats[7].GetInt(), 45);
+}
+
+// Simulate an uneven distribution which forces multi shard search to perform a refill
+TEST_F(SearchFamilyTest, MultiShardRefill) {
+  Run({"ft.create", "i1", "schema", "idx", "numeric"});
+
+  // Place 100 keys ONLY on shard 0
+  for (auto cmd : FillShard(0, "doc", 100))
+    Run(absl::MakeSpan(cmd));
+
+  // This will fail the probabilistc bound as well as the refill phase,
+  // but should still succeed to select enough entries
+  for (size_t limit : {10, 20, 50}) {
+    auto resp = Run({"ft.search", "i1", "*", "LIMIT", "0", to_string(limit)});
+    EXPECT_THAT(resp.GetVec().size(), 2 * limit + 1);
+    EXPECT_THAT(resp.GetVec()[0], IntArg(100));
+
+    resp = Run({"ft.profile", "i1", "SEARCH", "QUERY", "*", "LIMIT", "0", to_string(limit)});
+    auto stats = resp.GetVec()[0].GetVec();
+    // Make sure only one additional hop was needed for refill
+    EXPECT_EQ(stats[8], "hops");
+    EXPECT_THAT(stats[9], IntArg(2)) << "On limit " << limit;
+    EXPECT_EQ(stats[6], "cutoff");
+    EXPECT_THAT(stats[7], IntArg(0));
+  }
+}
+
+// Simulate an uneven distribution which forces multi shard search to perform a refill,
+// but the refill is interrupted by constant updates, which should lead to a full repeated query
+// on a single shard (the interrupted one). After the repeated query, a successful order is built.
+TEST_F(SearchFamilyTest, MultiShardRefillRefresh) {
+  Run({"ft.create", "i1", "schema", "idx", "numeric"});
+
+  // Place 100 keys ONLY on shard 0
+  for (auto cmd : FillShard(0, "doc", 100))
+    Run(absl::MakeSpan(cmd));
+
+  atomic_bool keep_running = true;
+  string_view key = "doc1";
+  EXPECT_EQ(Shard(key, shard_set->size()), 0);
+  auto fb = pp_->at(2)->LaunchFiber([this, &keep_running, key]() {
+    while (keep_running.load())
+      Run("pressure", {"hset", key, "updates", "more-and-more!"});
+  });
+
+  auto resp = Run({"ft.profile", "i1", "SEARCH", "QUERY", "*", "LIMIT", "0", "10"});
+  auto stats = resp.GetVec()[0].GetVec();
+
+  // Make sure refill didn't succeed because of constant updates
+  EXPECT_EQ(stats[8], "hops");
+  EXPECT_THAT(stats[9], IntArg(2));
+
+  keep_running.store(false);
+  ThisFiber::SleepFor(10ms);
+  fb.Join();
+}
+
+// Simulate multi shard worst case. A refill needs to be performed, but fails on one shard due to
+// constant writes. After a full repeated query, one element less is returned, which leads to an
+// invalid order (because the other shard refilled one less than needed). A full repeated query is
+// needed, so a total of 3 hops are performed.
+// TODO: Test will be invalidated with fine-grained refills
+TEST_F(SearchFamilyTest, MultiShardRefillRepeat) {
+  Run({"ft.create", "i1", "schema", "idx", "numeric"});
+
+  // Place 100 keys ONLY on shard 0
+  for (auto cmd : FillShard(0, "doc", 100))
+    Run(absl::MakeSpan(cmd));
+
+  // Place a single key on shard 1
+  auto key = "the-destroyer";
+  EXPECT_EQ(Shard(key, shard_set->size()), 1);
+  Run({"hset", key, "idx", "1"});
+
+  atomic_bool keep_running = true;
+  auto fb = pp_->at(2)->LaunchFiber([this, &keep_running, key]() {
+    size_t idx = 0;
+    while (keep_running.load()) {
+      if (idx++ % 2 == 0)
+        Run("pressure", {"del", key});
+      else
+        Run("pressure", {"hset", key, "idx", "1"});
+    }
+  });
+
+  bool had_3hops = false;
+  for (size_t tries = 0; tries < 100; tries++) {
+    auto resp = Run({"ft.profile", "i1", "SEARCH", "QUERY", "*", "LIMIT", "0", "10"});
+    auto stats = resp.GetVec()[0].GetVec();
+
+    EXPECT_EQ(stats[8], "hops");
+    if (stats[9].GetInt() == 2)
+      continue;
+
+    EXPECT_THAT(stats[9], IntArg(3));
+    had_3hops = true;
+    break;
+  }
+
+  EXPECT_TRUE(had_3hops) << "Failed probabilstic test :(";
+
+  keep_running.store(false);
+  ThisFiber::SleepFor(10ms);
+  fb.Join();
+}
+
+// must have changed
+
+// s0   -> refill
+// s1   -> re-search -> delete some ->
 
 TEST_F(SearchFamilyTest, SimpleExpiry) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "expires-in", "numeric"}), "OK");
@@ -628,10 +776,15 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
 
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:2", "d:3"));
 
-  shard_set->TEST_EnableHeartBeat();
-
+  // Expired documents are still included in idlist
   AdvanceTime(60);
-  ThisFiber::SleepFor(5ms);  // Give heartbeat time to delete expired doc
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:2", "d:3"));
+
+  shard_set->TEST_EnableHeartBeat();
+  for (size_t i = 0; i < 5; i++) {  // Give heartbeat time to delete expired doc
+    ThisFiber::SleepFor(2ms);
+    Run({"incr", "run heatbeat run"});
+  }
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:3"));
 
   AdvanceTime(60);

@@ -160,11 +160,13 @@ template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
 // truthy value;
 template <typename T> struct AggregateValue {
   bool operator=(T val) {
+    if (!bool(val))
+      return false;
+
     std::lock_guard l{mu_};
-    if (!bool(current_) && bool(val)) {
+    if (!bool(current_))
       current_ = val;
-    }
-    return bool(val);
+    return true;
   }
 
   T operator*() {

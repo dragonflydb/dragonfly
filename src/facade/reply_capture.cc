@@ -4,6 +4,7 @@
 #include "facade/reply_capture.h"
 
 #include "base/logging.h"
+#include "facade/conn_context.h"
 #include "reply_capture.h"
 
 #define SKIP_LESS(needed)     \
@@ -133,6 +134,16 @@ void CapturingReplyBuilder::CollapseFilledCollections() {
     stack_.pop();
     Capture(std::move(pl.first));
   }
+}
+
+CapturingReplyBuilder::ScopeCapture::ScopeCapture(CapturingReplyBuilder* crb,
+                                                  ConnectionContext* cntx)
+    : cntx_{cntx} {
+  old_ = cntx->Inject(crb);
+}
+
+CapturingReplyBuilder::ScopeCapture::~ScopeCapture() {
+  cntx_->Inject(old_);
 }
 
 CapturingReplyBuilder::CollectionPayload::CollectionPayload(unsigned len, CollectionType type)

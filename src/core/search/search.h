@@ -144,6 +144,7 @@ class SearchAlgorithm {
   std::optional<AggregationInfo> HasAggregation() const;
 
   void EnableProfiling();
+  bool IsProfilingEnabled() const;
 
  private:
   bool profiling_enabled_ = false;
