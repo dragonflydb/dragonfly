@@ -409,6 +409,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
     options.spaces_around_comma(spaces_option::no_spaces)
         .spaces_around_colon(spaces_option::no_spaces)
         .object_array_line_splits(line_split_kind::multi_line)
+        .indent_size(1)
         .new_line_chars("");
 
     if (indent) {
@@ -441,14 +442,14 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
   json out;
   for (auto& expr : expressions) {
     json eval = expr.second.evaluate(json_entry);
-    if (should_format) {
-      json_printable jp(out, options, indenting::indent);
-      std::stringstream ss;
-      jp.dump(ss);
-      out[expr.first] = ss.str();
-    } else {
-      out[expr.first] = eval;
-    }
+    out[expr.first] = eval;
+  }
+
+  if (should_format) {
+    json_printable jp(out, options, indenting::indent);
+    std::stringstream ss;
+    jp.dump(ss);
+    return ss.str();
   }
 
   return out.as<string>();
