@@ -136,12 +136,17 @@ const uint32_t STREAM_ITEM_FLAG_NONE = 0;              /* No special flags. */
 const uint32_t STREAM_ITEM_FLAG_DELETED = (1 << 0);    /* Entry is deleted. Skip it. */
 const uint32_t STREAM_ITEM_FLAG_SAMEFIELDS = (1 << 1); /* Same fields as master entry. */
 
-inline string StreamIdRepr(const streamID& id) {
+string StreamIdRepr(const streamID& id) {
   return absl::StrCat(id.ms, "-", id.seq);
 };
 
-inline string NoGroupError(string_view key, string_view cgroup) {
+string NoGroupError(string_view key, string_view cgroup) {
   return absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'");
+}
+
+string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = "") {
+  return absl::StrCat("-NOGROUP No such key '", key, "'", " or consumer group '", cgroup, "'",
+                      suffix);
 }
 
 inline const uint8_t* SafePtr(MutableSlice field) {
@@ -766,9 +771,10 @@ OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
     CompactObj& cobj = (*res_it)->second;
     stream* s = (stream*)cobj.RObjPtr();
 
-    streamID last_id;
-    streamLastValidID(s, &last_id);
-
+    streamID last_id = s->last_id;
+    if (s->length) {
+      streamLastValidID(s, &last_id);
+    }
     last_ids.emplace_back(key, last_id);
   }
 
@@ -884,6 +890,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
 
   CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
+
   streamID id;
   ParsedStreamId parsed_id;
   if (opts.id == "$") {
@@ -1408,7 +1415,7 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
 
 void CreateGroup(CmdArgList args, string_view key, ConnectionContext* cntx) {
   if (args.size() < 2)
-    return (*cntx)->SendError(UnknownSubCmd("CREATE", "XGROUP"));
+    return cntx->SendError(UnknownSubCmd("CREATE", "XGROUP"));
 
   CreateOpts opts;
   opts.gname = ArgS(args, 0);
@@ -2254,7 +2261,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
     cntx->transaction->Conclude();
 
     if (last_ids.status() == OpStatus::WRONG_TYPE) {
-      (*cntx)->SendError(kWrongTypeErr);
+      cntx->SendError(kWrongTypeErr);
       return;
     }
 
@@ -2270,8 +2277,12 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
 
       if (opts->read_group && !requested_sitem.group) {
         // if the group associated with the key is not found,
-        // we will not read entries from the key.
-        continue;
+        // send NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here.
+        // However, we could actually report more precise error message.
+        cntx->transaction->Conclude();
+        cntx->SendError(NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
+        return;
       }
 
       // Resolve $ to the last ID in the stream.
@@ -2296,6 +2307,17 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
 
       if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
         block = false;
+      }
+    } else {
+      if (opts->read_group) {
+        // if the key is not found, send NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here.
+        // However, we could actually report more precise error message.
+        string error_msg =
+            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option");
+        cntx->transaction->Conclude();
+        cntx->SendError(error_msg);
+        return;
       }
     }
   }
