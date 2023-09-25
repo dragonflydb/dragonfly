@@ -542,7 +542,7 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsi
       double score = GetObjScore(ele);
       if (range.min > score || (range.min == score && range.minex))
         break;
-      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, score);
       if (!path.Prev())
         break;
     }
@@ -557,16 +557,27 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsi
         return arr;
     }
 
+    auto path2 = path;
+    size_t num_elems = 0;
+
+    // Count the number of elements in the range.
     while (limit--) {
       ScoreSds ele = path.Terminal();
 
       double score = GetObjScore(ele);
       if (range.max < score || (range.max == score && range.maxex))
         break;
-
-      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      ++num_elems;
       if (!path.Next())
         break;
+    }
+
+    // reserve enough space.
+    arr.resize(num_elems);
+    for (size_t i = 0; i < num_elems; ++i) {
+      ScoreSds ele = path2.Terminal();
+      arr[i] = {string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele)};
+      path2.Next();
     }
   }
 

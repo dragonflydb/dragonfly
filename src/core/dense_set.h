@@ -331,8 +331,15 @@ class DenseSet {
     mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
   }
 
-  // Returns true if *ptr was deleted.
-  bool ExpireIfNeeded(DensePtr* prev, DensePtr* ptr) const;
+  // Returns true if *node was deleted.
+  bool ExpireIfNeeded(DensePtr* prev, DensePtr* node) const {
+    if (node->HasTtl()) {
+      return ExpireIfNeededInternal(prev, node);
+    }
+    return false;
+  }
+
+  bool ExpireIfNeededInternal(DensePtr* prev, DensePtr* node) const;
 
   // Deletes the object pointed by ptr and removes it from the set.
   // If ptr is a link then it will be deleted internally.

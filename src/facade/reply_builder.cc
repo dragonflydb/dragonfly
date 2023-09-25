@@ -56,6 +56,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
 
   // Allow batching with up to kMaxBatchSize of data.
   if ((should_batch_ || should_aggregate_) && (batch_.size() + bsize < kMaxBatchSize)) {
+    batch_.reserve(batch_.size() + bsize);
     for (unsigned i = 0; i < len; ++i) {
       std::string_view src((char*)v[i].iov_base, v[i].iov_len);
       DVLOG(3) << "Appending to stream " << absl::CHexEscape(src);

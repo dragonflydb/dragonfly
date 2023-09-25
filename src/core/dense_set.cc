@@ -229,11 +229,13 @@ auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
 }
 
 void DenseSet::Reserve(size_t sz) {
-  sz = std::min<size_t>(sz, kMinSize);
+  sz = std::max<size_t>(sz, kMinSize);
 
   sz = absl::bit_ceil(sz);
-  capacity_log_ = absl::bit_width(sz);
-  entries_.reserve(sz);
+  if (sz > entries_.size()) {
+    entries_.resize(sz);
+    capacity_log_ = absl::bit_width(sz) - 1;
+  }
 }
 
 void DenseSet::Grow() {
@@ -622,20 +624,21 @@ auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
   return lk;
 }
 
-bool DenseSet::ExpireIfNeeded(DensePtr* prev, DensePtr* node) const {
+bool DenseSet::ExpireIfNeededInternal(DensePtr* prev, DensePtr* node) const {
   DCHECK(node != nullptr);
+  DCHECK(node->HasTtl());
 
   bool deleted = false;
-  while (node->HasTtl()) {
+  do {
     uint32_t obj_time = ObjExpireTime(node->GetObject());
     if (obj_time > time_now_) {
       break;
     }
 
-    // updates the node to next item if relevant.
+    // updates the *node to next item if relevant or resets it to empty.
     const_cast<DenseSet*>(this)->Delete(prev, node);
     deleted = true;
-  }
+  } while (node->HasTtl());
 
   return deleted;
 }

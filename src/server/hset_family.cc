@@ -9,6 +9,7 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
+#include "redis/zmalloc.h"
 }
 
 #include "base/logging.h"
@@ -104,6 +105,14 @@ pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, b
   }
 
   return make_pair(lp, !updated);
+}
+
+size_t EstimateListpackMinBytes(CmdArgList members) {
+  size_t bytes = 0;
+  for (const auto& member : members) {
+    bytes += (member.size() + 1);  // string + at least 1 byte for string header.
+  }
+  return bytes;
 }
 
 size_t HMapLength(const DbContext& db_cntx, const CompactObj& co) {
@@ -653,6 +662,11 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
   if (lp) {
     bool inserted;
+    size_t malloc_reserved = zmalloc_size(lp);
+    size_t min_sz = EstimateListpackMinBytes(values);
+    if (min_sz > malloc_reserved) {
+      lp = (uint8_t*)zrealloc(lp, min_sz);
+    }
     for (size_t i = 0; i < values.size(); i += 2) {
       tie(lp, inserted) = LpInsert(lp, ArgS(values, i), ArgS(values, i + 1), op_sp.skip_if_exists);
       created += inserted;
@@ -662,7 +676,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-
+    sm->Reserve(values.size() / 2);
     bool added;
 
     for (size_t i = 0; i < values.size(); i += 2) {

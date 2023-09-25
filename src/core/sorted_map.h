@@ -170,7 +170,7 @@ class SortedMap {
     size_t MallocSize() const;
 
     bool Reserve(size_t sz) {
-      return dictExpand(dict, 1) == DICT_OK;
+      return dictExpand(dict, sz) == DICT_OK;
     }
 
     size_t DeleteRangeByRank(unsigned start, unsigned end) {
