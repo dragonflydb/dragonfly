@@ -382,16 +382,15 @@ TEST_F(DflyEngineTest, OOM) {
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
+  max_memory_limit = 300000;
   shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
 
-  max_memory_limit = 300000;
-
   ssize_t i = 0;
   RespExpr resp;
-  for (; i < 5000; ++i) {
+  for (; i < 10000; ++i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
     // we evict some items because 5000 is too much when max_memory_limit is 300000.
     ASSERT_EQ(resp, "OK");

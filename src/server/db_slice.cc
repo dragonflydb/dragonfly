@@ -152,7 +152,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   if (!apply_memory_limit_ || mem_budget_ > soft_limit_)
     return true;
 
-  DCHECK_LT(tbl.size(), tbl.capacity());
+  DCHECK_LE(tbl.size(), tbl.capacity());
 
   // We take a conservative stance here -
   // we estimate how much memory we will take with the current capacity
