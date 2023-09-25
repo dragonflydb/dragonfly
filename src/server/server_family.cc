@@ -250,7 +250,12 @@ bool IsReplicatingNoOne(string_view host, string_view port) {
 }
 
 void RebuildAllSearchIndices(Service* service) {
-  boost::intrusive_ptr<Transaction> trans{new Transaction{service->FindCmd("FT.CREATE")}};
+  const CommandId* cmd = service->FindCmd("FT.CREATE");
+  if (cmd == nullptr) {
+    // On MacOS we don't include search so FT.CREATE won't exist.
+    return;
+  }
+  boost::intrusive_ptr<Transaction> trans{new Transaction{cmd}};
   trans->InitByArgs(0, {});
   trans->ScheduleSingleHop([](auto* trans, auto* es) {
     es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
