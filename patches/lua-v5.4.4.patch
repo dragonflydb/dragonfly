@@ -32,7 +32,7 @@ index d46e650c..c27e5677 100644
 +# equivalent to: if $(uname_m) == x86_64 || $(uname_m) == amd64
 +ifneq (, $(filter $(uname_m),x86_64 amd64))
 +OPTFLAGS= -march=sandybridge
-+else ifeq ($(uname_m), aarch64)
++else ifneq (, $(filter $(uname_m),aarch64 arm64))
 +OPTFLAGS= -march=armv8.2-a+fp16+rcpc+dotprod+crypto
 +else ifeq ($(uname_m), s390x)
 +OPTFLAGS= -march=native
