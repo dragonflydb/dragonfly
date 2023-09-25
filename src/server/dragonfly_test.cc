@@ -8,8 +8,10 @@ extern "C" {
 }
 
 #include <absl/strings/ascii.h>
+#include <absl/strings/charconv.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
+#include <fast_float/fast_float.h>
 #include <gmock/gmock.h>
 
 #include "base/flags.h"
@@ -665,5 +667,38 @@ TEST_F(DflyEngineTest, Latency) {
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
+
+// Parse Double benchmarks
+static void BM_ParseFastFloat(benchmark::State& state) {
+  std::vector<std::string> args(100);
+  std::random_device rd;
+
+  for (auto& arg : args) {
+    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
+  }
+  double res;
+  while (state.KeepRunning()) {
+    for (const auto& arg : args) {
+      fast_float::from_chars(arg.data(), arg.data() + arg.size(), res);
+    }
+  }
+}
+BENCHMARK(BM_ParseFastFloat);
+
+static void BM_ParseDoubleAbsl(benchmark::State& state) {
+  std::vector<std::string> args(100);
+  std::random_device rd;
+  for (auto& arg : args) {
+    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
+  }
+
+  double res;
+  while (state.KeepRunning()) {
+    for (const auto& arg : args) {
+      absl::from_chars(arg.data(), arg.data() + arg.size(), res);
+    }
+  }
+}
+BENCHMARK(BM_ParseDoubleAbsl);
 
 }  // namespace dfly

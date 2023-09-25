@@ -73,6 +73,7 @@ set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
 add_third_party(
   jsoncons
   URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v0.171.0.tar.gz
+  PATCH_COMMAND patch -p1 -i "${CMAKE_SOURCE_DIR}/patches/jsoncons-v0.171.0.patch"
   CMAKE_PASS_FLAGS "-DJSONCONS_BUILD_TESTS=OFF -DJSONCONS_HAS_POLYMORPHIC_ALLOCATOR=ON"
   LIB "none"
 )
@@ -109,6 +110,12 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  fast_float
+  URL https://github.com/fastfloat/fast_float/archive/refs/tags/v5.2.0.tar.gz
+  LIB "none"
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
@@ -123,6 +130,11 @@ add_library(TRDP::hnswlib INTERFACE IMPORTED)
 add_dependencies(TRDP::hnswlib hnswlib_project)
 set_target_properties(TRDP::hnswlib PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${HNSWLIB_INCLUDE_DIR}")
+
+add_library(TRDP::fast_float INTERFACE IMPORTED)
+add_dependencies(TRDP::fast_float fast_float_project)
+set_target_properties(TRDP::fast_float PROPERTIES
+                      INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 

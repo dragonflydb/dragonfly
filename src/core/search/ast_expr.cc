@@ -56,11 +56,18 @@ AstTagsNode::AstTagsNode(AstExpr&& l, std::string tag) {
   tags.push_back(move(tag));
 }
 
-AstKnnNode::AstKnnNode(AstNode&& filter, size_t limit, std::string_view field, OwnedFtVector vec)
-    : filter{make_unique<AstNode>(std::move(filter))},
+AstKnnNode::AstKnnNode(size_t limit, std::string_view field, OwnedFtVector vec,
+                       std::string_view score_alias)
+    : filter{nullptr},
       limit{limit},
       field{field.substr(1)},
-      vec{std::move(vec)} {
+      vec{std::move(vec)},
+      score_alias{score_alias} {
+}
+
+AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
+  *this = std::move(self);
+  this->filter = make_unique<AstNode>(std::move(filter));
 }
 
 }  // namespace dfly::search

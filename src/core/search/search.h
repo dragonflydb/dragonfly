@@ -107,8 +107,8 @@ class SearchAlgorithm {
 
   SearchResult Search(const FieldIndices* index) const;
 
-  // Return KNN limit if it is enabled
-  std::optional<size_t> HasKnn() const;
+  // if enabled, return limit & alias for knn query
+  std::optional<std::pair<size_t /*limit*/, std::string_view /*alias*/>> HasKnn() const;
 
   void EnableProfiling();
 

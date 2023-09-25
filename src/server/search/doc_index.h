@@ -63,6 +63,8 @@ struct SearchParams {
   bool IdsOnly() const {
     return return_fields && return_fields->empty();
   }
+
+  bool ShouldReturnField(std::string_view field) const;
 };
 
 // Stores basic info about a document index.

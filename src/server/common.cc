@@ -4,9 +4,9 @@
 
 #include "server/common.h"
 
-#include <absl/strings/charconv.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <fast_float/fast_float.h>
 
 #include <system_error>
 
@@ -194,7 +194,7 @@ bool ParseDouble(string_view src, double* value) {
   } else if (absl::EqualsIgnoreCase(src, "+inf")) {
     *value = HUGE_VAL;
   } else {
-    absl::from_chars_result result = absl::from_chars(src.data(), src.end(), *value);
+    fast_float::from_chars_result result = fast_float::from_chars(src.data(), src.end(), *value);
     if (int(result.ec) != 0 || result.ptr != src.end() || isnan(*value))
       return false;
   }
