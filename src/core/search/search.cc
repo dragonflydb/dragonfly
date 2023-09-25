@@ -488,10 +488,10 @@ SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
   return bs.Search(*query_);
 }
 
-optional<size_t> SearchAlgorithm::HasKnn() const {
+optional<pair<size_t, string_view>> SearchAlgorithm::HasKnn() const {
   DCHECK(query_);
-  if (holds_alternative<AstKnnNode>(*query_))
-    return get<AstKnnNode>(*query_).limit;
+  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
+    return make_pair(knn->limit, string_view{knn->score_alias});
   return nullopt;
 }
 
