@@ -1220,7 +1220,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return Client_SetName(sub_args, cntx);
   } else if (sub_cmd == "GETNAME") {
     return Client_GetName(sub_args, cntx);
-  } else if (sub_cmd == "List") {
+  } else if (sub_cmd == "LIST") {
     return Client_List(sub_args, cntx);
   } else if (sub_cmd == "PAUSE") {
     return Client_Pause(sub_args, cntx);
