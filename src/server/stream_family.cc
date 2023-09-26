@@ -2593,7 +2593,7 @@ void StreamFamily::XAck(CmdArgList args, ConnectionContext* cntx) {
     return OpAck(t->GetOpArgs(shard), key, group, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return (*cntx)->SendLong(*result);
   }
