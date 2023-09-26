@@ -1885,7 +1885,8 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}
                    .HFUNC(ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(ArrIndex);
-  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Debug);
+  // TODO: Support negative first_key index to revive the debug sub-command
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -3, 2, 2, 1, acl::JSON}.HFUNC(Debug);
   *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Resp);
   *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(
       Set);

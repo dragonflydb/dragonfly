@@ -954,6 +954,17 @@ TEST_F(JsonFamilyTest, DebugFields) {
 
   resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
   EXPECT_THAT(resp, IntArg(16));
+
+  json = R"({"a":1, "b":2, "c":{"k1":1,"k2":2}})";
+
+  resp = Run({"JSON.SET", "obj_doc", "$", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "FIELDS", "obj_doc", "$.a"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.DEBUG", "fields", "obj_doc", "$.a"});
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 TEST_F(JsonFamilyTest, Resp) {
