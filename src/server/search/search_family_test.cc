@@ -22,7 +22,7 @@ class SearchFamilyTest : public BaseFamilyTest {
 
 const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
 
-MATCHER_P(DocIds, arg_ids, "") {
+MATCHER_P2(DocIds, total, arg_ids, "") {
   if (arg_ids.empty()) {
     if (auto res = arg.GetInt(); !res || *res != 0) {
       *result_listener << "Expected single zero";
@@ -42,9 +42,8 @@ MATCHER_P(DocIds, arg_ids, "") {
     return false;
   }
 
-  if (auto num_results = results[0].GetInt();
-      !num_results || size_t(*num_results) != arg_ids.size()) {
-    *result_listener << "Bad document number in reply: " << results.size();
+  if (auto num_results = results[0].GetInt(); !num_results || size_t(*num_results) != total) {
+    *result_listener << "Bad total count in reply: " << num_results.value_or(-1);
     return false;
   }
 
@@ -60,7 +59,8 @@ MATCHER_P(DocIds, arg_ids, "") {
 }
 
 template <typename... Args> auto AreDocIds(Args... args) {
-  return DocIds(vector<string>{args...});
+  vector<string> ids{args...};
+  return DocIds(ids.size(), ids);
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
@@ -426,6 +426,34 @@ TEST_F(SearchFamilyTest, FtProfile) {
     EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
     EXPECT_EQ(tree[1].GetVec().size(), 3);
   }
+}
+
+TEST_F(SearchFamilyTest, BasicSort) {
+  Run({"ft.create", "i1", "schema", "ord", "numeric", "sortable"});
+
+  for (size_t i = 0; i < 100; i++)
+    Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
+
+  auto AreRange = [](size_t total, size_t l, size_t r) {
+    vector<string> out;
+    for (size_t i = min(l, r); i < max(l, r); i++)
+      out.push_back(absl::StrCat("d:", i));
+    if (l > r)
+      reverse(out.begin(), out.end());
+    return DocIds(total, out);
+  };
+
+  // Sort ranges of 23 elements
+  for (size_t i = 0; i < 77; i++)
+    EXPECT_THAT(
+        Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), to_string(23)}),
+        AreRange(100, i, i + 23));
+
+  // Sort ranges of 27 elements in reverse
+  for (size_t i = 0; i < 73; i++)
+    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i),
+                     to_string(27)}),
+                AreRange(100, 100 - i, 100 - i - 27));
 }
 
 }  // namespace dfly

@@ -26,7 +26,10 @@ std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 struct SerializedSearchDoc {
   std::string key;
   SearchDocData values;
-  float knn_distance;
+  search::ResultScore score;
+
+  bool operator<(const SerializedSearchDoc& other) const;
+  bool operator>(const SerializedSearchDoc& other) const;
 };
 
 struct SearchResult {
@@ -53,11 +56,12 @@ struct SearchParams {
 
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
   // the whole result set
-  size_t limit_offset;
-  size_t limit_total;
+  size_t limit_offset = 0;
+  size_t limit_total = 10;
 
   // Set but empty means no fields should be returned
   std::optional<FieldReturnList> return_fields;
+  std::optional<search::SortOption> sort_option;
   search::QueryParams query_params;
 
   bool IdsOnly() const {
