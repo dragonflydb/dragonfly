@@ -270,5 +270,8 @@ class SortedMap {
   PMR_NS::memory_resource* mr_res_;
 };
 
+// Used by CompactObject.
+unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score);
+
 }  // namespace detail
 }  // namespace dfly
