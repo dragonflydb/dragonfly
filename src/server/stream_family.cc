@@ -1296,7 +1296,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
     streamNACK* nack = (streamNACK*)raxFind(cg->pel, buf, sizeof(buf));
     if (nack != raxNotFound) {
       raxRemove(cg->pel, buf, sizeof(buf), nullptr);
-      raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
+      raxRemove(nack->consumer->pel, buf, sizeof(buf), nullptr);
       streamFreeNACK(nack);
       acknowledged++;
     }
