@@ -1476,7 +1476,7 @@ void DestroyGroup(string_view key, string_view gname, ConnectionContext* cntx) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
-  OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cntx->transaction->ScheduleSingleHop(cb);
   switch (result) {
     case OpStatus::OK:
       return (*cntx)->SendLong(1);
@@ -1494,7 +1494,7 @@ void CreateConsumer(string_view key, string_view gname, string_view consumer,
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -1516,7 +1516,7 @@ void DelConsumer(string_view key, string_view gname, string_view consumer,
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -1680,7 +1680,7 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
     return OpAdd(t->GetOpArgs(shard), add_opts, args);
   };
 
-  OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(cb);
   if (add_result) {
     return (*cntx)->SendBulkString(StreamIdRepr(*add_result));
   }
@@ -1780,7 +1780,7 @@ void StreamFamily::XClaim(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClaim(t->GetOpArgs(shard), key, opts, absl::Span{ids.data(), ids.size()});
   };
-  OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(cb);
   if (!result) {
     (*cntx)->SendError(result.status());
     return;
@@ -1826,7 +1826,7 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
     return OpDel(t->GetOpArgs(shard), key, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return (*cntx)->SendLong(*result);
   }
@@ -1927,7 +1927,7 @@ void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return (*cntx)->SendLong(*result);
   }
@@ -2007,7 +2007,7 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPending(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<PendingResult> op_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<PendingResult> op_result = cntx->transaction->ScheduleSingleHopT(cb);
   if (!op_result) {
     if (op_result.status() == OpStatus::SKIPPED)
       return (*cntx)->SendError(NoGroupError(key, opts.group_name));
@@ -2504,7 +2504,7 @@ void StreamFamily::XTrim(CmdArgList args, ConnectionContext* cntx) {
     return OpTrim(t->GetOpArgs(shard), trim_opts);
   };
 
-  OpResult<int64_t> trim_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<int64_t> trim_result = cntx->transaction->ScheduleSingleHopT(cb);
   if (trim_result) {
     return (*cntx)->SendLong(*trim_result);
   }
@@ -2550,7 +2550,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
     return OpRange(t->GetOpArgs(shard), key, range_opts);
   };
 
-  OpResult<RecordVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<RecordVec> result = cntx->transaction->ScheduleSingleHopT(cb);
 
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
