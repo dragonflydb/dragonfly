@@ -19,7 +19,7 @@ void InitRedisTables() {
 
   // been used by t_zset routines that convert listpack to skiplist for cases
   // above these thresholds.
-  server.zset_max_listpack_entries = 100;
+  server.zset_max_listpack_entries = 128;
   server.zset_max_listpack_value = 32;
 
   server.max_map_field_len = 64;
