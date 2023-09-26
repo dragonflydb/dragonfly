@@ -119,6 +119,10 @@ void ServerState::SetPauseState(ClientPause state, bool start) {
   }
 }
 
+bool ServerState::IsPaused() const {
+  return client_pauses_[0] || client_pauses_[1];
+}
+
 void ServerState::AwaitPauseState(bool is_write) {
   client_pause_ec_.await([is_write, this]() {
     if (client_pauses_[int(ClientPause::ALL)]) {

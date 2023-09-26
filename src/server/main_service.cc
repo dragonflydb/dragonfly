@@ -1256,8 +1256,9 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
     const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
+    const bool is_pause = dfly::ServerState::tlocal()->IsPaused();
 
-    if (!is_multi && !is_eval && cid != nullptr) {
+    if (!is_multi && !is_eval && cid != nullptr && !is_pause) {
       stored_cmds.reserve(args_list.size());
       stored_cmds.emplace_back(cid, tail_args);
       continue;

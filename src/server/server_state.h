@@ -220,10 +220,16 @@ class ServerState {  // public struct - to allow initialization.
 
   acl::UserRegistry* user_registry;
 
+  acl::AclLog acl_log;
+
   // Starts or ends a `CLIENT PAUSE` command. @state controls whether
   // this is pausing only writes or every command, @start controls
   // whether this is starting or ending the pause.
   void SetPauseState(ClientPause state, bool start);
+
+  // Returns whether any type of commands is paused.
+  bool IsPaused() const;
+
   // Awaits until the pause is over and the command can execute.
   // @is_write controls whether the command is a write command or not.
   void AwaitPauseState(bool is_write);
@@ -231,8 +237,6 @@ class ServerState {  // public struct - to allow initialization.
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
   };
-
-  acl::AclLog acl_log;
 
  private:
   int64_t live_transactions_ = 0;
