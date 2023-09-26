@@ -40,7 +40,9 @@ struct FlowInfo {
   std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.
   std::unique_ptr<JournalStreamer> streamer;
   std::string eof_token;
+  DflyVersion version;
 
+  std::optional<LSN> start_partial_sync_at;
   uint64_t last_acked_lsn;
 
   std::function<void()> cleanup;  // Optional cleanup for cancellation.
@@ -99,8 +101,11 @@ class DflyCmd {
   struct ReplicaInfo {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, address{std::move(address)},
-          listening_port(listening_port), flows{flow_count} {
+        : state{SyncState::PREPARATION},
+          cntx{std::move(err_handler)},
+          address{std::move(address)},
+          listening_port(listening_port),
+          flows{flow_count} {
     }
 
     std::atomic<SyncState> state;
@@ -108,6 +113,7 @@ class DflyCmd {
 
     std::string address;
     uint32_t listening_port;
+    DflyVersion version = DflyVersion::VER0;
 
     std::vector<FlowInfo> flows;
     Mutex mu;  // See top of header for locking levels.
@@ -130,6 +136,9 @@ class DflyCmd {
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo();
 
+  // Sets metadata.
+  void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
+
  private:
   // JOURNAL [START/STOP]
   // Start or stop journaling.
@@ -139,8 +148,11 @@ class DflyCmd {
   // Return connection thread index or migrate to another thread.
   void Thread(CmdArgList args, ConnectionContext* cntx);
 
-  // FLOW <masterid> <syncid> <flowid>
+  // FLOW <masterid> <syncid> <flowid> [<seqid>]
   // Register connection as flow for sync session.
+  // If seqid is given, it means the client wants to try partial sync.
+  // If it is possible, return Ok and prepare for a partial sync, else
+  // return error and ask the replica to execute FLOW again.
   void Flow(CmdArgList args, ConnectionContext* cntx);
 
   // SYNC <syncid>

@@ -20,14 +20,16 @@ using facade::kWrongTypeErr;
 
 #ifndef RETURN_ON_ERR
 
-#define RETURN_ON_ERR(x)                                       \
+#define RETURN_ON_ERR_T(T, x)                                  \
   do {                                                         \
     std::error_code __ec = (x);                                \
     if (__ec) {                                                \
       DLOG(ERROR) << "Error " << __ec << " while calling " #x; \
-      return __ec;                                             \
+      return (T)(__ec);                                        \
     }                                                          \
   } while (0)
+
+#define RETURN_ON_ERR(x) RETURN_ON_ERR_T(std::error_code, x)
 
 #endif  // RETURN_ON_ERR
 

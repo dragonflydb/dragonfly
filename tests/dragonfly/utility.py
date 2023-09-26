@@ -1,4 +1,5 @@
 import itertools
+import logging
 import sys
 import asyncio
 from redis import asyncio as aioredis
@@ -39,10 +40,11 @@ def batch_fill_data(client, gen, batch_size=100):
         client.mset({k: v for k, v, in group})
 
 
-async def wait_available_async(client: aioredis.Redis):
+async def wait_available_async(client: aioredis.Redis, timeout=10):
     """Block until instance exits loading phase"""
     its = 0
-    while True:
+    start = time.time()
+    while (time.time() - start) < timeout:
         try:
             await client.get("key")
             return
@@ -56,6 +58,7 @@ async def wait_available_async(client: aioredis.Redis):
         print("W", end="", flush=True)
         await asyncio.sleep(0.01)
         its += 1
+    raise RuntimeError("Client did not become available in time!")
 
 
 class SizeChange(Enum):
@@ -374,7 +377,7 @@ class DflySeeder:
         Run a seeding cycle on all dbs either until stop(), a fixed number of commands (target_ops)
         or until reaching an allowed deviation from the target number of keys (target_deviation)
         """
-        print(f"Running ops:{target_ops} deviation:{target_deviation}")
+        logging.debug(f"Running ops:{target_ops} deviation:{target_deviation}")
         self.stop_flag = False
         queues = [asyncio.Queue(maxsize=3) for _ in range(self.dbcount)]
         producer = asyncio.create_task(
@@ -392,7 +395,7 @@ class DflySeeder:
 
         took = time.time() - time_start
         qps = round(cmdcount * self.dbcount / took, 2)
-        print(f"Filling took: {took}, QPS: {qps}")
+        logging.debug(f"Filling took: {took}, QPS: {qps}")
 
     def stop(self):
         """Stop all invocations to run"""
@@ -407,6 +410,7 @@ class DflySeeder:
 
         if port is None:
             port = self.port
+        logging.debug(f"Starting capture from {port=}")
         keys = sorted(list(self.gen.keys_and_types()))
 
         captures = await asyncio.gather(

@@ -673,6 +673,7 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
 }
 
 error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
+  VLOG(2) << "SendJournalOffset";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_OFFSET));
   uint8_t buf[sizeof(uint64_t)];
   absl::little_endian::Store64(buf, journal_offset);
@@ -680,6 +681,7 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
 }
 
 error_code RdbSerializer::SendFullSyncCut() {
+  VLOG(2) << "SendFullSyncCut";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
   // RDB_OPCODE_FULLSYNC_END followed by 8 bytes of 0.
@@ -734,6 +736,7 @@ io::Bytes RdbSerializer::PrepareFlush() {
 }
 
 error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
+  VLOG(2) << "WriteJournalEntry";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(1));
   RETURN_ON_ERR(SaveString(serialized_entry));
@@ -893,6 +896,7 @@ class RdbSaver::Impl {
        SaveMode save_mode, io::Sink* sink);
 
   void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
+  void StartIncrementalSnapshotting(Context* cntx, EngineShard* shard, LSN start_lsn);
 
   void StopSnapshotting(EngineShard* shard);
 
@@ -1053,9 +1057,17 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
                                        EngineShard* shard) {
   auto& s = GetSnapshot(shard);
-  s.reset(new SliceSnapshot(&shard->db_slice(), &channel_, compression_mode_));
+  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_);
 
   s->Start(stream_journal, cll);
+}
+
+void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
+                                                  LSN start_lsn) {
+  auto& s = GetSnapshot(shard);
+  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_);
+
+  s->StartIncremental(cntx, start_lsn);
 }
 
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
@@ -1142,6 +1154,10 @@ void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation* cll
   impl_->StartSnapshotting(stream_journal, cll, shard);
 }
 
+void RdbSaver::StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn) {
+  impl_->StartIncrementalSnapshotting(cntx, shard, start_lsn);
+}
+
 void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
   impl_->StopSnapshotting(shard);
 }
@@ -1159,17 +1175,20 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map) {
+error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(impl_->serializer()->FlushToSink(impl_->sink()));
 
   if (save_mode_ == SaveMode::SUMMARY) {
     impl_->serializer()->SendFullSyncCut();
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
-    error_code io_error = impl_->ConsumeChannel(cll);
+    error_code io_error = impl_->ConsumeChannel(cntx->GetCancellation());
     if (io_error) {
       LOG(ERROR) << "io error " << io_error;
       return io_error;
+    }
+    if (cntx->GetError()) {
+      return cntx->GetError();
     }
   }
 

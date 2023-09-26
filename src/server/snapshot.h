@@ -61,6 +61,13 @@ class SliceSnapshot {
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
   void Start(bool stream_journal, const Cancellation* cll);
 
+  // Initialize a snapshot that sends only the missing journal updates
+  // since start_lsn and then registers a callback switches into the
+  // journal streaming mode until stopped.
+  // If we're slower than the buffer and can't continue, `Cancel()` is
+  // called.
+  void StartIncremental(Context* cntx, LSN start_lsn);
+
   // Stop snapshot. Only needs to be called for journal streaming mode.
   void Stop();
 

@@ -1843,6 +1843,7 @@ error_code RdbLoader::Load(io::Source* src) {
     auto cb = mem_buf_->InputBuffer();
 
     if (memcmp(cb.data(), "REDIS", 5) != 0) {
+      VLOG(1) << "Bad header: " << absl::CHexEscape(facade::ToSV(cb));
       return RdbError(errc::wrong_signature);
     }
 

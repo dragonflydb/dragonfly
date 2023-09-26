@@ -290,6 +290,10 @@ std::error_code Replica::HandleCapaDflyResp() {
     return make_error_code(errc::bad_message);
   }
 
+  // If we're syncing a different replication ID, drop the saved LSNs.
+  if (master_context_.master_repl_id != ToSV(LastResponseArgs()[0].GetBuf())) {
+    last_journal_LSNs_.reset();
+  }
   master_context_.master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
   master_context_.dfly_session_id = ToSV(LastResponseArgs()[1].GetBuf());
   num_df_flows_ = param_num_flows;
@@ -414,9 +418,10 @@ error_code Replica::InitiateDflySync() {
 
   absl::Cleanup cleanup = [this]() {
     // We do the following operations regardless of outcome.
-    JoinAllFlows();
+    JoinDflyFlows();
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     state_mask_.fetch_and(~R_SYNCING);
+    last_journal_LSNs_.reset();
   };
 
   // Initialize MultiShardExecution.
@@ -450,25 +455,43 @@ error_code Replica::InitiateDflySync() {
   // Make sure we're in LOADING state.
   CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
 
-  // Flush dbs.
-  JournalExecutor{&service_}.FlushAll();
-
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
+  std::string_view sync_type = "full";
   {
+    // Going out of the way to avoid using std::vector<bool>...
+    auto is_full_sync = std::make_unique<bool[]>(num_df_flows_);
     auto partition = Partition(num_df_flows_);
+    CHECK(!last_journal_LSNs_ || last_journal_LSNs_->size() == shard_flows_.size());
     auto shard_cb = [&](unsigned index, auto*) {
       for (auto id : partition[index]) {
-        auto ec = shard_flows_[id]->StartFullSyncFlow(sync_block, &cntx_);
-        if (ec)
-          cntx_.ReportError(ec);
+        auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &cntx_,
+                                                  last_journal_LSNs_.has_value()
+                                                      ? std::optional((*last_journal_LSNs_)[id])
+                                                      : std::nullopt);
+        if (ec.has_value())
+          is_full_sync[id] = ec.value();
+        else
+          cntx_.ReportError(ec.error());
       }
     };
-
     // Lock to prevent the error handler from running instantly
     // while the flows are in a mixed state.
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
+
+    size_t num_full_flows =
+        std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows_, 0);
+
+    if (num_full_flows == num_df_flows_) {
+      JournalExecutor{&service_}.FlushAll();
+    } else if (num_full_flows == 0) {
+      sync_type = "partial";
+    } else {
+      last_journal_LSNs_.reset();
+      cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                        "Won't do a partial sync: some flows must fully resync");
+    }
   }
 
   RETURN_ON_ERR(cntx_.GetError());
@@ -478,7 +501,7 @@ error_code Replica::InitiateDflySync() {
     return cntx_.ReportError(ec);
   }
 
-  LOG(INFO) << absl::StrCat("Started full sync with ", server().Description());
+  LOG(INFO) << "Started " << sync_type << " sync with " << server().Description();
 
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
@@ -497,7 +520,7 @@ error_code Replica::InitiateDflySync() {
   // Joining flows and resetting state is done by cleanup.
 
   double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time)) / 1000;
-  LOG(INFO) << "Full sync finished in " << strings::HumanReadableElapsedTime(seconds);
+  LOG(INFO) << sync_type << " sync finished in " << strings::HumanReadableElapsedTime(seconds);
   return cntx_.GetError();
 }
 
@@ -590,7 +613,12 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
-  JoinAllFlows();
+  JoinDflyFlows();
+
+  last_journal_LSNs_.emplace();
+  for (auto& flow : shard_flows_) {
+    last_journal_LSNs_->push_back(flow->JournalExecutedCount());
+  }
 
   LOG(INFO) << "Exit stable sync";
   // The only option to unblock is to cancel the context.
@@ -599,7 +627,7 @@ error_code Replica::ConsumeDflyStream() {
   return cntx_.GetError();
 }
 
-void Replica::JoinAllFlows() {
+void Replica::JoinDflyFlows() {
   for (auto& flow : shard_flows_) {
     flow->JoinFlow();
   }
@@ -625,30 +653,41 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   return std::error_code{};
 }
 
-error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
+io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cntx,
+                                                 std::optional<LSN> lsn) {
+  using nonstd::make_unexpected;
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
-  RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
+  RETURN_ON_ERR_T(make_unexpected,
+                  ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << flow_id_;
 
-  auto cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
-                    master_context_.dfly_session_id, " ", flow_id_);
+  std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
+                           master_context_.dfly_session_id, " ", flow_id_);
+  // Try to negotiate a partial sync if possible.
+  if (lsn.has_value() && master_context_.version > DflyVersion::VER1) {
+    absl::StrAppend(&cmd, " ", *lsn);
+  }
 
   ResetParser(/*server_mode=*/false);
   leftover_buf_.emplace(128);
-  RETURN_ON_ERR(SendCommand(cmd));
+  RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
   auto read_resp = ReadRespReply(&*leftover_buf_);
   if (!read_resp.has_value()) {
-    return read_resp.error();
+    return make_unexpected(read_resp.error());
   }
 
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
+  PC_RETURN_ON_BAD_RESPONSE_T(make_unexpected,
+                              CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
 
   string_view flow_directive = ToSV(LastResponseArgs()[0].GetBuf());
   string eof_token;
-  PC_RETURN_ON_BAD_RESPONSE(flow_directive == "FULL");
+  PC_RETURN_ON_BAD_RESPONSE_T(make_unexpected,
+                              flow_directive == "FULL" || flow_directive == "PARTIAL");
+  bool is_full_sync = flow_directive == "FULL";
+
   eof_token = ToSV(LastResponseArgs()[1].GetBuf());
 
   leftover_buf_->ConsumeInput(read_resp->left_in_buffer);
@@ -658,7 +697,7 @@ error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx
   sync_fb_ = fb2::Fiber("shard_full_sync", &DflyShardReplica::FullSyncDflyFb, this,
                         std::move(eof_token), sb, cntx);
 
-  return error_code{};
+  return is_full_sync;
 }
 
 error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
@@ -680,7 +719,7 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   return std::error_code{};
 }
 
-void DflyShardReplica::FullSyncDflyFb(const string& eof_token, BlockingCounter bc, Context* cntx) {
+void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc, Context* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
@@ -722,7 +761,13 @@ void DflyShardReplica::FullSyncDflyFb(const string& eof_token, BlockingCounter b
     leftover_buf_.reset();
   }
 
-  this->journal_rec_executed_.store(loader.journal_offset());
+  if (auto jo = loader.journal_offset(); jo.has_value()) {
+    this->journal_rec_executed_.store(*jo);
+  } else {
+    if (master_context_.version > DflyVersion::VER0)
+      cntx->ReportError(std::make_error_code(errc::protocol_error),
+                        "Error finding journal offset in stream");
+  }
   VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
 }
 
@@ -855,10 +900,11 @@ void DflyShardReplica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Conte
 }
 
 bool DflyShardReplica::InsertTxToSharedMap(const TransactionData& tx_data) {
-  std::lock_guard lk{multi_shard_exe_->map_mu};
-
+  std::unique_lock lk(multi_shard_exe_->map_mu);
   auto [it, was_insert] =
       multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
+  lk.unlock();
+
   VLOG(2) << "txid: " << tx_data.txid << " unique_shard_cnt_: " << tx_data.shard_cnt
           << " was_insert: " << was_insert;
   it->second.block.Dec();
@@ -902,11 +948,11 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
   }
 
   VLOG(2) << "Execute txid: " << tx_data.txid;
-  multi_shard_exe_->map_mu.lock();
+  std::unique_lock lk(multi_shard_exe_->map_mu);
   auto it = multi_shard_exe_->tx_sync_execution.find(tx_data.txid);
   DCHECK(it != multi_shard_exe_->tx_sync_execution.end());
   auto& multi_shard_data = it->second;
-  multi_shard_exe_->map_mu.unlock();
+  lk.unlock();
 
   VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
   // Wait until shards flows got transaction data and inserted to map.

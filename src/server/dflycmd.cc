@@ -8,9 +8,11 @@
 #include <absl/strings/strip.h>
 
 #include <limits>
+#include <memory>
 #include <optional>
 #include <utility>
 
+#include "absl/strings/numbers.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
@@ -114,7 +116,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return Thread(args, cntx);
   }
 
-  if (sub_cmd == "FLOW" && args.size() == 4) {
+  if (sub_cmd == "FLOW" && (args.size() == 4 || args.size() == 5)) {
     return Flow(args, cntx);
   }
 
@@ -241,7 +243,16 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   string_view sync_id_str = ArgS(args, 2);
   string_view flow_id_str = ArgS(args, 3);
 
-  VLOG(1) << "Got DFLY FLOW " << master_id << " " << sync_id_str << " " << flow_id_str;
+  std::optional<LSN> seqid;
+  if (args.size() == 5) {
+    seqid.emplace();
+    if (!absl::SimpleAtoi(ArgS(args, 4), &seqid.value())) {
+      return rb->SendError(facade::kInvalidIntErr);
+    }
+  }
+
+  VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
+          << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
 
   if (master_id != sf_->master_id()) {
     return rb->SendError(kBadMasterId);
@@ -268,13 +279,33 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   absl::InsecureBitGen gen;
   string eof_token = GetRandomHex(gen, 40);
 
-  cntx->replication_flow = &replica_ptr->flows[flow_id];
-  replica_ptr->flows[flow_id].conn = cntx->owner();
-  replica_ptr->flows[flow_id].eof_token = eof_token;
+  auto& flow = replica_ptr->flows[flow_id];
+  cntx->replication_flow = &flow;
+  flow.conn = cntx->owner();
+  flow.eof_token = eof_token;
+  flow.version = replica_ptr->version;
+
   cntx->owner()->Migrate(shard_set->pool()->at(flow_id));
+  sf_->journal()->StartInThread();
+
+  std::string_view sync_type = "FULL";
+  if (seqid.has_value()) {
+    if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
+      flow.start_partial_sync_at = *seqid;
+      VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
+              << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
+      sync_type = "PARTIAL";
+    } else {
+      LOG(INFO) << "Partial sync requested from stale LSN=" << *seqid
+                << " that the replication buffer doesn't contain this anymore (current_lsn="
+                << sf_->journal()->GetLsn() << "). Will perform a full sync of the data.";
+      LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
+                   "--shard_repl_backlog_len option";
+    }
+  }
 
   rb->StartArray(2);
-  rb->SendSimpleString("FULL");
+  rb->SendSimpleString(sync_type);
   rb->SendSimpleString(eof_token);
 }
 
@@ -309,7 +340,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Started full sync with replica " << replica_ptr->address << ":"
+  LOG(INFO) << "Started sync with replica " << replica_ptr->address << ":"
             << replica_ptr->listening_port;
 
   replica_ptr->state.store(SyncState::FULL_SYNC, memory_order_relaxed);
@@ -468,7 +499,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   // of the flows also contain them.
   SaveMode save_mode =
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
-  flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
+  flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false);
 
   flow->cleanup = [flow]() {
     flow->saver->Cancel();
@@ -477,11 +508,12 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     flow->saver.reset();
   };
 
-  sf_->journal()->StartInThread();
-
   // Shard can be null for io thread.
   if (shard != nullptr) {
-    flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
+    if (flow->start_partial_sync_at.has_value())
+      flow->saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
+    else
+      flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 
   flow->full_sync_fb = fb2::Fiber("full_sync", &DflyCmd::FullSyncFb, this, flow, cntx);
@@ -532,7 +564,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
       // Always send original body (with header & without auto async calls) that determines the sha,
       // It's stored only if it's different from the post-processed version.
       string& body = data.orig_body.empty() ? data.body : data.orig_body;
-      script_bodies.push_back(move(body));
+      script_bodies.push_back(std::move(body));
     }
     ec = saver->SaveHeader({script_bodies, {}});
   } else {
@@ -544,7 +576,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
     return;
   }
 
-  if (ec = saver->SaveBody(cntx->GetCancellation(), nullptr); ec) {
+  if (ec = saver->SaveBody(cntx, nullptr); ec) {
     cntx->ReportError(ec);
     return;
   }
@@ -709,6 +741,14 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLags() const {
     }
   }
   return rv;
+}
+
+void DflyCmd::SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version) {
+  auto replica_ptr = GetReplicaInfo(cntx->conn_state.replication_info.repl_session_id);
+  VLOG(1) << "Client version for session_id=" << cntx->conn_state.replication_info.repl_session_id
+          << " is " << int(version);
+
+  replica_ptr->version = version;
 }
 
 bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& sync_info, SyncState expected,

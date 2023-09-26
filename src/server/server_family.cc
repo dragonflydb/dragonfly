@@ -1827,9 +1827,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       if (!absl::SimpleAtoi(arg, &version)) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
-      VLOG(1) << "Client version for session_id="
-              << cntx->conn_state.replication_info.repl_session_id << " is " << version;
-      cntx->conn_state.replication_info.repl_version = DflyVersion(version);
+      dfly_cmd_->SetDflyClientVersion(cntx, DflyVersion(version));
     } else if (cmd == "ACK" && args.size() == 2) {
       // Don't send error/Ok back through the socket, because we don't want to interleave with
       // the journal writes that we write into the same socket.

@@ -4,8 +4,9 @@ import subprocess
 import aiohttp
 import logging
 import os
+import re
 import psutil
-from typing import Optional
+from typing import Optional, List
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 
@@ -42,6 +43,7 @@ class DflyInstance:
         self.params = params
         self.proc: Optional[subprocess.Popen] = None
         self._client: Optional[RedisClient] = None
+        self.log_files: List[str] = []
 
         self.dynamic_port = False
         if self.params.existing_port:
@@ -54,6 +56,12 @@ class DflyInstance:
             self.args["port"] = -1
             self._port = None
             self.dynamic_port = True
+
+        # Some tests check the log files, so make sure the log files
+        # exist even when people try to debug their test.
+        if "logtostderr" in self.params.args:
+            self.params.args.remove("logtostderr")
+            self.params.args.append("alsologtostderr")
 
     def __del__(self):
         assert self.proc == None
@@ -94,6 +102,7 @@ class DflyInstance:
                 time.sleep(0.05)
         else:
             raise DflyStartException("Process didn't start listening on port in time")
+        self.log_files = self.get_logs_from_psutil()
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
@@ -180,6 +189,14 @@ class DflyInstance:
             return ports.pop()
         raise RuntimeError("Couldn't parse port")
 
+    def get_logs_from_psutil(self) -> List[str]:
+        p = psutil.Process(self.proc.pid)
+        rv = []
+        for file in p.open_files():
+            if ".log." in file.path and "dragonfly" in file.path:
+                rv.append(file.path)
+        return rv
+
     @staticmethod
     def format_args(args):
         out = []
@@ -199,6 +216,17 @@ class DflyInstance:
             metric_family.name: metric_family
             for metric_family in text_string_to_metric_families(data)
         }
+
+    def is_in_logs(self, pattern):
+        if self.proc is not None:
+            raise RuntimeError("Must close server first")
+
+        matcher = re.compile(pattern)
+        for path in self.log_files:
+            for line in open(path):
+                if matcher.search(line):
+                    return True
+        return False
 
 
 class DflyInstanceFactory:

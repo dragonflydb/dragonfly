@@ -148,10 +148,13 @@ class ProtocolClient {
 /**
  * A convenience macro to use with ProtocolClient instances for protocol input validation.
  */
-#define PC_RETURN_ON_BAD_RESPONSE(x)                                                            \
-  do {                                                                                          \
-    if (!(x)) {                                                                                 \
-      LOG(ERROR) << "Bad response to \"" << last_cmd_ << "\": \"" << absl::CEscape(last_resp_); \
-      return std::make_error_code(errc::bad_message);                                           \
-    }                                                                                           \
+#define PC_RETURN_ON_BAD_RESPONSE_T(T, x)                                                      \
+  do {                                                                                         \
+    if (!(x)) {                                                                                \
+      LOG(ERROR) << "Bad response to \"" << last_cmd_ << "\": \"" << absl::CEscape(last_resp_) \
+                 << "\"";                                                                      \
+      return (T)(std::make_error_code(errc::bad_message));                                     \
+    }                                                                                          \
   } while (false)
+
+#define PC_RETURN_ON_BAD_RESPONSE(x) PC_RETURN_ON_BAD_RESPONSE_T(std::error_code, x)
