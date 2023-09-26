@@ -621,13 +621,16 @@ const char *strEncoding(int encoding) {
     case OBJ_ENCODING_RAW: return "raw";
     case OBJ_ENCODING_INT: return "int";
     case OBJ_ENCODING_HT: return "hashtable";
-    case OBJ_ENCODING_QUICKLIST: return "quicklist";
+    case OBJ_ENCODING_ZIPMAP: return "zipmap";
+    case OBJ_ENCODING_LINKEDLIST: return "linkedlist";
     case OBJ_ENCODING_ZIPLIST: return "ziplist";
-    case OBJ_ENCODING_LISTPACK: return "listpack";
     case OBJ_ENCODING_INTSET: return "intset";
     case OBJ_ENCODING_SKIPLIST: return "skiplist";
     case OBJ_ENCODING_EMBSTR: return "embstr";
+    case OBJ_ENCODING_QUICKLIST: return "quicklist";
     case OBJ_ENCODING_STREAM: return "stream";
+    case OBJ_ENCODING_LISTPACK: return "listpack";
+    case OBJ_ENCODING_COMPRESS_INTERNAL: return "compress_internal";
     default: return "unknown";
     }
 }
