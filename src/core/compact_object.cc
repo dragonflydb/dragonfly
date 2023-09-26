@@ -86,7 +86,7 @@ size_t MallocUsedSet(unsigned encoding, void* ptr) {
 size_t MallocUsedHSet(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingListPack:
-      return lpBytes(reinterpret_cast<uint8_t*>(ptr));
+      return zmalloc_usable_size(reinterpret_cast<uint8_t*>(ptr));
     case kEncodingStrMap2: {
       StringMap* sm = (StringMap*)ptr;
       return sm->ObjMallocUsed() + sm->SetMallocUsed();
@@ -99,7 +99,7 @@ size_t MallocUsedHSet(unsigned encoding, void* ptr) {
 size_t MallocUsedZSet(unsigned encoding, void* ptr) {
   switch (encoding) {
     case OBJ_ENCODING_LISTPACK:
-      return lpBytes(reinterpret_cast<uint8_t*>(ptr));
+      return zmalloc_usable_size(reinterpret_cast<uint8_t*>(ptr));
     case OBJ_ENCODING_SKIPLIST: {
       detail::SortedMap* ss = (detail::SortedMap*)ptr;
       return ss->MallocSize();  // DictMallocSize(zs->dict);
@@ -458,7 +458,7 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
       /* Remove and re-insert when score changed. */
       if (score != curscore) {
         lp = lpDeleteRangeWithEntry(lp, &eptr, 2);
-        lp = zzlInsert(lp, ele, score);
+        lp = detail::ZzlInsert(lp, ele, score);
         inner_obj_ = lp;
         *out_flags |= ZADD_OUT_UPDATED;
       }
@@ -476,7 +476,8 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
         inner_obj_ = ss.release();
         encoding_ = OBJ_ENCODING_SKIPLIST;
       } else {
-        inner_obj_ = zzlInsert(lp, ele, score);
+        lp = detail::ZzlInsert(lp, ele, score);
+        inner_obj_ = lp;
         if (newscore)
           *newscore = score;
         *out_flags |= ZADD_OUT_ADDED;
