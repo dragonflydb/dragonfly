@@ -1476,7 +1476,7 @@ void DestroyGroup(string_view key, string_view gname, ConnectionContext* cntx) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
-  OpStatus result = cntx->transaction->ScheduleSingleHop(cb);
+  OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::OK:
       return (*cntx)->SendLong(1);
