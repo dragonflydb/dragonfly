@@ -1278,16 +1278,16 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
   OpResult<pair<stream*, streamCG*>> res = FindGroup(op_args, key, gname);
   if (!res)
     return res.status();
-  stream* stream_inst = res->first;
-  streamCG* cg = res->second;
+  auto [stream_inst, cg] = *res;
+
   if (cg == nullptr || stream_inst == nullptr) {
     return 0;
   }
 
   int acknowledged = 0;
-  for (size_t j = 0; j < ids.size(); j++) {
+  for (auto& id : ids) {
     unsigned char buf[sizeof(streamID)];
-    streamEncodeID(buf, &ids[j]);
+    streamEncodeID(buf, &id);
 
     // From Redis' xackCommand's implemenation
     // Lookup the ID in the group PEL: it will have a reference to the

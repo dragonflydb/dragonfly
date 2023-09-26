@@ -675,6 +675,14 @@ TEST_F(StreamFamilyTest, XAck) {
   auto resp = Run({"xack", "foo", "cgroup", "1-0"});
   EXPECT_THAT(resp, IntArg(1));
 
+  // acknowledge a message from non-existing stream.
+  resp = Run({"xack", "nosuchstream", "cgroup", "1-0"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // acknowledge a message for a non-existing consumer group.
+  resp = Run({"xack", "foo", "nosuchcgroup", "1-0"});
+  EXPECT_THAT(resp, IntArg(0));
+
   // Verifies message id 1-0 gets removed from PEL.
   resp = Run({"xreadgroup", "group", "cgroup", "consumer", "streams", "foo", "0"});
   EXPECT_THAT(resp,
