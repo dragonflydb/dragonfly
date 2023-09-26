@@ -60,7 +60,7 @@ class Proxy:
 
     def drop_connection(self):
         """
-        Randomally drop one connection
+        Randomly drop one connection
         """
         if self.stop_connections:
             cb = random.choice(self.stop_connections)
