@@ -178,17 +178,16 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.shard->db_slice();
-  auto search_results = search_algo->Search(&indices_);
+  auto search_results = search_algo->Search(&indices_, params.limit_offset + params.limit_total);
 
   if (!search_results.error.empty())
     return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
 
-  size_t serialize_count = min(search_results.ids.size(), params.limit_offset + params.limit_total);
   vector<SerializedSearchDoc> out;
-  out.reserve(serialize_count);
+  out.reserve(search_results.ids.size());
 
   size_t expired_count = 0;
-  for (size_t i = 0; i < search_results.ids.size() && out.size() < serialize_count; i++) {
+  for (size_t i = 0; i < search_results.ids.size(); i++) {
     auto key = key_index_.Get(search_results.ids[i]);
     auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
 
@@ -205,7 +204,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), score});
   }
 
-  return SearchResult{std::move(out), search_results.ids.size() - expired_count,
+  return SearchResult{search_results.total - expired_count, std::move(out),
                       std::move(search_results.profile)};
 }
 
