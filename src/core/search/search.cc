@@ -88,7 +88,7 @@ struct IndexResult {
     return visit(cb, value_);
   }
 
-  // Move out of owned or copy borrowed
+  // Move out of owned or copy borrowed, truncate to limit if set
   DocVec Take(optional<size_t> limit = nullopt) {
     if (IsOwned()) {
       auto out = std::move(get<DocVec>(value_));

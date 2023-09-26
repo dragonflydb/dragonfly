@@ -86,7 +86,7 @@ struct SearchResult {
   size_t total;  // how many documents were matched in total
 
   // number of matches before any aggregation, used by multi-shard optimizations
-  size_t pre_aggreation_total;
+  size_t pre_aggregation_total;
 
   // The ids of the matched documents
   std::vector<DocId> ids;
