@@ -9,7 +9,6 @@ extern "C" {
 }
 
 #include <absl/container/inlined_vector.h>
-#include <double-conversion/string-to-double.h>
 
 #include <algorithm>
 #include <array>
@@ -35,7 +34,6 @@ namespace {
 
 using namespace std;
 using namespace facade;
-using namespace double_conversion;
 
 using CI = CommandId;
 DEFINE_VARZ(VarzQps, set_qps);
@@ -253,10 +251,8 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   string tmp;
   string_view slice = GetSlice(op_args.shard, it->second, &tmp);
 
-  StringToDoubleConverter stod(StringToDoubleConverter::NO_FLAGS, 0, 0, NULL, NULL);
-  int processed_digits = 0;
-  double base = stod.StringToDouble(slice.data(), slice.size(), &processed_digits);
-  if (unsigned(processed_digits) != slice.size()) {
+  double base = 0;
+  if (!ParseDouble(slice, &base)) {
     return OpStatus::INVALID_FLOAT;
   }
 
@@ -1499,6 +1495,7 @@ constexpr uint32_t kClThrottle = THROTTLE;
 }  // namespace acl
 
 void StringFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1, acl::kSet}.HFUNC(Set)
       << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1, acl::kSetEx}.HFUNC(

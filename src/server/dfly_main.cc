@@ -9,6 +9,7 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <absl/flags/parse.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
@@ -50,9 +51,16 @@
 // Note that SOURCE_PATH_FROM_BUILD_ENV is taken from the build system
 #define BUILD_LOCATION_PATH STRING_MAKE_PP(SOURCE_PATH_FROM_BUILD_ENV)
 
+#ifdef __APPLE__
+#include <crt_externs.h>
+#define environ (*_NSGetEnviron())
+#else
+extern char** environ;
+#endif
+
 using namespace std;
 
-ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
@@ -62,7 +70,7 @@ ABSL_FLAG(string, bind, "",
           "It's not advised due to security implications.");
 ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the file");
 ABSL_FLAG(string, unixsocket, "",
-          "If not empty - specifies path for the Unis socket that will "
+          "If not empty - specifies path for the Unix socket that will "
           "be used for listening for incoming connections.");
 ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal value.");
 ABSL_FLAG(bool, force_epoll, false,
@@ -346,7 +354,21 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   opts.disable_time_update = false;
   const auto& bind = GetFlag(FLAGS_bind);
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
-  auto port = GetFlag(FLAGS_port);
+
+  int32_t port = GetFlag(FLAGS_port);
+  // The reason for this code is a bit silly. We want to provide a way to
+  // bind any 'random' available port. The way to do that is to call
+  // bind with the argument port 0. However we can't expose this functionality
+  // as is to our users: Since giving --port=0 to redis DISABLES the network
+  // interface that would break users' existing configurations in potentionally
+  // unsafe ways. For that reason the user's --port=-1 means to us 'bind port 0'.
+  if (port == -1) {
+    port = 0;
+  } else if (port < 0 || port > 65535) {
+    LOG(ERROR) << "Bad port number " << port;
+    exit(1);
+  }
+
   auto mc_port = GetFlag(FLAGS_memcached_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
   bool unlink_uds = false;
@@ -419,6 +441,10 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     if (ec) {
       LOG(ERROR) << "Could not open port " << port << ", error: " << ec.message();
       exit(1);
+    }
+
+    if (port == 0) {
+      absl::SetFlag(&FLAGS_port, main_listener->socket()->LocalEndpoint().port());
     }
   }
 
@@ -701,6 +727,46 @@ void PrintBasicUsageInfo() {
   std::cout << endl;
 }
 
+void ParseFlagsFromEnv() {
+  if (getenv("DFLY_PASSWORD")) {
+    LOG(WARNING)
+        << "DFLY_PASSWORD environment variable is being deprecated in favour of DFLY_requirepass";
+  }
+  // Allowed environment variable names that can have
+  // DFLY_ prefix, but don't necessarily have an ABSL flag created
+  absl::flat_hash_set<std::string_view> ignored_environment_flag_names = {"DEV_ENV", "PASSWORD"};
+  const auto& flags = absl::GetAllFlags();
+  for (char** env = environ; *env != nullptr; env++) {
+    constexpr string_view kPrefix = "DFLY_";
+    string_view environ_var = *env;
+    if (absl::StartsWith(environ_var, kPrefix)) {
+      // Per 'man environ', environment variables are included with their values
+      // in the format "name=value". Need to strip them apart, in order to work with flags object
+      pair<string_view, string_view> environ_pair =
+          absl::StrSplit(absl::StripPrefix(environ_var, kPrefix), absl::MaxSplits('=', 1));
+      const auto& [flag_name, flag_value] = environ_pair;
+      if (ignored_environment_flag_names.contains(flag_name)) {
+        continue;
+      }
+      auto entry = flags.find(flag_name);
+      if (entry != flags.end()) {
+        if (absl::flags_internal::WasPresentOnCommandLine(flag_name)) {
+          continue;
+        }
+        string error;
+        auto& flag = entry->second;
+        bool success = flag->ParseFrom(flag_value, &error);
+        if (!success) {
+          LOG(FATAL) << "could not parse flag " << flag->Name()
+                     << " from environment variable. Error: " << error;
+        }
+      } else {
+        LOG(FATAL) << "unknown environment variable DFLY_" << flag_name;
+      }
+    }
+  }
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
@@ -721,6 +787,7 @@ Usage: dragonfly [FLAGS]
   absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
+  ParseFlagsFromEnv();
 
   PrintBasicUsageInfo();
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
@@ -754,14 +821,14 @@ Usage: dragonfly [FLAGS]
     }
   }
 
-  auto memory = ReadMemInfo().value();
+  io::MemInfoData mem_info = ReadMemInfo().value_or(io::MemInfoData{});
   size_t max_available_threads = 0u;
 
 #ifdef __linux__
-  UpdateResourceLimitsIfInsideContainer(&memory, &max_available_threads);
+  UpdateResourceLimitsIfInsideContainer(&mem_info, &max_available_threads);
 #endif
 
-  if (memory.swap_total != 0)
+  if (mem_info.swap_total != 0)
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
   dfly::max_memory_limit = dfly::GetMaxMemoryFlag();
@@ -769,8 +836,13 @@ Usage: dragonfly [FLAGS]
   if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
-    size_t available = memory.mem_avail;
+    size_t available = mem_info.mem_avail;
     size_t maxmemory = size_t(0.8 * available);
+    if (maxmemory == 0) {
+      LOG(ERROR) << "Could not deduce how much memory available. "
+                 << "Use --maxmemory=... to specify explicitly";
+      return 1;
+    }
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
 
@@ -778,15 +850,15 @@ Usage: dragonfly [FLAGS]
     dfly::max_memory_limit = maxmemory;
   } else {
     string hr_limit = HumanReadableNumBytes(dfly::max_memory_limit);
-    if (dfly::max_memory_limit > memory.mem_avail)
+    if (dfly::max_memory_limit > mem_info.mem_avail)
       LOG(WARNING) << "Got memory limit " << hr_limit << ", however only "
-                   << HumanReadableNumBytes(memory.mem_avail) << " was found.";
+                   << HumanReadableNumBytes(mem_info.mem_avail) << " was found.";
     LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
 
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
-  mi_option_set(mi_option_decommit_delay, 0);
+  mi_option_set(mi_option_decommit_delay, 1);
 
   unique_ptr<util::ProactorPool> pool;
 

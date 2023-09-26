@@ -118,6 +118,16 @@ TEST_F(SearchFamilyTest, Simple) {
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:this"}), kNoResults);
 }
 
+TEST_F(SearchFamilyTest, Errors) {
+  Run({"ft.create", "i1", "PREFIX", "1", "d:", "SCHEMA", "foo", "TAG", "bar", "TEXT"});
+
+  // Wrong field
+  EXPECT_THAT(Run({"ft.search", "i1", "@whoami:lol"}), ErrArg("Invalid field: whoami"));
+
+  // Wrong field type
+  EXPECT_THAT(Run({"ft.search", "i1", "@foo:lol"}), ErrArg("Wrong access type for field: foo"));
+}
+
 TEST_F(SearchFamilyTest, NoPrefix) {
   Run({"hset", "d:1", "a", "one", "k", "v"});
   Run({"hset", "d:2", "a", "two", "k", "v"});
@@ -359,6 +369,19 @@ TEST_F(SearchFamilyTest, Unicode) {
   auto resp = Run({"ft.search", "i1", "λιβελλούλη"});
   EXPECT_THAT(resp.GetVec()[2].GetVec(),
               UnorderedElementsAre("visits", "100", "title", "πανίσχυρη ΛΙΒΕΛΛΟΎΛΗ Δίας"));
+}
+
+TEST_F(SearchFamilyTest, UnicodeWords) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text"}), "OK");
+
+  Run({"hset", "d:1", "title",
+       "WORD!!! Одно слово? Zwei Wörter. Comma before ,sentence, "
+       "Τρεις λέξεις: χελώνα-σκύλου-γάτας. !זה עובד",
+       "visits", "400"});
+
+  // Make sure it includes ALL those words
+  EXPECT_THAT(Run({"ft.search", "i1", "word слово wörter sentence λέξεις γάτας עובד"}),
+              AreDocIds("d:1"));
 }
 
 TEST_F(SearchFamilyTest, SimpleExpiry) {

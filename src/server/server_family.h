@@ -27,6 +27,12 @@ class AWS;
 
 namespace dfly {
 
+namespace detail {
+
+class SnapshotStorage;
+
+}  // namespace detail
+
 std::string GetPassword();
 
 namespace journal {
@@ -59,6 +65,9 @@ struct Metrics {
   size_t heap_comitted_bytes = 0;
   size_t small_string_bytes = 0;
   uint64_t ooo_tx_transaction_cnt = 0;
+  uint64_t eval_io_coordination_cnt = 0;
+  uint64_t eval_shardlocal_coordination_cnt = 0;
+  uint64_t tx_schedule_cancel_cnt = 0;
   uint32_t traverse_ttl_per_sec = 0;
   uint32_t delete_ttl_per_sec = 0;
   bool is_master = true;
@@ -127,7 +136,7 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  Future<std::error_code> Load(const std::string& file_name);
+  Future<GenericError> Load(const std::string& file_name);
 
   // used within tests.
   bool IsSaving() const {
@@ -212,7 +221,7 @@ class ServerFamily {
   void SnapshotScheduling();
 
   Fiber snapshot_schedule_fb_;
-  Future<std::error_code> load_result_;
+  Future<GenericError> load_result_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;
@@ -242,6 +251,7 @@ class ServerFamily {
   Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
   std::unique_ptr<util::cloud::AWS> aws_;
+  std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 };
 
 }  // namespace dfly

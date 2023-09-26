@@ -3,33 +3,14 @@ import redis
 from redis import asyncio as aioredis
 from . import DflyInstanceFactory
 from .utility import disconnect_clients
+import tempfile
 import asyncio
-
-
-@pytest.mark.asyncio
-async def test_acl_list_default_user(async_client):
-    """
-    make sure that the default created user is printed correctly
-    """
-
-    # Bad input
-    with pytest.raises(redis.exceptions.ResponseError):
-        await async_client.execute_command("ACL LIST TEMP")
-
-    with pytest.raises(redis.exceptions.ResponseError):
-        await async_client.execute_command("ACL")
-
-    result = await async_client.execute_command("ACL LIST")
-    assert 1 == len(result)
-    assert "user default on nopass +@ALL" == result[0]
+import os
+from . import dfly_args
 
 
 @pytest.mark.asyncio
 async def test_acl_setuser(async_client):
-    # Bad input
-    with pytest.raises(redis.exceptions.ResponseError):
-        await async_client.execute_command("ACL SETUSER")
-
     await async_client.execute_command("ACL SETUSER kostas")
     result = await async_client.execute_command("ACL LIST")
     assert 2 == len(result)
@@ -62,27 +43,24 @@ async def test_acl_setuser(async_client):
     result = await async_client.execute_command("ACL LIST")
     assert "user kostas on nopass +@ALL" in result
 
+    # commands
+    await async_client.execute_command("ACL SETUSER kostas +set +get +hset")
+    result = await async_client.execute_command("ACL LIST")
+    assert "user kostas on nopass +@ALL +SET +GET +HSET" in result
 
-@pytest.mark.asyncio
-async def test_acl_auth(async_client):
-    await async_client.execute_command("ACL SETUSER shahar >mypass")
+    await async_client.execute_command("ACL SETUSER kostas -set -get +hset")
+    result = await async_client.execute_command("ACL LIST")
+    assert "user kostas on nopass +@ALL +HSET" in result
 
-    with pytest.raises(redis.exceptions.ResponseError):
-        await async_client.execute_command("AUTH shahar wrong_pass")
+    # interleaved
+    await async_client.execute_command("ACL SETUSER kostas -hset +get -get -@all")
+    result = await async_client.execute_command("ACL LIST")
+    assert "user kostas on nopass +@NONE" in result
 
-    # This should fail because user is inactive
-    with pytest.raises(redis.exceptions.ResponseError):
-        await async_client.execute_command("AUTH shahar mypass")
-
-    # Activate user
-    await async_client.execute_command("ACL SETUSER shahar ON +@fast")
-
-    result = await async_client.execute_command("AUTH shahar mypass")
-    assert result == "OK"
-
-    # Let's also try default
-    result = await async_client.execute_command("AUTH default nopass")
-    assert result == "OK"
+    # interleaved with categories
+    await async_client.execute_command("ACL SETUSER kostas +@string +get -get +set")
+    result = await async_client.execute_command("ACL LIST")
+    assert "user kostas on nopass +@STRING +SET" in result
 
 
 @pytest.mark.asyncio
@@ -135,11 +113,26 @@ async def test_acl_categories(async_client):
 
 
 @pytest.mark.asyncio
-async def test_acl_categories_multi_exec_squash(df_local_factory):
+async def test_acl_commands(async_client):
+    await async_client.execute_command("ACL SETUSER random ON >mypass +@NONE +set +get")
+
+    result = await async_client.execute_command("AUTH random mypass")
+    assert result == "OK"
+
+    result = await async_client.execute_command("SET foo bar")
+    assert result == "OK"
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("ZADD myset 1 two")
+
+
+@pytest.mark.asyncio
+async def test_acl_cat_commands_multi_exec_squash(df_local_factory):
     df = df_local_factory.create(multi_exec_squash=True, port=1111)
 
     df.start()
 
+    # Testing acl categories
     client = aioredis.Redis(port=df.port)
     res = await client.execute_command("ACL SETUSER kk ON >kk +@transaction +@string")
     assert res == b"OK"
@@ -196,13 +189,38 @@ async def test_acl_categories_multi_exec_squash(df_local_factory):
     await admin_client.close()
     await client.close()
 
+    # Testing acl commands
+    client = aioredis.Redis(port=df.port)
+    res = await client.execute_command("ACL SETUSER myuser ON >kk +@transaction +set")
+    assert res == b"OK"
+
+    res = await client.execute_command("AUTH myuser kk")
+    assert res == b"OK"
+
+    await client.execute_command("MULTI")
+    assert res == b"OK"
+    for x in range(33):
+        await client.execute_command(f"SET x{x} {x}")
+    await client.execute_command("EXEC")
+
+    # NOPERM between multi and exec
+    admin_client = aioredis.Redis(port=df.port)
+    res = await admin_client.execute_command("ACL SETUSER myuser -set")
+    assert res == b"OK"
+
+    # NOPERM while executing multi
+    await client.execute_command("MULTI")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command(f"SET x{x} {x}")
+
+    await admin_client.close()
+    await client.close()
+
 
 @pytest.mark.asyncio
 async def test_acl_deluser(df_server):
     client = aioredis.Redis(port=df_server.port)
-
-    with pytest.raises(redis.exceptions.ResponseError):
-        await client.execute_command("ACL DELUSER random")
 
     res = await client.execute_command("ACL SETUSER george ON >pass +@transaction +@string")
     assert res == b"OK"
@@ -274,17 +292,99 @@ async def test_acl_with_long_running_script(df_server):
     await admin_client.close()
 
 
+def create_temp_file(content, tmp_dir):
+    file = tempfile.NamedTemporaryFile(mode="w", dir=tmp_dir, delete=False)
+    acl = os.path.join(tmp_dir, file.name)
+    file.write(content)
+    file.flush()
+    return acl
+
+
 @pytest.mark.asyncio
-async def test_acl_whoami(async_client):
-    await async_client.execute_command("ACL SETUSER kostas >kk +@ALL ON")
+@dfly_args({"port": 1111})
+async def test_bad_acl_file(df_local_factory, tmp_dir):
+    acl = create_temp_file("ACL SETUSER kostas ON >mypass +@WRONG", tmp_dir)
+
+    df = df_local_factory.create(aclfile=acl)
+
+    df.start()
+
+    client = aioredis.Redis(port=df.port)
 
     with pytest.raises(redis.exceptions.ResponseError):
-        await async_client.execute_command("ACL WHOAMI WHO")
+        await client.execute_command("ACL LOAD")
 
-    result = await async_client.execute_command("ACL WHOAMI")
-    assert result == "User is default"
+    await client.close()
 
-    result = await async_client.execute_command("AUTH kostas kk")
 
-    result = await async_client.execute_command("ACL WHOAMI")
-    assert result == "User is kostas"
+@pytest.mark.asyncio
+@dfly_args({"port": 1111})
+async def test_good_acl_file(df_local_factory, tmp_dir):
+    acl = create_temp_file("", tmp_dir)
+    df = df_local_factory.create(aclfile=acl)
+
+    df.start()
+    client = aioredis.Redis(port=df.port)
+
+    await client.execute_command("ACL SETUSER roy ON >mypass +@STRING +HSET")
+    await client.execute_command("ACL SETUSER shahar >mypass +@SET")
+    await client.execute_command("ACL SETUSER vlad +@STRING")
+
+    result = await client.execute_command("ACL LIST")
+    assert 3 == len(result)
+    assert "user roy on ea71c25a7a60224 +@STRING +HSET" in result
+    assert "user shahar off ea71c25a7a60224 +@SET" in result
+    assert "user vlad off nopass +@STRING" in result
+
+    result = await client.execute_command("ACL DELUSER shahar")
+    assert result == b"OK"
+
+    result = await client.execute_command("ACL SAVE")
+
+    result = await client.execute_command("ACL LOAD")
+
+    result = await client.execute_command("ACL LIST")
+    assert 2 == len(result)
+    assert "user roy on ea71c25a7a60224 +@STRING +HSET" in result
+    assert "user vlad off nopass +@STRING" in result
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_acl_log(async_client):
+    res = await async_client.execute_command("ACL LOG")
+    assert [] == res
+
+    await async_client.execute_command("ACL SETUSER elon >mars ON +@string +@dangerous")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("AUTH elon wrong")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 1 == len(res)
+    assert res[0]["reason"] == "AUTH"
+    assert res[0]["object"] == "AUTH"
+    assert res[0]["username"] == "elon"
+
+    await async_client.execute_command("ACL LOG RESET")
+    res = await async_client.execute_command("ACL LOG")
+    assert 0 == len(res)
+
+    res = await async_client.execute_command("AUTH elon mars")
+    res = await async_client.execute_command("SET mykey 22")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("HSET mk kk 22")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 1 == len(res)
+    assert res[0]["reason"] == "COMMAND"
+    assert res[0]["object"] == "HSET"
+    assert res[0]["username"] == "elon"
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("LPUSH mylist 2")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 2 == len(res)

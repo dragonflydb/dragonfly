@@ -51,7 +51,11 @@ class CollectingMonitor:
                 pass
             self._monitor_task = None
 
-        if len(self.messages) > 0 and self.messages[0].cmd == "SELECT 1":
+        def should_exclude(cmd: str):
+            cmd = cmd.upper()
+            return "SELECT" in cmd or "CLIENT SETINFO" in cmd
+
+        while len(self.messages) > 0 and should_exclude(self.messages[0].cmd):
             self.messages = self.messages[1:]
         return self.messages
 

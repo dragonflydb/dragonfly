@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
+#include "redis/zmalloc.h"
 #include "redis/zset.h"
 }
 
@@ -42,7 +43,6 @@ static const char kFloatRangeErr[] = "min or max is not a float";
 static const char kLexRangeErr[] = "min or max not valid string range item";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
-constexpr unsigned kMaxListPackValue = 64;
 using MScoreResponse = std::vector<std::optional<double>>;
 
 using ScoredMember = std::pair<std::string, double>;
@@ -163,14 +163,15 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
 
   PrimeIterator& it = add_res.first;
   PrimeValue& pv = it->second;
-
+  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   if (add_res.second || zparams.override) {
-    if (member_len > kMaxListPackValue) {
+    if (member_len > server.max_map_field_len) {
       detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, zs);
     } else {
       unsigned char* lp = lpNew(0);
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+      stats->listpack_blob_cnt++;
     }
 
     if (!add_res.second) {
@@ -915,6 +916,14 @@ struct AddResult {
   bool is_nan = false;
 };
 
+size_t EstimateListpackMinBytes(ScoredMemberSpan members) {
+  size_t bytes = members.size() * 2;  // at least 2 bytes per score;
+  for (const auto& member : members) {
+    bytes += (member.second.size() + 1);  // string + at least 1 byte for string header.
+  }
+  return bytes;
+}
+
 OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_view key,
                           ScoredMemberSpan members) {
   DCHECK(!members.empty() || zparams.override);
@@ -926,7 +935,12 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
     return OpStatus::OK;
   }
 
-  OpResult<PrimeIterator> res_it = FindZEntry(zparams, op_args, key, members.front().second.size());
+  // When we have too many members to add, make sure field_len is large enough to use
+  // skiplist encoding.
+  size_t field_len = members.size() > server.zset_max_listpack_entries
+                         ? UINT32_MAX
+                         : members.front().second.size();
+  OpResult<PrimeIterator> res_it = FindZEntry(zparams, op_args, key, field_len);
 
   if (!res_it)
     return res_it.status();
@@ -942,6 +956,23 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   OpStatus op_status = OpStatus::OK;
   AddResult aresult;
   detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
+  bool is_list_pack = robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK;
+
+  // opportunistically reserve space if multiple entries are about to be added.
+  if ((zparams.flags & ZADD_IN_XX) == 0 && members.size() > 2) {
+    if (is_list_pack) {
+      uint8_t* zl = (uint8_t*)robj_wrapper->inner_obj();
+      size_t malloc_reserved = zmalloc_size(zl);
+      size_t min_sz = EstimateListpackMinBytes(members);
+      if (min_sz > malloc_reserved) {
+        zl = (uint8_t*)zrealloc(zl, min_sz);
+        robj_wrapper->set_inner_obj(zl);
+      }
+    } else {
+      detail::SortedMap* sm = (detail::SortedMap*)robj_wrapper->inner_obj();
+      sm->Reserve(members.size());
+    }
+  }
 
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
@@ -968,6 +999,12 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
       updated++;
     if (!(retflags & ZADD_OUT_NOP))
       processed++;
+  }
+
+  // if we migrated to skip_list - update listpack stats.
+  if (is_list_pack && robj_wrapper->encoding() != OBJ_ENCODING_LISTPACK) {
+    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
+    --stats->listpack_blob_cnt;
   }
 
   op_args.shard->db_slice().PostUpdate(op_args.db_cntx.db_index, *res_it, key);
@@ -1690,22 +1727,50 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
+  absl::flat_hash_set<string_view> members_set;
   absl::InlinedVector<ScoredMemberView, 4> members;
+
+  unsigned num_members = (args.size() - i) / 2;
+
+  // We sort the fields if the expected encoding could be listpack.
+  bool to_sort_fields = false;
+
+  if (num_members > 2) {
+    members.reserve(num_members);
+
+    members_set.reserve(num_members);
+    to_sort_fields = true;
+  }
+
   for (; i < args.size(); i += 2) {
     string_view cur_arg = ArgS(args, i);
     double val = 0;
 
+    // Parse the score. Treats Nan as invalid double.
     if (!ParseDouble(cur_arg, &val)) {
       VLOG(1) << "Bad score:" << cur_arg << "|";
       return (*cntx)->SendError(kInvalidFloatErr);
     }
-    if (isnan(val)) {
-      return (*cntx)->SendError(kScoreNaN);
-    }
+
     string_view member = ArgS(args, i + 1);
+    if (to_sort_fields) {
+      auto [_, inserted] = members_set.insert(member);
+      to_sort_fields &= inserted;
+    }
     members.emplace_back(val, member);
   }
   DCHECK(cntx->transaction);
+
+  if (to_sort_fields) {
+    if (num_members == 2) {  // fix unique_members for this special case.
+      if (members[0].second == members[1].second) {
+        to_sort_fields = false;
+      }
+    }
+    if (to_sort_fields) {
+      std::sort(members.begin(), members.end());
+    }
+  }
 
   absl::Span memb_sp{members.data(), members.size()};
   ZAddGeneric(key, zparams, memb_sp, cntx);
@@ -2574,7 +2639,7 @@ constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
-
+  registry->StartFamily();
   *registry
       << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
       << CI{"BZPOPMIN",

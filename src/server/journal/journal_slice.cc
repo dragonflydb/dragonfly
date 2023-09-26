@@ -5,12 +5,19 @@
 #include "server/journal/journal_slice.h"
 
 #include <absl/container/inlined_vector.h>
+#include <absl/flags/flag.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <fcntl.h>
 
 #include <filesystem>
 
+#include "base/function2.hpp"
 #include "base/logging.h"
+#include "server/journal/serializer.h"
+
+ABSL_FLAG(uint32_t, shard_repl_backlog_len, 1 << 10,
+          "The length of the circular replication log per shard");
 
 namespace dfly {
 namespace journal {
@@ -26,6 +33,14 @@ string ShardName(std::string_view base, unsigned index) {
 }
 */
 
+uint32_t NextPowerOf2(uint32_t x) {
+  if (x < 2) {
+    return 1;
+  }
+  int log = 32 - __builtin_clz(x - 1);
+  return 1 << log;
+}
+
 }  // namespace
 
 #define CHECK_EC(x)                                                                 \
@@ -33,12 +48,6 @@ string ShardName(std::string_view base, unsigned index) {
     auto __ec$ = (x);                                                               \
     CHECK(!__ec$) << "Error: " << __ec$ << " " << __ec$.message() << " for " << #x; \
   } while (false)
-
-struct JournalSlice::RingItem {
-  LSN lsn;
-  TxId txid;
-  Op opcode;
-};
 
 JournalSlice::JournalSlice() {
 }
@@ -48,11 +57,11 @@ JournalSlice::~JournalSlice() {
 }
 
 void JournalSlice::Init(unsigned index) {
-  // if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
-  //   return;
+  if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
+    return;
 
   slice_index_ = index;
-  // ring_buffer_.emplace(128);  // TODO: to make it configurable
+  ring_buffer_.emplace(NextPowerOf2(absl::GetFlag(FLAGS_shard_repl_backlog_len)));
 }
 
 #if 0
@@ -116,20 +125,50 @@ error_code JournalSlice::Close() {
 }
 #endif
 
+bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
+  DCHECK(ring_buffer_);
+
+  if (ring_buffer_->empty()) {
+    return false;
+  }
+  return (*ring_buffer_)[0].lsn <= lsn && lsn <= ((*ring_buffer_)[ring_buffer_->size() - 1].lsn);
+}
+
+std::string_view JournalSlice::GetEntry(LSN lsn) const {
+  DCHECK(ring_buffer_ && IsLSNInBuffer(lsn));
+  auto start = (*ring_buffer_)[0].lsn;
+  DCHECK((*ring_buffer_)[lsn - start].lsn == lsn);
+  return (*ring_buffer_)[lsn - start].data;
+}
+
 void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
-  // DCHECK(ring_buffer_);
-  if (entry.opcode != Op::NOOP) {
-    lsn_++;
-// TODO: This is preparation for AOC style journaling, currently unused.
+  DCHECK(ring_buffer_);
+
+  JournalItem dummy;
+  JournalItem* item;
+  if (entry.opcode == Op::NOOP) {
+    item = &dummy;
+    item->lsn = -1;
+    item->opcode = entry.opcode;
+    item->data = "";
+  } else {
+    FiberAtomicGuard fg;
+    // GetTail gives a pointer to a new tail entry in the buffer, possibly overriding the last entry
+    // if the buffer is full.
+    item = ring_buffer_->GetTail(true);
+    item->opcode = entry.opcode;
+    item->lsn = lsn_++;
+
+    io::BufSink buf_sink{&ring_serialize_buf_};
+    JournalWriter writer{&buf_sink};
+    writer.Write(entry);
+
+    item->data = io::View(ring_serialize_buf_.InputBuffer());
+    ring_serialize_buf_.Clear();
+    VLOG(2) << "Writing item [" << item->lsn << "]: " << entry.ToString();
+  }
+
 #if 0
-    RingItem item;
-    item.lsn = prev_lsn;
-
-    item.opcode = entry.opcode;
-    item.txid = entry.txid;
-    VLOG(1) << "Writing item [" << item.lsn << "]: " << entry.ToString();
-    ring_buffer_->EmplaceOrOverride(move(item));
-
     if (shard_file_) {
       string line = absl::StrCat(item.lsn, " ", entry.txid, " ", entry.opcode, "\n");
       error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
@@ -137,15 +176,15 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
       file_offset_ += line.size();
     }
 #endif
-  }
 
+  // TODO: Remove the callbacks, replace with notifiers
   {
     std::shared_lock lk(cb_mu_);
     DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
              << " num callbacks: " << change_cb_arr_.size();
 
     for (const auto& k_v : change_cb_arr_) {
-      k_v.second(entry, await);
+      k_v.second(*item, await);
     }
   }
 }

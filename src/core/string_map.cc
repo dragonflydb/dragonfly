@@ -28,13 +28,9 @@ inline sds GetValue(sds key) {
   return (sds)(kValMask & val);
 }
 
-}  // namespace
-
-StringMap::~StringMap() {
-  Clear();
-}
-
-bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
+// Returns key, tagged value pair
+pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t time_now,
+                                uint32_t ttl_sec) {
   // 8 additional bytes for a pointer to value.
   sds newkey;
   size_t meta_offset = field.size() + 1;
@@ -50,7 +46,7 @@ bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_s
     // key, '\0', 8-byte pointer to value, 4-byte absolute time.
     // the value pointer it tagged.
     newkey = AllocSdsWithSpace(field.size(), 8 + 4);
-    uint32_t at = time_now() + ttl_sec;
+    uint32_t at = time_now + ttl_sec;
     absl::little_endian::Store32(newkey + meta_offset + 8, at);  // skip the value pointer.
     sdsval_tag |= kValTtlBit;
   }
@@ -60,6 +56,18 @@ bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_s
   }
 
   absl::little_endian::Store64(newkey + meta_offset, sdsval_tag);
+  return {newkey, sdsval_tag};
+}
+
+}  // namespace
+
+StringMap::~StringMap() {
+  Clear();
+}
+
+bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
+  // 8 additional bytes for a pointer to value.
+  auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), ttl_sec);
 
   // Replace the whole entry.
   sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit);
@@ -72,12 +80,15 @@ bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_s
 }
 
 bool StringMap::AddOrSkip(std::string_view field, std::string_view value, uint32_t ttl_sec) {
-  void* obj = FindInternal(&field, 1);  // 1 - string_view
+  uint64_t hashcode = Hash(&field, 1);
+  void* obj = FindInternal(&field, hashcode, 1);  // 1 - string_view
 
   if (obj)
     return false;
 
-  return AddOrUpdate(field, value, ttl_sec);
+  auto [newkey, sdsval_tag] = CreateEntry(field, value, time_now(), ttl_sec);
+  AddUnique(newkey, sdsval_tag & kValTtlBit, hashcode);
+  return true;
 }
 
 bool StringMap::Erase(string_view key) {
@@ -86,7 +97,8 @@ bool StringMap::Erase(string_view key) {
 
 bool StringMap::Contains(string_view field) const {
   // 1 - means it's string_view. See ObjEqual for details.
-  return FindInternal(&field, 1) != nullptr;
+  uint64_t hashcode = Hash(&field, 1);
+  return FindInternal(&field, hashcode, 1) != nullptr;
 }
 
 void StringMap::Clear() {
@@ -94,11 +106,83 @@ void StringMap::Clear() {
 }
 
 sds StringMap::Find(std::string_view key) {
-  sds str = (sds)FindInternal(&key, 1);
+  uint64_t hashcode = Hash(&key, 1);
+  sds str = (sds)FindInternal(&key, hashcode, 1);
   if (!str)
     return nullptr;
 
   return GetValue(str);
+}
+
+std::pair<sds, sds> StringMap::RandomPair() {
+  auto it = begin();
+  it += rand() % Size();
+  return std::make_pair(it->first, it->second);
+}
+
+void StringMap::RandomPairsUnique(unsigned int count, std::vector<sds>& keys,
+                                  std::vector<sds>& vals, bool with_value) {
+  unsigned int total_size = Size();
+  unsigned int index = 0;
+  if (count > total_size)
+    count = total_size;
+
+  auto itr = begin();
+  uint32_t picked = 0, remaining = count;
+  while (picked < count && itr != end()) {
+    double random_double = ((double)rand()) / RAND_MAX;
+    double threshold = ((double)remaining) / (total_size - index);
+    if (random_double <= threshold) {
+      keys.push_back(itr->first);
+      if (with_value) {
+        vals.push_back(itr->second);
+      }
+      remaining--;
+      picked++;
+    }
+    ++itr;
+    index++;
+  }
+
+  DCHECK(keys.size() == count);
+  if (with_value)
+    DCHECK(vals.size() == count);
+}
+
+void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
+                            bool with_value) {
+  using RandomPick = std::pair<unsigned int, unsigned int>;
+  std::vector<RandomPick> picks;
+  unsigned int total_size = Size();
+
+  for (unsigned int i = 0; i < count; ++i) {
+    RandomPick pick{rand() % total_size, i};
+    picks.push_back(pick);
+  }
+
+  std::sort(picks.begin(), picks.end(), [](auto& x, auto& y) { return x.first < y.first; });
+
+  unsigned int index = picks[0].first, pick_index = 0;
+  auto itr = begin();
+  for (unsigned int i = 0; i < index; ++i)
+    ++itr;
+
+  keys.reserve(count);
+  if (with_value)
+    vals.reserve(count);
+
+  while (itr != end() && pick_index < count) {
+    auto [key, val] = *itr;
+    while (pick_index < count && index == picks[pick_index].first) {
+      int store_order = picks[pick_index].second;
+      keys[store_order] = key;
+      if (with_value)
+        vals[store_order] = val;
+      ++pick_index;
+    }
+    ++index;
+    ++itr;
+  }
 }
 
 pair<sds, bool> StringMap::ReallocIfNeeded(void* obj, float ratio) {

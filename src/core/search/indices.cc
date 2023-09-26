@@ -8,12 +8,18 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_split.h>
-#include <unicode/brkiter.h>
-#include <unicode/unistr.h>
+
+#define UNI_ALGO_DISABLE_NFKC_NFKD
+
+#include <hnswlib/hnswalg.h>
+#include <hnswlib/hnswlib.h>
+#include <hnswlib/space_ip.h>
+#include <hnswlib/space_l2.h>
+#include <uni_algo/case.h>
+#include <uni_algo/ranges_word.h>
 
 #include <algorithm>
 #include <cctype>
-#include <regex>
 
 #include "base/logging.h"
 
@@ -28,57 +34,11 @@ bool IsAllAscii(string_view sv) {
 }
 
 // Get all words from text as matched by the ICU library
-absl::flat_hash_set<std::string> ICUTokenizeWords(std::string_view text) {
-  // Is text contains only ascii, skip working with ICU resources
-  if (IsAllAscii(text)) {
-    std::regex rx{"\\b.*?\\b", std::regex_constants::icase};
-    std::cregex_iterator begin{text.data(), text.data() + text.size(), rx}, end{};
-
-    absl::flat_hash_set<string> words;
-    for (auto it = begin; it != end; ++it) {
-      auto word = it->str();
-      absl::AsciiStrToLower(&word);
-      words.insert(move(word));
-    }
-    return words;
-  }
-
-  icu::UnicodeString uStr(text.data(), text.size(), "UTF-8");
-
-  UErrorCode status = U_ZERO_ERROR;
-  std::unique_ptr<icu::BreakIterator> wordIter{
-      icu::BreakIterator::createWordInstance(icu::Locale::getDefault(), status)};
-
-  if (U_FAILURE(status))
-    return {};
-
-  wordIter->setText(uStr);
-
-  std::string tmpStdWord;
+absl::flat_hash_set<std::string> TokenizeWords(std::string_view text) {
   absl::flat_hash_set<std::string> words;
-
-  int32_t start = wordIter->first();
-  for (int32_t end = wordIter->next(); end != icu::BreakIterator::DONE;
-       start = end, end = wordIter->next()) {
-    icu::UnicodeString word = uStr.tempSubStringBetween(start, end);
-    // If the substring is not a space, convert it to lowercase and add to results
-    if (!word.isBogus() && !word.trim().isEmpty()) {
-      word.toLower();
-      word.toUTF8String(tmpStdWord);
-      words.emplace(move(tmpStdWord));
-    }
-  }
-
+  for (std::string_view word : una::views::word_only::utf8(text))
+    words.insert(una::cases::to_lowercase_utf8(word));
   return words;
-}
-
-// Convert string to lowercase with ICU library
-std::string ICUToLowercase(string_view input) {
-  icu::UnicodeString uStr = icu::UnicodeString::fromUTF8(input);
-  uStr.toLower();
-  std::string result;
-  uStr.toUTF8String(result);
-  return result;
 }
 
 // Split taglist, remove duplicates and convert all to lowercase
@@ -126,7 +86,7 @@ const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
   if (IsAllAscii(str))
     word = absl::AsciiStrToLower(str);
   else
-    word = ICUToLowercase(str);
+    word = una::cases::to_lowercase_utf8(str);
 
   auto it = entries_.find(word);
   return (it != entries_.end()) ? &it->second : nullptr;
@@ -143,24 +103,127 @@ void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field)
 }
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
-  return ICUTokenizeWords(value);
+  return TokenizeWords(value);
 }
 
 absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) const {
   return NormalizeTags(value);
 }
 
-void VectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  entries_[id] = doc->GetVector(field);
+BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {
 }
 
-void VectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  entries_.erase(id);
+std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
+  return {dim_, sim_};
 }
 
-FtVector VectorIndex::Get(DocId doc) const {
-  auto it = entries_.find(doc);
-  return it != entries_.end() ? it->second : FtVector{};
+FlatVectorIndex::FlatVectorIndex(size_t dim, VectorSimilarity sim)
+    : BaseVectorIndex{dim, sim}, entries_{} {
+}
+
+void FlatVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+  DCHECK_LE(id * dim_, entries_.size());
+  if (id * dim_ == entries_.size())
+    entries_.resize((id + 1) * dim_);
+
+  // TODO: Let get vector write to buf itself
+  auto [ptr, size] = doc->GetVector(field);
+
+  if (size == dim_)
+    memcpy(&entries_[id * dim_], ptr.get(), dim_ * sizeof(float));
+}
+
+void FlatVectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+  // noop
+}
+
+const float* FlatVectorIndex::Get(DocId doc) const {
+  return &entries_[doc * dim_];
+}
+
+struct HnswlibAdapter {
+  HnswlibAdapter(size_t dim, VectorSimilarity sim, size_t cap)
+      : space_{MakeSpace(dim, sim)}, world_{GetSpacePtr(), cap} {
+  }
+
+  void Add(float* data, DocId id) {
+    world_.addPoint(data, id);
+  }
+
+  void Remove(DocId id) {
+    world_.markDelete(id);
+  }
+
+  vector<pair<float, DocId>> Knn(float* target, size_t k) {
+    return QueueToVec(world_.searchKnn(target, k));
+  }
+
+  vector<pair<float, DocId>> Knn(float* target, size_t k, const vector<DocId>& allowed) {
+    struct BinsearchFilter : hnswlib::BaseFilterFunctor {
+      virtual bool operator()(hnswlib::labeltype id) {
+        return binary_search(allowed->begin(), allowed->end(), id);
+      }
+
+      BinsearchFilter(const vector<DocId>* allowed) : allowed{allowed} {
+      }
+      const vector<DocId>* allowed;
+    };
+
+    BinsearchFilter filter{&allowed};
+    return QueueToVec(world_.searchKnn(target, k, &filter));
+  }
+
+ private:
+  using SpaceUnion = std::variant<hnswlib::L2Space, hnswlib::InnerProductSpace>;
+
+  static SpaceUnion MakeSpace(size_t dim, VectorSimilarity sim) {
+    if (sim == VectorSimilarity::L2)
+      return hnswlib::L2Space{dim};
+    else
+      return hnswlib::InnerProductSpace{dim};
+  }
+
+  hnswlib::SpaceInterface<float>* GetSpacePtr() {
+    return visit([](auto& space) -> hnswlib::SpaceInterface<float>* { return &space; }, space_);
+  }
+
+  template <typename Q> static vector<pair<float, DocId>> QueueToVec(Q queue) {
+    vector<pair<float, DocId>> out(queue.size());
+    size_t idx = out.size();
+    while (!queue.empty()) {
+      out[--idx] = queue.top();
+      queue.pop();
+    }
+    return out;
+  }
+
+  SpaceUnion space_;
+  hnswlib::HierarchicalNSW<float> world_;
+};
+
+HnswVectorIndex::HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity)
+    : BaseVectorIndex{dim, sim}, adapter_{make_unique<HnswlibAdapter>(dim, sim, capacity)} {
+}
+
+HnswVectorIndex::~HnswVectorIndex() {
+}
+
+void HnswVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+  auto [ptr, size] = doc->GetVector(field);
+  if (size == dim_)
+    adapter_->Add(ptr.get(), id);
+}
+
+std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k) const {
+  return adapter_->Knn(target, k);
+}
+std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
+                                                          const std::vector<DocId>& allowed) const {
+  return adapter_->Knn(target, k, allowed);
+}
+
+void HnswVectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+  adapter_->Remove(id);
 }
 
 }  // namespace dfly::search

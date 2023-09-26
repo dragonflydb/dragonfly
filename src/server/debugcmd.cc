@@ -241,9 +241,11 @@ void DebugCmd::Run(CmdArgList args) {
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
-        "    If SLOTS is specified then create keys only in given slots range."
+        "    If SLOTS is specified then create keys only in given slots range.",
         "OBJHIST",
         "    Prints histogram of object sizes.",
+        "STACKTRACE",
+        "    Prints the stacktraces of all current fibers to the logs.",
         "HELP",
         "    Prints this help.",
     };
@@ -282,6 +284,9 @@ void DebugCmd::Run(CmdArgList args) {
   }
   if (subcmd == "OBJHIST") {
     return ObjHist();
+  }
+  if (subcmd == "STACKTRACE") {
+    return Stacktrace();
   }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return (*cntx_)->SendError(reply, kSyntaxErrType);
@@ -722,6 +727,15 @@ void DebugCmd::ObjHist() {
 
   absl::StrAppend(&result, "___end object histogram___\n");
   (*cntx_)->SendBulkString(result);
+}
+
+void DebugCmd::Stacktrace() {
+  fb2::Mutex m;
+  shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+    std::unique_lock lk(m);
+    fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+  });
+  (*cntx_)->SendOk();
 }
 
 }  // namespace dfly

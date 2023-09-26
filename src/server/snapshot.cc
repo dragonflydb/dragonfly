@@ -37,16 +37,16 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
-  snapshot_version_ = db_slice_->RegisterOnChange(move(db_cb));
+  snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
     auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
-    journal_cb_id_ = journal->RegisterOnChange(move(journal_cb));
+    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  serializer_.reset(new RdbSerializer(compression_mode_));
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -59,6 +59,55 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
       CloseRecordChannel();
     }
   });
+}
+
+void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
+  auto* journal = db_slice_->shard_owner()->journal();
+  DCHECK(journal);
+
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
+
+  snapshot_fb_ =
+      fb2::Fiber("incremental_snapshot", [this, journal, cntx, lsn = start_lsn]() mutable {
+        DCHECK(lsn <= journal->GetLsn()) << "The replica tried to sync from the future.";
+
+        VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
+
+        // The replica sends the LSN of the next entry is wants to receive.
+        while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+          serializer_->WriteJournalEntry(journal->GetEntry(lsn));
+          PushSerializedToChannel(false);
+          lsn++;
+        }
+
+        VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
+
+        // This check is safe, but it is not trivially safe.
+        // We rely here on the fact that JournalSlice::AddLogRecord can
+        // only preempt while holding the callback lock.
+        // That guarantees that if we have processed the last LSN the callback
+        // will only be added after JournalSlice::AddLogRecord has finished
+        // iterating its callbacks and we won't process the record twice.
+        // We have to make sure we don't preempt ourselves before registering the callback!
+
+        // GetLsn() is always the next lsn that we expect to create.
+        if (journal->GetLsn() == lsn) {
+          {
+            FiberAtomicGuard fg;
+            serializer_->SendFullSyncCut();
+          }
+          auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+          journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+          PushSerializedToChannel(true);
+        } else {
+          // We stopped but we didn't manage to send the whole stream.
+          cntx->ReportError(
+              std::make_error_code(errc::state_not_recoverable),
+              absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
+                           " was dropped from the buffer. Current lsn=", journal->GetLsn()));
+          Cancel();
+        }
+      });
 }
 
 void SliceSnapshot::Stop() {
@@ -91,8 +140,7 @@ void SliceSnapshot::Cancel() {
 
 void SliceSnapshot::Join() {
   // Fiber could have already been joined by Stop.
-  if (snapshot_fb_.IsJoinable())
-    snapshot_fb_.Join();
+  snapshot_fb_.JoinIfNeeded();
 }
 
 // The algorithm is to go over all the buckets and serialize those with
@@ -260,14 +308,13 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // transaction.
 // OnJournalEntry registers for changes in journal, the journal change function signature is
 // (const journal::Entry& entry, bool await) In snapshot flow we dont use the await argument.
-void SliceSnapshot::OnJournalEntry(const journal::Entry& entry, bool unused_await_arg) {
-  // We ignore non payload entries like EXEC because we have no transactional ordering during
-  // LOAD phase on replica.
-  if (!entry.HasPayload()) {
+void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg) {
+  // We ignore EXEC and NOOP entries because we they have no meaning during
+  // the LOAD phase on replica.
+  if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC)
     return;
-  }
 
-  serializer_->WriteJournalEntry(entry);
+  serializer_->WriteJournalEntry(item.data);
 
   // This is the only place that flushes in streaming mode
   // once the iterate buckets fiber finished.

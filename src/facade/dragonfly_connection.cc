@@ -8,6 +8,9 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <variant>
+
+#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -24,7 +27,7 @@
 
 using namespace std;
 
-ABSL_FLAG(bool, tcp_nodelay, false,
+ABSL_FLAG(bool, tcp_nodelay, true,
           "Configures dragonfly connections with socket option TCP_NODELAY");
 ABSL_FLAG(bool, primary_port_http_enabled, true,
           "If true allows accessing http console on main TCP port");
@@ -211,8 +214,13 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
   auto* ctx = static_cast<dfly::ConnectionContext*>(self->cntx());
-  if (ctx && msg.username == ctx->authed_username) {
-    ctx->acl_categories = msg.categories;
+  if (ctx) {
+    for (size_t id = 0; id < msg.username.size(); ++id) {
+      if (msg.username[id] == ctx->authed_username) {
+        ctx->acl_categories = msg.categories[id];
+        ctx->acl_commands = msg.commands[id];
+      }
+    }
   }
 }
 
@@ -387,8 +395,11 @@ std::string Connection::LocalBindAddress() const {
   return le.address().to_string();
 }
 
-string Connection::GetClientInfo(unsigned thread_id) const {
-  string res;
+std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() const {
+  CHECK(service_ && socket_);
+  CHECK_LT(unsigned(phase_), NUM_PHASES);
+
+  string before;
   auto le = socket_->LocalEndpoint();
   auto re = socket_->RemoteEndpoint();
   time_t now = time(nullptr);
@@ -396,24 +407,58 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   int cpu = 0;
   socklen_t len = sizeof(cpu);
   getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
-  int my_cpu_id = sched_getcpu();
 
-  static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
+#ifdef __APPLE__
+  int my_cpu_id = -1;  // __APPLE__ does not have sched_getcpu()
+#else
+  int my_cpu_id = sched_getcpu();
+#endif
+
+  static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");
 
-  absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
-  absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
-  absl::StrAppend(&res, " fd=", socket_->native_handle(), " name=", name_);
-  absl::StrAppend(&res, " tid=", thread_id, " irqmatch=", int(cpu == my_cpu_id));
-  absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
-  absl::StrAppend(&res, " phase=", PHASE_NAMES[phase_]);
+  absl::StrAppend(&before, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
+  absl::StrAppend(&before, " laddr=", le.address().to_string(), ":", le.port());
+  absl::StrAppend(&before, " fd=", socket_->native_handle(), " name=", name_);
+
+  string after;
+  absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
+  absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
+  absl::StrAppend(&after, " phase=", PHASE_NAMES[phase_]);
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get());
-    absl::StrAppend(&res, " ", cc_info);
+    absl::StrAppend(&after, " ", cc_info);
   }
 
-  return res;
+  return {std::move(before), std::move(after)};
+}
+
+string Connection::GetClientInfo(unsigned thread_id) const {
+  auto [before, after] = GetClientInfoBeforeAfterTid();
+  absl::StrAppend(&before, " tid=", thread_id);
+  absl::StrAppend(&before, after);
+  return before;
+}
+
+string Connection::GetClientInfo() const {
+  auto [before, after] = GetClientInfoBeforeAfterTid();
+  absl::StrAppend(&before, after);
+  // The following are dummy fields and users should not rely on those unless
+  // we decide to implement them.
+  // This is only done because the redis pyclient parser for the field "client-info"
+  // for the command ACL LOG hardcodes the expected values. This behaviour does not
+  // conform to the actual expected values, since it's missing half of them.
+  // That is, even for redis-server, issuing an ACL LOG command via redis-cli and the pyclient
+  // will return different results! For example, the fields:
+  // addr=127.0.0.1:57275
+  // laddr=127.0.0.1:6379
+  // are missing from the pyclient.
+
+  absl::StrAppend(&before, " qbuf=0 ", "qbuf-free=0 ", "obl=0 ", "argv-mem=0 ");
+  absl::StrAppend(&before, "oll=0 ", "omem=0 ", "tot-mem=0 ", "multi=0 ");
+  absl::StrAppend(&before, "psub=0 ", "sub=0");
+  return before;
 }
 
 uint32_t Connection::GetClientId() const {
@@ -682,7 +727,12 @@ void Connection::OnBreakCb(int32_t mask) {
     return;  // we cancelled the poller, which means we do not need to break from anything.
 
   VLOG(1) << "Got event " << mask;
-  CHECK(cc_);
+
+  if (!cc_) {
+    LOG(ERROR) << "Unexpected event " << mask << " " << break_poll_id_;
+    return;
+  }
+
   cc_->conn_closing = true;
   break_poll_id_ = UINT32_MAX;  // do not attempt to cancel it.
 
@@ -849,16 +899,19 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       service_->DispatchManyCommands(absl::MakeSpan(args), cc_.get());
       cc_->async_dispatch = false;
 
+      // Flush strictly before the dispatch queue is cleared so that no sync dispatch can occur
+      if (dispatch_q_.size() == args.size()) {  // Flush if no new messages appeared
+        builder->FlushBatch();
+        builder->SetBatchMode(false);  // in case the next dispatch is sync
+      }
+
+      DCHECK(!cc_->sync_dispatch);
       // Dispatch queue could have grown, so handle strictly as many as we executed
       for (size_t i = 0; i < args.size(); i++) {
         recycle(move(dispatch_q_.front()));
         dispatch_q_.pop_front();
       }
 
-      if (dispatch_q_.empty()) {
-        builder->FlushBatch();
-        builder->SetBatchMode(false);  // in case the next dispatch is sync
-      }
     } else {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
@@ -967,7 +1020,7 @@ void Connection::SendMonitorMessageAsync(string msg) {
 }
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
-  SendAsync({msg});
+  SendAsync({std::move(msg)});
 }
 
 void Connection::SendAsync(MessageHandle msg) {
@@ -985,9 +1038,20 @@ void Connection::SendAsync(MessageHandle msg) {
         fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
   }
 
+  auto place_in_dispatch_q = [this](MessageHandle msg) {
+    auto it = dispatch_q_.begin();
+    const auto end = dispatch_q_.end();
+    while (it < end && std::holds_alternative<AclUpdateMessage>(it->handle))
+      ++it;
+    dispatch_q_.insert(it, std::move(msg));
+  };
+
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
-    dispatch_q_.push_front(std::move(msg));
+    // We need to reorder the queue, since multiple updates might happen before we
+    // pop the message, invalidating the correct order since we always push at the front
+    place_in_dispatch_q(std::move(msg));
+
   } else {
     dispatch_q_.push_back(std::move(msg));
   }

@@ -390,7 +390,8 @@ void SendJsonValue(ConnectionContext* cntx, const JsonType& j) {
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
-                       vector<pair<string_view, JsonExpression>> expressions) {
+                       vector<pair<string_view, JsonExpression>> expressions, bool should_format,
+                       const OptString& indent, const OptString& new_line, const OptString& space) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
@@ -402,8 +403,39 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
     // means we just brings all values
     return json_entry.to_string();
   }
+
+  json_options options;
+  if (should_format) {
+    options.spaces_around_comma(spaces_option::no_spaces)
+        .spaces_around_colon(spaces_option::no_spaces)
+        .object_array_line_splits(line_split_kind::multi_line)
+        .indent_size(1)
+        .new_line_chars("");
+
+    if (indent) {
+      options.indent_chars(*indent);
+    } else {
+      options.indent_size(0);
+    }
+
+    if (new_line) {
+      options.new_line_chars(*new_line);
+    }
+
+    if (space) {
+      options.after_key_chars(*space);
+    }
+  }
+
   if (expressions.size() == 1) {
     json out = expressions[0].second.evaluate(json_entry);
+    if (should_format) {
+      json_printable jp(out, options, indenting::indent);
+      std::stringstream ss;
+      jp.dump(ss);
+      return ss.str();
+    }
+
     return out.as<string>();
   }
 
@@ -411,6 +443,13 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
   for (auto& expr : expressions) {
     json eval = expr.second.evaluate(json_entry);
     out[expr.first] = eval;
+  }
+
+  if (should_format) {
+    json_printable jp(out, options, indenting::indent);
+    std::stringstream ss;
+    jp.dump(ss);
+    return ss.str();
   }
 
   return out.as<string>();
@@ -1375,12 +1414,6 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
       (*cntx)->SendError(kSyntaxErr);
       return;
     }
-
-    if (converted_val->is_object()) {
-      (*cntx)->SendError(kWrongTypeErr);
-      return;
-    }
-
     append_values.emplace_back(converted_val);
   }
 
@@ -1754,22 +1787,52 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
   string_view key = ArgS(args, 0);
 
+  OptString indent;
+  OptString new_line;
+  OptString space;
   vector<pair<string_view, JsonExpression>> expressions;
-
   for (size_t i = 1; i < args.size(); ++i) {
-    string_view path = ArgS(args, i);
+    string_view param = ArgS(args, i);
+    if (absl::EqualsIgnoreCase(param, "space")) {
+      if (++i >= args.size()) {
+        return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()),
+                                  facade::kSyntaxErrType);
+      } else {
+        space = ArgS(args, i);
+        continue;
+      }
+    } else if (absl::EqualsIgnoreCase(param, "newline")) {
+      if (++i >= args.size()) {
+        return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()),
+                                  facade::kSyntaxErrType);
+      } else {
+        new_line = ArgS(args, i);
+        continue;
+      }
+    } else if (absl::EqualsIgnoreCase(param, "indent")) {
+      if (++i >= args.size()) {
+        return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()),
+                                  facade::kSyntaxErrType);
+      } else {
+        indent = ArgS(args, i);
+        continue;
+      }
+    }
+
     error_code ec;
-    JsonExpression expr = ParseJsonPath(path, &ec);
+    JsonExpression expr = ParseJsonPath(param, &ec);
 
     if (ec) {
-      LOG(WARNING) << "path '" << path << "': Invalid JSONPath syntax: " << ec.message();
+      LOG(WARNING) << "path '" << param << "': Invalid JSONPath syntax: " << ec.message();
       return (*cntx)->SendError(kSyntaxErr);
     }
-    expressions.emplace_back(path, move(expr));
+    expressions.emplace_back(param, move(expr));
   }
 
+  bool should_format = (indent || new_line || space);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGet(t->GetOpArgs(shard), key, move(expressions));
+    return OpGet(t->GetOpArgs(shard), key, move(expressions), should_format, indent, new_line,
+                 space);
   };
 
   Transaction* trans = cntx->transaction;
@@ -1796,6 +1859,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 // TODO: Add sensible defaults/categories to json commands
 
 void JsonFamily::Register(CommandRegistry* registry) {
+  registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -3, 1, -2, 1,
                   acl::JSON}
@@ -1821,7 +1885,8 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}
                    .HFUNC(ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(ArrIndex);
-  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Debug);
+  // TODO: Support negative first_key index to revive the debug sub-command
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -3, 2, 2, 1, acl::JSON}.HFUNC(Debug);
   *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, 1, acl::JSON}.HFUNC(Resp);
   *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1, acl::JSON}.HFUNC(
       Set);

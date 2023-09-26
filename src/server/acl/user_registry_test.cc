@@ -23,7 +23,7 @@ TEST_F(UserRegistryTest, BasicOp) {
   const std::string username = "kostas";
   const std::string pass = "mypass";
 
-  User::UpdateRequest req{pass, {}, true};
+  User::UpdateRequest req{pass, {}, true, false, {}};
   registry.MaybeAddAndUpdate(username, std::move(req));
   CHECK_EQ(registry.AuthUser(username, pass), true);
   CHECK_EQ(registry.IsUserActive(username), true);
@@ -32,14 +32,14 @@ TEST_F(UserRegistryTest, BasicOp) {
 
   using Sign = User::Sign;
   std::vector<std::pair<Sign, uint32_t>> cat = {{Sign::PLUS, LIST}, {Sign::PLUS, SET}};
-  req = User::UpdateRequest{{}, std::move(cat), {}};
+  req = User::UpdateRequest{{}, std::move(cat), true, false, {}};
   registry.MaybeAddAndUpdate(username, std::move(req));
   auto acl_categories = registry.GetCredentials(username).acl_categories;
   uint32_t expected_result = NONE | LIST | SET;
   CHECK_EQ(acl_categories, expected_result);
 
   cat.push_back({Sign::MINUS, LIST});
-  req = User::UpdateRequest{{}, std::move(cat), {}};
+  req = User::UpdateRequest{{}, std::move(cat), true, false, {}};
   registry.MaybeAddAndUpdate(username, std::move(req));
   acl_categories = registry.GetCredentials(username).acl_categories;
   expected_result = NONE | SET;

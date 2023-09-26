@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <variant>
 
 #include "core/search/base.h"
 
@@ -23,8 +24,20 @@ struct TextIndex;
 struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
+  struct VectorParams {
+    bool use_hnsw = false;
+
+    size_t dim = 0u;                              // dimension of knn vectors
+    VectorSimilarity sim = VectorSimilarity::L2;  // similarity type
+    size_t capacity = 1000;                       // initial capacity for hnsw world
+  };
+
+  using ParamsVariant = std::variant<std::monostate, VectorParams>;
+
   FieldType type;
   std::string short_name;  // equal to ident if none provided
+
+  ParamsVariant special_params{std::monostate{}};
 };
 
 // Describes the fields of an index
@@ -48,6 +61,8 @@ class FieldIndices {
   BaseIndex* GetIndex(std::string_view field) const;
   std::vector<TextIndex*> GetAllTextIndices() const;
   const std::vector<DocId>& GetAllDocs() const;
+
+  const Schema& GetSchema() const;
 
  private:
   Schema schema_;
@@ -76,6 +91,9 @@ struct SearchResult {
 
   // If profiling was enabled
   std::optional<AlgorithmProfile> profile;
+
+  // If an error occurred, last recent one
+  std::string error;
 };
 
 // SearchAlgorithm allows searching field indices with a query
@@ -89,8 +107,8 @@ class SearchAlgorithm {
 
   SearchResult Search(const FieldIndices* index) const;
 
-  // Return KNN limit if it is enabled
-  std::optional<size_t> HasKnn() const;
+  // if enabled, return limit & alias for knn query
+  std::optional<std::pair<size_t /*limit*/, std::string_view /*alias*/>> HasKnn() const;
 
   void EnableProfiling();
 

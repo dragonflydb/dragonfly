@@ -65,7 +65,9 @@ struct MaxMemoryFlag {
 static bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err);
 static std::string AbslUnparseFlag(const MaxMemoryFlag& flag);
 
-ABSL_FLAG(uint32_t, port, 6379, "Redis port");
+ABSL_FLAG(int32_t, port, 6379,
+          "Redis port. 0 disables the port, -1 will bind on a random available port.");
+
 ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
@@ -603,31 +605,13 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
-optional<ShardId> GetRemoteShardToRunAt(const Transaction& tx) {
-  if (tx.GetMultiMode() != Transaction::LOCK_AHEAD) {
-    return nullopt;
-  }
-
-  if (tx.GetUniqueShardCnt() != 1) {
-    return nullopt;
-  }
-
-  // At this point `tx` can run on a single shard, but we only return `sid` if that shard !=
-  // current shard.
-
-  ShardId sid = tx.GetUniqueShard();
-
-  if (ServerState::tlocal()->thread_index() == sid) {
-    // Same shard, so no point in an extra Await() and a new Fiber
-    return nullopt;
-  }
-
-  return sid;
-}
 }  // namespace
 
 Service::Service(ProactorPool* pp)
-    : pp_(*pp), server_family_(this), cluster_family_(&server_family_) {
+    : pp_(*pp),
+      acl_family_(&user_registry_, pp),
+      server_family_(this),
+      cluster_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -687,7 +671,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
   if (!tcp_disabled && !listeners.empty()) {
-    acl_family_.Init(listeners.front());
+    acl_family_.Init(listeners.front(), &user_registry_);
   }
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
@@ -1438,7 +1422,7 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ev_args.args = args.subspan(2 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(ev_args, interpreter, cntx);
+  EvalInternal(args, ev_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
@@ -1543,7 +1527,27 @@ std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const 
   return {res, args.subspan(1)};
 }
 
-void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
+static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::ScriptParams& params,
+                                   const Transaction& tx) {
+  if (!sid.has_value()) {
+    return false;
+  }
+
+  if (DetermineMultiMode(params) != Transaction::LOCK_AHEAD) {
+    return false;
+  }
+
+  if (tx.GetMultiMode() != Transaction::NOT_DETERMINED) {
+    // We may be running EVAL under MULTI. Currently RunSingleShardMulti() will attempt to lock
+    // keys, in which case will be already locked by MULTI. We could optimize this path as well
+    // though.
+    return false;
+  }
+
+  return true;
+}
+
+void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
 
@@ -1560,36 +1564,70 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   DCHECK(!cntx->conn_state.script_info);  // we should not call eval from the script.
 
+  optional<ShardId> sid;
+
   // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
-    sinfo->keys.insert(KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i)));
+    string_view key = KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i));
+    sinfo->keys.insert(key);
+
+    ShardId cur_sid = Shard(key, shard_count());
+    if (i == 0) {
+      sid = cur_sid;
+    }
+    if (sid.has_value() && *sid != cur_sid) {
+      sid = nullopt;
+    }
   }
+
   sinfo->async_cmds_heap_limit = absl::GetFlag(FLAGS_multi_eval_squash_buffer);
   Transaction* tx = cntx->transaction;
   CHECK(tx != nullptr);
 
-  optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
-  if (!scheduled) {
-    return;
-  }
-
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
-  interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
+  absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
 
   Interpreter::RunResult result;
-  optional<ShardId> sid = GetRemoteShardToRunAt(*tx);
-  if (sid.has_value()) {
+
+  if (CanRunSingleShardMulti(sid, *params, *tx)) {
     // If script runs on a single shard, we run it remotely to save hops.
-    pp_.at(sid.value())->Await([&]() { result = interpreter->RunFunction(eval_args.sha, &error); });
+    interpreter->SetRedisFunc([cntx, tx, this](Interpreter::CallArgs args) {
+      // Disable squashing, as we're using the squashing mechanism to run remotely.
+      args.async = false;
+      CallFromScript(cntx, args);
+    });
+
+    ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
+    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx};
+    cntx->transaction = stub_tx.get();
+
+    tx->PrepareMultiForScheduleSingleHop(*sid, 0, args);
+    tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
+      result = interpreter->RunFunction(eval_args.sha, &error);
+      return OpStatus::OK;
+    });
+
+    cntx->transaction = tx;
   } else {
+    optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
+    if (!scheduled) {
+      return;
+    }
+
+    ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
+    interpreter->SetRedisFunc(
+        [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
     result = interpreter->RunFunction(eval_args.sha, &error);
+
+    // Conclude the transaction.
+    if (*scheduled)
+      cntx->transaction->UnlockMulti();
   }
-  absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
 
   if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
     auto err_ref = CapturingReplyBuilder::GetError(*err);
@@ -1598,10 +1636,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   }
 
   cntx->conn_state.script_info.reset();  // reset script_info
-
-  // Conclude the transaction.
-  if (*scheduled)
-    cntx->transaction->UnlockMulti();
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
@@ -1729,13 +1763,13 @@ void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
+  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
+
   if (!cntx->conn_state.exec_info.IsCollecting()) {
     return rb->SendError("EXEC without MULTI");
   }
 
   auto& exec_info = cntx->conn_state.exec_info;
-  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
-
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
   }
@@ -2120,10 +2154,10 @@ constexpr uint32_t kPubSub = SLOW;
 constexpr uint32_t kCommand = SLOW | CONNECTION;
 }  // namespace acl
 
-void Service::RegisterCommands() {
+void Service::Register(CommandRegistry* registry) {
   using CI = CommandId;
-
-  registry_
+  registry->StartFamily();
+  *registry
       << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kMulti}.HFUNC(Multi)
       << CI{"WATCH", CO::LOADING, -2, 1, -1, 1, acl::kWatch}.HFUNC(Watch)
@@ -2149,7 +2183,10 @@ void Service::RegisterCommands() {
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0, acl::kMonitor}.MFUNC(Monitor)
       << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
       << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0, acl::kCommand}.MFUNC(Command);
+}
 
+void Service::RegisterCommands() {
+  Register(&registry_);
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);
@@ -2160,15 +2197,21 @@ void Service::RegisterCommands() {
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
+
+#ifndef __APPLE__
   SearchFamily::Register(&registry_);
-  acl_family_.Register(&registry_);
+#endif
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
 
+  acl_family_.Register(&registry_);
+  acl::BuildIndexers(registry_.GetFamilies());
+
   // Only after all the commands are registered
   registry_.Init(pp_.size());
 
+  using CI = CommandId;
   if (VLOG_IS_ON(1)) {
     LOG(INFO) << "Multi-key commands are: ";
     registry_.Traverse([](std::string_view key, const CI& cid) {
@@ -2189,6 +2232,10 @@ void Service::RegisterCommands() {
       }
     });
   }
+}
+
+void Service::TestInit() {
+  acl_family_.Init(nullptr, &user_registry_);
 }
 
 void SetMaxMemoryFlag(uint64_t value) {

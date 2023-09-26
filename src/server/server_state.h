@@ -9,6 +9,7 @@
 
 #include "base/histogram.h"
 #include "core/interpreter.h"
+#include "server/acl/acl_log.h"
 #include "server/acl/user_registry.h"
 #include "server/common.h"
 #include "server/script_mgr.h"
@@ -91,6 +92,9 @@ class ServerState {  // public struct - to allow initialization.
  public:
   struct Stats {
     uint64_t ooo_tx_cnt = 0;
+    uint64_t eval_io_coordination_cnt = 0;
+    uint64_t eval_shardlocal_coordination_cnt = 0;
+    uint64_t tx_schedule_cancel_cnt = 0;
   };
 
   static ServerState* tlocal() {
@@ -206,6 +210,8 @@ class ServerState {  // public struct - to allow initialization.
   facade::ConnectionStats connection_stats;
 
   acl::UserRegistry* user_registry;
+
+  acl::AclLog acl_log;
 
  private:
   int64_t live_transactions_ = 0;

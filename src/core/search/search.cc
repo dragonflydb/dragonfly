@@ -10,6 +10,7 @@
 #include <absl/strings/str_join.h>
 
 #include <chrono>
+#include <type_traits>
 #include <variant>
 
 #include "base/logging.h"
@@ -18,7 +19,7 @@
 #include "core/search/compressed_sorted_set.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
-#include "core/search/vector.h"
+#include "core/search/vector_utils.h"
 
 using namespace std;
 
@@ -35,11 +36,18 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
   return driver.Take();
 }
 
+// GCC 12 yields a wrong warning in a deeply inlined call in UnifyResults, only ignoring the whole
+// scope solves it
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
   using DocVec = vector<DocId>;
+  using BorrowedView = variant<const DocVec*, const CompressedSortedSet*>;
 
-  IndexResult() : value_{DocVec{}} {};
+  IndexResult() : value_{DocVec{}} {
+  }
 
   IndexResult(const CompressedSortedSet* css) : value_{css} {
     if (css == nullptr)
@@ -49,10 +57,11 @@ struct IndexResult {
   IndexResult(DocVec&& dv) : value_{move(dv)} {
   }
 
+  IndexResult(const DocVec* dv) : value_{dv} {
+  }
+
   size_t Size() const {
-    if (holds_alternative<DocVec>(value_))
-      return get<DocVec>(value_).size();
-    return get<const CompressedSortedSet*>(value_)->Size();
+    return visit([](auto* set) { return set->size(); }, Borrowed());
   }
 
   bool IsOwned() const {
@@ -64,28 +73,31 @@ struct IndexResult {
       swap(get<DocVec>(value_), entries);  // swap to keep backing array
       entries.clear();
     } else {
-      value_ = move(entries);
+      value_ = std::move(entries);
     }
     return *this;
   }
 
-  variant<const DocVec*, const CompressedSortedSet*> Borrowed() {
-    if (holds_alternative<DocVec>(value_))
-      return &get<DocVec>(value_);
-    return get<const CompressedSortedSet*>(value_);
+  BorrowedView Borrowed() const {
+    auto cb = [](const auto& v) -> BorrowedView {
+      if constexpr (is_pointer_v<remove_reference_t<decltype(v)>>)
+        return v;
+      else
+        return &v;
+    };
+    return visit(cb, value_);
   }
 
   // Move out of owned or copy borrowed
   DocVec Take() {
-    if (holds_alternative<DocVec>(value_))
+    if (IsOwned())
       return move(get<DocVec>(value_));
 
-    const CompressedSortedSet* css = get<const CompressedSortedSet*>(value_);
-    return DocVec(css->begin(), css->end());
+    return visit([](auto* set) { return DocVec(set->begin(), set->end()); }, Borrowed());
   }
 
  private:
-  variant<DocVec /*owned*/, const CompressedSortedSet* /* borrowed */> value_;
+  variant<DocVec /*owned*/, const CompressedSortedSet*, const DocVec*> value_;
 };
 
 struct ProfileBuilder {
@@ -104,7 +116,7 @@ struct ProfileBuilder {
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
     };
-    return visit(node_info, static_cast<const NodeVariants&>(node));
+    return visit(node_info, node.Variant());
   }
 
   using Tp = std::chrono::steady_clock::time_point;
@@ -146,10 +158,19 @@ struct BasicSearch {
   // Get casted sub index by field
   template <typename T> T* GetIndex(string_view field) {
     static_assert(is_base_of_v<BaseIndex, T>);
+
     auto index = indices_->GetIndex(field);
-    DCHECK(index) << field;  // TODO: handle not existing error
+    if (!index) {
+      error_ = absl::StrCat("Invalid field: ", field);
+      return nullptr;
+    }
+
     auto* casted_ptr = dynamic_cast<T*>(index);
-    DCHECK(casted_ptr) << field;  // TODO: handle type errors
+    if (!casted_ptr) {
+      error_ = absl::StrCat("Wrong access type for field: ", field);
+      return nullptr;
+    }
+
     return casted_ptr;
   }
 
@@ -194,7 +215,7 @@ struct BasicSearch {
     sort(sub_results.begin(), sub_results.end(),
          [](const auto& l, const auto& r) { return l.Size() < r.Size(); });
 
-    IndexResult out{move(sub_results[0])};
+    IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
       Merge(move(matched), &out, op);
     return out;
@@ -206,14 +227,15 @@ struct BasicSearch {
 
   IndexResult Search(const AstStarNode& node, string_view active_field) {
     DCHECK(active_field.empty());
-    return vector<DocId>{indices_->GetAllDocs()};  // TODO FIX;
+    return {&indices_->GetAllDocs()};
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set
   IndexResult Search(const AstTermNode& node, string_view active_field) {
     if (!active_field.empty()) {
-      auto* index = GetIndex<TextIndex>(active_field);
-      return index->Matching(node.term);
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        return index->Matching(node.term);
+      return IndexResult{};
     }
 
     vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
@@ -225,7 +247,9 @@ struct BasicSearch {
   // [range]: access field's numeric index
   IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
-    return GetIndex<NumericIndex>(active_field)->Range(node.lo, node.hi);
+    if (auto* index = GetIndex<NumericIndex>(active_field); index)
+      return index->Range(node.lo, node.hi);
+    return IndexResult{};
   }
 
   // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
@@ -257,9 +281,34 @@ struct BasicSearch {
 
   // {tags | ...}: Unify results for all tags
   IndexResult Search(const AstTagsNode& node, string_view active_field) {
-    auto* tag_index = GetIndex<TagIndex>(active_field);
-    auto mapping = [tag_index](string_view tag) { return tag_index->Matching(tag); };
-    return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
+    if (auto* tag_index = GetIndex<TagIndex>(active_field); tag_index) {
+      auto mapping = [tag_index](string_view tag) { return tag_index->Matching(tag); };
+      return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
+    }
+    return IndexResult{};
+  }
+
+  void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
+    distances_.reserve(sub_results.Size());
+    auto cb = [&](auto* set) {
+      auto [dim, sim] = vec_index->Info();
+      for (DocId matched_doc : *set) {
+        float dist = VectorDistance(knn.vec.first.get(), vec_index->Get(matched_doc), dim, sim);
+        distances_.emplace_back(dist, matched_doc);
+      }
+    };
+    visit(cb, sub_results.Borrowed());
+
+    size_t prefix_size = min(knn.limit, distances_.size());
+    partial_sort(distances_.begin(), distances_.begin() + prefix_size, distances_.end());
+    distances_.resize(prefix_size);
+  }
+
+  void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
+    if (indices_->GetAllDocs().size() == sub_results.Size())
+      distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit);
+    else
+      distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, sub_results.Take());
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
@@ -267,32 +316,37 @@ struct BasicSearch {
     DCHECK(active_field.empty());
     auto sub_results = SearchGeneric(*knn.filter, active_field);
 
-    auto* vec_index = GetIndex<VectorIndex>(knn.field);
+    auto* vec_index = GetIndex<BaseVectorIndex>(knn.field);
+    if (!vec_index)
+      return IndexResult{};
 
-    distances_.reserve(sub_results.Size());
-    auto cb = [&](auto* set) {
-      for (DocId matched_doc : *set) {
-        float dist = VectorDistance(knn.vector, vec_index->Get(matched_doc));
-        distances_.emplace_back(dist, matched_doc);
-      }
-    };
-    visit(cb, sub_results.Borrowed());
+    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second) {
+      error_ =
+          absl::StrCat("Wrong vector index dimensions, got: ", knn.vec.second, ", expected: ", dim);
+      return IndexResult{};
+    }
 
-    sort(distances_.begin(), distances_.end());
+    distances_.clear();
+    if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
+      SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
+    else
+      SearchKnnFlat(dynamic_cast<FlatVectorIndex*>(vec_index), knn, std::move(sub_results));
 
-    vector<DocId> out(min(knn.limit, distances_.size()));
-    for (size_t i = 0; i < out.size(); i++)
+    vector<DocId> out(distances_.size());
+    for (size_t i = 0; i < distances_.size(); i++)
       out[i] = distances_[i].second;
-
     return out;
   }
 
   // Determine node type and call specific search function
   IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
+    if (!error_.empty())
+      return IndexResult{};
+
     ProfileBuilder::Tp start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
 
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
-    auto result = visit(cb, static_cast<const NodeVariants&>(node));
+    auto result = visit(cb, node.Variant());
 
     // Top level results don't need to be sorted, because they will be scored, sorted by fields or
     // used by knn
@@ -320,16 +374,20 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    return SearchResult{result.Take(), std::move(knn_distances), std::move(profile)};
+    return SearchResult{result.Take(), std::move(knn_distances), std::move(profile),
+                        std::move(error_)};
   }
 
   const FieldIndices* indices_;
 
+  string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
 
   vector<DocId> tmp_vec_;
   vector<pair<float, DocId>> distances_;
 };
+
+#pragma GCC diagnostic pop
 
 }  // namespace
 
@@ -346,7 +404,17 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
         indices_[field_ident] = make_unique<NumericIndex>();
         break;
       case SchemaField::VECTOR:
-        indices_[field_ident] = make_unique<VectorIndex>();
+        unique_ptr<BaseVectorIndex> vector_index;
+
+        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
+        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
+
+        if (vparams.use_hnsw)
+          vector_index = make_unique<HnswVectorIndex>(vparams.dim, vparams.sim, vparams.capacity);
+        else
+          vector_index = make_unique<FlatVectorIndex>(vparams.dim, vparams.sim);
+
+        indices_[field_ident] = std::move(vector_index);
         break;
     }
   }
@@ -393,6 +461,10 @@ const vector<DocId>& FieldIndices::GetAllDocs() const {
   return all_ids_;
 }
 
+const Schema& FieldIndices::GetSchema() const {
+  return schema_;
+}
+
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
@@ -416,10 +488,10 @@ SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
   return bs.Search(*query_);
 }
 
-optional<size_t> SearchAlgorithm::HasKnn() const {
+optional<pair<size_t, string_view>> SearchAlgorithm::HasKnn() const {
   DCHECK(query_);
-  if (holds_alternative<AstKnnNode>(*query_))
-    return get<AstKnnNode>(*query_).limit;
+  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
+    return make_pair(knn->limit, string_view{knn->score_alias});
   return nullopt;
 }
 

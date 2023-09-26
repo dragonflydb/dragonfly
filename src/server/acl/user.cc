@@ -6,6 +6,11 @@
 
 #include <openssl/sha.h>
 
+#include <limits>
+
+#include "absl/strings/escaping.h"
+#include "server/acl/helpers.h"
+
 namespace dfly::acl {
 
 namespace {
@@ -20,12 +25,12 @@ std::string StringSHA256(std::string_view password) {
 }  // namespace
 
 User::User() {
-  // acl_categories_ = AclCat::ACL_CATEGORY_ADMIN;
+  commands_ = std::vector<uint64_t>(NumberOfFamilies(), 0);
 }
 
 void User::Update(UpdateRequest&& req) {
   if (req.password) {
-    SetPasswordHash(*req.password);
+    SetPasswordHash(*req.password, req.is_hashed);
   }
 
   for (auto [sign, category] : req.categories) {
@@ -36,42 +41,80 @@ void User::Update(UpdateRequest&& req) {
     UnsetAclCategories(category);
   }
 
+  for (auto [sign, index, bit_index] : req.commands) {
+    if (sign == Sign::PLUS) {
+      SetAclCommands(index, bit_index);
+      continue;
+    }
+    UnsetAclCommands(index, bit_index);
+  }
+
   if (req.is_active) {
     SetIsActive(*req.is_active);
   }
 }
 
-void User::SetPasswordHash(std::string_view password) {
+void User::SetPasswordHash(std::string_view password, bool is_hashed) {
+  if (password == "nopass") {
+    return;
+  }
+
+  if (is_hashed) {
+    password_hash_ = absl::HexStringToBytes(password);
+    return;
+  }
   password_hash_ = StringSHA256(password);
 }
 
 bool User::HasPassword(std::string_view password) const {
   if (!password_hash_) {
-    if (password == "nopass") {
-      return true;
-    }
-    return false;
+    return true;
   }
   // hash password and compare
   return *password_hash_ == StringSHA256(password);
 }
 
-void User::SetAclCategories(uint64_t cat) {
+void User::SetAclCategories(uint32_t cat) {
   acl_categories_ |= cat;
 }
 
-void User::UnsetAclCategories(uint64_t cat) {
+void User::UnsetAclCategories(uint32_t cat) {
   SetAclCategories(cat);
   acl_categories_ ^= cat;
+}
+
+void User::SetAclCommands(size_t index, uint64_t bit_index) {
+  if (IsIndexAllCommandsFlag(index)) {
+    for (auto& family : commands_) {
+      family = ALL_COMMANDS;
+    }
+    return;
+  }
+  commands_[index] |= bit_index;
+}
+
+void User::UnsetAclCommands(size_t index, uint64_t bit_index) {
+  if (IsIndexAllCommandsFlag(index)) {
+    for (auto& family : commands_) {
+      family = NONE_COMMANDS;
+    }
+    return;
+  }
+  SetAclCommands(index, bit_index);
+  commands_[index] ^= bit_index;
 }
 
 uint32_t User::AclCategory() const {
   return acl_categories_;
 }
 
-// For ACL commands
-// void SetAclCommand()
-// void AclCommand() const;
+std::vector<uint64_t> User::AclCommands() const {
+  return commands_;
+}
+
+const std::vector<uint64_t>& User::AclCommandsRef() const {
+  return commands_;
+}
 
 void User::SetIsActive(bool is_active) {
   is_active_ = is_active;

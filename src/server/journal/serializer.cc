@@ -4,8 +4,11 @@
 
 #include "server/journal/serializer.h"
 
+#include <system_error>
+
 #include "base/io_buf.h"
 #include "base/logging.h"
+#include "glog/logging.h"
 #include "io/io.h"
 #include "server/common.h"
 #include "server/error.h"

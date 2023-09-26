@@ -1,5 +1,5 @@
 %skeleton "lalr1.cc" // -*- C++ -*-
-%require "3.5.1"    // That's what's present on ubuntu 20.04.
+%require "3.5"  // fedora 32 has this one.
 
 %defines  // %header starts from 3.8.1
 
@@ -25,7 +25,7 @@
 // Added to cc file
 %code {
 #include "core/search/query_driver.h"
-#include "core/search/vector.h"
+#include "core/search/vector_utils.h"
 
 // Have to disable because GCC doesn't understand `symbol_type`'s union
 // implementation
@@ -57,6 +57,7 @@ using namespace std;
   RCURLBR  "}"
   OR_OP    "|"
   KNN      "KNN"
+  AS       "AS"
 ;
 
 %token AND_OP
@@ -66,12 +67,17 @@ using namespace std;
 %token <std::string> TERM "term" PARAM "param" FIELD "field"
 
 %precedence TERM
-%left OR_OP AND_OP
+%left OR_OP
+%left AND_OP
 %right NOT_OP
 %precedence LPAREN RPAREN
 
 %token <int64_t> INT64 "int64"
-%nterm <AstExpr> final_query filter search_expr field_cond field_cond_expr tag_list
+%nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr
+%nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
+
+%nterm <AstKnnNode> knn_query
+%nterm <std::string> opt_knn_alias
 
 %printer { yyo << $$; } <*>;
 
@@ -80,24 +86,41 @@ using namespace std;
 final_query:
   filter
       { driver->Set(move($1)); }
-  | filter ARROW LBRACKET KNN INT64 FIELD TERM RBRACKET
-      { driver->Set(AstKnnNode(move($1), $5, $6, BytesToFtVector($7))); }
+  | filter ARROW knn_query
+      { driver->Set(AstKnnNode(move($1), move($3))); }
+
+knn_query:
+  LBRACKET KNN INT64 FIELD TERM opt_knn_alias RBRACKET
+    { $$ = AstKnnNode($3, $4, BytesToFtVector($5), $6); }
+
+opt_knn_alias:
+  AS TERM { $$ = move($2); }
+  | { $$ = std::string{}; }
 
 filter:
-  search_expr { $$ = move($1); }
-  | STAR { $$ = AstStarNode(); }
+  search_expr               { $$ = move($1); }
+  | STAR                    { $$ = AstStarNode(); }
 
 search_expr:
- LPAREN search_expr RPAREN              { $$ = move($2); }
- | search_expr search_expr %prec AND_OP { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
- | search_expr OR_OP search_expr        { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
- | NOT_OP search_expr                   { $$ = AstNegateNode(move($2)); }
- | TERM                                 { $$ = AstTermNode(move($1)); }
- | INT64                                { $$ = AstTermNode(to_string($1)); }
- | FIELD COLON field_cond               { $$ = AstFieldNode(move($1), move($3)); }
+  search_unary_expr         { $$ = move($1); }
+  | search_and_expr         { $$ = move($1); }
+  | search_or_expr          { $$ = move($1); }
 
-// field_cond doesn't implicitly turn into field_cond_expr that can contain multi-term and/or expressions,
-// as those can only be contained inside parentheses
+search_and_expr:
+  search_unary_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+  | search_and_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+
+search_or_expr:
+  search_expr OR_OP search_and_expr                { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+  | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+
+search_unary_expr:
+  LPAREN search_expr RPAREN           { $$ = move($2); }
+  | NOT_OP search_unary_expr          { $$ = AstNegateNode(move($2)); }
+  | TERM                              { $$ = AstTermNode(move($1)); }
+  | INT64                             { $$ = AstTermNode(to_string($1)); }
+  | FIELD COLON field_cond            { $$ = AstFieldNode(move($1), move($3)); }
+
 field_cond:
   TERM                                  { $$ = AstTermNode(move($1)); }
   | INT64                               { $$ = AstTermNode(to_string($1)); }
@@ -107,12 +130,23 @@ field_cond:
   | LCURLBR tag_list RCURLBR            { $$ = move($2); }
 
 field_cond_expr:
-  LPAREN field_cond_expr RPAREN                   { $$ = move($2); }
-  | field_cond_expr field_cond_expr %prec AND_OP  { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
-  | field_cond_expr OR_OP field_cond_expr         { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
-  | NOT_OP field_cond_expr                        { $$ = AstNegateNode(move($2)); };
-  | TERM                                          { $$ = AstTermNode(move($1)); }
-  | INT64                                         { $$ = AstTermNode(to_string($1)); }
+  field_unary_expr                       { $$ = move($1); }
+  | field_and_expr                       { $$ = move($1); }
+  | field_or_expr                        { $$ = move($1); }
+
+field_and_expr:
+  field_unary_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+  | field_and_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+
+field_or_expr:
+  field_cond_expr OR_OP field_unary_expr          { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+  | field_cond_expr OR_OP field_and_expr          { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+
+field_unary_expr:
+  LPAREN field_cond_expr RPAREN                  { $$ = move($2); }
+  | NOT_OP field_unary_expr                      { $$ = AstNegateNode(move($2)); };
+  | TERM                                         { $$ = AstTermNode(move($1)); }
+  | INT64                                        { $$ = AstTermNode(to_string($1)); }
 
 tag_list:
   TERM                       { $$ = AstTagsNode(move($1)); }

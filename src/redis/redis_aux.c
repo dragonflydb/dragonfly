@@ -14,20 +14,16 @@ void InitRedisTables() {
   crc64_init();
   memset(&server, 0, sizeof(server));
 
-  server.page_size = sysconf(_SC_PAGESIZE);
-
   server.maxmemory_policy = 0;
   server.lfu_decay_time = 0;
 
   // been used by t_zset routines that convert listpack to skiplist for cases
   // above these thresholds.
   server.zset_max_listpack_entries = 128;
-  server.zset_max_listpack_value = 64;
+  server.zset_max_listpack_value = 32;
 
-  // Present so that redis code compiles. However, we ignore this field and instead check against
-  // listpack total size in hset_family.cc
-  server.hash_max_listpack_entries = 512;
-  server.hash_max_listpack_value = 32;  // decreased from redis default 64.
+  server.max_map_field_len = 64;
+  server.max_listpack_map_bytes = 1024;
 
   server.stream_node_max_bytes = 4096;
   server.stream_node_max_entries = 100;

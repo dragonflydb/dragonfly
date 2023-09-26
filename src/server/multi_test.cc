@@ -70,6 +70,20 @@ TEST_F(MultiTest, MultiAndFlush) {
   EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("'FLUSHALL' inside MULTI is not allowed"));
 }
 
+TEST_F(MultiTest, MultiWithError) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"set", "x"}), ErrArg("wrong number of arguments for 'set' command"));
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "z", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), "OK");
+
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"get", "z"}), "y");
+}
+
 TEST_F(MultiTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
@@ -364,6 +378,22 @@ TEST_F(MultiTest, Eval) {
   EXPECT_EQ(resp, "12345678912345-works");
   resp = Run({"eval", kGetScore, "1", "z1", "c"});
   EXPECT_EQ(resp, "12.5-works");
+
+  // Multiple calls in a Lua script
+  EXPECT_EQ(Run({"eval",
+                 R"(redis.call('set', 'foo', '42')
+                    return redis.call('get', 'foo'))",
+                 "1", "foo"}),
+            "42");
+
+  auto condition = [&]() { return service_->IsLocked(0, "foo"); };
+  auto fb = ExpectConditionWithSuspension(condition);
+  EXPECT_EQ(Run({"eval",
+                 R"(redis.call('set', 'foo', '42')
+                    return redis.call('get', 'foo'))",
+                 "1", "foo"}),
+            "42");
+  fb.Join();
 }
 
 TEST_F(MultiTest, Watch) {
@@ -518,7 +548,8 @@ TEST_F(MultiTest, EvalOOO) {
   }
 
   auto metrics = GetMetrics();
-  EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
+  EXPECT_EQ(1 + 2 * kTimes,
+            metrics.eval_io_coordination_cnt + metrics.eval_shardlocal_coordination_cnt);
 }
 
 // Run MULTI/EXEC commands in parallel, where each command is:

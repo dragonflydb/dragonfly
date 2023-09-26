@@ -54,13 +54,15 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
     bsize += v[i].iov_len;
   }
 
-  // Allow batching with up to 8K of data.
+  // Allow batching with up to kMaxBatchSize of data.
   if ((should_batch_ || should_aggregate_) && (batch_.size() + bsize < kMaxBatchSize)) {
+    batch_.reserve(batch_.size() + bsize);
     for (unsigned i = 0; i < len; ++i) {
       std::string_view src((char*)v[i].iov_base, v[i].iov_len);
-      DVLOG(2) << "Appending to stream " << absl::CHexEscape(src);
+      DVLOG(3) << "Appending to stream " << absl::CHexEscape(src);
       batch_.append(src.data(), src.size());
     }
+    DVLOG(2) << "Batched " << bsize << " bytes";
     return;
   }
 
@@ -72,7 +74,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   if (batch_.empty()) {
     ec = sink_->Write(v, len);
   } else {
-    DVLOG(2) << "Sending batch to stream " << sink_ << ": " << absl::CHexEscape(batch_);
+    DVLOG(3) << "Sending batch to stream :" << absl::CHexEscape(batch_);
 
     io_write_bytes_ += batch_.size();
 
@@ -85,6 +87,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   }
 
   if (ec) {
+    DVLOG(1) << "Error writing to stream: " << ec.message();
     ec_ = ec;
   }
 }
@@ -130,7 +133,7 @@ void SinkReplyBuilder::StopAggregate() {
   DVLOG(1) << "StopAggregate";
   should_aggregate_ = false;
 
-  if (should_batch_ || batch_.empty())
+  if (should_batch_)
     return;
 
   FlushBatch();
@@ -142,10 +145,15 @@ void SinkReplyBuilder::SetBatchMode(bool batch) {
 }
 
 void SinkReplyBuilder::FlushBatch() {
+  if (batch_.empty())
+    return;
+
   error_code ec = sink_->Write(io::Buffer(batch_));
   batch_.clear();
-  if (ec)
+  if (ec) {
+    DVLOG(1) << "Error flushing to stream: " << ec.message();
     ec_ = ec;
+  }
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {

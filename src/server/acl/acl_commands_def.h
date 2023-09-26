@@ -5,6 +5,7 @@
 #pragma once
 
 #include "absl/container/flat_hash_map.h"
+#include "base/logging.h"
 
 namespace dfly::acl {
 /* There are 21 ACL categories as of redis 7
@@ -105,5 +106,30 @@ inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
     "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
     "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
     "_RESERVED", "FT_SEARCH", "THROTTLE",  "JSON"};
+
+using RevCommandField = std::vector<std::string>;
+using RevCommandsIndexStore = std::vector<RevCommandField>;
+
+constexpr uint64_t ALL_COMMANDS = std::numeric_limits<uint64_t>::max();
+constexpr uint64_t NONE_COMMANDS = std::numeric_limits<uint64_t>::min();
+
+// A variation of meyers singleton
+// This is initialized when the constructor of Service is called.
+// Basically, it calls this functions within the AclFamily::Register
+// functions which has the number of all the acl families registered
+inline size_t NumberOfFamilies(size_t number = 0) {
+  static size_t number_of_families = number;
+  return number_of_families;
+}
+
+inline const RevCommandsIndexStore& CommandsRevIndexer(RevCommandsIndexStore store = {}) {
+  static RevCommandsIndexStore rev_index_store = std::move(store);
+  return rev_index_store;
+}
+
+inline void BuildIndexers(std::vector<std::vector<std::string>> families) {
+  acl::NumberOfFamilies(families.size());
+  acl::CommandsRevIndexer(std::move(families));
+}
 
 }  // namespace dfly::acl

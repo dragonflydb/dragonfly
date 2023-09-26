@@ -54,7 +54,12 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
 
 Transaction::Transaction(const Transaction* parent)
     : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
-  multi_->mode = parent->multi_->mode;
+  if (parent->multi_) {
+    multi_->mode = parent->multi_->mode;
+  } else {
+    // Use squashing mechanism for inline execution of single-shard EVAL
+    multi_->mode = LOCK_AHEAD;
+  }
   multi_->role = SQUASHED_STUB;
 
   time_now_ms_ = parent->time_now_ms_;
@@ -76,18 +81,7 @@ void Transaction::InitGlobal() {
   DCHECK(!multi_ || (multi_->mode == GLOBAL || multi_->mode == NON_ATOMIC));
 
   global_ = true;
-  unique_shard_cnt_ = shard_set->size();
-  shard_data_.resize(unique_shard_cnt_);
-  for (auto& sd : shard_data_)
-    sd.local_mask = ACTIVE;
-}
-
-void Transaction::InitNoKey() {
-  // No key command will use the first shard.
-  unique_shard_cnt_ = 1;
-  unique_shard_id_ = 0;
-  shard_data_.resize(1);
-  shard_data_.front().local_mask |= ACTIVE;
+  EnableAllShards();
 }
 
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
@@ -124,7 +118,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
                                 bool rev_mapping) {
   args_.reserve(num_args);
   if (rev_mapping)
-    reverse_index_.reserve(args_.size());
+    reverse_index_.reserve(num_args);
 
   // Store the concatenated per-shard arguments from the shard index inside args_
   // and make each shard data point to its own sub-span inside args_.
@@ -315,8 +309,11 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     return OpStatus::OK;
   }
 
-  if ((cid_->opt_mask() & CO::NO_KEY_JOURNAL) > 0) {
-    InitNoKey();
+  if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
+    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+      EnableAllShards();
+    else
+      EnableShard(0);
     return OpStatus::OK;
   }
 
@@ -411,6 +408,15 @@ string Transaction::DebugId() const {
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
 
   return StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
+}
+
+void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args) {
+  multi_.reset();
+  InitBase(db, args);
+  EnableShard(sid);
+  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
+  CHECK(key_index);
+  StoreKeysInArgs(*key_index, false);
 }
 
 // Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
@@ -559,16 +565,9 @@ void Transaction::ScheduleInternal() {
   // on the context. For regular multi-transactions we can actually inspect all commands.
   // For eval-like transactions - we can decided based on the command flavor (EVAL/EVALRO) or
   // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
-  IntentLock::Mode mode = Mode();
-
   if (span_all) {
     is_active = [](uint32_t) { return true; };
     num_shards = shard_set->size();
-
-    // Lock shards
-    auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
-    shard_set->RunBriefInParallel(std::move(cb));
-    VLOG(1) << "Global shard lock acquired";
   } else {
     num_shards = unique_shard_cnt_;
     DCHECK_GT(num_shards, 0u);
@@ -609,6 +608,7 @@ void Transaction::ScheduleInternal() {
     }
 
     VLOG(2) << "Cancelling " << DebugId();
+    ServerState::tlocal()->stats.tx_schedule_cancel_cnt += 1;
 
     atomic_bool should_poll_execution{false};
     auto cancel = [&](EngineShard* shard) {
@@ -894,6 +894,21 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
+void Transaction::EnableShard(ShardId sid) {
+  unique_shard_cnt_ = 1;
+  unique_shard_id_ = sid;
+  shard_data_.resize(1);
+  shard_data_.front().local_mask |= ACTIVE;
+}
+
+void Transaction::EnableAllShards() {
+  unique_shard_cnt_ = shard_set->size();
+  unique_shard_id_ = unique_shard_cnt_ == 1 ? 0 : kInvalidSid;
+  shard_data_.resize(shard_set->size());
+  for (auto& sd : shard_data_)
+    sd.local_mask |= ACTIVE;
+}
+
 void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK(!IsAtomicMulti());
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
@@ -943,7 +958,7 @@ void Transaction::ExpireBlocking(WaitKeysProvider wcb) {
 }
 
 string_view Transaction::Name() const {
-  return cid_->name();
+  return cid_ ? cid_->name() : "null-command";
 }
 
 ShardId Transaction::GetUniqueShard() const {
@@ -956,7 +971,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   res.db_index = db_index_;
   res.key_step = cid_->key_arg_step();
   res.args = GetShardArgs(sid);
-  DCHECK(!res.args.empty() || (cid_->opt_mask() & CO::NO_KEY_JOURNAL));
+  DCHECK(!res.args.empty() || (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL));
 
   return res;
 }
@@ -1040,6 +1055,11 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
     return {false, false};
   }
 
+  if (IsGlobal()) {
+    shard->shard_lock()->Acquire(mode);
+    VLOG(1) << "Global shard lock acquired";
+  }
+
   TxQueue::Iterator it = txq->Insert(this);
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
   sd.pq_pos = it;
@@ -1072,6 +1092,9 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
     DCHECK(lock_args.args.size() > 0);
     shard->db_slice().Release(mode, lock_args);
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
+  }
+  if (IsGlobal()) {
+    shard->shard_lock()->Release(Mode());
   }
 
   if (pos == head && !txq->Empty()) {
@@ -1326,18 +1349,13 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   if (multi_ && multi_->role == SQUASHER)
     return;
 
-  bool journal_by_cmd_mask = true;
-  if ((cid_->opt_mask() & CO::NO_KEY_JOURNAL) > 0) {
-    journal_by_cmd_mask = true;  // Enforce journaling for commands that dont change the db.
-  } else if ((cid_->opt_mask() & CO::WRITE) == 0) {
-    journal_by_cmd_mask = false;  // Non-write command are not journaled.
-  } else if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 &&
-             !renabled_auto_journal_.load(memory_order_relaxed)) {
-    journal_by_cmd_mask = false;  // Command disabled auto journal.
-  }
-  if (!journal_by_cmd_mask) {
+  // Only write commands and/or no-key-transactional commands are logged
+  if ((cid_->opt_mask() & CO::WRITE) == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
-  }
+
+  // If autojournaling was disabled and not re-enabled, skip it
+  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !renabled_auto_journal_.load(memory_order_relaxed))
+    return;
 
   auto journal = shard->journal();
   if (journal == nullptr)

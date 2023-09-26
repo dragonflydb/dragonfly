@@ -228,8 +228,11 @@ TEST_F(DashTest, Basic) {
 
 TEST_F(DashTest, Segment) {
   std::unique_ptr<Segment> seg(new Segment(1));
+
+#ifndef __APPLE__
   LOG(INFO) << "Segment size " << sizeof(Segment)
             << " malloc size: " << malloc_usable_size(seg.get());
+#endif
 
   set<Segment::Key_t> keys = FillSegment(0);
 
@@ -817,7 +820,7 @@ TEST_F(DashTest, SplitBug) {
   string_view line;
   uint64_t val;
   while (lr.Next(&line)) {
-    CHECK(absl::SimpleHexAtoi(line, &val));
+    CHECK(absl::SimpleHexAtoi(line, &val)) << line;
     table.Insert(val, 0);
   }
   EXPECT_EQ(746, table.size());

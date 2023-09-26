@@ -51,6 +51,18 @@ TEST_F(ZSetFamilyTest, Add) {
   EXPECT_EQ(0.79028573343077946, 0.7902857334307795);
 }
 
+TEST_F(ZSetFamilyTest, AddNonUniqeMembers) {
+  auto resp = Run({"zadd", "x", "2", "a", "1", "a"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"zscore", "x", "a"});
+  EXPECT_EQ(resp, "1");
+
+  resp = Run({"zadd", "y", "3", "a", "1", "a", "2", "b"});
+  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_EQ("1", Run({"zscore", "y", "a"}));
+}
+
 TEST_F(ZSetFamilyTest, ZRem) {
   auto resp = Run({"zadd", "x", "1.1", "b", "2.1", "a"});
   EXPECT_THAT(resp, IntArg(2));

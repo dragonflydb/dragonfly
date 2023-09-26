@@ -62,6 +62,7 @@ term_char [_]|\w
 "}"            return Parser::make_RCURLBR (loc());
 "|"            return Parser::make_OR_OP (loc());
 "KNN"          return Parser::make_KNN (loc());
+"AS"           return Parser::make_AS (loc());
 
 -?[0-9]+       return make_INT64(matched_view(), loc());
 

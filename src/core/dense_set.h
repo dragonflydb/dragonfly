@@ -253,7 +253,7 @@ class DenseSet {
     return false;
   }
 
-  void* FindInternal(const void* obj, uint32_t cookie) const;
+  void* FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const;
   void* PopInternal();
 
   // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
@@ -279,6 +279,9 @@ class DenseSet {
   // Returns the previous object if it has been replaced.
   // nullptr, if obj was added.
   void* AddOrReplaceObj(void* obj, bool has_ttl);
+
+  // Assumes that the object does not exist in the set.
+  void AddUnique(void* obj, bool has_ttl, uint64_t hashcode);
 
  private:
   DenseSet(const DenseSet&) = delete;
@@ -328,8 +331,15 @@ class DenseSet {
     mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
   }
 
-  // Returns true if *ptr was deleted.
-  bool ExpireIfNeeded(DensePtr* prev, DensePtr* ptr) const;
+  // Returns true if *node was deleted.
+  bool ExpireIfNeeded(DensePtr* prev, DensePtr* node) const {
+    if (node->HasTtl()) {
+      return ExpireIfNeededInternal(prev, node);
+    }
+    return false;
+  }
+
+  bool ExpireIfNeededInternal(DensePtr* prev, DensePtr* node) const;
 
   // Deletes the object pointed by ptr and removes it from the set.
   // If ptr is a link then it will be deleted internally.
@@ -346,11 +356,12 @@ class DenseSet {
   uint32_t time_now_ = 0;
 };
 
-inline void* DenseSet::FindInternal(const void* obj, uint32_t cookie) const {
+inline void* DenseSet::FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const {
   if (entries_.empty())
     return nullptr;
 
-  DensePtr* ptr = const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second;
+  uint32_t bid = BucketId(hashcode);
+  DensePtr* ptr = const_cast<DenseSet*>(this)->Find(obj, bid, cookie).second;
   return ptr ? ptr->GetObject() : nullptr;
 }
 

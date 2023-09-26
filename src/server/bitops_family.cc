@@ -841,7 +841,7 @@ constexpr uint32_t kSetBit = WRITE | BITMAP | SLOW;
 
 void BitOpsFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-
+  registry->StartFamily();
   *registry
       << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1, 1, acl::kBitPos}.SetHandler(&BitPos)
       << CI{"BITCOUNT", CO::READONLY, -2, 1, 1, 1, acl::kBitCount}.SetHandler(&BitCount)

@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
@@ -57,6 +58,11 @@ const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTy
 
 }  // namespace
 
+bool SearchParams::ShouldReturnField(std::string_view field) const {
+  auto cb = [field](const auto& entry) { return entry.first == field; };
+  return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
+}
+
 optional<search::SchemaField::FieldType> ParseSearchFieldType(string_view name) {
   auto it = kSchemaTypes.find(name);
   return it != kSchemaTypes.end() ? make_optional(it->second) : nullopt;
@@ -84,6 +90,16 @@ string DocIndexInfo::BuildRestoreCommand() const {
   for (const auto& [fident, finfo] : base_index.schema.fields) {
     absl::StrAppend(&out, " ", fident, " AS ", finfo.short_name, " ",
                     SearchFieldTypeToString(finfo.type));
+
+    Overloaded info{
+        [](monostate) {},
+        [out = &out](const search::SchemaField::VectorParams& params) {
+          auto sim = params.sim == search::VectorSimilarity::L2 ? "L2" : "COSINE";
+          absl::StrAppend(out, " ", params.use_hnsw ? "HNSW" : "FLAT", " 6 ", "DIM ", params.dim,
+                          " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
+        },
+    };
+    visit(info, finfo.special_params);
   }
 
   return out;
@@ -168,6 +184,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
                                    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.shard->db_slice();
   auto search_results = search_algo->Search(&indices_);
+
+  if (!search_results.error.empty())
+    return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
 
   size_t serialize_count = min(search_results.ids.size(), params.limit_offset + params.limit_total);
   vector<SerializedSearchDoc> out;

@@ -2,7 +2,8 @@ default_stages: [commit]
 exclude: |
     (?x)(
       src/redis/.* |
-      contrib/charts/dragonfly/ci/.*
+      contrib/charts/dragonfly/ci/.* |
+      patches/.*
     )
 repos:
   - repo: local

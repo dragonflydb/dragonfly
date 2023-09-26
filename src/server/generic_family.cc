@@ -108,7 +108,7 @@ class InMemSource : public ::io::Source {
 ::io::Result<size_t> InMemSource::ReadSome(const iovec* v, uint32_t len) {
   ssize_t read_total = 0;
   while (size_t(offs_) < buf_.size() && len > 0) {
-    size_t read_sz = min(buf_.size() - offs_, v->iov_len);
+    size_t read_sz = min<size_t>(buf_.size() - offs_, v->iov_len);
     memcpy(v->iov_base, buf_.data() + offs_, read_sz);
     read_total += read_sz;
     offs_ += read_sz;
@@ -723,7 +723,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
-  int_arg = std::max(int_arg, -1L);
+  int_arg = std::max<int64_t>(int_arg, -1);
   DbSlice::ExpireParams params{.value = int_arg};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -743,7 +743,7 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  int_arg = std::max(int_arg, 0L);
+  int_arg = std::max<int64_t>(int_arg, 0L);
   DbSlice::ExpireParams params{.value = int_arg, .absolute = true};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -787,7 +787,7 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(msec, &int_arg)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
-  int_arg = std::max(int_arg, 0L);
+  int_arg = std::max<int64_t>(int_arg, 0L);
   DbSlice::ExpireParams params{.value = int_arg, .absolute = true, .unit = TimeUnit::MSEC};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -810,7 +810,7 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(msec, &int_arg)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
-  int_arg = std::max(int_arg, 0L);
+  int_arg = std::max<int64_t>(int_arg, 0L);
   DbSlice::ExpireParams params{.value = int_arg, .unit = TimeUnit::MSEC};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1468,7 +1468,7 @@ constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 
 void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
-
+  registry->StartFamily();
   *registry
       << CI{"DEL", CO::WRITE, -2, 1, -1, 1, acl::kDel}.HFUNC(Del)
       /* Redis compatibility:

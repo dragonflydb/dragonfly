@@ -333,11 +333,11 @@ TEST_F(RdbTest, SaveManyDbs) {
 
 TEST_F(RdbTest, HMapBugs) {
   // Force kEncodingStrMap2 encoding.
-  server.hash_max_listpack_value = 0;
+  server.max_map_field_len = 0;
   Run({"hset", "hmap1", "key1", "val", "key2", "val2"});
   Run({"hset", "hmap2", "key1", string(690557, 'a')});
 
-  server.hash_max_listpack_value = 32;
+  server.max_map_field_len = 32;
   Run({"debug", "reload"});
   EXPECT_EQ(2, CheckedInt({"hlen", "hmap1"}));
 }
@@ -354,10 +354,10 @@ TEST_F(RdbTest, Issue1305) {
   */
 
   // Force kEncodingStrMap2 encoding.
-  server.hash_max_listpack_value = 0;
+  server.max_map_field_len = 0;
   Run({"hset", "hmap", "key1", "val", "key2", ""});
 
-  server.hash_max_listpack_value = 32;
+  server.max_map_field_len = 32;
   Run({"debug", "reload"});
   EXPECT_EQ(2, CheckedInt({"hlen", "hmap"}));
 }

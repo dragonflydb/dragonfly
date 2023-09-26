@@ -21,7 +21,6 @@ using facade::OpStatus;
 class HSetFamily {
  public:
   static void Register(CommandRegistry* registry);
-  static uint32_t MaxListPackLen();
 
   // Does not free lp.
   static StringMap* ConvertToStrMap(uint8_t* lp);

@@ -35,16 +35,6 @@ class HestFamilyTestProtocolVersioned : public HSetFamilyTest,
 INSTANTIATE_TEST_CASE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
                         ::testing::Values("2", "3"));
 
-TEST_F(HSetFamilyTest, Hash) {
-  robj* obj = createHashObject();
-  sds field = sdsnew("field");
-  sds val = sdsnew("value");
-  hashTypeSet(obj, field, val, 0);
-  sdsfree(field);
-  sdsfree(val);
-  decrRefCount(obj);
-}
-
 TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});
   EXPECT_THAT(resp, ErrArg("wrong number"));
@@ -201,6 +191,117 @@ TEST_F(HSetFamilyTest, HRandFloat) {
   }
 
   Run({"hrandfield", "k"});
+}
+
+TEST_F(HSetFamilyTest, HRandField) {
+  // exercise Redis' listpack encoding
+  Run({"HSET", "k", "a", "0", "b", "1", "c", "2"});
+
+  EXPECT_THAT(Run({"hrandfield", "k"}), AnyOf("a", "b", "c"));
+
+  EXPECT_THAT(Run({"hrandfield", "k", "2"}).GetVec(), IsSubsetOf({"a", "b", "c"}));
+
+  EXPECT_THAT(Run({"hrandfield", "k", "3"}).GetVec(), UnorderedElementsAre("a", "b", "c"));
+
+  EXPECT_THAT(Run({"hrandfield", "k", "4"}).GetVec(), UnorderedElementsAre("a", "b", "c"));
+
+  auto resp = Run({"hrandfield", "k", "4", "withvalues"});
+  EXPECT_THAT(resp, ArrLen(6));
+  auto vec = resp.GetVec();
+
+  std::vector<RespExpr> k, v;
+  for (unsigned int i = 0; i < vec.size(); ++i) {
+    if (i % 2 == 1)
+      v.push_back(vec[i]);
+    else
+      k.push_back(vec[i]);
+  }
+
+  EXPECT_THAT(v, UnorderedElementsAre("0", "1", "2"));
+  EXPECT_THAT(k, UnorderedElementsAre("a", "b", "c"));
+
+  resp = Run({"hrandfield", "k", "-4", "withvalues"});
+  EXPECT_THAT(resp, ArrLen(8));
+  vec = resp.GetVec();
+  k.clear();
+  v.clear();
+  for (unsigned int i = 0; i < vec.size(); ++i) {
+    if (i % 2 == 0) {
+      if (vec[i] == "a")
+        EXPECT_EQ(vec[i + 1], "0");
+      else if (vec[i] == "b")
+        EXPECT_EQ(vec[i + 1], "1");
+      else if (vec[i] == "c")
+        EXPECT_EQ(vec[i + 1], "2");
+      else
+        ADD_FAILURE();
+    }
+  }
+
+  // exercise Dragonfly's string map encoding
+  int num_entries = 500;
+  for (int i = 0; i < num_entries; i++) {
+    Run({"HSET", "largehash", std::to_string(i), std::to_string(i * 10)});
+  }
+
+  resp = Run({"hrandfield", "largehash"});
+  EXPECT_LE(stoi(resp.GetString()), num_entries - 1);
+  EXPECT_GE(stoi(resp.GetString()), 0);
+
+  resp = Run({"hrandfield", "largehash", std::to_string(num_entries / 2)});
+  vec = resp.GetVec();
+  std::vector<std::string> string_vec;
+  for (auto v : vec) {
+    string_vec.push_back(v.GetString());
+  }
+
+  sort(string_vec.begin(), string_vec.end());
+  auto it = std::unique(string_vec.begin(), string_vec.end());
+  bool is_unique = (it == string_vec.end());
+  EXPECT_TRUE(is_unique);
+
+  for (const auto& str : string_vec) {
+    EXPECT_LE(stoi(str), num_entries - 1);
+    EXPECT_GE(stoi(str), 0);
+  }
+
+  resp = Run({"hrandfield", "largehash", std::to_string(num_entries * -1 - 1)});
+  EXPECT_THAT(resp, ArrLen(num_entries + 1));
+  vec = resp.GetVec();
+
+  string_vec.clear();
+  for (auto v : vec) {
+    string_vec.push_back(v.GetString());
+    int i = stoi(v.GetString());
+    EXPECT_LE(i, num_entries - 1);
+    EXPECT_GE(i, 0);
+  }
+
+  sort(string_vec.begin(), string_vec.end());
+  it = std::unique(string_vec.begin(), string_vec.end());
+  is_unique = (it == string_vec.end());
+  EXPECT_FALSE(is_unique);
+
+  resp = Run({"hrandfield", "largehash", std::to_string(num_entries * -1 - 1), "withvalues"});
+  EXPECT_THAT(resp, ArrLen((num_entries + 1) * 2));
+  vec = resp.GetVec();
+
+  string_vec.clear();
+  for (unsigned int i = 0; i < vec.size(); ++i) {
+    if (i % 2 == 0) {
+      int k = stoi(vec[i].GetString());
+      EXPECT_LE(k, num_entries - 1);
+      EXPECT_GE(k, 0);
+      int v = stoi(vec[i + 1].GetString());
+      EXPECT_EQ(v, k * 10);
+      string_vec.push_back(vec[i].GetString());
+    }
+  }
+
+  sort(string_vec.begin(), string_vec.end());
+  it = std::unique(string_vec.begin(), string_vec.end());
+  is_unique = (it == string_vec.end());
+  EXPECT_FALSE(is_unique);
 }
 
 TEST_F(HSetFamilyTest, HSetEx) {

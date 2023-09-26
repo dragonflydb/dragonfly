@@ -36,16 +36,66 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: true
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.3
+
+      - name: Configure Cache Env
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
+
       - name: Install dependencies
         run: |
           cmake --version
+          mkdir -p $GITHUB_WORKSPACE/build
+      - name: Install packages
+        if: matrix.container == 'fedora:30'
+        run: |
+          echo Passed
+
+      - name: Configure & Build
+        run: |
+          cd $GITHUB_WORKSPACE/build
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+             ${{ matrix.flags }}
+          ninja src/all
+      - name: Test
+        run: |
+            cd $GITHUB_WORKSPACE/build
+            ctest -V -L DFLY
+
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install dependencies
+        run: |
+          brew update && brew install ninja boost openssl automake gcc zstd bison c-ares \
+              autoconf libtool automake
+          # brew info icu4c
           mkdir -p $GITHUB_WORKSPACE/build
 
       - name: Configure & Build
         run: |
           cd $GITHUB_WORKSPACE/build
-          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ${{ matrix.flags }}
+
+          export PATH=/usr/local/opt/bison/bin:$PATH
+          which gcc
+          which gcc-13
+
+          bison --version
+
+
+          echo "*************************** START BUILDING **************************************"
+          CC=gcc-13 CXX=g++-13 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF
+
           ninja src/all
+
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build

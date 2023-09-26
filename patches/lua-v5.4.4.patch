@@ -15,13 +15,15 @@ diff --git a/makefile b/makefile
 index d46e650c..c27e5677 100644
 --- a/makefile
 +++ b/makefile
-@@ -66,13 +66,25 @@ LOCAL = $(TESTS) $(CWARNS)
+@@ -66,13 +66,26 @@ LOCAL = $(TESTS) $(CWARNS)
 
 
  # enable Linux goodies
 -MYCFLAGS= $(LOCAL) -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE
 +MYCFLAGS= $(LOCAL) -std=c99 -g -O2 -DLUA_USE_LINUX
- MYLDFLAGS= $(LOCAL) -Wl,-E
+-MYLDFLAGS= $(LOCAL) -Wl,-E
++# Commenting out dynamic linking flags because we link statically
++# and this does not work on MacOS: MYLDFLAGS= $(LOCAL) -Wl,-E
 -MYLIBS= -ldl -lreadline
 +MYLIBS= -ldl
 
@@ -30,7 +32,7 @@ index d46e650c..c27e5677 100644
 +# equivalent to: if $(uname_m) == x86_64 || $(uname_m) == amd64
 +ifneq (, $(filter $(uname_m),x86_64 amd64))
 +OPTFLAGS= -march=sandybridge
-+else ifeq ($(uname_m), aarch64)
++else ifneq (, $(filter $(uname_m),aarch64 arm64))
 +OPTFLAGS= -march=armv8.2-a+fp16+rcpc+dotprod+crypto
 +else ifeq ($(uname_m), s390x)
 +OPTFLAGS= -march=native

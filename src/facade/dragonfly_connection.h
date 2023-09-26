@@ -80,8 +80,9 @@ class Connection : public util::Connection {
   struct MonitorMessage : public std::string {};
 
   struct AclUpdateMessage {
-    std::string_view username;
-    uint64_t categories{0};
+    std::vector<std::string> username;
+    std::vector<uint32_t> categories;
+    std::vector<std::vector<uint64_t>> commands;
   };
 
   struct PipelineMessage {
@@ -119,7 +120,7 @@ class Connection : public util::Connection {
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage> handle;
   };
 
-  enum Phase { READ_SOCKET, PROCESS };
+  enum Phase { SETUP, READ_SOCKET, PROCESS, NUM_PHASES };
 
  public:
   // Add PubMessage to dispatch queue.
@@ -155,6 +156,7 @@ class Connection : public util::Connection {
   bool IsCurrentlyDispatching() const;
 
   std::string GetClientInfo(unsigned thread_id) const;
+  std::string GetClientInfo() const;
   std::string RemoteEndpointStr() const;
   std::string RemoteEndpointAddress() const;
   std::string LocalBindAddress() const;
@@ -168,6 +170,7 @@ class Connection : public util::Connection {
   }
 
   void SetName(std::string name) {
+    util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
     name_ = std::move(name);
   }
 
@@ -226,6 +229,7 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
  private:
+  std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
@@ -249,7 +253,7 @@ class Connection : public util::Connection {
 
   time_t creation_time_, last_interaction_;
 
-  Phase phase_;
+  Phase phase_ = SETUP;
   std::string name_;
 
   // A pointer to the ConnectionContext object if it exists. Some connections (like http

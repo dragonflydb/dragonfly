@@ -1,4 +1,5 @@
 import itertools
+import logging
 import sys
 import asyncio
 from redis import asyncio as aioredis
@@ -10,6 +11,7 @@ import time
 import difflib
 import json
 import subprocess
+import os
 from enum import Enum
 
 
@@ -38,10 +40,11 @@ def batch_fill_data(client, gen, batch_size=100):
         client.mset({k: v for k, v, in group})
 
 
-async def wait_available_async(client: aioredis.Redis):
+async def wait_available_async(client: aioredis.Redis, timeout=10):
     """Block until instance exits loading phase"""
     its = 0
-    while True:
+    start = time.time()
+    while (time.time() - start) < timeout:
         try:
             await client.get("key")
             return
@@ -55,6 +58,7 @@ async def wait_available_async(client: aioredis.Redis):
         print("W", end="", flush=True)
         await asyncio.sleep(0.01)
         its += 1
+    raise RuntimeError("Client did not become available in time!")
 
 
 class SizeChange(Enum):
@@ -373,7 +377,7 @@ class DflySeeder:
         Run a seeding cycle on all dbs either until stop(), a fixed number of commands (target_ops)
         or until reaching an allowed deviation from the target number of keys (target_deviation)
         """
-        print(f"Running ops:{target_ops} deviation:{target_deviation}")
+        logging.debug(f"Running ops:{target_ops} deviation:{target_deviation}")
         self.stop_flag = False
         queues = [asyncio.Queue(maxsize=3) for _ in range(self.dbcount)]
         producer = asyncio.create_task(
@@ -391,7 +395,7 @@ class DflySeeder:
 
         took = time.time() - time_start
         qps = round(cmdcount * self.dbcount / took, 2)
-        print(f"Filling took: {took}, QPS: {qps}")
+        logging.debug(f"Filling took: {took}, QPS: {qps}")
 
     def stop(self):
         """Stop all invocations to run"""
@@ -406,6 +410,7 @@ class DflySeeder:
 
         if port is None:
             port = self.port
+        logging.debug(f"Starting capture from {port=}")
         keys = sorted(list(self.gen.keys_and_types()))
 
         captures = await asyncio.gather(
@@ -581,3 +586,22 @@ def gen_certificate(
     # Use CA's private key to sign dragonfly's CSR and get back the signed certificate
     step2 = rf"openssl x509 -req -in {certificate_request_path} -days 1 -CA {ca_certificate_path} -CAkey {ca_key_path} -CAcreateserial -out {certificate_path}"
     subprocess.run(step2, shell=True)
+
+
+class EnvironCntx:
+    def __init__(self, **kwargs):
+        self.updates = kwargs
+        self.undo = {}
+
+    def __enter__(self):
+        for k, v in self.updates.items():
+            if k in os.environ:
+                self.undo[k] = os.environ[k]
+            os.environ[k] = v
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        for k, v in self.updates.items():
+            if k in self.undo:
+                os.environ[k] = self.undo[k]
+            else:
+                del os.environ[k]

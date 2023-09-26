@@ -120,6 +120,28 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
 
   resp = Run({"JSON.GET", "json", "$..phoneNumbers[1].*"});
   EXPECT_EQ(resp, R"(["646 555-4567","office"])");
+
+  resp = Run({"JSON.GET", "json", "$.address.*", "INDENT", "indent", "NEWLINE", "newline"});
+  EXPECT_EQ(
+      resp,
+      R"([newlineindent"New York",newlineindent"NY",newlineindent"21 2nd Street",newlineindent"10021-3100"newline])");
+
+  resp = Run({"JSON.GET", "json", "$.address", "SPACE", "space"});
+  EXPECT_EQ(
+      resp,
+      R"([{"city":space"New York","state":space"NY","street":space"21 2nd Street","zipcode":space"10021-3100"}])");
+
+  resp = Run({"JSON.GET", "json", "$.firstName", "$.age", "$.lastName", "INDENT", "indent",
+              "NEWLINE", "newline", "SPACE", "space"});
+  EXPECT_EQ(
+      resp,
+      R"({newlineindent"$.age":space[newlineindentindent27newlineindent],newlineindent"$.firstName":space[newlineindentindent"John"newlineindent],newlineindent"$.lastName":space[newlineindentindent"Smith"newlineindent]newline})");
+
+  resp =
+      Run({"JSON.GET", "json", "$..phoneNumbers.*", "INDENT", "t", "NEWLINE", "s", "SPACE", "s"});
+  EXPECT_EQ(
+      resp,
+      R"([st{stt"number":s"212 555-1234",stt"type":s"home"st},st{stt"number":s"646 555-4567",stt"type":s"office"st}s])");
 }
 
 TEST_F(JsonFamilyTest, Type) {
@@ -932,6 +954,17 @@ TEST_F(JsonFamilyTest, DebugFields) {
 
   resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
   EXPECT_THAT(resp, IntArg(16));
+
+  json = R"({"a":1, "b":2, "c":{"k1":1,"k2":2}})";
+
+  resp = Run({"JSON.SET", "obj_doc", "$", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "FIELDS", "obj_doc", "$.a"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.DEBUG", "fields", "obj_doc", "$.a"});
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 TEST_F(JsonFamilyTest, Resp) {

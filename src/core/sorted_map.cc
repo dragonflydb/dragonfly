@@ -19,7 +19,7 @@ extern "C" {
 
 using namespace std;
 
-ABSL_FLAG(bool, use_zset_tree, false, "If true use b+tree for zset implementation");
+ABSL_FLAG(bool, use_zset_tree, true, "If true use b+tree for zset implementation");
 
 extern "C" unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele,
                                       double score);
@@ -435,13 +435,11 @@ int SortedMap::DfImpl::Add(double score, sds ele, int in_flags, int* out_flags, 
       return 1;
     }
 
-    auto [newk, added] = score_map->AddOrUpdate(string_view{ele, sdslen(ele)}, score);
-    DCHECK(added);
+    obj = score_map->AddUnique(string_view{ele, sdslen(ele)}, score);
 
     *out_flags = ZADD_OUT_ADDED;
     *newscore = score;
-    obj = newk;
-    added = score_tree->Insert(obj);
+    bool added = score_tree->Insert(obj);
     DCHECK(added);
 
     return 1;
@@ -544,7 +542,7 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsi
       double score = GetObjScore(ele);
       if (range.min > score || (range.min == score && range.minex))
         break;
-      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, score);
       if (!path.Prev())
         break;
     }
@@ -559,16 +557,27 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsi
         return arr;
     }
 
+    auto path2 = path;
+    size_t num_elems = 0;
+
+    // Count the number of elements in the range.
     while (limit--) {
       ScoreSds ele = path.Terminal();
 
       double score = GetObjScore(ele);
       if (range.max < score || (range.max == score && range.maxex))
         break;
-
-      arr.emplace_back(string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele));
+      ++num_elems;
       if (!path.Next())
         break;
+    }
+
+    // reserve enough space.
+    arr.resize(num_elems);
+    for (size_t i = 0; i < num_elems; ++i) {
+      ScoreSds ele = path2.Terminal();
+      arr[i] = {string{(sds)ele, sdslen((sds)ele)}, GetObjScore(ele)};
+      path2.Next();
     }
   }
 

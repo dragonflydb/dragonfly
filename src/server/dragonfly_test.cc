@@ -8,8 +8,10 @@ extern "C" {
 }
 
 #include <absl/strings/ascii.h>
+#include <absl/strings/charconv.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
+#include <fast_float/fast_float.h>
 #include <gmock/gmock.h>
 
 #include "base/flags.h"
@@ -380,16 +382,15 @@ TEST_F(DflyEngineTest, OOM) {
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
+  max_memory_limit = 300000;
   shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
 
-  max_memory_limit = 300000;
-
   ssize_t i = 0;
   RespExpr resp;
-  for (; i < 5000; ++i) {
+  for (; i < 10000; ++i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
     // we evict some items because 5000 is too much when max_memory_limit is 300000.
     ASSERT_EQ(resp, "OK");
@@ -666,5 +667,38 @@ TEST_F(DflyEngineTest, Latency) {
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
+
+// Parse Double benchmarks
+static void BM_ParseFastFloat(benchmark::State& state) {
+  std::vector<std::string> args(100);
+  std::random_device rd;
+
+  for (auto& arg : args) {
+    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
+  }
+  double res;
+  while (state.KeepRunning()) {
+    for (const auto& arg : args) {
+      fast_float::from_chars(arg.data(), arg.data() + arg.size(), res);
+    }
+  }
+}
+BENCHMARK(BM_ParseFastFloat);
+
+static void BM_ParseDoubleAbsl(benchmark::State& state) {
+  std::vector<std::string> args(100);
+  std::random_device rd;
+  for (auto& arg : args) {
+    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
+  }
+
+  double res;
+  while (state.KeepRunning()) {
+    for (const auto& arg : args) {
+      absl::from_chars(arg.data(), arg.data() + arg.size(), res);
+    }
+  }
+}
+BENCHMARK(BM_ParseDoubleAbsl);
 
 }  // namespace dfly

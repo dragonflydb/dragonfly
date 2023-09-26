@@ -88,6 +88,9 @@ class RdbSaver {
   // TODO: to implement break functionality to allow stopping early.
   void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
+  // Send only the incremental snapshot since start_lsn.
+  void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);
+
   // Stops serialization in journal streaming mode in the shard's thread.
   void StopSnapshotInShard(EngineShard* shard);
 
@@ -97,7 +100,7 @@ class RdbSaver {
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Fills freq_map with the histogram of rdb types.
   // freq_map can optionally be null.
-  std::error_code SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map);
+  std::error_code SaveBody(Context* cntx, RdbTypeFreqMap* freq_map);
 
   void Cancel();
 
@@ -122,7 +125,7 @@ class CompressorImpl;
 
 class RdbSerializer {
  public:
-  RdbSerializer(CompressionMode compression_mode);
+  explicit RdbSerializer(CompressionMode compression_mode);
 
   ~RdbSerializer();
 
@@ -158,7 +161,7 @@ class RdbSerializer {
   }
 
   // Write journal entry as an embedded journal blob.
-  std::error_code WriteJournalEntry(const journal::Entry& entry);
+  std::error_code WriteJournalEntry(std::string_view entry);
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
 
@@ -188,7 +191,6 @@ class RdbSerializer {
   void AllocateCompressorOnce();
 
   base::IoBuf mem_buf_;
-  base::IoBuf journal_mem_buf_;
   std::string tmp_str_;
   base::PODArray<uint8_t> tmp_buf_;
   DbIndex last_entry_db_index_ = kInvalidDbId;

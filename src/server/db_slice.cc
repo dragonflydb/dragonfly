@@ -59,8 +59,13 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
   stats.obj_memory_usage -= (del_it->first.MallocUsed() + value_heap_size);
-  if (pv.ObjType() == OBJ_STRING)
+  if (pv.ObjType() == OBJ_STRING) {
     stats.strval_memory_usage -= value_heap_size;
+  } else if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
+    --stats.listpack_blob_cnt;
+  } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+    --stats.listpack_blob_cnt;
+  }
 
   if (ClusterConfig::IsEnabled()) {
     string tmp;
@@ -147,7 +152,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   if (!apply_memory_limit_ || mem_budget_ > soft_limit_)
     return true;
 
-  DCHECK_LT(tbl.size(), tbl.capacity());
+  DCHECK_LE(tbl.size(), tbl.capacity());
 
   // We take a conservative stance here -
   // we estimate how much memory we will take with the current capacity

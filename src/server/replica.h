@@ -109,7 +109,10 @@ class Replica : ProtocolClient {
 
   void RedisStreamAcksFb();
 
-  void JoinAllFlows();                // Join all flows if possible.
+  // Joins all the flows when doing sharded replication. This is called in two
+  // places: Once at the end of full sync to join the full sync fibers, and twice
+  // if a stable sync is interrupted to join the cancelled stable sync fibers.
+  void JoinDflyFlows();
   void SetShardStates(bool replica);  // Call SetReplica(replica) on all shards.
 
   // Send DFLY ${kind} to the master instance.
@@ -164,6 +167,9 @@ class Replica : ProtocolClient {
   EventCount waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
+  // A vector of the last executer LSNs when a replication is interrupted.
+  // Allows partial sync on reconnects.
+  std::optional<std::vector<LSN>> last_journal_LSNs_;
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)
@@ -221,13 +227,14 @@ class DflyShardReplica : public ProtocolClient {
   void JoinFlow();
 
   // Start replica initialized as dfly flow.
-  std::error_code StartFullSyncFlow(BlockingCounter block, Context* cntx);
+  // Sets is_full_sync when successful.
+  io::Result<bool> StartSyncFlow(BlockingCounter block, Context* cntx, std::optional<LSN>);
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(Context* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(const std::string& eof_token, BlockingCounter block, Context* cntx);
+  void FullSyncDflyFb(std::string eof_token, BlockingCounter block, Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyReadFb(Context* cntx);

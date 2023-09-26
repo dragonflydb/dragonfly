@@ -9,6 +9,7 @@
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
 #include "server/cluster/cluster_family.h"
@@ -116,6 +117,10 @@ class Service : public facade::ServiceInterface {
     return server_family_;
   }
 
+  // Utility function used in unit tests
+  // Do not use in production, only meant to be used by unit tests
+  void TestInit();
+
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
@@ -149,7 +154,8 @@ class Service : public facade::ServiceInterface {
   std::optional<facade::ErrorReply> CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                        const ConnectionContext& dfly_cntx);
 
-  void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
+  void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
+                    ConnectionContext* cntx);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
                ConnectionContext* cntx);
 
@@ -160,6 +166,7 @@ class Service : public facade::ServiceInterface {
   void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
 
   void RegisterCommands();
+  void Register(CommandRegistry* registry);
 
   base::VarzValue::Map GetVarzStats();
 
