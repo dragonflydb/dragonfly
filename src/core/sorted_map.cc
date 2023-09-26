@@ -19,7 +19,7 @@ extern "C" {
 
 using namespace std;
 
-ABSL_FLAG(bool, use_zset_tree, false, "If true use b+tree for zset implementation");
+ABSL_FLAG(bool, use_zset_tree, true, "If true use b+tree for zset implementation");
 
 extern "C" unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele,
                                       double score);
