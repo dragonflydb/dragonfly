@@ -405,14 +405,14 @@ async def test_rotating_masters(
 @pytest.mark.slow
 async def test_cancel_replication_immediately(df_local_factory, df_seeder_factory):
     """
-    Issue 40 replication commands randomally distributed over 10 seconds. This
+    Issue 80 replication commands randomally distributed over 10 seconds. This
     checks that the replication state machine can handle cancellation well.
     We assert that at least one command was cancelled during start and at least
-    one command one successfull.
+    one command was successfull.
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
-    COMMANDS_TO_ISSUE = 40
+    COMMANDS_TO_ISSUE = 80
 
     replica = df_local_factory.create()
     masters = [df_local_factory.create() for i in range(4)]
