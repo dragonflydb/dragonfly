@@ -83,6 +83,12 @@ struct AlgorithmProfile {
 
 // Represents a search result returned from the search algorithm.
 struct SearchResult {
+  size_t total;  // how many documents were matched in total
+
+  // number of matches before any aggregation, used by multi-shard optimizations
+  size_t pre_aggregation_total;
+
+  // The ids of the matched documents
   std::vector<DocId> ids;
 
   // If a KNN-query is present, distances for doc ids are returned as well
@@ -105,7 +111,8 @@ class SearchAlgorithm {
   // Init with query and return true if successful.
   bool Init(std::string_view query, const QueryParams* params);
 
-  SearchResult Search(const FieldIndices* index) const;
+  SearchResult Search(const FieldIndices* index,
+                      size_t limit = std::numeric_limits<size_t>::max()) const;
 
   // if enabled, return limit & alias for knn query
   std::optional<std::pair<size_t /*limit*/, std::string_view /*alias*/>> HasKnn() const;
