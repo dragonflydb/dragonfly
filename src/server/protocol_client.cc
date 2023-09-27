@@ -219,7 +219,10 @@ error_code ProtocolClient::ResolveMasterDns() {
     LOG(ERROR) << "Dns error " << gai_strerror(resolve_res) << ", host: " << server_context_.host;
     return make_error_code(errc::host_unreachable);
   }
-  LOG(INFO) << "Resetting endpoint! " << ip_addr << ", " << server_context_.port;
+
+  LOG_IF(INFO, std::string(ip_addr) != server_context_.host)
+      << "Resolved endpoint " << server_context_.Description() << " to " << ip_addr << ":"
+      << server_context_.port;
   server_context_.endpoint = {ip::make_address(ip_addr), server_context_.port};
 
   return error_code{};
