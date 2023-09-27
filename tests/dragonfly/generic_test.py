@@ -4,7 +4,8 @@ import redis
 import asyncio
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args, dfly_args, DflyStartException
+from . import dfly_multi_test_args, dfly_args
+from .instance import DflyStartException
 from .utility import batch_fill_data, gen_test_data, EnvironCntx
 
 
