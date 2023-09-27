@@ -1,7 +1,7 @@
 #!/bin/sh
 
 HOST="localhost"
-PORT=6379
+PORT=${PORT:-6379}
 
 # If we're running with TLS enabled, utilise OpenSSL for the check
 if [ -f "/etc/dragonfly/tls/ca.crt" ]
