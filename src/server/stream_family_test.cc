@@ -660,6 +660,70 @@ TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
   resp = Run({"xpending", "foo", "group", "-", "+"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 }
+  
+TEST_F(StreamFamilyTest, XAck) {
+  Run({"xadd", "foo", "1-0", "k0", "v0"});
+  Run({"xadd", "foo", "1-1", "k1", "v1"});
+  Run({"xadd", "foo", "1-2", "k2", "v2"});
+  Run({"xadd", "foo", "1-3", "k3", "v3"});
+  Run({"xgroup", "create", "foo", "cgroup", "0"});
+  Run({"xreadgroup", "group", "cgroup", "consumer", "count", "4", "streams", "foo", ">"});
+
+  // PEL of cgroup now has 4 messages.
+  // Acknowledge a message that exists.
+  auto resp = Run({"xack", "foo", "cgroup", "1-0"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // acknowledge a message from non-existing stream.
+  resp = Run({"xack", "nosuchstream", "cgroup", "1-0"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // acknowledge a message for a non-existing consumer group.
+  resp = Run({"xack", "foo", "nosuchcgroup", "1-0"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Verifies message id 1-0 gets removed from PEL.
+  resp = Run({"xreadgroup", "group", "cgroup", "consumer", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-1", RespArray(ElementsAre("k1", "v1")))),
+                             RespArray(ElementsAre("1-2", RespArray(ElementsAre("k2", "v2")))),
+                             RespArray(ElementsAre("1-3", RespArray(ElementsAre("k3", "v3")))))))));
+
+  // acknowledge a message that doesn't exist
+  resp = Run({"xack", "foo", "cgroup", "1-9"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Verifies no message gets removed from PEL.
+  resp = Run({"xreadgroup", "group", "cgroup", "consumer", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-1", RespArray(ElementsAre("k1", "v1")))),
+                             RespArray(ElementsAre("1-2", RespArray(ElementsAre("k2", "v2")))),
+                             RespArray(ElementsAre("1-3", RespArray(ElementsAre("k3", "v3")))))))));
+
+  // acknowledge another message that exists and one non-existing message.
+  resp = Run({"xack", "foo", "cgroup", "1-3", "1-9"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // Verifies only "1-3" gets removed from PEL.
+  resp = Run({"xreadgroup", "group", "cgroup", "consumer", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-1", RespArray(ElementsAre("k1", "v1")))),
+                             RespArray(ElementsAre("1-2", RespArray(ElementsAre("k2", "v2")))))))));
+
+  // acknowledge all the existing messages left.
+  resp = Run({"xack", "foo", "cgroup", "1-1", "1-2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  // Verifies that PEL is empty.
+  resp = Run({"xreadgroup", "group", "cgroup", "consumer", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ArrLen(0));
+}
 
 TEST_F(StreamFamilyTest, XInfoGroups) {
   Run({"del", "mystream"});
