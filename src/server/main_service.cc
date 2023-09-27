@@ -2067,9 +2067,14 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
   // We set the password for the HTTP service unless it is only enabled on the
   // admin port and the admin port is password-less.
   if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
-    base->SetUsername("default");
-    base->SetPassword(GetPassword());
-    base->SetSkipAuthForPath([](std::string_view path) { return path == "/metrics"; });
+    std::string pass = GetPassword();
+    base->SetAuthFunctor([pass = std::move(pass)](std::string_view path, std::string_view username,
+                                                  std::string_view password) {
+      if (path == "/metrics")
+        return true;
+      const bool pass_verified = pass.empty() ? true : password == pass;
+      return username == "default" && pass_verified;
+    });
   }
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
