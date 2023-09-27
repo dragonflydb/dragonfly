@@ -79,6 +79,8 @@ class UserRegistry {
 
   UserWithWriteLock MaybeAddAndUpdateWithLock(std::string_view username, User::UpdateRequest req);
 
+  User::UpdateRequest DefaultUserUpdateRequest() const;
+
  private:
   RegistryType registry_;
   mutable util::SharedMutex mu_;

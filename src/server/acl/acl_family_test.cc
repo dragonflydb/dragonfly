@@ -44,6 +44,9 @@ TEST_F(AclFamilyTest, AclDelUser) {
   auto resp = Run({"ACL", "DELUSER"});
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
 
+  resp = Run({"ACL", "DELUSER", "default"});
+  EXPECT_THAT(resp, ErrArg("ERR The'default' user cannot be removed"));
+
   resp = Run({"ACL", "DELUSER", "NOTEXISTS"});
   EXPECT_THAT(resp, ErrArg("ERR User NOTEXISTS does not exist"));
 
