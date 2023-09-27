@@ -36,10 +36,10 @@ ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "defragmentation");
 
 ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
-          "The ratio of wasted/commited memory above which we run defragmentation");
+          "The ratio of wasted/committed memory above which we run defragmentation");
 
 ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
-          "memory page under utilization threshold. Ratio between used and commited size, below "
+          "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
 namespace dfly {
 
