@@ -32,7 +32,7 @@ extern "C" {
 
 ABSL_FLAG(int, replication_acks_interval, 3000, "Interval between acks in milliseconds.");
 ABSL_FLAG(bool, enable_multi_shard_sync, false,
-          "Execute multi shards commands on replica syncrhonized");
+          "Execute multi shards commands on replica synchronized");
 ABSL_FLAG(int, master_connect_timeout_ms, 20000,
           "Timeout for establishing connection to a replication master");
 ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
