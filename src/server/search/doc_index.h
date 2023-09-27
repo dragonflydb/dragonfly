@@ -32,16 +32,16 @@ struct SerializedSearchDoc {
 struct SearchResult {
   SearchResult() = default;
 
-  SearchResult(std::vector<SerializedSearchDoc> docs, size_t total_hits,
+  SearchResult(size_t total_hits, std::vector<SerializedSearchDoc> docs,
                std::optional<search::AlgorithmProfile> profile)
-      : docs{std::move(docs)}, total_hits{total_hits}, profile{std::move(profile)} {
+      : total_hits{total_hits}, docs{std::move(docs)}, profile{std::move(profile)} {
   }
 
   SearchResult(facade::ErrorReply error) : error{std::move(error)} {
   }
 
-  std::vector<SerializedSearchDoc> docs;
   size_t total_hits;
+  std::vector<SerializedSearchDoc> docs;
   std::optional<search::AlgorithmProfile> profile;
 
   std::optional<facade::ErrorReply> error;
