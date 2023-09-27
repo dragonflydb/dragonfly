@@ -55,6 +55,7 @@ class Proxy:
             _, port = self.server.sockets[0].getsockname()[:2]
             self.port = port
 
+    async def serve(self):
         async with self.server:
             await self.server.serve_forever()
 
