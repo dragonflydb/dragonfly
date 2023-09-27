@@ -78,6 +78,8 @@ struct GroupInfo {
   size_t consumer_size;
   size_t pending_size;
   streamID last_id;
+  long long entries_read;
+  long long lag;
 };
 
 struct RangeOpts {
@@ -864,6 +866,8 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
       ginfo.consumer_size = raxSize(cg->consumers);
       ginfo.pending_size = raxSize(cg->pel);
       ginfo.last_id = cg->last_id;
+      ginfo.entries_read = cg->entries_read;
+      ginfo.lag = streamCGLag(s, cg);
       result.push_back(std::move(ginfo));
     }
     raxStop(&ri);
@@ -884,6 +888,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  long entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
       // MKSTREAM is enabled, so create the stream
@@ -913,7 +918,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
     }
   }
 
-  streamCG* cg = streamCreateCG(s, opts.gname.data(), opts.gname.size(), &id, 0);
+  streamCG* cg = streamCreateCG(s, opts.gname.data(), opts.gname.size(), &id, entries_read);
   if (cg) {
     return OpStatus::OK;
   }
@@ -1915,7 +1920,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         for (const auto& ginfo : *result) {
           string last_id = StreamIdRepr(ginfo.last_id);
 
-          (*cntx)->StartCollection(4, RedisReplyBuilder::MAP);
+          (*cntx)->StartCollection(6, RedisReplyBuilder::MAP);
           (*cntx)->SendBulkString("name");
           (*cntx)->SendBulkString(ginfo.name);
           (*cntx)->SendBulkString("consumers");
@@ -1924,6 +1929,18 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           (*cntx)->SendLong(ginfo.pending_size);
           (*cntx)->SendBulkString("last-delivered-id");
           (*cntx)->SendBulkString(last_id);
+          (*cntx)->SendBulkString("entries-read");
+          if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
+            (*cntx)->SendLong(ginfo.entries_read);
+          } else {
+            (*cntx)->SendNull();
+          }
+          (*cntx)->SendBulkString("lag");
+          if (ginfo.lag != SCG_INVALID_LAG) {
+            (*cntx)->SendLong(ginfo.lag);
+          } else {
+            (*cntx)->SendNull();
+          }
         }
         return;
       }
