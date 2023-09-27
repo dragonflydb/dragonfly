@@ -653,6 +653,16 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     rec.id = id;
     rec.kv_arr.reserve(numfields);
     if (opts.group && streamCompareID(&id, &opts.group->last_id) > 0) {
+      if (opts.group->entries_read != SCG_INVALID_ENTRIES_READ &&
+          !streamRangeHasTombstones(s, &id, NULL)) {
+        /* A valid counter and no future tombstones mean we can
+         * increment the read counter to keep tracking the group's
+         * progress. */
+        opts.group->entries_read++;
+      } else if (s->entries_added) {
+        /* The group's counter may be invalid, so we try to obtain it. */
+        opts.group->entries_read = streamEstimateDistanceFromFirstEverEntry(s, &id);
+      }
       opts.group->last_id = id;
     }
 
@@ -1272,6 +1282,38 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
   return deleted;
 }
 
+// XACK key groupname id [id ...]
+OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gname,
+                         absl::Span<streamID> ids) {
+  OpResult<pair<stream*, streamCG*>> res = FindGroup(op_args, key, gname);
+  if (!res)
+    return res.status();
+  auto [stream_inst, cg] = *res;
+
+  if (cg == nullptr || stream_inst == nullptr) {
+    return 0;
+  }
+
+  int acknowledged = 0;
+  for (auto& id : ids) {
+    unsigned char buf[sizeof(streamID)];
+    streamEncodeID(buf, &id);
+
+    // From Redis' xackCommand's implemenation
+    // Lookup the ID in the group PEL: it will have a reference to the
+    // NACK structure that will have a reference to the consumer, so that
+    // we are able to remove the entry from both PELs.
+    streamNACK* nack = (streamNACK*)raxFind(cg->pel, buf, sizeof(buf));
+    if (nack != raxNotFound) {
+      raxRemove(cg->pel, buf, sizeof(buf), nullptr);
+      raxRemove(nack->consumer->pel, buf, sizeof(buf), nullptr);
+      streamFreeNACK(nack);
+      acknowledged++;
+    }
+  }
+  return acknowledged;
+}
+
 struct PendingOpts {
   string_view group_name;
   string_view consumer_name;
@@ -1462,7 +1504,7 @@ void CreateConsumer(string_view key, string_view gname, string_view consumer,
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -1484,7 +1526,7 @@ void DelConsumer(string_view key, string_view gname, string_view consumer,
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -1648,7 +1690,7 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
     return OpAdd(t->GetOpArgs(shard), add_opts, args);
   };
 
-  OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(cb);
   if (add_result) {
     return (*cntx)->SendBulkString(StreamIdRepr(*add_result));
   }
@@ -1748,7 +1790,7 @@ void StreamFamily::XClaim(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClaim(t->GetOpArgs(shard), key, opts, absl::Span{ids.data(), ids.size()});
   };
-  OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(cb);
   if (!result) {
     (*cntx)->SendError(result.status());
     return;
@@ -1794,7 +1836,7 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
     return OpDel(t->GetOpArgs(shard), key, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return (*cntx)->SendLong(*result);
   }
@@ -1895,7 +1937,7 @@ void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     return (*cntx)->SendLong(*result);
   }
@@ -1975,7 +2017,7 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPending(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<PendingResult> op_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<PendingResult> op_result = cntx->transaction->ScheduleSingleHopT(cb);
   if (!op_result) {
     if (op_result.status() == OpStatus::SKIPPED)
       return (*cntx)->SendError(NoGroupError(key, opts.group_name));
@@ -2472,7 +2514,7 @@ void StreamFamily::XTrim(CmdArgList args, ConnectionContext* cntx) {
     return OpTrim(t->GetOpArgs(shard), trim_opts);
   };
 
-  OpResult<int64_t> trim_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<int64_t> trim_result = cntx->transaction->ScheduleSingleHopT(cb);
   if (trim_result) {
     return (*cntx)->SendLong(*trim_result);
   }
@@ -2518,7 +2560,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
     return OpRange(t->GetOpArgs(shard), key, range_opts);
   };
 
-  OpResult<RecordVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<RecordVec> result = cntx->transaction->ScheduleSingleHopT(cb);
 
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
@@ -2542,6 +2584,34 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   return (*cntx)->SendError(result.status());
 }
 
+void StreamFamily::XAck(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view group = ArgS(args, 1);
+  args.remove_prefix(2);
+  absl::InlinedVector<streamID, 8> ids(args.size());
+
+  for (size_t i = 0; i < args.size(); ++i) {
+    ParsedStreamId parsed_id;
+    string_view str_id = ArgS(args, i);
+    if (!ParseID(str_id, true, 0, &parsed_id)) {
+      return (*cntx)->SendError(kInvalidStreamId, kSyntaxErrType);
+    }
+    ids[i] = parsed_id.val;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpAck(t->GetOpArgs(shard), key, group, absl::Span{ids.data(), ids.size()});
+  };
+
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(cb);
+  if (result || result.status() == OpStatus::KEY_NOTFOUND) {
+    return (*cntx)->SendLong(*result);
+  }
+
+  (*cntx)->SendError(result.status());
+  return;
+}
+
 #define HFUNC(x) SetHandler(&StreamFamily::x)
 
 namespace acl {
@@ -2559,6 +2629,7 @@ constexpr uint32_t kXReadGroup = WRITE | STREAM | SLOW | BLOCKING;
 constexpr uint32_t kXSetId = WRITE | STREAM | SLOW;
 constexpr uint32_t kXTrim = WRITE | STREAM | SLOW;
 constexpr uint32_t kXGroupHelp = READ | STREAM | SLOW;
+constexpr uint32_t kXAck = WRITE | STREAM | FAST;
 }  // namespace acl
 
 void StreamFamily::Register(CommandRegistry* registry) {
@@ -2583,7 +2654,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
       << CI{"XSETID", CO::WRITE, 3, 1, 1, 1, acl::kXSetId}.HFUNC(XSetId)
       << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, 1, acl::kXTrim}.HFUNC(XTrim)
       << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0, acl::kXGroupHelp}.SetHandler(
-             XGroupHelp);
+             XGroupHelp)
+      << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, 1, acl::kXAdd}.HFUNC(XAck);
 }
 
 }  // namespace dfly

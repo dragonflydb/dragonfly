@@ -13,6 +13,8 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <double-conversion/double-to-string.h>
+
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -20,9 +22,6 @@ extern "C" {
 using namespace std;
 
 ABSL_FLAG(bool, use_zset_tree, true, "If true use b+tree for zset implementation");
-
-extern "C" unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele,
-                                      double score);
 
 namespace dfly {
 namespace detail {
@@ -80,7 +79,140 @@ void* BuildScoredKey(double score, bool is_str_inf, char buf[]) {
   return key;
 }
 
+// Copied from t_zset.c
+/* Returns 1 if the double value can safely be represented in long long without
+ * precision loss, in which case the corresponding long long is stored in the out variable. */
+static int double2ll(double d, long long* out) {
+#if (DBL_MANT_DIG >= 52) && (DBL_MANT_DIG <= 63) && (LLONG_MAX == 0x7fffffffffffffffLL)
+  /* Check if the float is in a safe range to be casted into a
+   * long long. We are assuming that long long is 64 bit here.
+   * Also we are assuming that there are no implementations around where
+   * double has precision < 52 bit.
+   *
+   * Under this assumptions we test if a double is inside a range
+   * where casting to long long is safe. Then using two castings we
+   * make sure the decimal part is zero. If all this is true we can use
+   * integer without precision loss.
+   *
+   * Note that numbers above 2^52 and below 2^63 use all the fraction bits as real part,
+   * and the exponent bits are positive, which means the "decimal" part must be 0.
+   * i.e. all double values in that range are representable as a long without precision loss,
+   * but not all long values in that range can be represented as a double.
+   * we only care about the first part here. */
+  if (d < (double)(-LLONG_MAX / 2) || d > (double)(LLONG_MAX / 2))
+    return 0;
+  long long ll = d;
+  if (ll == d) {
+    *out = ll;
+    return 1;
+  }
+#endif
+  return 0;
+}
+
+/* Compare element in sorted set with given element. */
+int zzlCompareElements(unsigned char* eptr, unsigned char* cstr, unsigned int clen) {
+  unsigned char* vstr;
+  unsigned int vlen;
+  long long vlong;
+  unsigned char vbuf[32];
+  int minlen, cmp;
+
+  vstr = lpGetValue(eptr, &vlen, &vlong);
+  if (vstr == NULL) {
+    /* Store string representation of long long in buf. */
+    vlen = ll2string((char*)vbuf, sizeof(vbuf), vlong);
+    vstr = vbuf;
+  }
+
+  minlen = (vlen < clen) ? vlen : clen;
+  cmp = memcmp(vstr, cstr, minlen);
+  if (cmp == 0)
+    return vlen - clen;
+  return cmp;
+}
+
+using double_conversion::DoubleToStringConverter;
+constexpr unsigned kConvFlags = DoubleToStringConverter::UNIQUE_ZERO;
+
+DoubleToStringConverter score_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
+
+// Copied from redis code but uses double_conversion to encode double values.
+unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, double score) {
+  unsigned char* sptr;
+  char scorebuf[128];
+  unsigned scorelen = 0;
+  long long lscore;
+  int score_is_long = double2ll(score, &lscore);
+  if (!score_is_long) {
+    // Use double converter to get the shortest representation.
+    double_conversion::StringBuilder sb(scorebuf, sizeof(scorebuf));
+    score_conv.ToShortest(score, &sb);
+    scorelen = sb.position();
+    sb.Finalize();
+    DCHECK_EQ(scorelen, strlen(scorebuf));
+  }
+
+  if (eptr == NULL) {
+    zl = lpAppend(zl, (unsigned char*)ele, sdslen(ele));
+    if (score_is_long)
+      zl = lpAppendInteger(zl, lscore);
+    else
+      zl = lpAppend(zl, (unsigned char*)scorebuf, scorelen);
+  } else {
+    /* Insert member before the element 'eptr'. */
+    zl = lpInsertString(zl, (unsigned char*)ele, sdslen(ele), eptr, LP_BEFORE, &sptr);
+
+    /* Insert score after the member. */
+    if (score_is_long)
+      zl = lpInsertInteger(zl, lscore, sptr, LP_AFTER, NULL);
+    else
+      zl = lpInsertString(zl, (unsigned char*)scorebuf, scorelen, sptr, LP_AFTER, NULL);
+  }
+  return zl;
+}
+
 }  // namespace
+
+/* Insert (element,score) pair in listpack. This function assumes the element is
+ * not yet present in the list. */
+unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
+  unsigned char *eptr = NULL, *sptr = lpSeek(zl, -1);
+  double s;
+
+  // Optimization: check first whether the new element should be the last.
+  if (sptr != NULL) {
+    s = zzlGetScore(sptr);
+    if (s >= score) {
+      // It should not be the last, so fallback to the forward iteration.
+      eptr = lpSeek(zl, 0);
+    }
+  }
+
+  while (eptr != NULL) {
+    sptr = lpNext(zl, eptr);
+    serverAssert(sptr != NULL);
+    s = zzlGetScore(sptr);
+
+    if (s > score) {
+      /* First element with score larger than score for element to be
+       * inserted. This means we should take its spot in the list to
+       * maintain ordering. */
+      return zzlInsertAt(zl, eptr, ele, score);
+    } else if (s == score) {
+      /* Ensure lexicographical ordering for elements. */
+      if (zzlCompareElements(eptr, (unsigned char*)ele, sdslen(ele)) > 0) {
+        return zzlInsertAt(zl, eptr, ele, score);
+      }
+    }
+
+    /* Move to next element. */
+    eptr = lpNext(zl, sptr);
+  }
+
+  /* Push on tail of list when it was not yet inserted. */
+  return zzlInsertAt(zl, NULL, ele, score);
+}
 
 void SortedMap::RdImpl::Init() {
   dict = dictCreate(&zsetDictType);

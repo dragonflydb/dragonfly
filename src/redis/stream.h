@@ -157,6 +157,7 @@ streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int flags);
 streamConsumer *streamCreateConsumer(streamCG *cg, sds name, robj *key, int dbid, int flags);
 streamCG *streamCreateCG(stream *s, const char *name, size_t namelen, streamID *id, long long entries_read);
 streamNACK *streamCreateNACK(streamConsumer *consumer);
+void streamEncodeID(void *buf, streamID *id);
 void streamDecodeID(void *buf, streamID *id);
 int streamCompareID(streamID *a, streamID *b);
 int streamEntryExists(stream *s, streamID *id);
@@ -179,5 +180,6 @@ void streamFreeCG(streamCG *cg);
 void streamDelConsumer(streamCG *cg, streamConsumer *consumer);
 void streamLastValidID(stream *s, streamID *maxid);
 int streamIDEqZero(streamID *id);
+int streamRangeHasTombstones(stream *s, streamID *start, streamID *end);
 
 #endif

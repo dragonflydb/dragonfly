@@ -88,12 +88,22 @@ struct IndexResult {
     return visit(cb, value_);
   }
 
-  // Move out of owned or copy borrowed
-  DocVec Take() {
-    if (IsOwned())
-      return move(get<DocVec>(value_));
+  // Move out of owned or copy borrowed, truncate to limit if set
+  DocVec Take(optional<size_t> limit = nullopt) {
+    if (IsOwned()) {
+      auto out = std::move(get<DocVec>(value_));
+      out.resize(min(limit.value_or(out.size()), out.size()));
+      return out;
+    }
 
-    return visit([](auto* set) { return DocVec(set->begin(), set->end()); }, Borrowed());
+    auto cb = [limit](auto* set) {
+      DocVec out(min(limit.value_or(set->size()), set->size()));
+      auto it = set->begin();
+      for (size_t i = 0; it != set->end() && i < out.size(); ++i, ++it)
+        out[i] = *it;
+      return out;
+    };
+    return visit(cb, Borrowed());
   }
 
  private:
@@ -326,6 +336,7 @@ struct BasicSearch {
       return IndexResult{};
     }
 
+    preagg_total_ = sub_results.Size();
     distances_.clear();
     if (auto hnsw_index = dynamic_cast<HnswVectorIndex*>(vec_index); hnsw_index)
       SearchKnnHnsw(hnsw_index, knn, std::move(sub_results));
@@ -359,7 +370,7 @@ struct BasicSearch {
     return result;
   }
 
-  SearchResult Search(const AstNode& query) {
+  SearchResult Search(const AstNode& query, size_t limit) {
     IndexResult result = SearchGeneric(query, "", true);
 
     // Copy knn distances to be returned
@@ -374,11 +385,18 @@ struct BasicSearch {
     optional<AlgorithmProfile> profile =
         profile_builder_ ? make_optional(profile_builder_->Take()) : nullopt;
 
-    return SearchResult{result.Take(), std::move(knn_distances), std::move(profile),
+    size_t total = result.Size();
+    return SearchResult{total,
+                        max(total, preagg_total_),
+                        result.Take(limit),
+                        std::move(knn_distances),
+                        std::move(profile),
                         std::move(error_)};
   }
 
   const FieldIndices* indices_;
+
+  size_t preagg_total_ = 0;
 
   string error_;
   optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
@@ -481,11 +499,11 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params) {
   }
 }
 
-SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
+SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t limit) const {
   auto bs = BasicSearch{index};
   if (profiling_enabled_)
     bs.EnableProfiling();
-  return bs.Search(*query_);
+  return bs.Search(*query_, limit);
 }
 
 optional<pair<size_t, string_view>> SearchAlgorithm::HasKnn() const {

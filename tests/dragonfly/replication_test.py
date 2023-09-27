@@ -1566,27 +1566,29 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
     async with replica.client() as c_replica:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", 1111, "localhost", master.port)
-        task = asyncio.create_task(proxy.start())
-
-        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
-
-        for _ in range(10):
-            await asyncio.sleep(random.randint(0, 10) / 10)
-            proxy.drop_connection()
-
-        # Give time to detect dropped connection and reconnect
-        await asyncio.sleep(1.0)
-        await wait_for_replica_status(c_replica, status="up")
-        await wait_available_async(c_replica)
-
-        capture = await seeder.capture()
-        assert await seeder.compare(capture, replica.port)
-        proxy.close()
+        proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
         try:
-            await task
-        except asyncio.exceptions.CancelledError:
-            pass
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+            for _ in range(10):
+                await asyncio.sleep(random.randint(0, 10) / 10)
+                proxy.drop_connection()
+
+            # Give time to detect dropped connection and reconnect
+            await asyncio.sleep(1.0)
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+        finally:
+            proxy.close()
+            try:
+                await task
+            except asyncio.exceptions.CancelledError:
+                pass
 
     master.stop()
     replica.stop()
@@ -1603,35 +1605,37 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
     async with replica.client() as c_replica, master.client() as c_master:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", 1112, "localhost", master.port)
-        task = asyncio.create_task(proxy.start())
-
-        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
-
-        fill_task = asyncio.create_task(seeder.run(target_ops=10000))
-
-        for _ in range(3):
-            await asyncio.sleep(random.randint(10, 20) / 10)
-            proxy.drop_connection()
-
-        seeder.stop()
-        await fill_task
-
-        # Give time to detect dropped connection and reconnect
-        await asyncio.sleep(1.0)
-        await wait_for_replica_status(c_replica, status="up")
-        await wait_available_async(c_replica)
-
-        logging.debug(await c_replica.execute_command("INFO REPLICATION"))
-        logging.debug(await c_master.execute_command("INFO REPLICATION"))
-
-        capture = await seeder.capture()
-        assert await seeder.compare(capture, replica.port)
-        proxy.close()
+        proxy = Proxy("127.0.0.1", 1112, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
         try:
-            await task
-        except asyncio.exceptions.CancelledError:
-            pass
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+            fill_task = asyncio.create_task(seeder.run(target_ops=10000))
+
+            for _ in range(3):
+                await asyncio.sleep(random.randint(10, 20) / 10)
+                proxy.drop_connection()
+
+            seeder.stop()
+            await fill_task
+
+            # Give time to detect dropped connection and reconnect
+            await asyncio.sleep(1.0)
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            logging.debug(await c_replica.execute_command("INFO REPLICATION"))
+            logging.debug(await c_master.execute_command("INFO REPLICATION"))
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+        finally:
+            proxy.close()
+            try:
+                await task
+            except asyncio.exceptions.CancelledError:
+                pass
 
     master.stop()
     replica.stop()
@@ -1648,34 +1652,37 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
     async with replica.client() as c_replica, master.client() as c_master:
         await seeder.run(target_deviation=0.1)
 
-        proxy = Proxy("localhost", 1113, "localhost", master.port)
-        task = asyncio.create_task(proxy.start())
+        proxy = Proxy("127.0.0.1", 1113, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
 
-        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
-
-        fill_task = asyncio.create_task(seeder.run(target_ops=10000))
-
-        for _ in range(3):
-            await asyncio.sleep(random.randint(5, 10) / 10)
-            proxy.drop_connection()
-
-        seeder.stop()
-        await fill_task
-
-        # Give time to detect dropped connection and reconnect
-        await asyncio.sleep(1.0)
-        await wait_for_replica_status(c_replica, status="up")
-        await wait_available_async(c_replica)
-
-        # logging.debug(await c_replica.execute_command("INFO REPLICATION"))
-        # logging.debug(await c_master.execute_command("INFO REPLICATION"))
-        capture = await seeder.capture()
-        assert await seeder.compare(capture, replica.port)
-        proxy.close()
         try:
-            await task
-        except asyncio.exceptions.CancelledError:
-            pass
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+            fill_task = asyncio.create_task(seeder.run(target_ops=10000))
+
+            for _ in range(3):
+                await asyncio.sleep(random.randint(5, 10) / 10)
+                proxy.drop_connection()
+
+            seeder.stop()
+            await fill_task
+
+            # Give time to detect dropped connection and reconnect
+            await asyncio.sleep(1.0)
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            # logging.debug(await c_replica.execute_command("INFO REPLICATION"))
+            # logging.debug(await c_master.execute_command("INFO REPLICATION"))
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+        finally:
+            proxy.close()
+            try:
+                await task
+            except asyncio.exceptions.CancelledError:
+                pass
 
     master.stop()
     replica.stop()
