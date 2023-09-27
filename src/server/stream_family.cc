@@ -653,6 +653,16 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     rec.id = id;
     rec.kv_arr.reserve(numfields);
     if (opts.group && streamCompareID(&id, &opts.group->last_id) > 0) {
+      if (opts.group->entries_read != SCG_INVALID_ENTRIES_READ &&
+          !streamRangeHasTombstones(s, &id, NULL)) {
+        /* A valid counter and no future tombstones mean we can
+         * increment the read counter to keep tracking the group's
+         * progress. */
+        opts.group->entries_read++;
+      } else if (s->entries_added) {
+        /* The group's counter may be invalid, so we try to obtain it. */
+        opts.group->entries_read = streamEstimateDistanceFromFirstEverEntry(s, &id);
+      }
       opts.group->last_id = id;
     }
 

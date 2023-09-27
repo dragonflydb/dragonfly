@@ -180,5 +180,6 @@ void streamFreeCG(streamCG *cg);
 void streamDelConsumer(streamCG *cg, streamConsumer *consumer);
 void streamLastValidID(stream *s, streamID *maxid);
 int streamIDEqZero(streamID *id);
+int streamRangeHasTombstones(stream *s, streamID *start, streamID *end);
 
 #endif
