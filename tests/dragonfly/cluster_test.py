@@ -299,113 +299,109 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
-    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
-    replica = df_local_factory.create(port=BASE_PORT + 1, admin_port=BASE_PORT + 1001)
+    master = df_local_factory.create(admin_port=BASE_PORT + 1000)
+    replica = df_local_factory.create(admin_port=BASE_PORT + 1001)
     df_local_factory.start_all([master, replica])
 
-    c_master = aioredis.Redis(port=master.port)
-    c_master_admin = aioredis.Redis(port=master.admin_port)
-    master_id = await get_node_id(c_master_admin)
+    async with master.client() as c_master, master.admin_client() as c_master_admin, replica.client() as c_replica, replica.admin_client() as c_replica_admin:
+        master_id = await get_node_id(c_master_admin)
+        replica_id = await get_node_id(c_replica_admin)
 
-    c_replica = aioredis.Redis(port=replica.port)
-    c_replica_admin = aioredis.Redis(port=replica.admin_port)
-    replica_id = await get_node_id(c_replica_admin)
-
-    config = f"""
-      [
-        {{
-          "slot_ranges": [
-            {{
-              "start": 0,
-              "end": 16383
-            }}
-          ],
-          "master": {{
-            "id": "{master_id}",
-            "ip": "localhost",
-            "port": {master.port}
-          }},
-          "replicas": [
-            {{
-              "id": "{replica_id}",
+        config = f"""
+        [
+          {{
+            "slot_ranges": [
+              {{
+                "start": 0,
+                "end": 16383
+              }}
+            ],
+            "master": {{
+              "id": "{master_id}",
               "ip": "localhost",
-              "port": {replica.port}
-            }}
-          ]
-        }}
-      ]
-    """
-    await push_config(config, [c_master_admin, c_replica_admin])
+              "port": {master.port}
+            }},
+            "replicas": [
+              {{
+                "id": "{replica_id}",
+                "ip": "localhost",
+                "port": {replica.port}
+              }}
+            ]
+          }}
+        ]
+      """
+        await push_config(config, [c_master_admin, c_replica_admin])
 
-    # Setup replication and make sure that it works properly.
-    await c_master.set("key", "value")
-    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
-    await check_all_replicas_finished([c_replica], c_master)
-    assert (await c_replica.get("key")).decode() == "value"
-    assert await c_replica.execute_command("dbsize") == 1
+        # Setup replication and make sure that it works properly.
+        await c_master.set("key", "value")
+        await c_replica.execute_command("REPLICAOF", "localhost", master.port)
+        await check_all_replicas_finished([c_replica], c_master)
+        assert (await c_replica.get("key")).decode() == "value"
+        assert await c_replica.execute_command("dbsize") == 1
 
-    # Tell the replica that it and the master no longer own any data, but don't tell that to the
-    # master. This will allow us to set keys on the master and make sure that they are set in the
-    # replica.
+        # Tell the replica that it and the master no longer own any data, but don't tell that to the
+        # master. This will allow us to set keys on the master and make sure that they are set in the
+        # replica.
 
-    replica_config = f"""
-      [
-        {{
-          "slot_ranges": [],
-          "master": {{
-            "id": "{master_id}",
-            "ip": "localhost",
-            "port": {master.port}
-          }},
-          "replicas": [
-            {{
-              "id": "{replica_id}",
+        replica_config = f"""
+        [
+          {{
+            "slot_ranges": [],
+            "master": {{
+              "id": "{master_id}",
               "ip": "localhost",
-              "port": {replica.port}
-            }}
-          ]
-        }},
-        {{
-          "slot_ranges": [
-            {{
-              "start": 0,
-              "end": 16383
-            }}
-          ],
-          "master": {{
-            "id": "non-existing-master",
-            "ip": "localhost",
-            "port": 1111
+              "port": {master.port}
+            }},
+            "replicas": [
+              {{
+                "id": "{replica_id}",
+                "ip": "localhost",
+                "port": {replica.port}
+              }}
+            ]
           }},
-          "replicas": []
-        }}
-      ]
-    """
+          {{
+            "slot_ranges": [
+              {{
+                "start": 0,
+                "end": 16383
+              }}
+            ],
+            "master": {{
+              "id": "non-existing-master",
+              "ip": "localhost",
+              "port": 1111
+            }},
+            "replicas": []
+          }}
+        ]
+      """
 
-    await push_config(replica_config, [c_replica_admin])
+        await push_config(replica_config, [c_replica_admin])
 
-    # The replica should *not* have deleted the key.
-    assert await c_replica.execute_command("dbsize") == 1
+        # The replica should *not* have deleted the key.
+        assert await c_replica.execute_command("dbsize") == 1
 
-    # Set another key on the master, which it owns but the replica does not own.
-    await c_master.set("key2", "value")
-    await check_all_replicas_finished([c_replica], c_master)
+        # Set another key on the master, which it owns but the replica does not own.
+        await c_master.set("key2", "value")
+        await check_all_replicas_finished([c_replica], c_master)
 
-    # See that the key exists in both replica and master
-    assert await c_master.execute_command("dbsize") == 2
-    assert await c_replica.execute_command("dbsize") == 2
+        # See that the key exists in both replica and master
+        assert await c_master.execute_command("dbsize") == 2
+        assert await c_replica.execute_command("dbsize") == 2
 
-    # The replica should still reply with MOVED, despite having that key.
-    try:
-        await c_replica.get("key2")
-        assert False, "Should not be able to get key on non-owner cluster node"
-    except redis.exceptions.ResponseError as e:
-        assert re.match(r"MOVED \d+ localhost:1111", e.args[0])
+        # The replica should still reply with MOVED, despite having that key.
+        try:
+            await c_replica.get("key2")
+            assert False, "Should not be able to get key on non-owner cluster node"
+        except redis.exceptions.ResponseError as e:
+            assert re.match(r"MOVED \d+ localhost:1111", e.args[0])
 
-    await push_config(replica_config, [c_master_admin])
-    await asyncio.sleep(0.5)
-    assert await c_master.execute_command("dbsize") == 0
-    assert await c_replica.execute_command("dbsize") == 0
+        await push_config(replica_config, [c_master_admin])
+        await asyncio.sleep(0.5)
+        assert await c_master.execute_command("dbsize") == 0
+        assert await c_replica.execute_command("dbsize") == 0
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
