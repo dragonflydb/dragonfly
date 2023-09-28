@@ -37,6 +37,8 @@ ABSL_FLAG(int, master_connect_timeout_ms, 20000,
           "Timeout for establishing connection to a replication master");
 ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
+ABSL_FLAG(bool, replica_partial_sync, true,
+          "Use partial sync to reconnect when a replica connection is interrupted.");
 ABSL_DECLARE_FLAG(int32_t, port);
 
 namespace dfly {
@@ -667,7 +669,8 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cn
   std::string cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                            master_context_.dfly_session_id, " ", flow_id_);
   // Try to negotiate a partial sync if possible.
-  if (lsn.has_value() && master_context_.version > DflyVersion::VER1) {
+  if (lsn.has_value() && master_context_.version > DflyVersion::VER1 &&
+      absl::GetFlag(FLAGS_replica_partial_sync)) {
     absl::StrAppend(&cmd, " ", *lsn);
   }
 
