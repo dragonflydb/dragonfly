@@ -143,7 +143,7 @@ void RedisTranslator::OnNil() {
 
 void RedisTranslator::OnStatus(std::string_view str) {
   CHECK(array_index_.empty()) << "unexpected status";
-  lua_newtable(lua_);
+  lua_createtable(lua_, 0, 1);
   lua_pushstring(lua_, "ok");
   lua_pushlstring(lua_, str.data(), str.size());
   lua_settable(lua_, -3);
@@ -156,7 +156,7 @@ void RedisTranslator::OnError(std::string_view str) {
 
 void RedisTranslator::OnArrayStart(unsigned len) {
   ArrayPre();
-  lua_newtable(lua_);
+  lua_createtable(lua_, len, 0);
   array_index_.push_back(1);
 }
 
@@ -201,7 +201,7 @@ optional<int> FetchKey(lua_State* lua, const char* key) {
 }
 
 void SetGlobalArrayInternal(lua_State* lua, const char* name, MutSliceSpan args) {
-  lua_newtable(lua);
+  lua_createtable(lua, args.size(), 0);
   for (size_t j = 0; j < args.size(); j++) {
     lua_pushlstring(lua, args[j].data(), args[j].size());
     lua_rawseti(lua, -2, j + 1);
