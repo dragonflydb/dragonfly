@@ -26,6 +26,7 @@ LUALIB_API int(luaopen_cjson)(lua_State* L);
 LUALIB_API int(luaopen_struct)(lua_State* L);
 LUALIB_API int(luaopen_cmsgpack)(lua_State* L);
 LUALIB_API int(luaopen_bit)(lua_State* L);
+LUALIB_API const char* lua_pushlongstring(lua_State* L, const char* s, size_t len);
 }
 
 #include <absl/strings/str_format.h>
@@ -108,7 +109,8 @@ void RedisTranslator::OnBool(bool b) {
 
 void RedisTranslator::OnString(std::string_view str) {
   ArrayPre();
-  lua_pushlstring(lua_, str.data(), str.size());
+  // use lua_pushlongstring to omit going through lua shared strings table.
+  lua_pushlongstring(lua_, str.data(), str.size());
   ArrayPost();
 }
 
@@ -203,7 +205,7 @@ optional<int> FetchKey(lua_State* lua, const char* key) {
 void SetGlobalArrayInternal(lua_State* lua, const char* name, MutSliceSpan args) {
   lua_createtable(lua, args.size(), 0);
   for (size_t j = 0; j < args.size(); j++) {
-    lua_pushlstring(lua, args[j].data(), args[j].size());
+    lua_pushlongstring(lua, args[j].data(), args[j].size());
     lua_rawseti(lua, -2, j + 1);
   }
   lua_setglobal(lua, name);
@@ -357,8 +359,10 @@ void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
   (void)ud;
   (void)osize; /* not used */
   if (nsize == 0) {
-    mi_free(ptr);
+    mi_free_size(ptr, osize);
     return nullptr;
+  } else if (ptr == nullptr) {
+    return mi_malloc(nsize);
   } else {
     return mi_realloc(ptr, nsize);
   }

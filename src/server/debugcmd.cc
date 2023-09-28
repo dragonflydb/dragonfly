@@ -49,6 +49,7 @@ struct PopulateBatch {
 };
 
 struct ObjInfo {
+  unsigned type;
   unsigned encoding;
   unsigned bucket_id = 0;
   unsigned slot_id = 0;
@@ -88,6 +89,17 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value
       return;
     }
   }
+}
+
+const char* EncodingName(unsigned type, unsigned encoding) {
+  if (type == OBJ_HASH) {
+    return encoding == kEncodingListPack ? "listpack" : "hashtable";
+  }
+
+  if (type == OBJ_SET) {
+    return encoding == kEncodingIntSet ? "int" : "hashtable";
+  }
+  return strEncoding(encoding);
 }
 
 struct ObjHist {
@@ -573,6 +585,7 @@ void DebugCmd::Inspect(string_view key) {
       const PrimeValue& pv = it->second;
 
       oinfo.found = true;
+      oinfo.type = pv.ObjType();
       oinfo.encoding = pv.Encoding();
       oinfo.bucket_id = it.bucket_id();
       oinfo.slot_id = it.slot_id();
@@ -611,7 +624,7 @@ void DebugCmd::Inspect(string_view key) {
     return;
   }
 
-  StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
+  StrAppend(&resp, "encoding:", EncodingName(res.type, res.encoding), " bucket_id:", res.bucket_id);
   StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
 
   if (res.ttl != INT64_MAX) {

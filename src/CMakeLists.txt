@@ -7,6 +7,8 @@ endif()
 
 add_third_party(
   lua
+  # GIT_REPOSITORY https://github.com/lua/lua
+  # GIT_TAG v5.4.4
   URL https://github.com/lua/lua/archive/refs/tags/v5.4.4.tar.gz
   PATCH_COMMAND patch -p1 -i "${CMAKE_SOURCE_DIR}/patches/lua-v5.4.4.patch"
   CONFIGURE_COMMAND echo

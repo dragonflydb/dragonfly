@@ -1,3 +1,70 @@
+diff --git a/lapi.c b/lapi.c
+index 5ee65792..02991318 100644
+--- a/lapi.c
++++ b/lapi.c
+@@ -538,6 +538,21 @@ LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
+   return getstr(ts);
+ }
+ 
++LUA_API const char *lua_pushlongstring (lua_State *L, const char *s, size_t len) {
++  TString *ts;
++  lua_lock(L);
++  if (len <= 1) {
++    ts = luaS_newlstr(L, s, len);
++  } else {
++    ts = luaS_createlngstrobj(L, len);
++    memcpy(getstr(ts), s, len * sizeof(char));
++  }
++  setsvalue2s(L, L->top, ts);
++  api_incr_top(L);
++  luaC_checkGC(L);
++  lua_unlock(L);
++  return getstr(ts);
++}
+ 
+ LUA_API const char *lua_pushstring (lua_State *L, const char *s) {
+   lua_lock(L);
+diff --git a/lstring.c b/lstring.c
+index 13dcaf42..15913857 100644
+--- a/lstring.c
++++ b/lstring.c
+@@ -39,6 +39,24 @@ int luaS_eqlngstr (TString *a, TString *b) {
+      (memcmp(getstr(a), getstr(b), len) == 0));  /* equal contents */
+ }
+ 
++/* equality for strings with differrent variants */
++int luaS_eqstr (TString *a, TString *b) {
++  size_t len;
++  lua_assert(a->tt != b->tt);
++
++  if (b->tt == LUA_VSHRSTR) {
++    if (b->shrlen != a->u.lnglen) {
++      return 0;
++    }
++    len = b->shrlen;
++  } else {
++    if (a->shrlen != b->u.lnglen) {
++      return 0;
++    }
++    len = a->shrlen;
++  }
++  return memcmp(getstr(a), getstr(b), len) == 0;
++}
+ 
+ unsigned int luaS_hash (const char *str, size_t l, unsigned int seed) {
+   unsigned int h = seed ^ cast_uint(l);
+diff --git a/lstring.h b/lstring.h
+index 450c2390..ac4f3405 100644
+--- a/lstring.h
++++ b/lstring.h
+@@ -44,6 +44,7 @@
+ LUAI_FUNC unsigned int luaS_hash (const char *str, size_t l, unsigned int seed);
+ LUAI_FUNC unsigned int luaS_hashlongstr (TString *ts);
+ LUAI_FUNC int luaS_eqlngstr (TString *a, TString *b);
++LUAI_FUNC int luaS_eqstr (TString *a, TString *b);
+ LUAI_FUNC void luaS_resize (lua_State *L, int newsize);
+ LUAI_FUNC void luaS_clearcache (global_State *g);
+ LUAI_FUNC void luaS_init (lua_State *L);
 diff --git a/luaconf.h b/luaconf.h
 index d42d14b7..75647e72 100644
 --- a/luaconf.h
@@ -11,22 +78,53 @@ index d42d14b7..75647e72 100644
  #else
  #define LUAI_MAXSTACK		15000
  #endif
+diff --git a/lvm.c b/lvm.c
+index 2ec34400..284209c6 100644
+--- a/lvm.c
++++ b/lvm.c
+@@ -565,9 +565,10 @@ int luaV_lessequal (lua_State *L, const TValue *l, const TValue *r) {
+ int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2) {
+   const TValue *tm;
+   if (ttypetag(t1) != ttypetag(t2)) {  /* not the same variant? */
+-    if (ttype(t1) != ttype(t2) || ttype(t1) != LUA_TNUMBER)
+-      return 0;  /* only numbers can be equal with different variants */
+-    else {  /* two numbers with different variants */
++    if (ttype(t1) != ttype(t2))
++      return 0;
++
++    if (ttype(t1) == LUA_TNUMBER) { /* two numbers with different variants */
+       /* One of them is an integer. If the other does not have an
+          integer value, they cannot be equal; otherwise, compare their
+          integer values. */
+@@ -576,6 +577,11 @@ int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2) {
+               luaV_tointegerns(t2, &i2, F2Ieq) &&
+               i1 == i2);
+     }
++    if (ttype(t1) == LUA_TSTRING) {
++      /* two strings with different variants */
++      return luaS_eqstr(tsvalue(t1), tsvalue(t2));
++    }
++    return 0;
+   }
+   /* values have same type and same variant */
+   switch (ttypetag(t1)) {
 diff --git a/makefile b/makefile
-index d46e650c..c27e5677 100644
+index d46e650c..180a0f9e 100644
 --- a/makefile
 +++ b/makefile
 @@ -66,13 +66,26 @@ LOCAL = $(TESTS) $(CWARNS)
-
-
+ 
+ 
  # enable Linux goodies
 -MYCFLAGS= $(LOCAL) -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE
-+MYCFLAGS= $(LOCAL) -std=c99 -g -O2 -DLUA_USE_LINUX
 -MYLDFLAGS= $(LOCAL) -Wl,-E
+-MYLIBS= -ldl -lreadline
+-
++MYCFLAGS= $(LOCAL) -std=c99 -g -O2 -DLUA_USE_LINUX
 +# Commenting out dynamic linking flags because we link statically
 +# and this does not work on MacOS: MYLDFLAGS= $(LOCAL) -Wl,-E
--MYLIBS= -ldl -lreadline
 +MYLIBS= -ldl
-
++
 +uname_m := $(shell uname -m)
 +
 +# equivalent to: if $(uname_m) == x86_64 || $(uname_m) == amd64
@@ -39,7 +137,7 @@ index d46e650c..c27e5677 100644
 +else
 +  $(error ERROR: unknown architecture $(uname_m))
 +endif
-
+ 
  CC= gcc
 -CFLAGS= -Wall -O2 $(MYCFLAGS) -fno-stack-protector -fno-common -march=native
 +CFLAGS= -Wall -O2 $(MYCFLAGS) -fno-stack-protector -fno-common $(OPTFLAGS)

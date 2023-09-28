@@ -1599,6 +1599,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
+  sinfo->keys.reserve(eval_args.keys.size());
+
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i));
     sinfo->keys.insert(key);
