@@ -318,19 +318,19 @@ void Connection::OnShutdown() {
 
 void Connection::OnPreMigrateThread() {
   // If we migrating to another io_uring we should cancel any pending requests we have.
-  if (break_poll_id_ != UINT32_MAX) {
-    socket_->CancelPoll(break_poll_id_);
-    break_poll_id_ = UINT32_MAX;
+  if (break_cb_engaged_) {
+    socket_->CancelOnErrorCb();
+    break_cb_engaged_ = false;
   }
 }
 
 void Connection::OnPostMigrateThread() {
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_) {
-    DCHECK_EQ(UINT32_MAX, break_poll_id_);
+    DCHECK(!break_cb_engaged_);
 
-    break_poll_id_ =
-        socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+    socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
+    break_cb_engaged_ = true;
   }
 }
 
@@ -398,14 +398,14 @@ void Connection::HandleRequests() {
     } else {
       cc_.reset(service_->CreateContext(peer, this));
       if (breaker_cb_) {
-        break_poll_id_ =
-            socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+        socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
+        break_cb_engaged_ = true;
       }
 
       ConnectionFlow(peer);
 
-      if (break_poll_id_ != UINT32_MAX) {
-        socket_->CancelPoll(break_poll_id_);
+      if (!break_cb_engaged_) {
+        socket_->CancelOnErrorCb();
       }
 
       cc_.reset();
@@ -759,12 +759,12 @@ void Connection::OnBreakCb(int32_t mask) {
   VLOG(1) << "Got event " << mask;
 
   if (!cc_) {
-    LOG(ERROR) << "Unexpected event " << mask << " " << break_poll_id_;
+    LOG(ERROR) << "Unexpected event " << mask;
     return;
   }
 
   cc_->conn_closing = true;
-  break_poll_id_ = UINT32_MAX;  // do not attempt to cancel it.
+  break_cb_engaged_ = false;  // do not attempt to cancel it.
 
   breaker_cb_(mask);
   evc_.notify();  // Notify dispatch fiber.

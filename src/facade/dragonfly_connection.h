@@ -289,7 +289,7 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;
 
   unsigned parser_error_ = 0;
-  uint32_t break_poll_id_ = UINT32_MAX;
+  bool break_cb_engaged_ = false;
 
   BreakerCb breaker_cb_;
   std::unique_ptr<Shutdown> shutdown_cb_;
