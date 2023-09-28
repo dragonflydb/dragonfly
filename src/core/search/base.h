@@ -42,9 +42,10 @@ struct SortOption {
 };
 
 struct WrappedStrPtr {
+  // Intentionally implicit and const std::string& for use in templates
   WrappedStrPtr(const std::string& s);
   bool operator<(const WrappedStrPtr& other) const;
-  bool operator>(const WrappedStrPtr& other) const;
+  bool operator>=(const WrappedStrPtr& other) const;
 
  private:
   std::unique_ptr<char[]> ptr;

@@ -10,9 +10,6 @@
 #include <absl/strings/str_split.h>
 
 #include <algorithm>
-#include <cctype>
-
-#include "base/logging.h"
 
 namespace dfly::search {
 

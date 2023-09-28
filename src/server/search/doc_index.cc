@@ -62,8 +62,8 @@ bool SerializedSearchDoc::operator<(const SerializedSearchDoc& other) const {
   return this->score < other.score;
 }
 
-bool SerializedSearchDoc::operator>(const SerializedSearchDoc& other) const {
-  return this->score > other.score;
+bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
+  return this->score >= other.score;
 }
 
 bool SearchParams::ShouldReturnField(std::string_view field) const {

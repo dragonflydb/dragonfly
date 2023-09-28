@@ -29,7 +29,7 @@ struct SerializedSearchDoc {
   search::ResultScore score;
 
   bool operator<(const SerializedSearchDoc& other) const;
-  bool operator>(const SerializedSearchDoc& other) const;
+  bool operator>=(const SerializedSearchDoc& other) const;
 };
 
 struct SearchResult {

@@ -429,31 +429,46 @@ TEST_F(SearchFamilyTest, FtProfile) {
 }
 
 TEST_F(SearchFamilyTest, BasicSort) {
-  Run({"ft.create", "i1", "schema", "ord", "numeric", "sortable"});
-
-  for (size_t i = 0; i < 100; i++)
-    Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
-
-  auto AreRange = [](size_t total, size_t l, size_t r) {
+  auto AreRange = [](size_t total, size_t l, size_t r, string_view prefix) {
     vector<string> out;
     for (size_t i = min(l, r); i < max(l, r); i++)
-      out.push_back(absl::StrCat("d:", i));
+      out.push_back(absl::StrCat(prefix, i));
     if (l > r)
       reverse(out.begin(), out.end());
     return DocIds(total, out);
   };
 
+  max_memory_limit = INT_MAX;
+
+  Run({"ft.create", "i1", "prefix", "1", "d:", "schema", "ord", "numeric", "sortable"});
+
+  for (size_t i = 0; i < 100; i++)
+    Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
+
   // Sort ranges of 23 elements
   for (size_t i = 0; i < 77; i++)
-    EXPECT_THAT(
-        Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), to_string(23)}),
-        AreRange(100, i, i + 23));
+    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), "23"}),
+                AreRange(100, i, i + 23, "d:"));
 
   // Sort ranges of 27 elements in reverse
   for (size_t i = 0; i < 73; i++)
-    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i),
-                     to_string(27)}),
-                AreRange(100, 100 - i, 100 - i - 27));
+    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i), "27"}),
+                AreRange(100, 100 - i, 100 - i - 27, "d:"));
+
+  Run({"ft.create", "i2", "prefix", "1", "d2:", "schema", "name", "text", "sortable"});
+
+  absl::InsecureBitGen gen;
+  vector<string> random_strs;
+  for (size_t i = 0; i < 10; i++)
+    random_strs.emplace_back(dfly::GetRandomHex(gen, 3));
+  sort(random_strs.begin(), random_strs.end());
+
+  for (size_t i = 0; i < 10; i++)
+    Run({"hset", absl::StrCat("d2:", i), "name", random_strs[i]});
+
+  for (size_t i = 0; i < 7; i++)
+    EXPECT_THAT(Run({"ft.search", "i2", "*", "SORTBY", "name", "DESC", "LIMIT", to_string(i), "3"}),
+                AreRange(10, 10 - i, 10 - i - 3, "d2:"));
 }
 
 }  // namespace dfly

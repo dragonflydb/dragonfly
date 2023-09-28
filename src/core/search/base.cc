@@ -17,15 +17,15 @@ std::string& QueryParams::operator[](std::string_view k) {
 }
 
 WrappedStrPtr::WrappedStrPtr(const std::string& s) : ptr{std::make_unique<char[]>(s.size() + 1)} {
-  std::memcpy(ptr.get(), s.c_str(), s.size() + 1);
+  std::strcpy(ptr.get(), s.c_str());
 }
 
 bool WrappedStrPtr::operator<(const WrappedStrPtr& other) const {
-  return std::strcmp(ptr.get(), other.ptr.get());
+  return std::strcmp(ptr.get(), other.ptr.get()) < 0;
 }
 
-bool WrappedStrPtr::operator>(const WrappedStrPtr& other) const {
-  return !operator>(other);
+bool WrappedStrPtr::operator>=(const WrappedStrPtr& other) const {
+  return !operator<(other);
 }
 
 }  // namespace dfly::search

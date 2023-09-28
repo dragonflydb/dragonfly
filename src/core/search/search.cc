@@ -311,7 +311,7 @@ struct BasicSearch {
     return IndexResult{};
   }
 
-  // SORTBY [DESC] clause
+  // SORTBY field [DESC]: Sort by field. Part of params and not "core query".
   IndexResult Search(const AstSortNode& node, string_view active_field) {
     auto sub_results = SearchGeneric(*node.filter, active_field);
     preagg_total_ = sub_results.Size();
@@ -517,7 +517,7 @@ void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
-  // Replace short field name with full ident
+  // Replace short field name with full identifier
   if (auto it = schema_.field_names.find(field); it != schema_.field_names.end())
     field = it->second;
 
@@ -526,7 +526,7 @@ BaseIndex* FieldIndices::GetIndex(string_view field) const {
 }
 
 BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
-  // Replace short field name with full ident
+  // Replace short field name with full identifier
   if (auto it = schema_.field_names.find(field); it != schema_.field_names.end())
     field = it->second;
 

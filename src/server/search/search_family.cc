@@ -274,7 +274,7 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
 
   if (agg.descending)
     partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
-                 [](const auto* l, const auto* r) { return *l > *r; });
+                 [](const auto* l, const auto* r) { return *l >= *r; });
   else
     partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
                  [](const auto* l, const auto* r) { return *l < *r; });
