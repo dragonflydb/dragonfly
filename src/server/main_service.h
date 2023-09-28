@@ -74,8 +74,8 @@ class Service : public facade::ServiceInterface {
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
 
-  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
-  const CommandId* FindCmd(std::string_view) const;
+  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args, bool admin) const;
+  const CommandId* FindCmd(std::string_view, bool admin) const;
 
   CommandRegistry* mutable_registry() {
     return &registry_;

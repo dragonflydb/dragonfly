@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
 
 #include <functional>
@@ -128,20 +129,37 @@ class CommandRegistry {
 
   CommandRegistry& operator<<(CommandId cmd);
 
-  const CommandId* Find(std::string_view cmd) const {
+  const CommandId* Find(std::string_view cmd, bool admin) const {
+    if (!admin) {
+      if (blocked_cmds_.find(cmd) != blocked_cmds_.end()) {
+        return nullptr;
+      }
+    }
+
     auto it = cmd_map_.find(cmd);
     return it == cmd_map_.end() ? nullptr : &it->second;
   }
 
-  CommandId* Find(std::string_view cmd) {
+  CommandId* Find(std::string_view cmd, bool admin) {
+    if (!admin) {
+      if (blocked_cmds_.find(cmd) != blocked_cmds_.end()) {
+        return nullptr;
+      }
+    }
+
     auto it = cmd_map_.find(cmd);
     return it == cmd_map_.end() ? nullptr : &it->second;
   }
 
   using TraverseCb = std::function<void(std::string_view, const CommandId&)>;
 
-  void Traverse(TraverseCb cb) {
+  void Traverse(TraverseCb cb, bool admin) {
     for (const auto& k_v : cmd_map_) {
+      if (!admin) {
+        if (blocked_cmds_.find(k_v.first) != blocked_cmds_.end()) {
+          continue;
+        }
+      }
       cb(k_v.first, k_v.second);
     }
   }
@@ -169,6 +187,7 @@ class CommandRegistry {
  private:
   absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
+  absl::flat_hash_set<std::string> blocked_cmds_;
 
   FamiliesVec family_of_commands_;
   size_t bit_index_;

@@ -20,6 +20,8 @@ using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
           "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
           "<cmd2_name>=<cmd2_new_name>");
+ABSL_FLAG(vector<string>, blocked_commands, {},
+          "Commands blocked to non-admin users");
 
 namespace dfly {
 
@@ -86,6 +88,10 @@ CommandRegistry::CommandRegistry() {
       LOG(ERROR) << "Invalid rename_command flag, trying to give 2 names to a command";
       exit(1);
     }
+  }
+
+  for (string name : GetFlag(FLAGS_blocked_commands)) {
+    blocked_cmds_.emplace(AsciiStrToUpper(name));
   }
 }
 
