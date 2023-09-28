@@ -91,7 +91,7 @@ class Service : public facade::ServiceInterface {
 
   GlobalState GetGlobalState() const;
 
-  void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
+  void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_admin) final;
   void OnClose(facade::ConnectionContext* cntx) final;
   std::string GetContextInfo(facade::ConnectionContext* cntx) final;
 

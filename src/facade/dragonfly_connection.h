@@ -165,6 +165,8 @@ class Connection : public util::Connection {
   // Virtual because behavior is overridden in test_utils.
   virtual bool IsAdmin() const;
 
+  bool IsMain() const;
+
   Protocol protocol() const {
     return protocol_;
   }

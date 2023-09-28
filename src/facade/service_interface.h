@@ -36,7 +36,7 @@ class ServiceInterface {
 
   virtual ConnectionStats* GetThreadLocalConnectionStats() = 0;
 
-  virtual void ConfigureHttpHandlers(util::HttpListenerBase* base) {
+  virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_admin) {
   }
 
   virtual void OnClose(ConnectionContext* cntx) {

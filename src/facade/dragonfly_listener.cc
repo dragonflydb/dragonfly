@@ -6,6 +6,8 @@
 
 #include <openssl/err.h>
 
+#include <memory>
+
 #include "facade/tls_error.h"
 
 #ifdef DFLY_USE_SSL
@@ -138,17 +140,21 @@ bool ConfigureKeepAlive(int fd) {
 
 }  // namespace
 
-Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), protocol_(protocol) {
+Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
+    : service_(si), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
   if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslServerCntx();
   }
 #endif
+  role_ = role;
 
-  http_base_.reset(new HttpListener<>);
-  http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
-  si->ConfigureHttpHandlers(http_base_.get());
+  if (IsAdminInterface() || IsMainInterface()) {
+    http_base_ = std::make_unique<HttpListener<>>();
+    http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
+    si->ConfigureHttpHandlers(http_base_.get(), IsAdminInterface());
+  }
 }
 
 Listener::~Listener() {
@@ -214,11 +220,11 @@ bool Listener::AwaitDispatches(absl::Duration timeout,
 }
 
 bool Listener::IsAdminInterface() const {
-  return is_admin_;
+  return role_ == Role::ADMIN;
 }
 
-void Listener::SetAdminInterface(bool is_admin) {
-  is_admin_ = is_admin;
+bool Listener::IsMainInterface() const {
+  return role_ == Role::MAIN;
 }
 
 void Listener::PreShutdown() {

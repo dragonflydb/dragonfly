@@ -469,10 +469,17 @@ bool Connection::IsAdmin() const {
   return static_cast<Listener*>(owner())->IsAdminInterface();
 }
 
+bool Connection::IsMain() const {
+  return static_cast<Listener*>(owner())->IsMainInterface();
+}
+
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
-  bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
-  bool admin = IsAdmin();
-  if (!primary_port_enabled && !admin) {
+  if (!IsAdmin() && !IsMain()) {
+    return false;
+  }
+
+  const bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
+  if (!primary_port_enabled && !IsAdmin()) {
     return false;
   }
 

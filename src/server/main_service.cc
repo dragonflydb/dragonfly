@@ -2063,10 +2063,13 @@ GlobalState Service::GetGlobalState() const {
   return global_state_;
 }
 
-void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
+void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_admin) {
   // We set the password for the HTTP service unless it is only enabled on the
   // admin port and the admin port is password-less.
-  if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
+  if (is_admin && GetFlag(FLAGS_admin_nopass)) {
+    base->SetAuthFunctor([](std::string_view path, std::string_view username,
+                            std::string_view password) { return username == "default"; });
+  } else if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
     std::string pass = GetPassword();
     base->SetAuthFunctor([pass = std::move(pass)](std::string_view path, std::string_view username,
                                                   std::string_view password) {
