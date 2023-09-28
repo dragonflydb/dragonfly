@@ -272,12 +272,10 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
   size_t agg_limit = agg.limit.value_or(total);
   size_t prefix = min(params.limit_offset + params.limit_total, agg_limit);
 
-  if (agg.descending)
-    partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
-                 [](const auto* l, const auto* r) { return *l >= *r; });
-  else
-    partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
-                 [](const auto* l, const auto* r) { return *l < *r; });
+  partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
+               [desc = agg.descending](const auto* l, const auto* r) {
+                 return desc ? (*l >= *r) : (*l < *r);
+               });
 
   docs.resize(min(docs.size(), agg_limit));
 
