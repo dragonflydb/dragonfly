@@ -2,7 +2,7 @@ name: Regression Tests
 
 on:
   schedule:
-    - cron: '0 0/3 * * *'
+    - cron: "0 0/3 * * *"
   workflow_dispatch:
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
           submodules: true
 
       - name: Print cpu info
-        run:  cat /proc/cpuinfo
+        run: cat /proc/cpuinfo
 
       - name: Configure & Build
         run: |
@@ -40,5 +40,5 @@ jobs:
         with:
           dfly-executable: dragonfly
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
-          run-only-on-ubuntu-latest: true
+          run-only-on-ubuntu-latest: false
           build-folder-name: build
