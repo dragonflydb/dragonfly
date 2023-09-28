@@ -2066,10 +2066,9 @@ GlobalState Service::GetGlobalState() const {
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_admin) {
   // We set the password for the HTTP service unless it is only enabled on the
   // admin port and the admin port is password-less.
-  if (is_admin && GetFlag(FLAGS_admin_nopass)) {
-    base->SetAuthFunctor([](std::string_view path, std::string_view username,
-                            std::string_view password) { return username == "default"; });
-  } else if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
+  const bool admin_nopass = GetFlag(FLAGS_admin_nopass);
+  const bool should_skip_auth = is_admin && admin_nopass;
+  if (!should_skip_auth && GetFlag(FLAGS_primary_port_http_enabled)) {
     base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
                                                 std::string_view password) {
       if (path == "/metrics")
