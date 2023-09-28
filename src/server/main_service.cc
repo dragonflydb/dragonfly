@@ -2070,9 +2070,8 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_admin)
     base->SetAuthFunctor([](std::string_view path, std::string_view username,
                             std::string_view password) { return username == "default"; });
   } else if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
-    std::string pass = GetPassword();
-    base->SetAuthFunctor([pass = std::move(pass)](std::string_view path, std::string_view username,
-                                                  std::string_view password) {
+    base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
+                                                std::string_view password) {
       if (path == "/metrics")
         return true;
       const bool pass_verified = pass.empty() ? true : password == pass;
