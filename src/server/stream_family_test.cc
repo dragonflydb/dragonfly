@@ -729,9 +729,9 @@ TEST_F(StreamFamilyTest, XAck) {
 TEST_F(StreamFamilyTest, XInfo) {
   Run({"xgroup", "create", "foo", "cgroup", "0", "mkstream"});
   auto resp = Run({"xinfo", "groups", "foo"});
-  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "cgroup", "consumers", IntArg(0), "pending",
-                                         IntArg(0), "last-delivered-id", "0-0", "entries-read",
-                                         ArgType(RespExpr::NIL), "lag", IntArg(0)));
+  EXPECT_THAT(resp, RespArray(ElementsAre("name", "cgroup", "consumers", IntArg(0), "pending",
+                                          IntArg(0), "last-delivered-id", "0-0", "entries-read",
+                                          ArgType(RespExpr::NIL), "lag", IntArg(0))));
 }
 
 }  // namespace dfly

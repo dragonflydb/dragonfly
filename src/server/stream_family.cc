@@ -78,8 +78,8 @@ struct GroupInfo {
   size_t consumer_size;
   size_t pending_size;
   streamID last_id;
-  long long entries_read;
-  long long lag;
+  int64_t entries_read;
+  int64_t lag;
 };
 
 struct RangeOpts {
@@ -888,7 +888,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
-  long entries_read = SCG_INVALID_ENTRIES_READ;
+  int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
       // MKSTREAM is enabled, so create the stream
