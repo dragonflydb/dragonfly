@@ -944,6 +944,7 @@ OpResult<pair<stream*, streamCG*>> FindGroup(const OpArgs& op_args, string_view 
 
 constexpr uint8_t kClaimForce = 1 << 0;
 constexpr uint8_t kClaimJustID = 1 << 1;
+constexpr uint8_t kClaimLastID = 1 << 2;
 
 struct ClaimOpts {
   string_view group;
@@ -952,6 +953,7 @@ struct ClaimOpts {
   int64 delivery_time = -1;
   int retry = -1;
   uint8_t flags = 0;
+  streamID last_id;
 };
 
 struct ClaimInfo {
@@ -1004,6 +1006,16 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
   auto now = GetCurrentTimeMs();
   ClaimInfo result;
   result.justid = (opts.flags & kClaimJustID);
+
+  // TODO: support replication via DF's propagation mechanism.
+  // int propagate_last_id = 0;
+  streamID last_id = opts.last_id;
+  if (opts.flags & kClaimLastID) {
+    if (streamCompareID(&last_id, &scg->last_id) > 0) {
+      scg->last_id = last_id;
+      // propagate_last_id = 1;
+    }
+  }
 
   for (streamID id : ids) {
     std::array<uint8_t, sizeof(streamID)> buf;
@@ -1753,8 +1765,14 @@ void ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, ConnectionContext* cn
         }
         continue;
       } else if (arg == "LASTID") {
+        opts.flags |= kClaimLastID;
         arg = ArgS(args, ++i);
-        // TODO: implement lastID
+        ParsedStreamId parsed_id;
+        if (ParseID(arg, true, 0, &parsed_id)) {
+          opts.last_id = parsed_id.val;
+        } else {
+          return (*cntx)->SendError(kInvalidStreamId, kSyntaxErrType);
+        }
         continue;
       }
     }
