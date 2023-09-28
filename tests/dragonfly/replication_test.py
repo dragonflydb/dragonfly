@@ -105,11 +105,14 @@ async def check_replica_finished_exec(c_replica, c_master):
     return r_offset == m_offset
 
 
-async def check_all_replicas_finished(c_replicas, c_master):
+async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
     print("Waiting for replicas to finish")
 
     waiting_for = list(c_replicas)
-    while len(waiting_for) > 0:
+    start = time.time()
+    while (time.time() - start) < timeout:
+        if not waiting_for:
+            return
         await asyncio.sleep(1.0)
 
         tasks = (asyncio.create_task(check_replica_finished_exec(c, c_master)) for c in waiting_for)
@@ -117,6 +120,7 @@ async def check_all_replicas_finished(c_replicas, c_master):
 
         # Remove clients that finished from waiting list
         waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
+    raise RuntimeError("Not all replicas finished in time!")
 
 
 async def check_data(seeder, replicas, c_replicas):

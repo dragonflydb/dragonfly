@@ -68,6 +68,9 @@ class DflyInstance:
     def client(self, *args, **kwargs) -> RedisClient:
         return RedisClient(port=self.port, *args, **kwargs)
 
+    def admin_client(self, *args, **kwargs) -> RedisClient:
+        return RedisClient(port=self.admin_port, *args, **kwargs)
+
     def __enter__(self):
         self.start()
         return self
