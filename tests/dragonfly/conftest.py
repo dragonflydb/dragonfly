@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from time import sleep
+from typing import Dict, List, Union
 from redis import asyncio as aioredis
 import pytest
 import pytest_asyncio
@@ -18,7 +19,8 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker, dfly_args
+from .instance import DflyInstance, DflyParams, DflyInstanceFactory
+from . import PortPicker, dfly_args
 from .utility import DflySeederFactory, gen_certificate
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -61,6 +63,18 @@ def df_seeder_factory(request) -> DflySeederFactory:
     return DflySeederFactory(request.config.getoption("--log-seeder"))
 
 
+def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
+    args_dict = {}
+    for arg in args:
+        if "=" in arg:
+            pos = arg.find("=")
+            name, value = arg[:pos], arg[pos + 1 :]
+            args_dict[name] = value
+        else:
+            args_dict[arg] = None
+    return args_dict
+
+
 @pytest.fixture(scope="session", params=[{}])
 def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     """
@@ -77,7 +91,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         path=path,
         cwd=tmp_dir,
         gdb=request.config.getoption("--gdb"),
-        args=request.config.getoption("--df"),
+        args=parse_args(request.config.getoption("--df")),
         existing_port=int(existing) if existing else None,
         existing_admin_port=int(existing_admin) if existing_admin else None,
         existing_mc_port=int(existing_mc) if existing_mc else None,

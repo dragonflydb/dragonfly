@@ -7,7 +7,8 @@ import async_timeout
 import pymemcache
 from dataclasses import dataclass
 
-from . import DflyInstance, dfly_args
+from . import dfly_args
+from .instance import DflyInstance
 
 BASE_PORT = 1111
 

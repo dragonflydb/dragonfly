@@ -6,7 +6,8 @@ import asyncio
 import redis
 from redis import asyncio as aioredis
 from .utility import *
-from . import DflyInstanceFactory, dfly_args
+from .instance import DflyInstanceFactory
+from . import dfly_args
 import pymemcache
 import logging
 from .proxy import Proxy
