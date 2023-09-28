@@ -32,7 +32,7 @@ async def test_no_password_on_admin(df_factory):
         admin_port=1113,
         requirepass="XXX",
         primary_port_http_enabled=True,
-        admin_nopass=None,
+        admin_nopass=True,
     ) as server:
         async with aiohttp.ClientSession(auth=aiohttp.BasicAuth("default", "XXX")) as session:
             resp = await session.get(f"http://localhost:{server.admin_port}/")
