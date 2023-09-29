@@ -821,6 +821,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   ServerState& etl = *ServerState::tlocal();
 
+  if (!dfly_cntx.owner()->IsAdmin() && cid->IsRestricted()) {
+    return ErrorReply{"Cannot execute restricted command (admin only)"};
+  }
+
   if (auto err = cid->Validate(tail_args); err)
     return err;
 
