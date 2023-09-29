@@ -1329,7 +1329,6 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
     return cgr_res.status();
   stream* stream = cgr_res->first;
   streamCG* group = cgr_res->second;
-  int64_t minidle = opts.min_idle_time;
 
   if (stream == nullptr || group == nullptr) {
     return OpStatus::KEY_NOTFOUND;
@@ -1349,7 +1348,6 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   result.justid = (opts.flags & kClaimJustID);
 
   auto now = GetCurrentTimeMs();
-  int deleted_id_num = 0;
   int count = opts.count;
   while (attempts-- && count && raxNext(&ri)) {
     streamNACK* nack = (streamNACK*)ri.data;
@@ -1363,14 +1361,13 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
       raxRemove(nack->consumer->pel, ri.key, ri.key_len, nullptr);
       streamFreeNACK(nack);
       result.deleted_ids.push_back(id);
-      ++deleted_id_num;
       raxSeek(&ri, ">=", ri.key, ri.key_len);
       continue;
     }
 
-    if (minidle) {
+    if (opts.min_idle_time) {
       mstime_t this_idle = now - nack->delivery_time;
-      if (this_idle < minidle)
+      if (this_idle < opts.min_idle_time)
         continue;
     }
 
