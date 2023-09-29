@@ -140,7 +140,7 @@ std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
   }
 
   if (absl::StartsWith(command, "+")) {
-    auto res = registry.Find(command.substr(1), false);
+    auto res = registry.Find(command.substr(1));
     if (!res) {
       return {};
     }
@@ -149,7 +149,7 @@ std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
   }
 
   if (absl::StartsWith(command, "-")) {
-    auto res = registry.Find(command.substr(1), false);
+    auto res = registry.Find(command.substr(1));
     if (!res) {
       return {};
     }

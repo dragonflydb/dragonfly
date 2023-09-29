@@ -250,7 +250,7 @@ bool IsReplicatingNoOne(string_view host, string_view port) {
 }
 
 void RebuildAllSearchIndices(Service* service) {
-  const CommandId* cmd = service->FindCmd("FT.CREATE", true);
+  const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr) {
     // On MacOS we don't include search so FT.CREATE won't exist.
     return;
@@ -892,7 +892,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 }
 
 GenericError ServerFamily::DoSave() {
-  const CommandId* cid = service().FindCmd("SAVE", true);
+  const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(0, {});

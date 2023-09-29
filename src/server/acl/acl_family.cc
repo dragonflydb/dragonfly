@@ -406,7 +406,7 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
       }
     };
 
-    cmd_registry_->Traverse(cb, cntx->owner()->IsAdmin());
+    cmd_registry_->Traverse(cb);
     (*cntx)->StartArray(results.size());
     for (const auto& command : results) {
       (*cntx)->SendSimpleString(command);
@@ -478,7 +478,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
 
   ToUpper(&args[1]);
   auto command = facade::ArgS(args, 1);
-  auto* cid = cmd_registry_->Find(command, cntx->owner()->IsAdmin());
+  auto* cid = cmd_registry_->Find(command);
   if (!cid) {
     auto error = absl::StrCat("Command: ", command, " does not exists!");
     (*cntx)->SendError(error);

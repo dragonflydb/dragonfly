@@ -627,7 +627,7 @@ Service::Service(ProactorPool* pp)
   CHECK_LT(pp->size(), kMaxThreadSize);
   RegisterCommands();
 
-  exec_cid_ = FindCmd("EXEC", true);
+  exec_cid_ = FindCmd("EXEC");
 
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
@@ -902,7 +902,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ServerState& etl = *ServerState::tlocal();
 
   ToUpper(&args[0]);
-  const auto [cid, args_no_cmd] = FindCmd(args, cntx->owner()->IsAdmin());
+  const auto [cid, args_no_cmd] = FindCmd(args);
 
   if (cid == nullptr) {
     return cntx->SendError(ReportUnknownCmd(ArgS(args, 0)));
@@ -1064,7 +1064,7 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
   for (auto args : args_list) {
     ToUpper(&args[0]);
-    const auto [cid, tail_args] = FindCmd(args, cntx->owner()->IsAdmin());
+    const auto [cid, tail_args] = FindCmd(args);
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -1226,8 +1226,8 @@ facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
   return ServerState::tl_connection_stats();
 }
 
-const CommandId* Service::FindCmd(std::string_view cmd, bool admin) const {
-  return registry_.Find(cmd, admin);
+const CommandId* Service::FindCmd(std::string_view cmd) const {
+  return registry_.Find(cmd);
 }
 
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
@@ -1325,7 +1325,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   if ((info->async_cmds.empty() || !force) && used_mem < info->async_cmds_heap_limit)
     return nullopt;
 
-  auto* eval_cid = registry_.Find("EVAL", true);
+  auto* eval_cid = registry_.Find("EVAL");
   DCHECK(eval_cid);
   cntx->transaction->MultiSwitchCmd(eval_cid);
 
@@ -1355,7 +1355,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     auto& info = cntx->conn_state.script_info;
     ToUpper(&ca.args[0]);
     // Full command verification happens during squashed execution
-    if (auto* cid = registry_.Find(ArgS(ca.args, 0), cntx->owner()->IsAdmin()); cid != nullptr) {
+    if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
       auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
@@ -1506,23 +1506,23 @@ static std::string FullAclCommandFromArgs(CmdArgList args) {
   return std::string("ACL ") + std::string(args[1].begin(), args[1].end());
 }
 
-std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args, bool admin) const {
+std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
   const std::string_view command = facade::ToSV(args[0]);
   if (command == "ACL") {
     if (args.size() == 1) {
-      return {registry_.Find(ArgS(args, 0), admin), args};
+      return {registry_.Find(ArgS(args, 0)), args};
     }
-    return {registry_.Find(FullAclCommandFromArgs(args), admin), args.subspan(2)};
+    return {registry_.Find(FullAclCommandFromArgs(args)), args.subspan(2)};
   }
 
-  const CommandId* res = registry_.Find(ArgS(args, 0), admin);
+  const CommandId* res = registry_.Find(ArgS(args, 0));
   if (!res)
     return {nullptr, args};
 
   // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
   if (args.size() == 2 && res->name() == "XGROUP") {
     if (absl::EqualsIgnoreCase(ArgS(args, 1), "HELP")) {
-      res = registry_.Find("_XGROUP_HELP", admin);
+      res = registry_.Find("_XGROUP_HELP");
     }
   }
   return {res, args.subspan(1)};
@@ -1685,7 +1685,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
     return OpStatus::OK;
   };
 
-  cntx->transaction->MultiSwitchCmd(registry.Find(EXISTS, true));
+  cntx->transaction->MultiSwitchCmd(registry.Find(EXISTS));
   cntx->transaction->InitByArgs(cntx->conn_state.db_index, CmdArgList{str_list});
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
@@ -1993,7 +1993,7 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
     if ((cd.opt_mask() & CO::HIDDEN) == 0) {
       ++cmd_cnt;
     }
-  }, cntx->owner()->IsAdmin());
+  });
 
   if (args.size() > 0) {
     ToUpper(&args[0]);
@@ -2026,7 +2026,7 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendLong(cd.first_key_pos());
     (*cntx)->SendLong(cd.last_key_pos());
     (*cntx)->SendLong(cd.key_arg_step());
-  }, cntx->owner()->IsAdmin());
+  });
 }
 
 VarzValue::Map Service::GetVarzStats() {
@@ -2224,14 +2224,14 @@ void Service::RegisterCommands() {
           key_len = StrCat(cid.last_key_pos() - cid.first_key_pos() + 1);
         LOG(INFO) << "    " << key << ": with " << key_len << " keys";
       }
-    }, true);
+    });
 
     LOG(INFO) << "Non-transactional commands are: ";
     registry_.Traverse([](std::string_view name, const CI& cid) {
       if (cid.IsTransactional()) {
         LOG(INFO) << "    " << name;
       }
-    }, true);
+    });
   }
 }
 
