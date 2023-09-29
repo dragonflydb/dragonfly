@@ -31,6 +31,7 @@ class StreamFamily {
   static void XTrim(CmdArgList args, ConnectionContext* cntx);
   static void XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext* cntx);
   static void XAck(CmdArgList args, ConnectionContext* cntx);
+  static void XAutoClaim(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly
