@@ -1338,7 +1338,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   int64_t attempts = opts.count * 10;
 
   unsigned char start_key[sizeof(streamID)];
-  streamID start_id;
+  streamID start_id = opts.start;
   streamEncodeID(start_key, &start_id);
   raxIterator ri;
   raxStart(&ri, group->pel);
@@ -2732,13 +2732,6 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
   }
   if (opts.min_idle_time < 0) {
     opts.min_idle_time = 0;
-  }
-
-  ParsedStreamId parsed_id;
-  if (ParseID(ArgS(args, 4), true, 0, &parsed_id)) {
-    opts.start = parsed_id.val;
-  } else {
-    return (*cntx)->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   string_view start = ArgS(args, 4);
