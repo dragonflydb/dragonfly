@@ -821,6 +821,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   ServerState& etl = *ServerState::tlocal();
 
+  // If there is no connection owner, it means the command it being called
+  // from another command or used internally, therefore is always permitted.
+  if (dfly_cntx.owner() != nullptr && !dfly_cntx.owner()->IsAdmin() && cid->IsRestricted()) {
+    return ErrorReply{"Cannot execute restricted command (admin only)"};
+  }
+
   if (auto err = cid->Validate(tail_args); err)
     return err;
 
