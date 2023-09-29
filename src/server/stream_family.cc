@@ -960,7 +960,7 @@ struct ClaimInfo {
   bool justid = false;
   vector<streamID> ids;
   RecordVec records;
-  streamID cursor;               // only for XAUTOCLAIM
+  streamID end_id;               // only for XAUTOCLAIM
   vector<streamID> deleted_ids;  // only for XAUTOCLAIM
 };
 
@@ -1402,13 +1402,15 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   }
 
   raxNext(&ri);
-  streamID endid;
+  streamID end_id;
   if (raxEOF(&ri)) {
-    endid.ms = endid.seq = 0;
+    end_id.ms = end_id.seq = 0;
   } else {
-    streamDecodeID(ri.key, &endid);
+    streamDecodeID(ri.key, &end_id);
   }
   raxStop(&ri);
+  result.end_id = end_id;
+
   return result;
 }
 
@@ -2782,7 +2784,7 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
   ClaimInfo cresult = result.value();
-  (*cntx)->SendBulkString(StreamIdRepr(cresult.cursor));
+  (*cntx)->SendBulkString(StreamIdRepr(cresult.end_id));
   if (cresult.justid) {
     (*cntx)->StartArray(cresult.ids.size());
     for (auto id : cresult.ids) {
