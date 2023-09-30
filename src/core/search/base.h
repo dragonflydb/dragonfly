@@ -52,7 +52,6 @@ struct WrappedStrPtr {
 };
 
 using ResultScore = std::variant<std::monostate, float, int64_t, WrappedStrPtr>;
-// static_assert(sizeof(ResultScore) <= 2 * sizeof(int64_t));
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
@@ -75,8 +74,7 @@ struct BaseIndex {
 
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
-  virtual void Sort(std::vector<DocId>* entries, std::vector<ResultScore>* out, size_t limit,
-                    bool desc) const = 0;
+  virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
 };
 
 }  // namespace dfly::search

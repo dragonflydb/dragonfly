@@ -18,8 +18,7 @@
 namespace dfly::search {
 
 template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
-  void Sort(std::vector<DocId>* entries, std::vector<ResultScore>* out, size_t limit,
-            bool desc) const override;
+  std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
   virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field);
   virtual void Remove(DocId id, DocumentAccessor* doc, std::string_view field);

@@ -322,7 +322,7 @@ struct BasicSearch {
 
     if (auto* sort_index = GetSortIndex(node.field); sort_index) {
       auto ids_vec = sub_results.Take();
-      sort_index->Sort(&ids_vec, &scores_, limit_, node.descending);
+      scores_ = sort_index->Sort(&ids_vec, limit_, node.descending);
       return ids_vec;
     }
 

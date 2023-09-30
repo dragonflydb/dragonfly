@@ -18,22 +18,22 @@ using namespace std;
 namespace {}  // namespace
 
 template <typename T>
-void SimpleValueSortIndex<T>::Sort(std::vector<DocId>* entries, std::vector<ResultScore>* out,
-                                   size_t limit, bool desc) const {
+std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
+                                                       bool desc) const {
   auto cb = [this, desc](const auto& lhs, const auto& rhs) {
     return desc ? (values_[lhs] > values_[rhs]) : (values_[lhs] < values_[rhs]);
   };
-  std::partial_sort(entries->begin(), entries->begin() + std::min(entries->size(), limit),
-                    entries->end(), cb);
+  std::partial_sort(ids->begin(), ids->begin() + std::min(ids->size(), limit), ids->end(), cb);
 
-  out->clear();
-  out->reserve(entries->size());
-  for (auto id : *entries)
-    out->push_back(values_[id]);
+  vector<ResultScore> out(min(ids->size(), limit));
+  for (size_t i = 0; i < out.size(); i++)
+    out[i] = values_[(*ids)[i]];
+  return out;
 }
 
 template <typename T>
 void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_view field) {
+  DCHECK(id <= values_.size());  // Doc ids grow at most by one
   if (id >= values_.size())
     values_.resize(id + 1);
   values_[id] = Get(id, doc, field);

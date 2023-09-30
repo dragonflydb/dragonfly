@@ -59,8 +59,7 @@ MATCHER_P2(DocIds, total, arg_ids, "") {
 }
 
 template <typename... Args> auto AreDocIds(Args... args) {
-  vector<string> ids{args...};
-  return DocIds(ids.size(), ids);
+  return DocIds(sizeof...(args), vector<string>{args...});
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
@@ -384,28 +383,47 @@ TEST_F(SearchFamilyTest, UnicodeWords) {
               AreDocIds("d:1"));
 }
 
-TEST_F(SearchFamilyTest, SimpleExpiry) {
-  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "expires-in", "numeric"}), "OK");
+TEST_F(SearchFamilyTest, BasicSort) {
+  auto AreRange = [](size_t total, size_t l, size_t r, string_view prefix) {
+    vector<string> out;
+    for (size_t i = min(l, r); i < max(l, r); i++)
+      out.push_back(absl::StrCat(prefix, i));
+    if (l > r)
+      reverse(out.begin(), out.end());
+    return DocIds(total, out);
+  };
 
-  Run({"hset", "d:1", "title", "never to expire", "expires-in", "100500"});
+  // max_memory_limit = INT_MAX;
 
-  Run({"hset", "d:2", "title", "first to expire", "expires-in", "50"});
-  Run({"pexpire", "d:2", "50"});
+  Run({"ft.create", "i1", "prefix", "1", "d:", "schema", "ord", "numeric", "sortable"});
 
-  Run({"hset", "d:3", "title", "second to expire", "expires-in", "100"});
-  Run({"pexpire", "d:3", "100"});
+  for (size_t i = 0; i < 100; i++)
+    Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
 
-  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:2", "d:3"));
+  // Sort ranges of 23 elements
+  for (size_t i = 0; i < 77; i++)
+    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), "23"}),
+                AreRange(100, i, i + 23, "d:"));
 
-  shard_set->TEST_EnableHeartBeat();
+  // Sort ranges of 27 elements in reverse
+  for (size_t i = 0; i < 73; i++)
+    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i), "27"}),
+                AreRange(100, 100 - i, 100 - i - 27, "d:"));
 
-  AdvanceTime(60);
-  ThisFiber::SleepFor(5ms);  // Give heartbeat time to delete expired doc
-  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:3"));
+  Run({"ft.create", "i2", "prefix", "1", "d2:", "schema", "name", "text", "sortable"});
 
-  AdvanceTime(60);
-  Run({"HGETALL", "d:3"});  // Trigger expiry by access
-  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
+  absl::InsecureBitGen gen;
+  vector<string> random_strs;
+  for (size_t i = 0; i < 10; i++)
+    random_strs.emplace_back(dfly::GetRandomHex(gen, 7));
+  sort(random_strs.begin(), random_strs.end());
+
+  for (size_t i = 0; i < 10; i++)
+    Run({"hset", absl::StrCat("d2:", i), "name", random_strs[i]});
+
+  for (size_t i = 0; i < 7; i++)
+    EXPECT_THAT(Run({"ft.search", "i2", "*", "SORTBY", "name", "DESC", "LIMIT", to_string(i), "3"}),
+                AreRange(10, 10 - i, 10 - i - 3, "d2:"));
 }
 
 TEST_F(SearchFamilyTest, FtProfile) {
@@ -428,47 +446,31 @@ TEST_F(SearchFamilyTest, FtProfile) {
   }
 }
 
-TEST_F(SearchFamilyTest, BasicSort) {
-  auto AreRange = [](size_t total, size_t l, size_t r, string_view prefix) {
-    vector<string> out;
-    for (size_t i = min(l, r); i < max(l, r); i++)
-      out.push_back(absl::StrCat(prefix, i));
-    if (l > r)
-      reverse(out.begin(), out.end());
-    return DocIds(total, out);
-  };
+TEST_F(SearchFamilyTest, SimpleExpiry) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "expires-in", "numeric"}), "OK");
 
-  max_memory_limit = INT_MAX;
+  Run({"hset", "d:1", "title", "never to expire", "expires-in", "100500"});
 
-  Run({"ft.create", "i1", "prefix", "1", "d:", "schema", "ord", "numeric", "sortable"});
+  Run({"hset", "d:2", "title", "first to expire", "expires-in", "50"});
+  Run({"pexpire", "d:2", "50"});
 
-  for (size_t i = 0; i < 100; i++)
-    Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
+  Run({"hset", "d:3", "title", "second to expire", "expires-in", "100"});
+  Run({"pexpire", "d:3", "100"});
 
-  // Sort ranges of 23 elements
-  for (size_t i = 0; i < 77; i++)
-    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), "23"}),
-                AreRange(100, i, i + 23, "d:"));
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:2", "d:3"));
 
-  // Sort ranges of 27 elements in reverse
-  for (size_t i = 0; i < 73; i++)
-    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i), "27"}),
-                AreRange(100, 100 - i, 100 - i - 27, "d:"));
+  shard_set->TEST_EnableHeartBeat();
 
-  Run({"ft.create", "i2", "prefix", "1", "d2:", "schema", "name", "text", "sortable"});
+  AdvanceTime(60);
+  ThisFiber::SleepFor(5ms);  // Give heartbeat time to delete expired doc
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:3"));
 
-  absl::InsecureBitGen gen;
-  vector<string> random_strs;
-  for (size_t i = 0; i < 10; i++)
-    random_strs.emplace_back(dfly::GetRandomHex(gen, 3));
-  sort(random_strs.begin(), random_strs.end());
+  AdvanceTime(60);
+  Run({"HGETALL", "d:3"});  // Trigger expiry by access
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
 
-  for (size_t i = 0; i < 10; i++)
-    Run({"hset", absl::StrCat("d2:", i), "name", random_strs[i]});
-
-  for (size_t i = 0; i < 7; i++)
-    EXPECT_THAT(Run({"ft.search", "i2", "*", "SORTBY", "name", "DESC", "LIMIT", to_string(i), "3"}),
-                AreRange(10, 10 - i, 10 - i - 3, "d2:"));
+  Run({"flushall"});
+  EXPECT_EQ(used_mem_current.load(), 0);
 }
 
 }  // namespace dfly
