@@ -690,6 +690,16 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
     rec.id = id;
     rec.kv_arr.reserve(numfields);
     if (opts.group && streamCompareID(&id, &opts.group->last_id) > 0) {
+      if (opts.group->entries_read != SCG_INVALID_ENTRIES_READ &&
+          !streamRangeHasTombstones(s, &id, NULL)) {
+        /* A valid counter and no future tombstones mean we can
+         * increment the read counter to keep tracking the group's
+         * progress. */
+        opts.group->entries_read++;
+      } else if (s->entries_added) {
+        /* The group's counter may be invalid, so we try to obtain it. */
+        opts.group->entries_read = streamEstimateDistanceFromFirstEverEntry(s, &id);
+      }
       opts.group->last_id = id;
     }
 
@@ -962,11 +972,8 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
       ginfo.consumer_size = raxSize(cg->consumers);
       ginfo.pending_size = raxSize(cg->pel);
       ginfo.last_id = cg->last_id;
-      // ginfo.entries_read = cg->entries_read;  // TODO : this returns incorrect value, check.
-      ginfo.entries_read = streamEstimateDistanceFromFirstEverEntry(
-          s, &cg->last_id);  // TODO : check if this is correct.
-      // getConsumerGroupLag(s, cg, &ginfo);
-      ginfo.lag = s->entries_added - ginfo.entries_read;  // TODO : check if this is correct.
+      ginfo.entries_read = cg->entries_read;
+      ginfo.lag = streamCGLag(s, cg);
       result.push_back(std::move(ginfo));
     }
     raxStop(&ri);
@@ -1188,6 +1195,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
       // MKSTREAM is enabled, so create the stream
@@ -1217,7 +1225,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
     }
   }
 
-  streamCG* cg = streamCreateCG(s, opts.gname.data(), opts.gname.size(), &id, 0);
+  streamCG* cg = streamCreateCG(s, opts.gname.data(), opts.gname.size(), &id, entries_read);
   if (cg) {
     return OpStatus::OK;
   }
@@ -2229,9 +2237,17 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           (*cntx)->SendBulkString("last-delivered-id");
           (*cntx)->SendBulkString(last_id);
           (*cntx)->SendBulkString("entries-read");
-          (*cntx)->SendLong(ginfo.entries_read);
+          if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
+            (*cntx)->SendLong(ginfo.entries_read);
+          } else {
+            (*cntx)->SendNull();
+          }
           (*cntx)->SendBulkString("lag");
-          (*cntx)->SendLong(ginfo.lag);
+          if (ginfo.lag != SCG_INVALID_LAG) {
+            (*cntx)->SendLong(ginfo.lag);
+          } else {
+            (*cntx)->SendNull();
+          }
         }
         return;
       }

@@ -74,7 +74,7 @@ ABSL_FLAG(string, unixsocket, "",
           "be used for listening for incoming connections.");
 ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal value.");
 ABSL_FLAG(bool, force_epoll, false,
-          "If true - uses linux epoll engine underneath."
+          "If true - uses linux epoll engine underneath. "
           "Can fit for kernels older than 5.10.");
 
 ABSL_FLAG(bool, version_check, true,

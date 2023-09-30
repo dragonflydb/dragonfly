@@ -55,12 +55,13 @@ class Proxy:
             _, port = self.server.sockets[0].getsockname()[:2]
             self.port = port
 
+    async def serve(self):
         async with self.server:
             await self.server.serve_forever()
 
     def drop_connection(self):
         """
-        Randomally drop one connection
+        Randomly drop one connection
         """
         if self.stop_connections:
             cb = random.choice(self.stop_connections)

@@ -80,6 +80,16 @@ class CommandId {
     return bit_index_;
   }
 
+  // Returns true if the command can only be used by admin connections, false
+  // otherwise.
+  bool IsRestricted() const {
+    return restricted_;
+  }
+
+  void SetRestricted(bool restricted) {
+    restricted_ = restricted;
+  }
+
   static uint32_t OptCount(uint32_t mask);
 
  protected:
@@ -95,6 +105,9 @@ class CommandId {
   // Acl commands indices
   size_t family_;
   uint64_t bit_index_;
+
+  // Whether the command can only be used by admin connections.
+  bool restricted_ = false;
 };
 
 }  // namespace facade

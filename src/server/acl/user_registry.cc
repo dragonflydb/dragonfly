@@ -76,16 +76,20 @@ UserRegistry::UserWithWriteLock UserRegistry::MaybeAddAndUpdateWithLock(std::str
   return {std::move(lock), user, exists};
 }
 
-void UserRegistry::Init() {
-  // Add default user
+User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
   User::UpdateRequest::CommandsUpdateType tmp(NumberOfFamilies());
   size_t id = 0;
   for (auto& elem : tmp) {
     elem = {User::Sign::PLUS, id++, acl::ALL_COMMANDS};
   }
   std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
-  User::UpdateRequest req{{}, {acl}, true, false, std::move(tmp)};
-  MaybeAddAndUpdate("default", std::move(req));
+  return {{}, {acl}, true, false, std::move(tmp)};
+}
+
+void UserRegistry::Init() {
+  // Add default user
+  User::UpdateRequest::CommandsUpdateType tmp(NumberOfFamilies());
+  MaybeAddAndUpdate("default", DefaultUserUpdateRequest());
 }
 
 }  // namespace dfly::acl

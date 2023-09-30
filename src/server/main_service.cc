@@ -655,6 +655,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("requirepass");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("tcp_keepalive");
+  config_registry.RegisterMutable("replica_partial_sync");
 
   acl::UserRegistry* reg = &user_registry_;
   pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
@@ -819,6 +820,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   DCHECK(cid);
 
   ServerState& etl = *ServerState::tlocal();
+
+  // If there is no connection owner, it means the command it being called
+  // from another command or used internally, therefore is always permitted.
+  if (dfly_cntx.owner() != nullptr && !dfly_cntx.owner()->IsAdmin() && cid->IsRestricted()) {
+    return ErrorReply{"Cannot execute restricted command (admin only)"};
+  }
 
   if (auto err = cid->Validate(tail_args); err)
     return err;

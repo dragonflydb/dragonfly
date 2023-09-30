@@ -138,6 +138,7 @@ typedef struct {
 #define SCC_NO_DIRTIFY    (1<<1) /* Do not dirty++ if consumer created */
 
 #define SCG_INVALID_ENTRIES_READ -1
+#define SCG_INVALID_LAG -1
 
 #define TRIM_STRATEGY_NONE 0
 #define TRIM_STRATEGY_MAXLEN 1
@@ -180,5 +181,7 @@ void streamFreeCG(streamCG *cg);
 void streamDelConsumer(streamCG *cg, streamConsumer *consumer);
 void streamLastValidID(stream *s, streamID *maxid);
 int streamIDEqZero(streamID *id);
+int streamRangeHasTombstones(stream *s, streamID *start, streamID *end);
+long long streamCGLag(stream *s, streamCG *cg);
 
 #endif

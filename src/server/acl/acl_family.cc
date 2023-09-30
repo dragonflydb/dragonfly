@@ -125,6 +125,11 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
 
 void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
+  if (username == "default") {
+    cntx->SendError("The'default' user cannot be removed");
+    return;
+  }
+
   auto& registry = *registry_;
   if (!registry.RemoveUser(username)) {
     cntx->SendError(absl::StrCat("User ", username, " does not exist"));
@@ -253,6 +258,11 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
     user.Update(std::move(requests[i]));
     categories.push_back(user.AclCategory());
     commands.push_back(user.AclCommands());
+  }
+
+  if (!registry.contains("default")) {
+    auto& user = registry["default"];
+    user.Update(registry_->DefaultUserUpdateRequest());
   }
 
   if (!init) {

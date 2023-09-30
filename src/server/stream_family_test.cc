@@ -660,7 +660,7 @@ TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
   resp = Run({"xpending", "foo", "group", "-", "+"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 }
-  
+
 TEST_F(StreamFamilyTest, XAck) {
   Run({"xadd", "foo", "1-0", "k0", "v0"});
   Run({"xadd", "foo", "1-1", "k1", "v1"});

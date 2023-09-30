@@ -1,7 +1,7 @@
 import pytest
 import redis
 from redis import asyncio as aioredis
-from . import DflyInstanceFactory
+from .instance import DflyInstanceFactory
 from .utility import disconnect_clients
 import tempfile
 import asyncio
@@ -344,9 +344,10 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     result = await client.execute_command("ACL LOAD")
 
     result = await client.execute_command("ACL LIST")
-    assert 2 == len(result)
+    assert 3 == len(result)
     assert "user roy on ea71c25a7a60224 +@STRING +HSET" in result
     assert "user vlad off nopass +@STRING" in result
+    assert "user default on nopass +@ALL +ALL" in result
 
     await client.close()
 
