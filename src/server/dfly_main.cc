@@ -787,8 +787,11 @@ Usage: dragonfly [FLAGS]
   };
 
   absl::SetFlagsUsageConfig(config);
+  google::InitGoogleLogging(argv[0]);
+  google::SetLogFilenameExtension(".log");
 
   MainInitGuard guard(&argc, &argv);
+
   ParseFlagsFromEnv();
 
   PrintBasicUsageInfo();
