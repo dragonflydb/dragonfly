@@ -2,6 +2,7 @@ import time
 import subprocess
 import aiohttp
 import logging
+import random
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
 import re
@@ -19,11 +20,26 @@ class DflyParams:
     path: str
     cwd: str
     gdb: bool
+    buffered_out: bool
     args: Dict[str, Union[str, None]]
     existing_port: int
     existing_admin_port: int
     existing_mc_port: int
     env: any
+
+
+# COMMON_SINK = subprocess.Popen(['/usr/bin/cat'], stdin=subprocess.PIPE)
+
+
+class Colors:
+    CLEAR = "\\o33[0m"
+    COLORS = [f"\\o33[0;{i}m" for i in range(31, 37)]
+    last_color = -1
+
+    @classmethod
+    def next(clz):
+        clz.last_color = (clz.last_color + 1) % len(clz.COLORS)
+        return clz.COLORS[clz.last_color]
 
 
 class DflyStartException(Exception):
@@ -104,7 +120,14 @@ class DflyInstance:
                 time.sleep(0.05)
         else:
             raise DflyStartException("Process didn't start listening on port in time")
+
         self.log_files = self.get_logs_from_psutil()
+
+        sed_format = f"1,6d;s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
+        sed_cmd = ["sed", "-u", "-e", sed_format]
+        if self.params.buffered_out:
+            sed_cmd.remove("-u")
+        subprocess.Popen(sed_cmd, stdin=self.proc.stdout)
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
@@ -130,14 +153,17 @@ class DflyInstance:
         if self.dynamic_port:
             self._port = None
 
-        base_args = ["--use_zset_tree"]
+        base_args = []
         all_args = self.format_args(self.args) + base_args
         logging.debug(f"Starting instance with arguments {all_args} from {self.params.path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
-        self.proc = subprocess.Popen(run_cmd, cwd=self.params.cwd)
+
+        self.proc = subprocess.Popen(
+            run_cmd, cwd=self.params.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
 
     def _check_status(self):
         if not self.params.existing_port:
@@ -244,6 +270,8 @@ class DflyInstanceFactory:
     def create(self, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
+        args.setdefault("use_zset_tree", None)
+
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
 
