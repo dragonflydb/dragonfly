@@ -2170,7 +2170,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
       return RdbError(errc::unsupported_operation);
     }
 
-    VLOG(1) << "Executing item: " << entry.ToString();
+    DVLOG(2) << "Executing item: " << entry.ToString();
     ex.Execute(entry.dbid, entry.cmd);
   }
 
@@ -2333,7 +2333,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
    * assume to work in an exact keyspace state. */
 
   if (ServerState::tlocal()->is_master && settings->has_expired) {
-    VLOG(1) << "Expire key: " << item->key;
+    VLOG(2) << "Expire key: " << item->key;
     return kOk;
   }
 

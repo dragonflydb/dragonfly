@@ -130,10 +130,8 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
     RETURN_ON_ERROR(ip.length() <= 2, "IPv6 host name is too short");
 
     flag->host = ip.substr(1, ip.length() - 2);
-    VLOG(1) << "received IP of type IPv6: " << flag->host;
   } else {
     flag->host = ip;
-    VLOG(1) << "received IP of type IPv4 (or a host): " << flag->host;
   }
 
   VLOG(1) << "--replicaof: Received " << flag->host << " :  " << flag->port;
@@ -1647,7 +1645,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   // 2. Leave the DB in a consistent state after it is done.
   // We have a relatively involved state machine inside Replica itself which handels cancellation
   // with those requirements.
-  VLOG(1) << "Acquire replica lock";
+  VLOG(2) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
 
   if (IsReplicatingNoOne(host, port_sv)) {
@@ -1705,7 +1703,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
       break;
   };
 
-  VLOG(1) << "Acquire replica lock";
+  VLOG(2) << "Acquire replica lock";
   lk.lock();
 
   // Since we released the replication lock during Start(..), we need to check if this still the
@@ -1746,8 +1744,8 @@ void ServerFamily::Replicate(string_view host, string_view port) {
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "Starting take over";
-  VLOG(1) << "Acquire replica lock";
+  VLOG(1) << "ReplTakeOver start";
+
   unique_lock lk(replicaof_mu_);
 
   float_t timeout_sec;
@@ -1842,11 +1840,11 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         LOG(ERROR) << "Bad int in REPLCONF ACK command! arg=" << arg;
         return;
       }
-      VLOG(1) << "Received client ACK=" << ack;
+      VLOG(2) << "Received client ACK=" << ack;
       cntx->replication_flow->last_acked_lsn = ack;
       return;
     } else {
-      VLOG(1) << cmd << " " << arg << " " << args.size();
+      VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();
       goto err;
     }
   }

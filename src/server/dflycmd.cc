@@ -75,9 +75,9 @@ struct TransactionGuard {
   };
 
   explicit TransactionGuard(Transaction* t, bool disable_expirations = false) : t(t) {
-    VLOG(1) << "Transaction guard try schedule";
+    VLOG(2) << "Transaction guard try schedule";
     t->Schedule();
-    VLOG(1) << "Transaction guard schedule";
+    VLOG(2) << "Transaction guard schedule";
     t->Execute(
         [disable_expirations](Transaction* t, EngineShard* shard) {
           if (disable_expirations) {
@@ -86,11 +86,11 @@ struct TransactionGuard {
           return OpStatus::OK;
         },
         false);
-    VLOG(1) << "Transaction guard engaged";
+    VLOG(2) << "Transaction guard engaged";
   }
 
   ~TransactionGuard() {
-    VLOG(1) << "Releasing transaction guard";
+    VLOG(2) << "Releasing transaction guard";
     t->Execute(ExitGuardCb, true);
   }
 
