@@ -174,7 +174,8 @@ io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPath
   return paths;
 }
 
-AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2_metadata) {
+AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2_metadata,
+                                           bool disable_payload_signing) {
   shard_set->pool()->GetNextProactor()->Await([&] {
     if (!ec2_metadata) {
       setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
@@ -182,6 +183,9 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2
     // S3ClientConfiguration may request configuration and credentials from
     // EC2 metadata so must be run in a proactor thread.
     Aws::S3::S3ClientConfiguration s3_conf{};
+    if (disable_payload_signing) {
+      s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::ForceNever;
+    }
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider =
         std::make_shared<util::aws::CredentialsProviderChain>();
     // Pass a custom endpoint. If empty uses the S3 endpoint.
