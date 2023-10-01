@@ -174,8 +174,11 @@ io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPath
   return paths;
 }
 
-AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint) {
+AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2_metadata) {
   shard_set->pool()->GetNextProactor()->Await([&] {
+    if (!ec2_metadata) {
+      setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
+    }
     // S3ClientConfiguration may request configuration and credentials from
     // EC2 metadata so must be run in a proactor thread.
     Aws::S3::S3ClientConfiguration s3_conf{};

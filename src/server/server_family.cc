@@ -90,6 +90,11 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
 
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
+// Disable EC2 metadata by default, or if a users credentials are invalid the
+// AWS client will spent 30s trying to connect to inaccessable EC2 endpoints
+// to load the credentials.
+ABSL_FLAG(bool, s3_ec2_metadata, false,
+          "whether to load credentials and configuration from EC2 metadata");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -424,8 +429,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
-    snapshot_storage_ =
-        std::make_shared<detail::AwsS3SnapshotStorage>(absl::GetFlag(FLAGS_s3_endpoint));
+    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
+        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_ec2_metadata));
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
