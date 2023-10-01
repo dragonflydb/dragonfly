@@ -24,11 +24,11 @@ class ConnectionContext {
   virtual ~ConnectionContext() {
   }
 
-  Connection* owner() {
+  Connection* conn() {
     return owner_;
   }
 
-  const Connection* owner() const {
+  const Connection* conn() const {
     return owner_;
   }
 
