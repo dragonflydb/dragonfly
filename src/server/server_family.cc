@@ -1144,7 +1144,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       auto& stats = sstate.connection_stats;
       stats.err_count_map.clear();
       stats.command_cnt = 0;
-      stats.async_writes_cnt = 0;
+      stats.pipelined_cmd_cnt = 0;
     });
 
     return (*cntx)->SendOk();
@@ -1317,6 +1317,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("connected_clients", m.conn_stats.num_conns);
     append("client_read_buffer_bytes", m.conn_stats.read_buf_capacity);
     append("blocked_clients", m.conn_stats.num_blocked_clients);
+    append("dispatch_queue_entries", m.conn_stats.dispatch_queue_entries);
   }
 
   if (should_enter("MEMORY")) {
@@ -1326,8 +1327,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
     append("used_memory_peak", used_mem_peak.load(memory_order_relaxed));
 
-    append("comitted_memory", GetMallocCurrentCommitted());
-
     if (sdata_res.has_value()) {
       size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
       append("used_memory_rss", rss);
@@ -1336,6 +1335,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                              << sdata_res.error().message();
     }
+
+    append("comitted_memory", GetMallocCurrentCommitted());
+
+    append("maxmemory", max_memory_limit);
+    append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
 
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
     // heap. For example, strings or intsets. members of lists, sets, zsets etc
@@ -1351,9 +1355,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
-    append("pipeline_cache_bytes", m.conn_stats.pipeline_cache_capacity);
-    append("maxmemory", max_memory_limit);
-    append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
+
+    append("pipeline_cache_bytes", m.conn_stats.pipeline_cmd_cache_bytes);
+    append("dispatch_queue_bytes", m.conn_stats.dispatch_queue_bytes);
+    append("dispatch_queue_peak_bytes", m.conn_stats.dispatch_queue_peak_bytes);
+
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
       // PHP Symphony needs this field to work.
@@ -1389,7 +1395,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("keyspace_misses", m.events.misses);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
-    append("async_writes_count", m.conn_stats.async_writes_cnt);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);

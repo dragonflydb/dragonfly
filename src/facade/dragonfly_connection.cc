@@ -226,7 +226,6 @@ void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  ++stats->async_writes_cnt;
   unsigned i = 0;
   array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
@@ -874,13 +873,16 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     builder->SetBatchMode(dispatch_q_.size() > 1);
 
     auto recycle = [this, request_cache_limit](MessageHandle msg) {
-      dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
+      size_t used_mem = msg.UsedMemory();
+      dispatch_q_bytes_.fetch_sub(used_mem, memory_order_relaxed);
+      stats_->dispatch_queue_bytes -= used_mem;
+      stats_->dispatch_queue_entries--;
 
       // Retain pipeline message in pool.
       if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
         dispatch_q_cmds_count_--;
-        if (stats_->pipeline_cache_capacity < request_cache_limit) {
-          stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
+        if (stats_->pipeline_cmd_cache_bytes < request_cache_limit) {
+          stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
           pipeline_req_pool_.push_back(move(*pipe));
         }
       }
@@ -977,7 +979,7 @@ void Connection::ShrinkPipelinePool() {
 
   if (free_req_release_weight > stats_->num_conns) {
     free_req_release_weight = 0;
-    stats_->pipeline_cache_capacity -= pipeline_req_pool_.back()->StorageCapacity();
+    stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
     pipeline_req_pool_.pop_back();
   }
 }
@@ -988,7 +990,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
 
   free_req_release_weight = 0;  // Reset the release weight.
   auto ptr = move(pipeline_req_pool_.back());
-  stats_->pipeline_cache_capacity -= ptr->StorageCapacity();
+  stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
   pipeline_req_pool_.pop_back();
   return ptr;
 }
@@ -1053,7 +1055,12 @@ void Connection::SendAsync(MessageHandle msg) {
     dispatch_q_.insert(it, std::move(msg));
   };
 
-  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+  size_t used_mem = msg.UsedMemory();
+  dispatch_q_bytes_.fetch_add(used_mem, memory_order_relaxed);
+  stats_->dispatch_queue_entries++;
+  stats_->dispatch_queue_bytes += used_mem;
+  stats_->dispatch_queue_peak_bytes =
+      max(stats_->dispatch_queue_peak_bytes, stats_->dispatch_queue_bytes);
 
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
     // We need to reorder the queue, since multiple updates might happen before we

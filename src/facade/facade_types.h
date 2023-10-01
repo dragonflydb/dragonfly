@@ -39,18 +39,21 @@ struct CmdArgListFormatter {
 struct ConnectionStats {
   absl::flat_hash_map<std::string, uint64_t> err_count_map;
 
-  size_t read_buf_capacity = 0;
-  size_t pipeline_cache_capacity = 0;
+  size_t read_buf_capacity = 0;       // total capacity of input buffers
+  size_t dispatch_queue_entries = 0;  // total number of dispatch queue entries
+  size_t dispatch_queue_bytes = 0;    // total size of all dispatch queue entries
+  size_t dispatch_queue_peak_bytes = 0;
+
+  size_t pipeline_cmd_cache_bytes = 0;
 
   size_t io_read_cnt = 0;
   size_t io_read_bytes = 0;
   size_t io_write_cnt = 0;
   size_t io_write_bytes = 0;
+
   uint64_t command_cnt = 0;
   uint64_t pipelined_cmd_cnt = 0;
 
-  // Writes count that happened via DispatchOperations call.
-  uint64_t async_writes_cnt = 0;
   uint64_t conn_received_cnt = 0;
 
   uint32_t num_conns = 0;
