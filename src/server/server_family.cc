@@ -745,9 +745,10 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
                      &db_key_expire_metrics);
 
-  for (size_t i = 0; i < m.db.size(); ++i) {
-    AppendMetricValue("db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)}, &db_key_metrics);
-    AppendMetricValue("db_keys_expiring", m.db[i].expire_count, {"db"}, {StrCat("db", i)},
+  for (size_t i = 0; i < m.db_stats.size(); ++i) {
+    AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
+                      &db_key_metrics);
+    AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
   }
 
@@ -1200,12 +1201,12 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
-  if (src.db_stats.size() > dest->db.size())
-    dest->db.resize(src.db_stats.size());
-  for (size_t i = 0; i < src.db_stats.size(); ++i) {
-    dest->db[i] += src.db_stats[i];
-  }
+static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
+  if (src.db_stats.size() > dest->db_stats.size())
+    dest->db_stats.resize(src.db_stats.size());
+
+  for (size_t i = 0; i < src.db_stats.size(); ++i)
+    dest->db_stats[i] += src.db_stats[i];
 
   dest->events += src.events;
   dest->small_string_bytes += src.small_string_bytes;
@@ -1213,8 +1214,13 @@ static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
 
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
-
   Mutex mu;
+
+  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
+    auto& [calls, sum] = dest[string{name}];
+    calls += stat.first;
+    sum += stat.second;
+  };
 
   auto cb = [&](unsigned index, ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
@@ -1222,48 +1228,39 @@ Metrics ServerFamily::GetMetrics() const {
 
     lock_guard lk(mu);
 
-    result.uptime = time(NULL) - this->start_time_;
+    result.coordinator_stats += ss->stats;
     result.conn_stats += ss->connection_stats;
-    result.qps += uint64_t(ss->MovingSum6());
-    result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
-    result.eval_io_coordination_cnt += ss->stats.eval_io_coordination_cnt;
-    result.eval_shardlocal_coordination_cnt += ss->stats.eval_shardlocal_coordination_cnt;
-    result.eval_squashed_flushes += ss->stats.eval_squashed_flushes;
-    result.tx_schedule_cancel_cnt += ss->stats.tx_schedule_cancel_cnt;
 
-    service_.mutable_registry()->MergeCallStats(
-        index, [&dest_map = result.cmd_stats_map](string_view name, const CmdCallStats& src) {
-          auto& ent = dest_map[string{name}];
-          ent.first += src.first;
-          ent.second += src.second;
-        });
+    result.uptime = time(NULL) - this->start_time_;
+    result.qps += uint64_t(ss->MovingSum6());
 
     if (shard) {
-      MergeInto(shard->db_slice().GetStats(), &result);
-
       result.heap_used_bytes += shard->UsedMemory();
-      if (auto ts = shard->tiered_storage(); ts) {
-        result.tiered_stats += ts->GetStats();
-      }
-      if (auto si = shard->search_indices(); si) {
-        result.search_stats += si->GetStats();
-      }
+      MergeDbSliceStats(shard->db_slice().GetStats(), &result);
       result.shard_stats += shard->stats();
+
+      if (shard->tiered_storage())
+        result.tiered_stats += shard->tiered_storage()->GetStats();
+      if (shard->search_indices())
+        result.search_stats += shard->search_indices()->GetStats();
+
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
     }
+
+    service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
-  result.qps /= 6;  // normalize moving average stats
+
+  // Normalize moving average stats
+  result.qps /= 6;
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  result.is_master = false;
-  if (ServerState::tlocal() && ServerState::tlocal()->is_master) {
-    result.is_master = true;
+  result.is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
+  if (result.is_master)
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
-  }
 
   return result;
 }
@@ -1283,25 +1280,26 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   string info;
 
   auto should_enter = [&](string_view name, bool hidden = false) {
-    bool res = (!hidden && section.empty()) || section == "ALL" || section == name;
-    if (res && !info.empty())
-      info.append("\r\n");
-
-    return res;
+    if ((!hidden && section.empty()) || section == "ALL" || section == name) {
+      auto normalized_name = string{name.substr(0, 1)} + absl::AsciiStrToLower(name.substr(1));
+      absl::StrAppend(&info, info.empty() ? "" : "\r\n", "# ", normalized_name, "\r\n");
+      return true;
+    }
+    return false;
   };
 
   auto append = [&info](absl::AlphaNum a1, absl::AlphaNum a2) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
-#define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
   Metrics m = GetMetrics();
+  DbStats total;
+  for (const auto& db_stats : m.db_stats)
+    total += db_stats;
 
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
-
-    ADD_HEADER("# Server");
 
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
@@ -1315,22 +1313,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("uptime_in_days", uptime / (3600 * 24));
   }
 
-  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
-
-  DbStats total;
-  for (const auto& db_stats : m.db) {
-    total += db_stats;
-  }
-
   if (should_enter("CLIENTS")) {
-    ADD_HEADER("# Clients");
     append("connected_clients", m.conn_stats.num_conns);
     append("client_read_buffer_bytes", m.conn_stats.read_buf_capacity);
     append("blocked_clients", m.conn_stats.num_blocked_clients);
   }
 
   if (should_enter("MEMORY")) {
-    ADD_HEADER("# Memory");
+    io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
 
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
@@ -1366,7 +1356,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
-
       // PHP Symphony needs this field to work.
       append("maxmemory_policy", "eviction");
     } else {
@@ -1377,8 +1366,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("STATS")) {
-    ADD_HEADER("# Stats");
-
     append("total_connections_received", m.conn_stats.conn_received_cnt);
     append("total_commands_processed", m.conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
@@ -1406,14 +1393,20 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
+<<<<<<< HEAD
     append("eval_io_coordination_total", m.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
     append("eval_squashed_flushes", m.eval_squashed_flushes);
     append("tx_schedule_cancel_total", m.tx_schedule_cancel_cnt);
+=======
+    append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
+    append("eval_shardlocal_coordination_total",
+           m.coordinator_stats.eval_shardlocal_coordination_cnt);
+    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
+>>>>>>> 382c4f6a (fix(server): Clean up metrics collection)
   }
 
   if (should_enter("TIERED", true)) {
-    ADD_HEADER("# TIERED");
     append("tiered_entries", total.tiered_entries);
     append("tiered_bytes", total.tiered_size);
     append("tiered_reads", m.tiered_stats.tiered_reads);
@@ -1425,7 +1418,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("PERSISTENCE", true)) {
-    ADD_HEADER("# PERSISTENCE");
     decltype(last_save_info_) save_info;
     {
       lock_guard lk(save_mu_);
@@ -1445,8 +1437,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("REPLICATION")) {
-    ADD_HEADER("# Replication");
-
     ServerState& etl = *ServerState::tlocal();
 
     if (etl.is_master) {
@@ -1479,20 +1469,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("COMMANDSTATS", true)) {
-    ADD_HEADER("# Commandstats");
-
-    auto unknown_cmd = service_.UknownCmdMap();
-
     auto append_sorted = [&append](string_view prefix, auto display) {
       sort(display.begin(), display.end());
-
       for (const auto& k_v : display) {
         append(StrCat(prefix, k_v.first), k_v.second);
       }
     };
 
     vector<pair<string_view, string>> commands;
-
     for (const auto& [name, stats] : m.cmd_stats_map) {
       const auto calls = stats.first, sum = stats.second;
       commands.push_back(
@@ -1500,6 +1484,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
                                 absl::StrCat("usec_per_call=", static_cast<double>(sum) / calls)},
                                ",")});
     }
+
+    auto unknown_cmd = service_.UknownCmdMap();
 
     append_sorted("cmdstat_", move(commands));
     append_sorted("unknown_",
@@ -1514,16 +1500,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("ERRORSTATS", true)) {
-    ADD_HEADER("# Errorstats");
     for (const auto& k_v : m.conn_stats.err_count_map) {
       append(k_v.first, k_v.second);
     }
   }
 
   if (should_enter("KEYSPACE")) {
-    ADD_HEADER("# Keyspace");
-    for (size_t i = 0; i < m.db.size(); ++i) {
-      const auto& stats = m.db[i];
+    for (size_t i = 0; i < m.db_stats.size(); ++i) {
+      const auto& stats = m.db_stats[i];
       bool show = (i == 0) || (stats.key_count > 0);
       if (show) {
         string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
@@ -1535,7 +1519,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
 #ifndef __APPLE__
   if (should_enter("CPU")) {
-    ADD_HEADER("# CPU");
     struct rusage ru, cu, tu;
     getrusage(RUSAGE_SELF, &ru);
     getrusage(RUSAGE_CHILDREN, &cu);
@@ -1550,7 +1533,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 #endif
 
   if (should_enter("CLUSTER")) {
-    ADD_HEADER("# Cluster");
     append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
 

@@ -1054,6 +1054,7 @@ void Connection::SendAsync(MessageHandle msg) {
   };
 
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
     // We need to reorder the queue, since multiple updates might happen before we
     // pop the message, invalidating the correct order since we always push at the front

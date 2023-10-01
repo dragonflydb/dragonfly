@@ -13,6 +13,7 @@
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
+#include "server/server_state.h"
 
 namespace util {
 class AcceptServer;
@@ -53,32 +54,28 @@ struct ReplicaRoleInfo {
   uint64_t lsn_lag;
 };
 
+// Aggregated metrics over multiple sources on all shards
 struct Metrics {
-  std::vector<DbStats> db;
-  SliceEvents events;
-  TieredStats tiered_stats;
+  SliceEvents events;              // general keyspace stats
+  std::vector<DbStats> db_stats;   // dbsize stats
+  EngineShard::Stats shard_stats;  // per-shard stats
+
+  facade::ConnectionStats conn_stats;  // client stats and buffer sizes
+  TieredStats tiered_stats;            // stats for tiered storage
   SearchStats search_stats;
-  EngineShard::Stats shard_stats;
+  ServerState::Stats coordinator_stats;  // stats on transaction running
 
   size_t uptime = 0;
   size_t qps = 0;
+
   size_t heap_used_bytes = 0;
-  size_t heap_comitted_bytes = 0;
   size_t small_string_bytes = 0;
-  uint64_t ooo_tx_transaction_cnt = 0;
-  uint64_t eval_io_coordination_cnt = 0;
-  uint64_t eval_shardlocal_coordination_cnt = 0;
-  uint64_t eval_squashed_flushes = 0;
-  uint64_t tx_schedule_cancel_cnt = 0;
   uint32_t traverse_ttl_per_sec = 0;
   uint32_t delete_ttl_per_sec = 0;
+
+  std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;  // command call frequencies
+
   bool is_master = true;
-
-  facade::ConnectionStats conn_stats;
-
-  // command statistics; see CommandId.
-  std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
-
   std::vector<ReplicaRoleInfo> replication_metrics;
 };
 
