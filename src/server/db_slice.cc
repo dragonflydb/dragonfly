@@ -161,7 +161,8 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
   bool res = mem_budget_ >
              int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available * 1.1);
-  VLOG(1) << "available: " << new_available << ", res: " << res;
+  VLOG(2) << "available: " << new_available << ", res: " << res;
+
   return res;
 }
 
@@ -377,7 +378,7 @@ OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(const Context& cntx, 
       return res.status();
   }
 
-  VLOG(1) << "FindFirst " << args.front() << " not found";
+  VLOG(2) << "FindFirst " << args.front() << " not found";
   return OpStatus::KEY_NOTFOUND;
 }
 
@@ -426,7 +427,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (apply_memory_limit && !caching_mode_ && evp.mem_budget() < 0) {
-    VLOG(1) << "AddOrFind2: over limit, budget: " << evp.mem_budget();
+    VLOG(2) << "AddOrFind2: over limit, budget: " << evp.mem_budget();
     events_.insertion_rejections++;
     throw bad_alloc();
   }
@@ -441,7 +442,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
   try {
     tie(it, inserted) = db.prime.Insert(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
-    VLOG(1) << "AddOrFind2: bad alloc exception, budget: " << evp.mem_budget();
+    VLOG(2) << "AddOrFind2: bad alloc exception, budget: " << evp.mem_budget();
     events_.insertion_rejections++;
 
     throw e;
