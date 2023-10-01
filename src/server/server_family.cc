@@ -1044,12 +1044,12 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SETNAME" && args.size() == 2) {
-    cntx->owner()->SetName(string{ArgS(args, 1)});
+    cntx->conn()->SetName(string{ArgS(args, 1)});
     return (*cntx)->SendOk();
   }
 
   if (sub_cmd == "GETNAME") {
-    auto name = cntx->owner()->GetName();
+    auto name = cntx->conn()->GetName();
     if (!name.empty()) {
       return (*cntx)->SendBulkString(name);
     } else {
@@ -1603,7 +1603,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (has_setname) {
-    cntx->owner()->SetName(string{clientname});
+    cntx->conn()->SetName(string{clientname});
   }
 
   int proto_version = 2;
@@ -1625,7 +1625,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString("proto");
   (*cntx)->SendLong(proto_version);
   (*cntx)->SendBulkString("id");
-  (*cntx)->SendLong(cntx->owner()->GetClientId());
+  (*cntx)->SendLong(cntx->conn()->GetClientId());
   (*cntx)->SendBulkString("mode");
   (*cntx)->SendBulkString("standalone");
   (*cntx)->SendBulkString("role");
@@ -1792,7 +1792,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
         auto [sid, replica_info] = dfly_cmd_->CreateSyncSession(cntx);
-        cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
+        cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
         cntx->conn_state.replication_info.repl_session_id = sid;

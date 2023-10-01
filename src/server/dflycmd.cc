@@ -228,7 +228,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
 
   if (num_thread < pool->size()) {
     if (int(num_thread) != ProactorBase::GetIndex()) {
-      cntx->owner()->Migrate(pool->at(num_thread));
+      cntx->conn()->Migrate(pool->at(num_thread));
     }
 
     return rb->SendOk();
@@ -272,7 +272,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError(kInvalidState);
 
   // Set meta info on connection.
-  cntx->owner()->SetName(absl::StrCat("repl_flow_", sync_id));
+  cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
   cntx->conn_state.replication_info.repl_session_id = sync_id;
   cntx->conn_state.replication_info.repl_flow_id = flow_id;
 
@@ -281,11 +281,11 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   auto& flow = replica_ptr->flows[flow_id];
   cntx->replication_flow = &flow;
-  flow.conn = cntx->owner();
+  flow.conn = cntx->conn();
   flow.eof_token = eof_token;
   flow.version = replica_ptr->version;
 
-  cntx->owner()->Migrate(shard_set->pool()->at(flow_id));
+  cntx->conn()->Migrate(shard_set->pool()->at(flow_id));
   sf_->journal()->StartInThread();
 
   std::string_view sync_type = "FULL";
@@ -416,7 +416,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
   sf_->CancelBlockingCommands();
-  if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->owner()](util::Connection* conn) {
+  if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->conn()](util::Connection* conn) {
         // The only command that is currently dispatching should be the takeover command -
         // so we wait until this is true.
         return conn != self;
@@ -602,7 +602,7 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
     fb2::Fiber("stop_replication", &DflyCmd::StopReplication, this, sync_id).Detach();
   };
 
-  string address = cntx->owner()->RemoteEndpointAddress();
+  string address = cntx->conn()->RemoteEndpointAddress();
   uint32_t port = cntx->conn_state.replication_info.repl_listening_port;
 
   LOG(INFO) << "Registered replica " << address << ":" << port;
