@@ -2,7 +2,6 @@ import time
 import subprocess
 import aiohttp
 import logging
-import random
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
 import re
@@ -26,9 +25,6 @@ class DflyParams:
     existing_admin_port: int
     existing_mc_port: int
     env: any
-
-
-# COMMON_SINK = subprocess.Popen(['/usr/bin/cat'], stdin=subprocess.PIPE)
 
 
 class Colors:
@@ -123,6 +119,8 @@ class DflyInstance:
 
         self.log_files = self.get_logs_from_psutil()
 
+        # Remove first 6 lines - our default header with log locations (as it carries no useful information)
+        # Next, replace log-level + date with port and colored arrow
         sed_format = f"1,6d;s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
         sed_cmd = ["sed", "-u", "-e", sed_format]
         if self.params.buffered_out:
