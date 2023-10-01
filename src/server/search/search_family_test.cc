@@ -22,7 +22,7 @@ class SearchFamilyTest : public BaseFamilyTest {
 
 const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
 
-MATCHER_P(DocIds, arg_ids, "") {
+MATCHER_P2(DocIds, total, arg_ids, "") {
   if (arg_ids.empty()) {
     if (auto res = arg.GetInt(); !res || *res != 0) {
       *result_listener << "Expected single zero";
@@ -42,9 +42,8 @@ MATCHER_P(DocIds, arg_ids, "") {
     return false;
   }
 
-  if (auto num_results = results[0].GetInt();
-      !num_results || size_t(*num_results) != arg_ids.size()) {
-    *result_listener << "Bad document number in reply: " << results.size();
+  if (auto num_results = results[0].GetInt(); !num_results || size_t(*num_results) != total) {
+    *result_listener << "Bad total count in reply: " << num_results.value_or(-1);
     return false;
   }
 
@@ -60,7 +59,7 @@ MATCHER_P(DocIds, arg_ids, "") {
 }
 
 template <typename... Args> auto AreDocIds(Args... args) {
-  return DocIds(vector<string>{args...});
+  return DocIds(sizeof...(args), vector<string>{args...});
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
@@ -384,6 +383,69 @@ TEST_F(SearchFamilyTest, UnicodeWords) {
               AreDocIds("d:1"));
 }
 
+TEST_F(SearchFamilyTest, BasicSort) {
+  auto AreRange = [](size_t total, size_t l, size_t r, string_view prefix) {
+    vector<string> out;
+    for (size_t i = min(l, r); i < max(l, r); i++)
+      out.push_back(absl::StrCat(prefix, i));
+    if (l > r)
+      reverse(out.begin(), out.end());
+    return DocIds(total, out);
+  };
+
+  // max_memory_limit = INT_MAX;
+
+  Run({"ft.create", "i1", "prefix", "1", "d:", "schema", "ord", "numeric", "sortable"});
+
+  for (size_t i = 0; i < 100; i++)
+    Run({"hset", absl::StrCat("d:", i), "ord", absl::StrCat(i)});
+
+  // Sort ranges of 23 elements
+  for (size_t i = 0; i < 77; i++)
+    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "LIMIT", to_string(i), "23"}),
+                AreRange(100, i, i + 23, "d:"));
+
+  // Sort ranges of 27 elements in reverse
+  for (size_t i = 0; i < 73; i++)
+    EXPECT_THAT(Run({"ft.search", "i1", "*", "SORTBY", "ord", "DESC", "LIMIT", to_string(i), "27"}),
+                AreRange(100, 100 - i, 100 - i - 27, "d:"));
+
+  Run({"ft.create", "i2", "prefix", "1", "d2:", "schema", "name", "text", "sortable"});
+
+  absl::InsecureBitGen gen;
+  vector<string> random_strs;
+  for (size_t i = 0; i < 10; i++)
+    random_strs.emplace_back(dfly::GetRandomHex(gen, 7));
+  sort(random_strs.begin(), random_strs.end());
+
+  for (size_t i = 0; i < 10; i++)
+    Run({"hset", absl::StrCat("d2:", i), "name", random_strs[i]});
+
+  for (size_t i = 0; i < 7; i++)
+    EXPECT_THAT(Run({"ft.search", "i2", "*", "SORTBY", "name", "DESC", "LIMIT", to_string(i), "3"}),
+                AreRange(10, 10 - i, 10 - i - 3, "d2:"));
+}
+
+TEST_F(SearchFamilyTest, FtProfile) {
+  Run({"ft.create", "i1", "schema", "name", "text"});
+
+  auto resp = Run({"ft.profile", "i1", "search", "query", "(a | b) c d"});
+
+  const auto& top_level = resp.GetVec();
+  EXPECT_EQ(top_level.size(), shard_set->size() + 1);
+
+  EXPECT_THAT(top_level[0].GetVec(), ElementsAre("took", _, "hits", _, "serialized", _));
+
+  for (size_t sid = 0; sid < shard_set->size(); sid++) {
+    const auto& shard_resp = top_level[sid + 1].GetVec();
+    EXPECT_THAT(shard_resp, ElementsAre("took", _, "tree", _));
+
+    const auto& tree = shard_resp[3].GetVec();
+    EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
+    EXPECT_EQ(tree[1].GetVec().size(), 3);
+  }
+}
+
 TEST_F(SearchFamilyTest, SimpleExpiry) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "expires-in", "numeric"}), "OK");
 
@@ -406,26 +468,9 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
   AdvanceTime(60);
   Run({"HGETALL", "d:3"});  // Trigger expiry by access
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
-}
 
-TEST_F(SearchFamilyTest, FtProfile) {
-  Run({"ft.create", "i1", "schema", "name", "text"});
-
-  auto resp = Run({"ft.profile", "i1", "search", "query", "(a | b) c d"});
-
-  const auto& top_level = resp.GetVec();
-  EXPECT_EQ(top_level.size(), shard_set->size() + 1);
-
-  EXPECT_THAT(top_level[0].GetVec(), ElementsAre("took", _, "hits", _, "serialized", _));
-
-  for (size_t sid = 0; sid < shard_set->size(); sid++) {
-    const auto& shard_resp = top_level[sid + 1].GetVec();
-    EXPECT_THAT(shard_resp, ElementsAre("took", _, "tree", _));
-
-    const auto& tree = shard_resp[3].GetVec();
-    EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
-    EXPECT_EQ(tree[1].GetVec().size(), 3);
-  }
+  Run({"flushall"});
+  EXPECT_EQ(used_mem_current.load(), 0);
 }
 
 }  // namespace dfly

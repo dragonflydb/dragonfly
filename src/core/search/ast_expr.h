@@ -89,9 +89,15 @@ struct AstKnnNode {
   std::string score_alias;
 };
 
+struct AstSortNode {
+  std::unique_ptr<AstNode> filter;
+  std::string field;
+  bool descending = false;
+};
+
 using NodeVariants =
     std::variant<std::monostate, AstStarNode, AstTermNode, AstRangeNode, AstNegateNode,
-                 AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode>;
+                 AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;
