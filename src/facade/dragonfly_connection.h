@@ -133,7 +133,7 @@ class Connection : public util::Connection {
   // Add acl update to dispatch queue.
   void SendAclUpdateAsync(AclUpdateMessage msg);
 
-  // Must be called before Send_Async to ensure the connection dispatch queue is not overfilled.
+  // Must be called before SendAsync to ensure the connection dispatch queue is not overfilled.
   // Blocks until free space is available.
   void EnsureAsyncMemoryBudget();
 
@@ -236,9 +236,7 @@ class Connection : public util::Connection {
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
-  std::atomic_uint64_t dispatch_q_bytes_ = 0;  // memory usage of all entries
-  dfly::EventCount evc_bp_;                    // backpressure for memory limit
-  size_t dispatch_q_cmds_count_;               // how many queued async commands
+  size_t dispatch_q_cmds_count_;  // how many queued async commands
 
   base::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
@@ -275,6 +273,16 @@ class Connection : public util::Connection {
   // Aggregated while handling pipelines,
   // graudally released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
+
+  // Keeps track of total per-thread sizes of dispatch queues to
+  // limit memory taken up by pipelined / pubsub commands and slow down clients
+  // producing them to quickly via EnsureAsyncMemoryBudget.
+  struct QueueBackpressure {
+    dfly::EventCount ec;
+    std::atomic_size_t bytes = 0;
+    size_t limit = 0;
+  };
+  static thread_local QueueBackpressure queue_backpressure_;
 };
 
 }  // namespace facade
