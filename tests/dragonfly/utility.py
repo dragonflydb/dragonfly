@@ -436,7 +436,6 @@ class DflySeeder:
         self.gen.key_cnt_target = key_cnt
 
     async def _capture_db(self, port, target_db, keys):
-        eprint(f"Capture data on port {port}, db {target_db}")
         client = aioredis.Redis(port=port, db=target_db)
         capture = DataCapture(await self._capture_entries(client, keys))
         await client.connection_pool.disconnect()
