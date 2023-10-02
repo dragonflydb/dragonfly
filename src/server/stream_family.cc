@@ -94,8 +94,8 @@ struct GroupInfo {
   size_t pending_size;
   streamID last_id;
   size_t pel_count;
-  size_t entries_read;
-  size_t lag;
+  int64_t entries_read;
+  int64_t lag;
   vector<NACKInfo> stream_nack_vec;
   vector<ConsumerInfo> consumer_info_vec;
 };
@@ -877,77 +877,6 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   return s->length;
 }
 
-/* A helper that returns non-zero if the range from 'start' to `end`
- * contains a tombstone.
- *
- * NOTE: this assumes that the caller had verified that 'start' is less than
- * 's->last_id'. */
-// int streamRangeHasTombstones(stream* s, streamID* start, streamID* end) {
-//   streamID start_id, end_id;
-
-//   if (!s->length || streamIDEqZero(&s->max_deleted_entry_id)) {
-//     /* The stream is empty or has no tombstones. */
-//     return 0;
-//   }
-
-//   if (streamCompareID(&s->first_id, &s->max_deleted_entry_id) > 0) {
-//     /* The latest tombstone is before the first entry. */
-//     return 0;
-//   }
-
-//   if (start) {
-//     start_id = *start;
-//   } else {
-//     start_id.ms = 0;
-//     start_id.seq = 0;
-//   }
-
-//   if (end) {
-//     end_id = *end;
-//   } else {
-//     end_id.ms = UINT64_MAX;
-//     end_id.seq = UINT64_MAX;
-//   }
-
-//   if (streamCompareID(&start_id, &s->max_deleted_entry_id) <= 0 &&
-//       streamCompareID(&s->max_deleted_entry_id, &end_id) <= 0) {
-//     /* start_id <= max_deleted_entry_id <= end_id: The range does include a tombstone. */
-//     return 1;
-//   }
-
-//   /* The range doesn't includes a tombstone. */
-//   return 0;
-// }
-
-// void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
-//   int valid = 0;
-//   long long lag = 0;
-
-//   if (!s->entries_added) {
-//     /* The lag of a newly-initialized stream is 0. */
-//     lag = 0;
-//     valid = 1;
-//   } else if (cg->entries_read != SCG_INVALID_ENTRIES_READ &&
-//              !streamRangeHasTombstones(s, &cg->last_id, NULL)) {
-//     /* No fragmentation ahead means that the group's logical reads counter
-//      * is valid for performing the lag calculation. */
-//     lag = (long long)s->entries_added - cg->entries_read;
-//     valid = 1;
-//   } else {
-//     /* Attempt to retrieve the group's last ID logical read counter. */
-//     long long entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg->last_id);
-//     if (entries_read != SCG_INVALID_ENTRIES_READ) {
-//       /* A valid counter was obtained. */
-//       lag = (long long)s->entries_added - entries_read;
-//       valid = 1;
-//     }
-//   }
-
-//   if (valid) {
-//     ginfo->lag = lag;
-//   }
-// }
-
 OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
                                          EngineShard* shard) {
   auto& db_slice = shard->db_slice();
@@ -1114,13 +1043,10 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
         GroupInfo ginfo;
         ginfo.name.assign(reinterpret_cast<char*>(ri_cgroups.key), ri_cgroups.key_len);
         ginfo.last_id = cg->last_id;
-        ginfo.entries_read = streamEstimateDistanceFromFirstEverEntry(
-            s, &cg->last_id);  // TODO : check if this is correct
-        // ginfo.entries_read = cg->entries_read;
         ginfo.consumer_size = raxSize(cg->consumers);
         ginfo.pending_size = raxSize(cg->pel);
-        // getConsumerGroupLag(s, cg, &ginfo);
-        ginfo.lag = s->entries_added - ginfo.entries_read;  // TODO : check if this is correct
+        ginfo.entries_read = cg->entries_read;
+        ginfo.lag = streamCGLag(s, cg);
         ginfo.pel_count = raxSize(cg->pel);
         getGroupPEL(s, cg, &ginfo, count);
         getConsumers(s, cg, &ginfo, count);
@@ -2344,10 +2270,17 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
             (*cntx)->SendBulkString(StreamIdRepr(ginfo.last_id));
 
             (*cntx)->SendBulkString("entries-read");
-            (*cntx)->SendLong(ginfo.entries_read);  // TODO : check this, value is incorrect.
-
+            if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
+              (*cntx)->SendLong(ginfo.entries_read);
+            } else {
+              (*cntx)->SendNull();
+            }
             (*cntx)->SendBulkString("lag");
-            (*cntx)->SendLong(ginfo.lag);  // TODO : check this, value is incorrect.
+            if (ginfo.lag != SCG_INVALID_LAG) {
+              (*cntx)->SendLong(ginfo.lag);
+            } else {
+              (*cntx)->SendNull();
+            }
 
             (*cntx)->SendBulkString("pel-count");
             (*cntx)->SendLong(ginfo.pel_count);
