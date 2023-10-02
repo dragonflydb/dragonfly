@@ -230,7 +230,7 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
   string endpoint;
   if (cntx->conn_state.script_info) {
     endpoint = "lua";
-  } else if (const auto* conn = cntx->owner(); conn != nullptr) {
+  } else if (const auto* conn = cntx->conn(); conn != nullptr) {
     endpoint = conn->RemoteEndpointStr();
   } else {
     endpoint = "REPLICATION:0";
@@ -823,7 +823,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
-  if (dfly_cntx.owner() != nullptr && !dfly_cntx.owner()->IsAdmin() && cid->IsRestricted()) {
+  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsAdmin() && cid->IsRestricted()) {
     return ErrorReply{"Cannot execute restricted command (admin only)"};
   }
 
@@ -919,9 +919,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   bool under_multi = dfly_cntx->conn_state.exec_info.IsRunning();
 
   if (VLOG_IS_ON(2) &&
-      cntx->owner()) {  // owner may not exists in case of this being called from replica context
+      cntx->conn()) {  // owner may not exists in case of this being called from replica context
     const char* lua = under_script ? "LUA " : "";
-    LOG(INFO) << "Got (" << cntx->owner()->GetClientId() << "): " << lua << args
+    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << lua << args
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
@@ -1269,7 +1269,7 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   builder->CloseConnection();
 
   DeactivateMonitoring(static_cast<ConnectionContext*>(cntx));
-  cntx->owner()->ShutdownSelf();
+  cntx->conn()->ShutdownSelf();
 }
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
@@ -1874,7 +1874,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     // Most importantly, this approach allows not blocking and not awaiting in the dispatch below,
     // thus not adding any overhead to backpressure checks.
     for (auto& sub : subscribers)
-      sub.conn_cntx->owner()->EnsureAsyncMemoryBudget();
+      sub.conn_cntx->conn()->EnsureAsyncMemoryBudget();
 
     auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
     auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
@@ -1886,7 +1886,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
                             ChannelStore::Subscriber::ByThread);
 
       while (it != subscribers_ptr->end() && it->thread_id == idx) {
-        facade::Connection* conn = it->conn_cntx->owner();
+        facade::Connection* conn = it->conn_cntx->conn();
         DCHECK(conn);
         conn->SendPubMessageAsync(
             {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
@@ -1949,7 +1949,7 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 }
 
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientId();
+  VLOG(1) << "starting monitor on this connection: " << cntx->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
   // this connection, to send to it any command
   (*cntx)->SendOk();

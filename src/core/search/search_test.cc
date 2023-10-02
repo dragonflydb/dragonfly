@@ -68,7 +68,7 @@ struct MockedDocument : public DocumentAccessor {
 Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
   Schema schema;
   for (auto [name, type] : ilist) {
-    schema.fields[name] = {type, string{name}};
+    schema.fields[name] = {type, 0, string{name}};
   }
   return schema;
 }

@@ -436,7 +436,6 @@ class DflySeeder:
         self.gen.key_cnt_target = key_cnt
 
     async def _capture_db(self, port, target_db, keys):
-        eprint(f"Capture data on port {port}, db {target_db}")
         client = aioredis.Redis(port=port, db=target_db)
         capture = DataCapture(await self._capture_entries(client, keys))
         await client.connection_pool.disconnect()
@@ -567,6 +566,9 @@ class DflySeederFactory:
 
     def __init__(self, log_file=None):
         self.log_file = log_file
+
+    def __repr__(self) -> str:
+        return f"DflySeederFactory(log_file={self.log_file})"
 
     def create(self, **kwargs):
         return DflySeeder(log_file=self.log_file, **kwargs)

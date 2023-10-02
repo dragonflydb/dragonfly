@@ -110,7 +110,7 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
   if (cursor > kCursorDoneState || underutilized_found) {
-    VLOG(1) << "cursor: " << cursor << " and underutilized_found " << underutilized_found;
+    VLOG(2) << "cursor: " << cursor << " and underutilized_found " << underutilized_found;
     return true;
   }
 
@@ -209,7 +209,7 @@ uint32_t EngineShard::DefragTask() {
   const auto shard_id = db_slice().shard_id();
 
   if (defrag_state_.CheckRequired()) {
-    VLOG(1) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor
+    VLOG(2) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor
             << ", underutilzation found: " << defrag_state_.underutilized_found;
     if (DoDefrag()) {
       // we didn't finish the scan
@@ -526,7 +526,7 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
   while (true) {
     Heartbeat();
     if (fiber_periodic_done_.WaitFor(period_ms)) {
-      VLOG(1) << "finished running engine shard periodic task";
+      VLOG(2) << "finished running engine shard periodic task";
       return;
     }
   }
