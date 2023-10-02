@@ -1230,6 +1230,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
     result.eval_io_coordination_cnt += ss->stats.eval_io_coordination_cnt;
     result.eval_shardlocal_coordination_cnt += ss->stats.eval_shardlocal_coordination_cnt;
+    result.eval_squashed_flushes += ss->stats.eval_squashed_flushes;
     result.tx_schedule_cancel_cnt += ss->stats.tx_schedule_cancel_cnt;
 
     service_.mutable_registry()->MergeCallStats(
@@ -1406,6 +1407,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
     append("eval_io_coordination_total", m.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
+    append("eval_squashed_flushes", m.eval_squashed_flushes);
     append("tx_schedule_cancel_total", m.tx_schedule_cancel_cnt);
   }
 

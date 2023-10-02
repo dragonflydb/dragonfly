@@ -250,3 +250,17 @@ async def test_global_eval_in_multi(async_client: aioredis.Redis):
 
     print(res)
     assert res[1] == "works"
+
+
+@dfly_args({"proactor_threads": 4, "lua_auto_async": None})
+async def test_lua_auto_async(async_client: aioredis.Redis):
+    TEST_SCRIPT = """
+        for i = 1, 100 do
+            redis.call('LPUSH', KEYS[(i % 4) + 1], 'W')
+        end
+    """
+
+    await async_client.eval(TEST_SCRIPT, 4, "a", "b", "c", "d")
+
+    flushes = (await async_client.info("stats"))["eval_squashed_flushes"]
+    assert 1 <= flushes <= 3  # all 100 commands are executed in at most 3 batches
