@@ -1,3 +1,7 @@
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
@@ -21,23 +25,33 @@ using OwnedFtVector = std::pair<std::unique_ptr<float[]>, size_t /* dimension (s
 
 // Query params represent named parameters for queries supplied via PARAMS.
 struct QueryParams {
+  std::string_view operator[](std::string_view name) const;
+  std::string& operator[](std::string_view k);
+
   size_t Size() const {
     return params.size();
-  }
-
-  std::string_view operator[](std::string_view name) const {
-    if (auto it = params.find(name); it != params.end())
-      return it->second;
-    return "";
-  }
-
-  std::string& operator[](std::string_view k) {
-    return params[k];
   }
 
  private:
   absl::flat_hash_map<std::string, std::string> params;
 };
+
+struct SortOption {
+  std::string field;
+  bool descending = false;
+};
+
+struct WrappedStrPtr {
+  // Intentionally implicit and const std::string& for use in templates
+  WrappedStrPtr(const std::string& s);
+  bool operator<(const WrappedStrPtr& other) const;
+  bool operator>=(const WrappedStrPtr& other) const;
+
+ private:
+  std::unique_ptr<char[]> ptr;
+};
+
+using ResultScore = std::variant<std::monostate, float, int64_t, WrappedStrPtr>;
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
@@ -56,6 +70,11 @@ struct BaseIndex {
   virtual ~BaseIndex() = default;
   virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
   virtual void Remove(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+};
+
+// Base class for type-specific sorting indices.
+struct BaseSortIndex : BaseIndex {
+  virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
 };
 
 }  // namespace dfly::search

@@ -20,6 +20,8 @@ using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},
           "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
           "<cmd2_name>=<cmd2_new_name>");
+ABSL_FLAG(vector<string>, restricted_commands, {},
+          "Commands restricted to connections on the admin port");
 
 namespace dfly {
 
@@ -87,6 +89,10 @@ CommandRegistry::CommandRegistry() {
       exit(1);
     }
   }
+
+  for (string name : GetFlag(FLAGS_restricted_commands)) {
+    restricted_cmds_.emplace(AsciiStrToUpper(name));
+  }
 }
 
 void CommandRegistry::Init(unsigned int thread_count) {
@@ -103,6 +109,10 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
     k = it->second;
+  }
+
+  if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
+    cmd.SetRestricted(true);
   }
 
   family_of_commands_.back().push_back(std::string(k));
