@@ -789,20 +789,24 @@ TEST_F(StreamFamilyTest, XAutoClaim) {
   Run({"xadd", "foo", "1-6", "k7", "v7"});
   Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
   // test count and end_id
-  resp = Run({"xautoclaim", "foo", "group", "bob", "0", "0-0", "count", "1", "justid"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(
-                        "1-6", RespArray(ElementsAre("1-0", "1-1", "1-2", "1-3", "1-4", "1-5")),
-                        RespArray(ElementsAre()))));
+  resp = Run({"xautoclaim", "foo", "group", "bob", "0", "1-5", "count", "1", "justid"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("1-6", RespArray(ElementsAre("1-5")), RespArray(ElementsAre()))));
 
   resp = Run({"xautoclaim", "foo", "group", "bob", "0", "1-6", "count", "1", "justid"});
-  EXPECT_THAT(resp,
-              RespArray(ElementsAre(
-                  "0-0", RespArray(ElementsAre("1-0", "1-1", "1-2", "1-3", "1-4", "1-5", "1-6")),
-                  RespArray(ElementsAre()))));
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-6")), RespArray(ElementsAre()))));
 
   resp = Run({"xautoclaim", "foo", "group", "bob", "0", "1-10", "count", "1", "justid"});
   EXPECT_THAT(resp,
               RespArray(ElementsAre("0-0", RespArray(ElementsAre()), RespArray(ElementsAre()))));
+
+  // if a message being claimed is deleted, it should be listed separately.
+  Run({"xdel", "foo", "1-2", "1-4"});
+  resp = Run({"xautoclaim", "foo", "group", "alice", "0", "0-0", "justid"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-0", "1-1", "1-3", "1-5", "1-6")),
+                                  RespArray(ElementsAre("1-2", "1-4")))));
 }
 
 }  // namespace dfly

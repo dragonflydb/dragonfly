@@ -2783,7 +2783,10 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendError(result.status());
     return;
   }
+
   ClaimInfo cresult = result.value();
+
+  (*cntx)->StartArray(3);
   (*cntx)->SendBulkString(StreamIdRepr(cresult.end_id));
   if (cresult.justid) {
     (*cntx)->StartArray(cresult.ids.size());
