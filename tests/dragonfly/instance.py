@@ -75,6 +75,9 @@ class DflyInstance:
         self.start()
         return self
 
+    def __repr__(self):
+        return f":{self.port}"
+
     def __exit__(self, exc_type, exc_value, exc_traceback):
         self.stop()
 
@@ -264,5 +267,5 @@ class DflyInstanceFactory:
         for instance in self.instances:
             instance.stop()
 
-    def __str__(self):
+    def __repr__(self) -> str:
         return f"Factory({self.args})"

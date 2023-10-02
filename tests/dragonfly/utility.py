@@ -568,6 +568,9 @@ class DflySeederFactory:
     def __init__(self, log_file=None):
         self.log_file = log_file
 
+    def __repr__(self) -> str:
+        return f"DflySeederFactory(log_file={self.log_file})"
+
     def create(self, **kwargs):
         return DflySeeder(log_file=self.log_file, **kwargs)
 
