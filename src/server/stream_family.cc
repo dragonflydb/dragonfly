@@ -911,7 +911,8 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
   return result;
 }
 
-vector<Record> streamWithRange(stream* s, streamID start, streamID end, int reverse, size_t count) {
+vector<Record> GetStreamRecords(stream* s, streamID start, streamID end, int reverse,
+                                size_t count) {
   streamIterator si;
   int64_t numfields;
   streamID id;
@@ -933,7 +934,7 @@ vector<Record> streamWithRange(stream* s, streamID start, streamID end, int reve
 
       rec.kv_arr.emplace_back(move(skey), move(sval));
     }
-    records.push_back(rec);
+    records.push_back(std::move(rec));
     arraylen++;
     if (count && count == arraylen)
       break;
@@ -944,7 +945,7 @@ vector<Record> streamWithRange(stream* s, streamID start, streamID end, int reve
   return records;
 }
 
-void getGroupPEL(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
+void GetGroupPEL(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
   vector<NACKInfo> nack_info_vec;
   long long arraylen_cg_pel = 0;
   raxIterator ri_cg_pel;
@@ -965,10 +966,10 @@ void getGroupPEL(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
     arraylen_cg_pel++;
   }
   raxStop(&ri_cg_pel);
-  ginfo->stream_nack_vec = nack_info_vec;
+  ginfo->stream_nack_vec = std::move(nack_info_vec);
 }
 
-void getConsumers(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
+void GetConsumers(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
   vector<ConsumerInfo> consumer_info_vec;
   raxIterator ri_consumers;
   raxStart(&ri_consumers, cg->consumers);
@@ -1005,7 +1006,7 @@ void getConsumers(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
     raxStop(&ri_cpel);
   }
   raxStop(&ri_consumers);
-  ginfo->consumer_info_vec = consumer_info_vec;
+  ginfo->consumer_info_vec = std::move(consumer_info_vec);
 }
 
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard,
@@ -1029,7 +1030,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
   sinfo.entries_added = s->entries_added;
   sinfo.recorded_first_entry_id = s->first_id;
   sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
-  sinfo.entries = streamWithRange(s, s->first_id, s->last_id, 0, count);
+  sinfo.entries = GetStreamRecords(s, s->first_id, s->last_id, 0, count);
 
   if (full) {
     if (s->cgroups) {
@@ -1048,8 +1049,8 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
         ginfo.entries_read = cg->entries_read;
         ginfo.lag = streamCGLag(s, cg);
         ginfo.pel_count = raxSize(cg->pel);
-        getGroupPEL(s, cg, &ginfo, count);
-        getConsumers(s, cg, &ginfo, count);
+        GetGroupPEL(s, cg, count, &ginfo);
+        GetConsumers(s, cg, count, &ginfo);
 
         group_info_vec.push_back(ginfo);
       }
@@ -1059,11 +1060,11 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
     }
   } else {
     sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
-    vector<Record> first_entry_vector = streamWithRange(s, s->first_id, s->last_id, 0, 1);
+    vector<Record> first_entry_vector = GetStreamRecords(s, s->first_id, s->last_id, 0, 1);
     if (first_entry_vector.size() != 0) {
       sinfo.first_entry = first_entry_vector.at(0);
     }
-    vector<Record> last_entry_vector = streamWithRange(s, s->first_id, s->last_id, 1, 1);
+    vector<Record> last_entry_vector = GetStreamRecords(s, s->first_id, s->last_id, 1, 1);
     if (last_entry_vector.size() != 0) {
       sinfo.last_entry = last_entry_vector.at(0);
     }
