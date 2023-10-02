@@ -154,8 +154,7 @@ class DflyInstance:
         if self.dynamic_port:
             self._port = None
 
-        base_args = []
-        all_args = self.format_args(self.args) + base_args
+        all_args = self.format_args(self.args)
         logging.debug(f"Starting instance with arguments {all_args} from {self.params.path}")
 
         run_cmd = [self.params.path, *all_args]
