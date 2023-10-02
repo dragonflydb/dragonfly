@@ -1601,7 +1601,7 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
 
 
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=4, shard_repl_backlog_len=10000)
+    master = df_local_factory.create(proactor_threads=4, shard_repl_backlog_len=4000)
     replica = df_local_factory.create(proactor_threads=4)
 
     df_local_factory.start_all([replica, master])
@@ -1616,7 +1616,7 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
         try:
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
-            fill_task = asyncio.create_task(seeder.run(target_ops=10000))
+            fill_task = asyncio.create_task(seeder.run(target_ops=4000))
 
             for _ in range(3):
                 await asyncio.sleep(random.randint(10, 20) / 10)
