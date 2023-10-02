@@ -22,11 +22,11 @@ AclLog::AclLog() : total_entries_allowed_(absl::GetFlag(FLAGS_acllog_max_len)) {
 
 void AclLog::Add(const ConnectionContext& cntx, std::string object, Reason reason,
                  std::string tried_to_auth) {
-  if (total_entries_allowed_ == 0) {
+  if (total_entries_allowed_.load(std::memory_order_relaxed) == 0) {
     return;
   }
 
-  if (log_.size() == total_entries_allowed_) {
+  while (log_.size() <= total_entries_allowed_.load(std::memory_order_relaxed)) {
     log_.pop_back();
   }
 

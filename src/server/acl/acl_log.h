@@ -42,9 +42,13 @@ class AclLog {
 
   LogType GetLog(size_t number_of_entries) const;
 
+  void SetTotalEntries(size_t total_entries) {
+    total_entries_allowed_.store(total_entries, std::memory_order_relaxed);
+  }
+
  private:
   LogType log_;
-  const size_t total_entries_allowed_;
+  std::atomic<size_t> total_entries_allowed_;
 };
 
 }  // namespace dfly::acl
