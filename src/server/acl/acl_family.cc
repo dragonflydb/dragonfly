@@ -572,6 +572,13 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
     return;
   }
   registry_->Init();
+  config_registry.RegisterMutable("aclfile", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<std::string>();
+    if (res.has_value()) {
+      LoadToRegistryFromFile(res.value(), false);
+    }
+    return res.has_value();
+  });
 }
 
 }  // namespace dfly::acl
