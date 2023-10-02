@@ -36,6 +36,8 @@ ABSL_FLAG(uint32_t, tcp_keepalive, 300,
           "the period in seconds of inactivity after which keep-alives are triggerred,"
           "the duration until an inactive connection is terminated is twice the specified time");
 
+ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
+
 #if 0
 enum TlsClientAuth {
   CL_AUTH_NO = 0,
@@ -149,11 +151,14 @@ Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
   }
 #endif
   role_ = role;
-
-  if (IsAdminInterface() || IsMainInterface()) {
+  // We only set the HTTP interface for:
+  // 1. Privileged users (on privileged listener)
+  // 2. Main listener (if enabled)
+  const bool is_main_enabled = GetFlag(FLAGS_primary_port_http_enabled);
+  if (IsPrivilegedInterface() || (IsMainInterface() && is_main_enabled)) {
     http_base_ = std::make_unique<HttpListener<>>();
     http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
-    si->ConfigureHttpHandlers(http_base_.get(), IsAdminInterface());
+    si->ConfigureHttpHandlers(http_base_.get(), IsPrivilegedInterface());
   }
 }
 
@@ -219,8 +224,8 @@ bool Listener::AwaitDispatches(absl::Duration timeout,
   return false;
 }
 
-bool Listener::IsAdminInterface() const {
-  return role_ == Role::ADMIN;
+bool Listener::IsPrivilegedInterface() const {
+  return role_ == Role::PRIVILEGED;
 }
 
 bool Listener::IsMainInterface() const {

@@ -269,19 +269,19 @@ RespExpr BaseFamilyTest::Run(ArgSlice list) {
   return Run(GetId(), list);
 }
 
-RespExpr BaseFamilyTest::RunAdmin(std::initializer_list<const std::string_view> list) {
+RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_view> list) {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->RunAdmin(list); });
+    return pp_->at(0)->Await([&] { return this->RunPrivileged(list); });
   }
   string id = GetId();
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
   // Before running the command set the connection as admin connection
-  conn_wrapper->conn()->SetAdmin(true);
+  conn_wrapper->conn()->SetPrivileged(true);
   auto res = Run(id, ArgSlice{list.begin(), list.size()});
   // After running the command set the connection as non admin connection
   // because the connction is returned to the poll. This way the next call to Run from the same
   // thread will not have the connection set as admin.
-  conn_wrapper->conn()->SetAdmin(false);
+  conn_wrapper->conn()->SetPrivileged(false);
   return res;
 }
 

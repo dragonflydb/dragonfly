@@ -420,15 +420,16 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
-    Listener* admin_listener = new Listener{Protocol::REDIS, &service, Listener::Role::ADMIN};
-    error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener);
+    Listener* privileged_listener =
+        new Listener{Protocol::REDIS, &service, Listener::Role::PRIVILEGED};
+    error_code ec = acceptor->AddListener(interface_addr, admin_port, privileged_listener);
 
     if (ec) {
       LOG(ERROR) << "Failed to open " << printable_addr << ", error: " << ec.message();
-      delete admin_listener;
+      delete privileged_listener;
     } else {
       LOG(INFO) << "Listening on " << printable_addr;
-      listeners.push_back(admin_listener);
+      listeners.push_back(privileged_listener);
     }
   }
 

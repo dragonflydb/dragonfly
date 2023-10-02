@@ -163,7 +163,7 @@ class Connection : public util::Connection {
 
   uint32_t GetClientId() const;
   // Virtual because behavior is overridden in test_utils.
-  virtual bool IsAdmin() const;
+  virtual bool IsPrivileged() const;
 
   bool IsMain() const;
 

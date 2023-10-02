@@ -25,7 +25,7 @@ class ServiceInterface;
 
 class Listener : public util::ListenerInterface {
  public:
-  enum class Role { ADMIN, MAIN, OTHER };
+  enum class Role { PRIVILEGED, MAIN, OTHER };
   Listener(Protocol protocol, ServiceInterface*, Role role = Role::OTHER);
   ~Listener();
 
@@ -36,7 +36,7 @@ class Listener : public util::ListenerInterface {
   bool AwaitDispatches(absl::Duration timeout,
                        const std::function<bool(util::Connection*)>& filter);
 
-  bool IsAdminInterface() const;
+  bool IsPrivilegedInterface() const;
   bool IsMainInterface() const;
 
  private:
