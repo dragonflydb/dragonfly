@@ -54,6 +54,11 @@ struct ReplicaRoleInfo {
   uint64_t lsn_lag;
 };
 
+struct ReplicationMemoryStats {
+  size_t streamer_buf_capacity_bytes_ = 0;  // get total capacities of streamer buffers
+  size_t full_sync_buf_bytes_ = 0;          // get total bytes used for full sync bufferings
+};
+
 // Aggregated metrics over multiple sources on all shards
 struct Metrics {
   SliceEvents events;              // general keyspace stats

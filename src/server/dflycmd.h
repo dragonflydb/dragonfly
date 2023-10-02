@@ -26,11 +26,13 @@ class ServerFamily;
 class RdbSaver;
 class JournalStreamer;
 struct ReplicaRoleInfo;
+struct ReplicationMemoryStats;
 
 // Stores information related to a single flow.
 struct FlowInfo {
   FlowInfo();
   ~FlowInfo();
+
   // Shutdown associated socket if its still open.
   void TryShutdownSocket();
 
@@ -40,6 +42,7 @@ struct FlowInfo {
   std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.
   std::unique_ptr<JournalStreamer> streamer;
   std::string eof_token;
+
   DflyVersion version;
 
   std::optional<LSN> start_partial_sync_at;
@@ -136,6 +139,8 @@ class DflyCmd {
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo();
 
+  void GetReplicationMemoryStats(ReplicationMemoryStats* out);
+
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
 
@@ -218,7 +223,7 @@ class DflyCmd {
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
   ReplicaInfoMap replica_infos_;
 
-  Mutex mu_;  // Guard global operations. See header top for locking levels.
+  mutable Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
 
 }  // namespace dfly

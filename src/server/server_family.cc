@@ -1369,6 +1369,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       // Compatible with redis based frameworks.
       append("maxmemory_policy", "noeviction");
     }
+
+    if (m.is_master && !m.replication_metrics.empty()) {
+      ReplicationMemoryStats repl_mem;
+      dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
+      append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
+      append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
+    }
   }
 
   if (should_enter("STATS")) {
