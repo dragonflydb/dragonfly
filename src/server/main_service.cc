@@ -2073,8 +2073,8 @@ GlobalState Service::GetGlobalState() const {
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   // We skip authentication on privileged listener if the flag admin_nopass is set
   // We also skip authentication if requirepass is empty
-  const bool should_skip_auth = is_privileged && !RequirePrivilegedAuth();
-  if (!should_skip_auth && !GetPassword().empty()) {
+  const bool should_skip_auth = is_privileged && !RequirePrivilegedAuth() && !GetPassword().empty();
+  if (!should_skip_auth) {
     base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
                                                 std::string_view password) {
       if (path == "/metrics")
