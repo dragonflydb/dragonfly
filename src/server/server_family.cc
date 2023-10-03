@@ -1217,13 +1217,13 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   CmdArgList sub_args = args.subspan(1);
 
   if (sub_cmd == "SETNAME") {
-    return Client_SetName(sub_args, cntx);
+    return ClientSetName(sub_args, cntx);
   } else if (sub_cmd == "GETNAME") {
-    return Client_GetName(sub_args, cntx);
+    return ClientGetName(sub_args, cntx);
   } else if (sub_cmd == "LIST") {
-    return Client_List(sub_args, cntx);
+    return ClientList(sub_args, cntx);
   } else if (sub_cmd == "PAUSE") {
-    return Client_Pause(sub_args, cntx);
+    return ClientPause(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -1234,7 +1234,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
-void ServerFamily::Client_SetName(CmdArgList args, ConnectionContext* cntx) {
+void ServerFamily::ClientSetName(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 1) {
     cntx->conn()->SetName(string{ArgS(args, 0)});
     return (*cntx)->SendOk();
@@ -1243,7 +1243,7 @@ void ServerFamily::Client_SetName(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void ServerFamily::Client_GetName(CmdArgList args, ConnectionContext* cntx) {
+void ServerFamily::ClientGetName(CmdArgList args, ConnectionContext* cntx) {
   if (!args.empty()) {
     return (*cntx)->SendError(facade::kSyntaxErr);
   }
@@ -1255,7 +1255,7 @@ void ServerFamily::Client_GetName(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void ServerFamily::Client_List(CmdArgList args, ConnectionContext* cntx) {
+void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
   if (!args.empty()) {
     return (*cntx)->SendError(facade::kSyntaxErr);
   }
@@ -1281,7 +1281,7 @@ void ServerFamily::Client_List(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendBulkString(result);
 }
 
-void ServerFamily::Client_Pause(CmdArgList args, ConnectionContext* cntx) {
+void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
 
   auto timeout = parser.Next().Int<uint64_t>();
@@ -1298,12 +1298,23 @@ void ServerFamily::Client_Pause(CmdArgList args, ConnectionContext* cntx) {
     ServerState::tlocal()->SetPauseState(pause_state, true);
   });
 
-  (*cntx)->SendOk();
-  ThisFiber::SleepFor(timeout * 1ms);
+  fb2::Fiber("client_pause", [this, timeout, pause_state]() mutable {
+    auto step = 10ms;
+    auto timeout_ms = timeout * 1ms;
+    int64_t steps = timeout_ms.count() / step.count();
+    ServerState& etl = *ServerState::tlocal();
+    do {
+      ThisFiber::SleepFor(step);
+    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
 
-  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-    ServerState::tlocal()->SetPauseState(pause_state, false);
-  });
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      });
+    }
+  }).Detach();
+
+  (*cntx)->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
