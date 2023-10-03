@@ -12,7 +12,7 @@ SORT does not take any locale into account.
 
 ## Expiry ranges.
 Expirations are limited to 8 years. For commands with millisecond precision like PEXPIRE or PSETEX,
-expirations greater than 2^28ms are quietly rounded to the nearest second loosing precision of less than 0.001%.
+expirations greater than 2^28ms are quietly rounded to the nearest second losing precision of less than 0.001%.
 
 ## Lua
 We use lua 5.4.4 that has been released in 2022.
