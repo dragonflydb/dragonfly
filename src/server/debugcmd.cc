@@ -246,6 +246,8 @@ void DebugCmd::Run(CmdArgList args) {
         "    Prints histogram of object sizes.",
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
+        "SHARDS",
+        "    Prints memory usage and key stats per shard, as well as min/max indicators.",
         "HELP",
         "    Prints this help.",
     };
@@ -754,7 +756,7 @@ void DebugCmd::Shards() {
   };
 
   vector<ShardInfo> infos(shard_set->size());
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
     auto slice_stats = shard->db_slice().GetStats();
     auto& stats = infos[shard->shard_id()];
 
