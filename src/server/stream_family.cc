@@ -1007,13 +1007,10 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
   ClaimInfo result;
   result.justid = (opts.flags & kClaimJustID);
 
-  // TODO: support replication via DF's propagation mechanism.
-  // int propagate_last_id = 0;
   streamID last_id = opts.last_id;
   if (opts.flags & kClaimLastID) {
     if (streamCompareID(&last_id, &scg->last_id) > 0) {
       scg->last_id = last_id;
-      // propagate_last_id = 1;
     }
   }
 
