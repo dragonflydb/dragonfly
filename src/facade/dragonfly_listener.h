@@ -25,6 +25,9 @@ class ServiceInterface;
 
 class Listener : public util::ListenerInterface {
  public:
+  // The Role PRIVILEGED is for admin port/listener
+  // The Role MAIN is for the main listener on main port
+  // The Role OTHER is for all the other listeners
   enum class Role { PRIVILEGED, MAIN, OTHER };
   Listener(Protocol protocol, ServiceInterface*, Role role = Role::OTHER);
   ~Listener();
