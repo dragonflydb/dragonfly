@@ -82,8 +82,8 @@ ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed com
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
-          "If set, would enable open admin access to console on the assigned port, without auth "
-          "token needed.");
+          "If set, would enable open admin access to console on the assigned port, without "
+          "authorization needed.");
 
 ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
           "Limit on maximum-memory that is used by the database. "
@@ -823,7 +823,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
-  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsAdmin() && cid->IsRestricted()) {
+  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
     return ErrorReply{"Cannot execute restricted command (admin only)"};
   }
 
@@ -1204,7 +1204,7 @@ ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
   return ErrorReply{StrCat("unknown command `", cmd_name, "`"), "unknown_cmd"};
 }
 
-bool RequireAdminAuth() {
+bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
@@ -1212,7 +1212,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
 
-  if (owner->IsAdmin() && !RequireAdminAuth()) {
+  if (owner->IsPrivileged() && !RequirePrivilegedAuth()) {
     res->req_auth = false;
   } else {
     res->req_auth = !GetPassword().empty();
@@ -2070,11 +2070,17 @@ GlobalState Service::GetGlobalState() const {
   return global_state_;
 }
 
-void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
-  // We set the password for the HTTP service unless it is only enabled on the
-  // admin port and the admin port is password-less.
-  if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
-    base->SetPassword(GetPassword());
+void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
+  // We skip authentication on privileged listener if the flag admin_nopass is set
+  const bool should_skip_auth = is_privileged && !RequirePrivilegedAuth();
+  if (!should_skip_auth) {
+    base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
+                                                std::string_view password) {
+      if (path == "/metrics")
+        return true;
+      const bool pass_verified = pass.empty() ? true : password == pass;
+      return username == "default" && pass_verified;
+    });
   }
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);

@@ -34,7 +34,7 @@ class ClusterFamilyTest : public BaseFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   string GetMyId() {
-    return RunAdmin({"dflycluster", "myid"}).GetString();
+    return RunPrivileged({"dflycluster", "myid"}).GetString();
   }
 };
 
@@ -56,13 +56,13 @@ TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
           "replicas": []
         }
       ])json";
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
   EXPECT_THAT(Run({"dflycluster", "config", config}),
               ErrArg("DflyCluster command allowed only under admin port"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
-  EXPECT_THAT(RunAdmin({"dflycluster", "config", "invalid JSON"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "config", "invalid JSON"}),
               ErrArg("Invalid JSON cluster config"));
 
   string cluster_info = Run({"cluster", "info"}).GetString();
@@ -78,7 +78,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
-  EXPECT_THAT(RunAdmin({"dflycluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
 
   string cluster_info = Run({"cluster", "info"}).GetString();
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
@@ -89,7 +89,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidMissingSlots) {
-  EXPECT_THAT(RunAdmin({"dflycluster", "config", R"json(
+  EXPECT_THAT(RunPrivileged({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -117,7 +117,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidMissingSlots) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
-  EXPECT_THAT(RunAdmin({"dflycluster", "config", R"json(
+  EXPECT_THAT(RunPrivileged({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -159,7 +159,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -215,7 +215,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFull) {
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -287,7 +287,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -440,9 +440,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfoInvalid) {
   constexpr string_view kTooFewArgs =
       "ERR wrong number of arguments for 'dflycluster getslotinfo' command";
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo"}), ErrArg(kTooFewArgs));
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "s"}), ErrArg(kTooFewArgs));
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots"}), ErrArg(kTooFewArgs));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo"}), ErrArg(kTooFewArgs));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "s"}), ErrArg(kTooFewArgs));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots"}), ErrArg(kTooFewArgs));
 }
 
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
@@ -465,7 +465,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
       ])json";
   string config = absl::Substitute(config_template, GetMyId());
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   constexpr string_view kKey = "some-key";
   const SlotId slot = ClusterConfig::KeySlot(kKey);
@@ -473,7 +473,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
 
   EXPECT_EQ(Run({"SET", kKey, "value"}), "OK");
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
                                         "total_writes", IntArg(0))),
@@ -482,7 +482,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
 
   EXPECT_EQ(Run({"GET", kKey}), "value");
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
                                         "total_writes", IntArg(0))),
@@ -491,7 +491,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
 
   EXPECT_EQ(Run({"SET", kKey, "value2"}), "OK");
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
                                         "total_writes", IntArg(0))),
@@ -519,17 +519,17 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
       ])json";
   string config = absl::Substitute(config_template, GetMyId());
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   Run({"debug", "populate", "10000", "key", "4", "SLOTS", "0", "1000"});
 
   for (int i = 0; i <= 1'000; ++i) {
-    EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
+    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
                 RespArray(ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _)));
   }
 
   for (int i = 1'001; i <= 16'383; ++i) {
-    EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
+    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
                 RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _)));
   }
 }
@@ -554,11 +554,11 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
       ])json";
   string config = absl::Substitute(config_template, GetMyId());
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   Run({"debug", "populate", "100000"});
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads",
                                         IntArg(0), "total_writes", Not(IntArg(0)))),
@@ -566,12 +566,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                         IntArg(0), "total_writes", Not(IntArg(0)))))));
 
   config = absl::Substitute(config_template, "abc");
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
   EXPECT_THAT(
-      RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
       RespArray(ElementsAre(RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0), "total_reads",
                                                   IntArg(0), "total_writes", Not(IntArg(0)))),
                             RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads",
@@ -599,11 +599,11 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
       ])json";
   string config = absl::Substitute(config_template, GetMyId());
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   Run({"debug", "populate", "100000"});
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads",
                                         IntArg(0), "total_writes", Not(IntArg(0)))),
@@ -613,7 +613,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
   config = absl::Substitute(config_template, "abc");
   // After running the new config we start a fiber that removes all slots from current instance
   // we immediately shut down to test that we do not crash.
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
@@ -650,12 +650,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
       ])json";
   string config = absl::Substitute(config_template, GetMyId());
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   Run({"debug", "populate", "1", "key", "4", "SLOTS", "7999", "7999"});
   Run({"debug", "populate", "2", "key", "4", "SLOTS", "8000", "8000"});
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _)),
                   RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(2), _, _, _, _)))));
@@ -663,12 +663,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
 
   // Move ownership over 8000 to other master
   config = absl::StrReplaceAll(config, {{"8000", "7999"}, {"8001", "8000"}});
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   // Verify that keys for slot 8000 were deleted, while key for slot 7999 was kept
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 1; });
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
               RespArray(ElementsAre(
                   RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _)),
                   RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(0), _, _, _, _)))));
@@ -688,7 +688,7 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   EXPECT_EQ(Run({"debug", "load", save_info->file_name}), "OK");
   EXPECT_EQ(CheckedInt({"dbsize"}), 50000);
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -725,25 +725,25 @@ TEST_F(ClusterFamilyTest, Keyslot) {
 TEST_F(ClusterFamilyTest, FlushSlots) {
   EXPECT_EQ(Run({"debug", "populate", "100", "key", "4", "slots", "0", "1"}), "OK");
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", "1"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
               RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", Not(IntArg(0)),
                                                           "total_reads", _, "total_writes", _)),
                                     RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)),
                                                           "total_reads", _, "total_writes", _)))));
 
   ExpectConditionWithinTimeout([&]() {
-    return RunAdmin({"dflycluster", "flushslots", "0"}) == "OK";
+    return RunPrivileged({"dflycluster", "flushslots", "0"}) == "OK";
   });
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", "1"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
               RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0),
                                                           "total_reads", _, "total_writes", _)),
                                     RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)),
                                                           "total_reads", _, "total_writes", _)))));
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "flushslots", "0", "1"}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", "0", "1"}), "OK");
 
-  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", "1"}),
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
               RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0),
                                                           "total_reads", _, "total_writes", _)),
                                     RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0),
@@ -770,7 +770,7 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
       ])json";
   string config = absl::Substitute(config_template, GetMyId());
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
   EXPECT_EQ(Run({"SET", "key", "value"}), "OK");
   EXPECT_EQ(Run({"GET", "key"}), "value");
 

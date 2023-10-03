@@ -348,7 +348,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // we depend on tcp listener to be at the front since we later
   // need to pass it to the AclFamily::Init
   if (!tcp_disabled) {
-    main_listener = new Listener{Protocol::REDIS, &service};
+    main_listener = new Listener{Protocol::REDIS, &service, Listener::Role::MAIN};
     listeners.push_back(main_listener);
   }
 
@@ -427,8 +427,8 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
-    auto admin_listener = std::make_unique<Listener>(Protocol::REDIS, &service);
-    admin_listener->SetAdminInterface();
+    auto admin_listener =
+        std::make_unique<Listener>(Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener.get());
 
     if (ec) {

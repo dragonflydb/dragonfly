@@ -374,7 +374,7 @@ ServerFamily::~ServerFamily() {
 
 void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients) {
   for (auto* listener : listeners) {
-    if (!listener->IsAdminInterface()) {
+    if (!listener->IsPrivilegedInterface()) {
       listener->SetMaxClients(maxclients);
     }
   }
