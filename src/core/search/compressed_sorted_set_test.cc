@@ -49,7 +49,7 @@ class CompressedSortedSetTest : public ::testing::Test {
 using IdVec = vector<uint32_t>;
 
 TEST_F(CompressedSortedSetTest, BasicInsert) {
-  CompressedSortedSet list{pmr::get_default_resource()};
+  CompressedSortedSet list{PMR_NS::get_default_resource()};
   IdVec list_copy;
 
   auto current = [&list]() { return IdVec{list.begin(), list.end()}; };
@@ -106,7 +106,7 @@ TEST_F(CompressedSortedSetTest, BasicInsert) {
 }
 
 TEST_F(CompressedSortedSetTest, BasicInsertLargeValues) {
-  CompressedSortedSet list{pmr::get_default_resource()};
+  CompressedSortedSet list{PMR_NS::get_default_resource()};
   IdVec list_copy;
 
   const uint32_t kBase = 1'000'000'000;
@@ -137,7 +137,7 @@ TEST_F(CompressedSortedSetTest, BasicInsertLargeValues) {
 }
 
 TEST_F(CompressedSortedSetTest, SortedBackInserter) {
-  CompressedSortedSet list{pmr::get_default_resource()};
+  CompressedSortedSet list{PMR_NS::get_default_resource()};
 
   vector<uint32_t> v1 = {1, 3, 5};
   vector<uint32_t> v2 = {2, 4, 6};
@@ -148,7 +148,7 @@ TEST_F(CompressedSortedSetTest, SortedBackInserter) {
 }
 
 TEST_F(CompressedSortedSetTest, BasicRemove) {
-  CompressedSortedSet list{pmr::get_default_resource()};
+  CompressedSortedSet list{PMR_NS::get_default_resource()};
 
   IdVec values = {1, 3, 4, 7, 8, 11, 15, 17, 20, 22, 27};
   copy(values.begin(), values.end(), SetInserter{&list});
@@ -179,7 +179,7 @@ TEST_F(CompressedSortedSetTest, BasicRemove) {
 }
 
 TEST_F(CompressedSortedSetTest, BasicRemoveLargeValues) {
-  CompressedSortedSet list{pmr::get_default_resource()};
+  CompressedSortedSet list{PMR_NS::get_default_resource()};
 
   IdVec values = {1, 12, 123, 123'4, 123'45, 123'456, 1'234'567, 12'345'678};
   copy(values.begin(), values.end(), SetInserter{&list});
@@ -208,7 +208,7 @@ TEST_F(CompressedSortedSetTest, BasicRemoveLargeValues) {
 }
 
 TEST_F(CompressedSortedSetTest, InsertRemoveLargeValues) {
-  CompressedSortedSet list{pmr::get_default_resource()};
+  CompressedSortedSet list{PMR_NS::get_default_resource()};
 
   for (int shift = 3; shift < 30; shift++) {
     uint32_t value = 1u << shift;

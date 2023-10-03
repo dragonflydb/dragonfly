@@ -165,7 +165,7 @@ ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
     : base_{std::move(index)}, indices_{{}, nullptr}, key_index_{} {
 }
 
-void ShardDocIndex::Rebuild(const OpArgs& op_args, pmr::memory_resource* mr) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   key_index_ = DocKeyIndex{};
   indices_ = search::FieldIndices{base_->schema, mr};
 

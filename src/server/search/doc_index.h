@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
 #include "core/search/search.h"
 #include "server/common.h"
@@ -135,7 +136,7 @@ class ShardDocIndex {
 
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
-  void Rebuild(const OpArgs& op_args, std::pmr::memory_resource* mr);
+  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
  private:
   std::shared_ptr<const DocIndex> base_;

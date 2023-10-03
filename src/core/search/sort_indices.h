@@ -8,18 +8,18 @@
 
 #include <map>
 #include <memory>
-#include <memory_resource>
 #include <optional>
 #include <vector>
 
 #include "base/logging.h"
+#include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 #include "core/search/compressed_sorted_set.h"
 
 namespace dfly::search {
 
 template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
-  SimpleValueSortIndex(std::pmr::memory_resource* mr);
+  SimpleValueSortIndex(PMR_NS::memory_resource* mr);
 
   std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
@@ -29,23 +29,23 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
  protected:
   virtual T Get(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
 
-  std::pmr::memory_resource* GetMemRes() const;
+  PMR_NS::memory_resource* GetMemRes() const;
 
  private:
-  std::pmr::vector<T> values_;
+  PMR_NS::vector<T> values_;
 };
 
 struct NumericSortIndex : public SimpleValueSortIndex<int64_t> {
-  NumericSortIndex(std::pmr::memory_resource* mr) : SimpleValueSortIndex{mr} {};
+  NumericSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
 
   int64_t Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
 };
 
 // TODO: Map tags to integers for fast sort
-struct StringSortIndex : public SimpleValueSortIndex<std::pmr::string> {
-  StringSortIndex(std::pmr::memory_resource* mr) : SimpleValueSortIndex{mr} {};
+struct StringSortIndex : public SimpleValueSortIndex<PMR_NS::string> {
+  StringSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
 
-  std::pmr::string Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  PMR_NS::string Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
 };
 
 }  // namespace dfly::search

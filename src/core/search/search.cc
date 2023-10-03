@@ -440,12 +440,13 @@ struct BasicSearch {
 
 }  // namespace
 
-FieldIndices::FieldIndices(Schema schema, std::pmr::memory_resource* mr) : schema_{move(schema)}, all_ids_{}, indices_{} {
+FieldIndices::FieldIndices(Schema schema, PMR_NS::memory_resource* mr)
+    : schema_{move(schema)}, all_ids_{}, indices_{} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }
 
-void FieldIndices::CreateIndices(std::pmr::memory_resource* mr) {
+void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
   for (const auto& [field_ident, field_info] : schema_.fields) {
     if ((field_info.flags & SchemaField::NOINDEX) > 0)
       continue;
@@ -478,7 +479,7 @@ void FieldIndices::CreateIndices(std::pmr::memory_resource* mr) {
   }
 }
 
-void FieldIndices::CreateSortIndices(std::pmr::memory_resource* mr) {
+void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
   for (const auto& [field_ident, field_info] : schema_.fields) {
     if ((field_info.flags & SchemaField::SORTABLE) == 0)
       continue;

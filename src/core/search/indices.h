@@ -8,10 +8,10 @@
 
 #include <map>
 #include <memory>
-#include <memory_resource>
 #include <optional>
 #include <vector>
 
+#include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 #include "core/search/compressed_sorted_set.h"
 
@@ -20,7 +20,7 @@ namespace dfly::search {
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
-  explicit NumericIndex(std::pmr::memory_resource* mr);
+  explicit NumericIndex(PMR_NS::memory_resource* mr);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -29,12 +29,12 @@ struct NumericIndex : public BaseIndex {
 
  private:
   using Entry = std::pair<int64_t, DocId>;
-  absl::btree_set<Entry, std::less<Entry>, std::pmr::polymorphic_allocator<Entry>> entries_;
+  absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
 };
 
 // Base index for string based indices.
 struct BaseStringIndex : public BaseIndex {
-  BaseStringIndex(std::pmr::memory_resource* mr);
+  BaseStringIndex(PMR_NS::memory_resource* mr);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -50,10 +50,10 @@ struct BaseStringIndex : public BaseIndex {
 
   struct PmrEqual {
     using is_transparent = void;
-    bool operator()(const std::pmr::string& lhs, const std::pmr::string& rhs) const {
+    bool operator()(const PMR_NS::string& lhs, const PMR_NS::string& rhs) const {
       return lhs == rhs;
     }
-    bool operator()(const std::pmr::string& lhs, const std::string_view& rhs) const {
+    bool operator()(const PMR_NS::string& lhs, const std::string_view& rhs) const {
       return lhs == rhs;
     }
   };
@@ -63,21 +63,20 @@ struct BaseStringIndex : public BaseIndex {
     size_t operator()(const std::string_view& sv) const {
       return absl::Hash<std::string_view>()(sv);
     }
-    size_t operator()(const std::pmr::string& pmrs) const {
+    size_t operator()(const PMR_NS::string& pmrs) const {
       return operator()(std::string_view{pmrs.data(), pmrs.size()});
     }
   };
 
-  absl::flat_hash_map<
-      std::pmr::string, CompressedSortedSet, PmrHash, PmrEqual,
-      std::pmr::polymorphic_allocator<std::pair<std::pmr::string, CompressedSortedSet>>>
+  absl::flat_hash_map<PMR_NS::string, CompressedSortedSet, PmrHash, PmrEqual,
+                      PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, CompressedSortedSet>>>
       entries_;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TextIndex : public BaseStringIndex {
-  TextIndex(std::pmr::memory_resource* mr) : BaseStringIndex(mr) {
+  TextIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
   }
 
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
@@ -86,7 +85,7 @@ struct TextIndex : public BaseStringIndex {
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex {
-  TagIndex(std::pmr::memory_resource* mr) : BaseStringIndex(mr) {
+  TagIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
   }
 
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
@@ -105,7 +104,7 @@ struct BaseVectorIndex : public BaseIndex {
 // Index for vector fields.
 // Only supports lookup by id.
 struct FlatVectorIndex : public BaseVectorIndex {
-  FlatVectorIndex(size_t dim, VectorSimilarity sim, std::pmr::memory_resource* mr);
+  FlatVectorIndex(size_t dim, VectorSimilarity sim, PMR_NS::memory_resource* mr);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -113,13 +112,13 @@ struct FlatVectorIndex : public BaseVectorIndex {
   const float* Get(DocId doc) const;
 
  private:
-  std::pmr::vector<float> entries_;
+  PMR_NS::vector<float> entries_;
 };
 
 struct HnswlibAdapter;
 
 struct HnswVectorIndex : public BaseVectorIndex {
-  HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity, std::pmr::memory_resource* mr);
+  HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;

@@ -4,10 +4,10 @@
 
 #include <cstdint>
 #include <iterator>
-#include <memory_resource>
 #include <optional>
 #include <vector>
 
+#include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 
 namespace dfly::search {
@@ -51,7 +51,7 @@ class CompressedSortedSet {
   friend struct Iterator;
 
  public:
-  explicit CompressedSortedSet(std::pmr::memory_resource* mr);
+  explicit CompressedSortedSet(PMR_NS::memory_resource* mr);
 
   ConstIterator begin() const;
   ConstIterator end() const;
@@ -91,7 +91,7 @@ class CompressedSortedSet {
  private:
   uint32_t size_{0};
   std::optional<IntType> tail_value_{};
-  std::vector<uint8_t, std::pmr::polymorphic_allocator<uint8_t>> diffs_;
+  std::vector<uint8_t, PMR_NS::polymorphic_allocator<uint8_t>> diffs_;
 };
 
 }  // namespace dfly::search

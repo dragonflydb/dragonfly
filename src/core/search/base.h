@@ -8,11 +8,11 @@
 
 #include <cstdint>
 #include <memory>
-#include <memory_resource>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "base/pmr/memory_resource.h"
 #include "core/core_types.h"
 #include "core/string_map.h"
 
@@ -44,7 +44,7 @@ struct SortOption {
 
 struct WrappedStrPtr {
   // Intentionally implicit and const std::string& for use in templates
-  WrappedStrPtr(const std::pmr::string& s);
+  WrappedStrPtr(const PMR_NS::string& s);
   bool operator<(const WrappedStrPtr& other) const;
   bool operator>=(const WrappedStrPtr& other) const;
 

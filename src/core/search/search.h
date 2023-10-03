@@ -8,12 +8,12 @@
 
 #include <functional>
 #include <memory>
-#include <memory_resource>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
 
+#include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 
 namespace dfly::search {
@@ -55,7 +55,7 @@ struct Schema {
 class FieldIndices {
  public:
   // Create indices based on schema
-  FieldIndices(Schema schema, std::pmr::memory_resource* mr);
+  FieldIndices(Schema schema, PMR_NS::memory_resource* mr);
 
   void Add(DocId doc, DocumentAccessor* access);
   void Remove(DocId doc, DocumentAccessor* access);
@@ -70,8 +70,8 @@ class FieldIndices {
   const Schema& GetSchema() const;
 
  private:
-  void CreateIndices(std::pmr::memory_resource* mr);
-  void CreateSortIndices(std::pmr::memory_resource* mr);
+  void CreateIndices(PMR_NS::memory_resource* mr);
+  void CreateSortIndices(PMR_NS::memory_resource* mr);
 
  private:
   Schema schema_;
