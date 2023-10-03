@@ -353,7 +353,7 @@ TEST_F(SearchTest, Errors) {
   auto schema = MakeSimpleSchema(
       {{"score", SchemaField::NUMERIC}, {"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema};
+  FieldIndices indices{schema, PMR_NS::get_default_resource()};
 
   SearchAlgorithm algo{};
   QueryParams params;
