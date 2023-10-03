@@ -48,13 +48,12 @@ void SimpleValueSortIndex<T>::Remove(DocId id, DocumentAccessor* doc, std::strin
   values_[id] = T{};
 }
 
-template<typename T>
-std::pmr::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {
+template <typename T> std::pmr::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {
   return values_.get_allocator().resource();
 }
 
 template struct SimpleValueSortIndex<int64_t>;
-template struct SimpleValueSortIndex<std::string>;
+template struct SimpleValueSortIndex<std::pmr::string>;
 
 int64_t NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
   int64_t v;
@@ -63,8 +62,8 @@ int64_t NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view 
   return v;
 }
 
-std::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
-  return string{doc->GetString(field)};
+std::pmr::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
+  return pmr::string{doc->GetString(field)};
 }
 
 }  // namespace dfly::search
