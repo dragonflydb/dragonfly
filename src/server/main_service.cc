@@ -1331,6 +1331,8 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   if ((info->async_cmds.empty() || !force) && used_mem < info->async_cmds_heap_limit)
     return nullopt;
 
+  ++ServerState::tlocal()->stats.eval_squashed_flushes;
+
   auto* eval_cid = registry_.Find("EVAL");
   DCHECK(eval_cid);
   cntx->transaction->MultiSwitchCmd(eval_cid);
@@ -1629,17 +1631,18 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
     interpreter->SetRedisFunc(
         [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
+
     result = interpreter->RunFunction(eval_args.sha, &error);
+
+    if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
+      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      result = Interpreter::RUN_ERR;
+      error = absl::StrCat(err_ref->first);
+    }
 
     // Conclude the transaction.
     if (*scheduled)
       cntx->transaction->UnlockMulti();
-  }
-
-  if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-    auto err_ref = CapturingReplyBuilder::GetError(*err);
-    result = Interpreter::RUN_ERR;
-    error = absl::StrCat(err_ref->first);
   }
 
   cntx->conn_state.script_info.reset();  // reset script_info
