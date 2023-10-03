@@ -36,19 +36,19 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
+        pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO
 
     - name: Run PyTests replication test
-      if: ${{ inputs.run-only-on-ubuntu-latest == 'false' || matrix.runner  == 'ubuntu-latest' }}
+      if: ${{ inputs.run-only-on-ubuntu-latest == 'true' || (inputs.run-only-on-ubuntu-latest == 'false' && matrix.runner == 'ubuntu-latest') }}
       shell: bash
       run: |
-        echo "Running PyTests replication test with flag: ${{ inputs.run-only-on-ubuntu-latest }}"
+        echo "Running PyTests replication test"
         cd ${GITHUB_WORKSPACE}/tests
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
-        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
-        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
+        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
+        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep2_report.json dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'

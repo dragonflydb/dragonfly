@@ -166,10 +166,12 @@ class CommandGenerator:
             )
             return ("v0", 0, "v1", 0) + tuple(itertools.chain(*elements))
         elif t == ValueType.ZSET:
-            # Random sequnce of k-letter keys and int score for ZSET
-            elements = (
-                (random.randint(0, self.val_size), rand_str()) for _ in range(self.val_size // 4)
-            )
+            # Random sequnce of k-letter members and int score for ZADD
+            # The length of the sequence will vary between val_size/4 and 130. This ensures that we test both the ZSET implementation with Lispack and the bptree.
+            value_sizes = [self.val_size // 4, 130]
+            probabilities = [4, 1]
+            value_size = random.choices(value_sizes, probabilities)[0]
+            elements = ((random.randint(0, self.val_size), rand_str()) for _ in range(value_size))
             return tuple(itertools.chain(*elements))
 
         elif t == ValueType.JSON:
@@ -436,7 +438,6 @@ class DflySeeder:
         self.gen.key_cnt_target = key_cnt
 
     async def _capture_db(self, port, target_db, keys):
-        eprint(f"Capture data on port {port}, db {target_db}")
         client = aioredis.Redis(port=port, db=target_db)
         capture = DataCapture(await self._capture_entries(client, keys))
         await client.connection_pool.disconnect()
@@ -567,6 +568,9 @@ class DflySeederFactory:
 
     def __init__(self, log_file=None):
         self.log_file = log_file
+
+    def __repr__(self) -> str:
+        return f"DflySeederFactory(log_file={self.log_file})"
 
     def create(self, **kwargs):
         return DflySeeder(log_file=self.log_file, **kwargs)

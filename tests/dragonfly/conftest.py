@@ -91,6 +91,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         path=path,
         cwd=tmp_dir,
         gdb=request.config.getoption("--gdb"),
+        buffered_out=request.config.getoption("--buffered-output"),
         args=parse_args(request.config.getoption("--df")),
         existing_port=int(existing) if existing else None,
         existing_admin_port=int(existing_admin) if existing_admin else None,
@@ -205,17 +206,14 @@ async def async_client(async_pool):
 
 
 def pytest_addoption(parser):
-    """
-    Custom pytest options:
-        --gdb - start all instances inside gdb
-        --df arg - pass arg to all instances, can be used multiple times
-        --log-seeder file - to log commands of last seeder run
-        --existing-port - to provide a port to an existing process instead of starting a new instance
-        --existing-admin-port - to provide an admin port to an existing process instead of starting a new instance
-        --rand-seed - to set the global random seed
-    """
     parser.addoption("--gdb", action="store_true", default=False, help="Run instances in gdb")
     parser.addoption("--df", action="append", default=[], help="Add arguments to dragonfly")
+    parser.addoption(
+        "--buffered-output",
+        action="store_true",
+        default=False,
+        help="Makes instance output buffered, grouping it together",
+    )
     parser.addoption(
         "--log-seeder", action="store", default=None, help="Store last generator commands in file"
     )
@@ -237,7 +235,6 @@ def pytest_addoption(parser):
         default=None,
         help="Provide an admin port to the existing process for the test",
     )
-
     parser.addoption(
         "--existing-mc-port",
         action="store",

@@ -3,6 +3,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/numbers.h"
 #ifdef NDEBUG
@@ -26,6 +27,7 @@
 #include <signal.h>
 
 #include <iostream>
+#include <memory>
 #include <regex>
 
 #include "base/init.h"
@@ -372,6 +374,11 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   auto mc_port = GetFlag(FLAGS_memcached_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
   bool unlink_uds = false;
+  absl::Cleanup maybe_unlink_uds([&unlink_uds, &unix_sock]() {
+    if (unlink_uds) {
+      unlink(unix_sock.c_str());
+    }
+  });
 
   if (!unix_sock.empty()) {
     string perm_str = GetFlag(FLAGS_unixsocketperm);
@@ -390,8 +397,9 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
     unlink(unix_sock.c_str());
 
-    Listener* uds_listener = new Listener{Protocol::REDIS, &service};
-    error_code ec = acceptor->AddUDSListener(unix_sock.c_str(), unix_socket_perm, uds_listener);
+    auto uds_listener = std::make_unique<Listener>(Protocol::REDIS, &service);
+    error_code ec =
+        acceptor->AddUDSListener(unix_sock.c_str(), unix_socket_perm, uds_listener.get());
     if (ec) {
       if (tcp_disabled) {
         LOG(ERROR) << "Could not open unix socket " << unix_sock
@@ -400,10 +408,9 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
       } else {
         LOG(WARNING) << "Could not open unix socket " << unix_sock << ", error " << ec;
       }
-      delete uds_listener;
     } else {
       LOG(INFO) << "Listening on unix socket " << unix_sock;
-      listeners.push_back(uds_listener);
+      listeners.push_back(uds_listener.release());
       unlink_uds = true;
     }
   } else if (tcp_disabled) {
@@ -420,16 +427,15 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
-    Listener* privileged_listener =
-        new Listener{Protocol::REDIS, &service, Listener::Role::PRIVILEGED};
-    error_code ec = acceptor->AddListener(interface_addr, admin_port, privileged_listener);
+    auto admin_listener =
+        std::make_unique<Listener>(Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
+    error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener.get());
 
     if (ec) {
       LOG(ERROR) << "Failed to open " << printable_addr << ", error: " << ec.message();
-      delete privileged_listener;
     } else {
       LOG(INFO) << "Listening on " << printable_addr;
-      listeners.push_back(privileged_listener);
+      listeners.push_back(admin_listener.release());
     }
   }
 
@@ -461,10 +467,6 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   version_monitor.Shutdown();
   service.Shutdown();
-
-  if (unlink_uds) {
-    unlink(unix_sock.c_str());
-  }
 
   return true;
 }
