@@ -8,10 +8,10 @@
 
 ## What is the license model of Dragonfly? Is it an open source?
 Dragonfly is released under [BSL 1.1](../LICENSE.md) (Business Source License). We believe that a BSL license is more permissive than AGPL-like licenses. In general terms, it means that dragonfly's code is free to use and free to change as long as you do not sell services directly related to dragonfly or in-memory datastores.
-We followed the trend of other technological companies like Elastic, Redis, MongoDB, Cockroach labs, Redpanda Data to protect our rights to provide service and support for the software we are building. 
+We followed the trend of other technological companies like Elastic, Redis, MongoDB, Cockroach labs, Redpanda Data to protect our rights to provide service and support for the software we are building.
 
 ## Can I use dragonfly in production?
-License wise you are free to use dragonfly in your production as long as you do not provide dragonfly as a managed service. From a code maturity point of view, Dragonfly's code is covered with unit testing. However as with any new software there are use cases that are hard to test and predict. We advise you to run your own particular use case on dragonfly for a few days before considering production usage. 
+License wise you are free to use dragonfly in your production as long as you do not provide dragonfly as a managed service. From a code maturity point of view, Dragonfly's code is covered with unit testing. However as with any new software there are use cases that are hard to test and predict. We advise you to run your own particular use case on dragonfly for a few days before considering production usage.
 
 ## Dragonfly provides vertical scale, but we can achieve similar throughput with X nodes in a Redis cluster.
 Dragonfly utilizes the underlying hardware in an optimal way. Meaning it can run on small 8GB instances and scale vertically to large 768GB machines with 64 cores. This versatility allows to drastically reduce complexity of running cluster workloads to a single node saving hardware resources and costs. More importantly, it reduces the complexity (total cost of ownership) of handling the multi-node cluster. In addition, Redis cluster-mode imposes some limitations on multi-key and transactional operations while Dragonfly provides the same semantics as single node Redis.
