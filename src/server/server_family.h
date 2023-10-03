@@ -55,8 +55,14 @@ struct ReplicaRoleInfo {
 };
 
 struct ReplicationMemoryStats {
-  size_t streamer_buf_capacity_bytes_ = 0;  // get total capacities of streamer buffers
-  size_t full_sync_buf_bytes_ = 0;          // get total bytes used for full sync bufferings
+  size_t streamer_buf_capacity_bytes_ = 0;  // total capacities of streamer buffers
+  size_t full_sync_buf_bytes_ = 0;          // total bytes used for full sync buffers
+};
+
+// Global peak stats recorded after aggregating metrics over all shards
+struct PeakStats {
+  size_t conn_dispatch_queue_bytes = 0;  // peak value of conn_stats.dispatch_queue_bytes
+  size_t conn_read_buf_capacity = 0;     // peak of total read buf capcacities
 };
 
 // Aggregated metrics over multiple sources on all shards
@@ -69,6 +75,8 @@ struct Metrics {
   TieredStats tiered_stats;            // stats for tiered storage
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
+
+  PeakStats peak_stats;
 
   size_t uptime = 0;
   size_t qps = 0;
@@ -256,6 +264,9 @@ class ServerFamily {
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
   std::unique_ptr<util::cloud::AWS> aws_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
+
+  mutable Mutex peak_stats_mu_;
+  mutable PeakStats peak_stats_;
 };
 
 }  // namespace dfly

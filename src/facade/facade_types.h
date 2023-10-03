@@ -42,7 +42,6 @@ struct ConnectionStats {
   size_t read_buf_capacity = 0;       // total capacity of input buffers
   size_t dispatch_queue_entries = 0;  // total number of dispatch queue entries
   size_t dispatch_queue_bytes = 0;    // total size of all dispatch queue entries
-  size_t dispatch_queue_peak_bytes = 0;
 
   size_t pipeline_cmd_cache_bytes = 0;
 

@@ -137,9 +137,9 @@ class DflyCmd {
   // Create new sync session.
   std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> CreateSyncSession(ConnectionContext* cntx);
 
-  std::vector<ReplicaRoleInfo> GetReplicasRoleInfo();
+  std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const;
 
-  void GetReplicationMemoryStats(ReplicationMemoryStats* out);
+  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const;
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);

@@ -680,7 +680,7 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   return {};
 }
 
-std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
+std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
 
@@ -694,7 +694,7 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
   return vec;
 }
 
-void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) {
+void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
   Mutex stats_mu;
 
   lock_guard lk_main{mu_};  // prevent state changes

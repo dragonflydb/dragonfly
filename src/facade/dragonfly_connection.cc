@@ -102,6 +102,10 @@ thread_local uint32_t free_req_release_weight = 0;
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
 thread_local Connection::QueueBackpressure Connection::queue_backpressure_;
 
+void Connection::QueueBackpressure::EnsureBelowLimit() {
+  ec.await([this] { return bytes.load(memory_order_relaxed) <= limit; });
+}
+
 struct Connection::Shutdown {
   absl::flat_hash_map<ShutdownHandle, ShutdownCb> map;
   ShutdownHandle next_handle = 1;
@@ -1067,8 +1071,6 @@ void Connection::SendAsync(MessageHandle msg) {
 
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
-  stats_->dispatch_queue_peak_bytes =
-      max(stats_->dispatch_queue_peak_bytes, stats_->dispatch_queue_bytes);
 
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
     // We need to reorder the queue, since multiple updates might happen before we
@@ -1088,9 +1090,7 @@ void Connection::SendAsync(MessageHandle msg) {
 }
 
 void Connection::EnsureAsyncMemoryBudget() {
-  queue_backpressure_.ec.await([this] {
-    return queue_backpressure_.bytes.load(memory_order_relaxed) <= queue_backpressure_.limit;
-  });
+  queue_backpressure_.EnsureBelowLimit();
 }
 
 std::string Connection::RemoteEndpointStr() const {

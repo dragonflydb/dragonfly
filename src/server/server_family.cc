@@ -261,6 +261,10 @@ void RebuildAllSearchIndices(Service* service) {
   });
 }
 
+template <typename T> void UpdateMax(T* maxv, T current) {
+  *maxv = std::max(*maxv, current);
+}
+
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -1262,6 +1266,13 @@ Metrics ServerFamily::GetMetrics() const {
   if (result.is_master)
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
 
+  // Update peak stats
+  lock_guard lk{peak_stats_mu_};
+  UpdateMax(&peak_stats_.conn_dispatch_queue_bytes, result.conn_stats.dispatch_queue_bytes);
+  UpdateMax(&peak_stats_.conn_read_buf_capacity, result.conn_stats.read_buf_capacity);
+
+  result.peak_stats = peak_stats_;
+
   return result;
 }
 
@@ -1358,7 +1369,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     append("pipeline_cache_bytes", m.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.conn_stats.dispatch_queue_bytes);
-    append("dispatch_queue_peak_bytes", m.conn_stats.dispatch_queue_peak_bytes);
+    append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
+    append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");

@@ -278,6 +278,8 @@ class Connection : public util::Connection {
   // limit memory taken up by pipelined / pubsub commands and slow down clients
   // producing them to quickly via EnsureAsyncMemoryBudget.
   struct QueueBackpressure {
+    void EnsureBelowLimit();  // block until memory usage is above limit
+
     dfly::EventCount ec;
     std::atomic_size_t bytes = 0;
     size_t limit = 0;
