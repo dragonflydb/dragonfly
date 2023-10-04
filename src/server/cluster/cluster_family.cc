@@ -70,7 +70,7 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
     DCHECK(etl.is_master);
     std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
     std::string preferred_endpoint =
-        cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
+        cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
 
     info.master = {.id = server_family_->master_id(),
                    .ip = preferred_endpoint,
@@ -85,7 +85,7 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
     info.master = {
         .id = etl.remote_client_id_, .ip = replication_info->host, .port = replication_info->port};
     info.replicas.push_back({.id = server_family_->master_id(),
-                             .ip = cntx->owner()->LocalBindAddress(),
+                             .ip = cntx->conn()->LocalBindAddress(),
                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
   }
 
@@ -378,7 +378,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kClusterDisabled);
   }
 
-  if (cntx->owner() && !cntx->owner()->IsAdmin()) {
+  if (cntx->conn() && !cntx->conn()->IsPrivileged()) {
     return (*cntx)->SendError(kDflyClusterCmdPort);
   }
 

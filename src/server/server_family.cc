@@ -130,10 +130,8 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
     RETURN_ON_ERROR(ip.length() <= 2, "IPv6 host name is too short");
 
     flag->host = ip.substr(1, ip.length() - 2);
-    VLOG(1) << "received IP of type IPv6: " << flag->host;
   } else {
     flag->host = ip;
-    VLOG(1) << "received IP of type IPv4 (or a host): " << flag->host;
   }
 
   VLOG(1) << "--replicaof: Received " << flag->host << " :  " << flag->port;
@@ -376,7 +374,7 @@ ServerFamily::~ServerFamily() {
 
 void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients) {
   for (auto* listener : listeners) {
-    if (!listener->IsAdminInterface()) {
+    if (!listener->IsPrivilegedInterface()) {
       listener->SetMaxClients(maxclients);
     }
   }
@@ -1044,12 +1042,12 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SETNAME" && args.size() == 2) {
-    cntx->owner()->SetName(string{ArgS(args, 1)});
+    cntx->conn()->SetName(string{ArgS(args, 1)});
     return (*cntx)->SendOk();
   }
 
   if (sub_cmd == "GETNAME") {
-    auto name = cntx->owner()->GetName();
+    auto name = cntx->conn()->GetName();
     if (!name.empty()) {
       return (*cntx)->SendBulkString(name);
     } else {
@@ -1230,6 +1228,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
     result.eval_io_coordination_cnt += ss->stats.eval_io_coordination_cnt;
     result.eval_shardlocal_coordination_cnt += ss->stats.eval_shardlocal_coordination_cnt;
+    result.eval_squashed_flushes += ss->stats.eval_squashed_flushes;
     result.tx_schedule_cancel_cnt += ss->stats.tx_schedule_cancel_cnt;
 
     service_.mutable_registry()->MergeCallStats(
@@ -1406,6 +1405,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
     append("eval_io_coordination_total", m.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
+    append("eval_squashed_flushes", m.eval_squashed_flushes);
     append("tx_schedule_cancel_total", m.tx_schedule_cancel_cnt);
   }
 
@@ -1603,7 +1603,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (has_setname) {
-    cntx->owner()->SetName(string{clientname});
+    cntx->conn()->SetName(string{clientname});
   }
 
   int proto_version = 2;
@@ -1625,7 +1625,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString("proto");
   (*cntx)->SendLong(proto_version);
   (*cntx)->SendBulkString("id");
-  (*cntx)->SendLong(cntx->owner()->GetClientId());
+  (*cntx)->SendLong(cntx->conn()->GetClientId());
   (*cntx)->SendBulkString("mode");
   (*cntx)->SendBulkString("standalone");
   (*cntx)->SendBulkString("role");
@@ -1647,7 +1647,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   // 2. Leave the DB in a consistent state after it is done.
   // We have a relatively involved state machine inside Replica itself which handels cancellation
   // with those requirements.
-  VLOG(1) << "Acquire replica lock";
+  VLOG(2) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
 
   if (IsReplicatingNoOne(host, port_sv)) {
@@ -1705,7 +1705,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
       break;
   };
 
-  VLOG(1) << "Acquire replica lock";
+  VLOG(2) << "Acquire replica lock";
   lk.lock();
 
   // Since we released the replication lock during Start(..), we need to check if this still the
@@ -1746,8 +1746,8 @@ void ServerFamily::Replicate(string_view host, string_view port) {
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "Starting take over";
-  VLOG(1) << "Acquire replica lock";
+  VLOG(1) << "ReplTakeOver start";
+
   unique_lock lk(replicaof_mu_);
 
   float_t timeout_sec;
@@ -1792,7 +1792,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
         auto [sid, replica_info] = dfly_cmd_->CreateSyncSession(cntx);
-        cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
+        cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
         cntx->conn_state.replication_info.repl_session_id = sid;
@@ -1842,11 +1842,11 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         LOG(ERROR) << "Bad int in REPLCONF ACK command! arg=" << arg;
         return;
       }
-      VLOG(1) << "Received client ACK=" << ack;
+      VLOG(2) << "Received client ACK=" << ack;
       cntx->replication_flow->last_acked_lsn = ack;
       return;
     } else {
-      VLOG(1) << cmd << " " << arg << " " << args.size();
+      VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();
       goto err;
     }
   }

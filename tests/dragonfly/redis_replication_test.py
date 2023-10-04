@@ -153,11 +153,11 @@ async def test_replication_stable_sync(
 # Threads for each dragonfly replica, Seeder Config.
 replication_specs = [
     ([1], dict(keys=1000, dbcount=1, unsupported_types=[ValueType.JSON])),
-    ([6, 6, 6], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
-    ([2, 2, 2, 2], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
-    ([8, 8], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
-    ([1] * 8, dict(keys=500, dbcount=2, unsupported_types=[ValueType.JSON])),
-    ([1], dict(keys=100, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([6, 6, 6], dict(keys=4_000, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([2, 2, 2, 2], dict(keys=4_000, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([8, 8], dict(keys=4_000, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([1] * 8, dict(keys=500, dbcount=1, unsupported_types=[ValueType.JSON])),
+    ([1], dict(keys=100, dbcount=4, unsupported_types=[ValueType.JSON])),
 ]
 
 

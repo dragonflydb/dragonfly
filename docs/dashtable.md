@@ -1,7 +1,7 @@
 
 # Dashtable in Dragonfly
 
-Dashtable is very important data structure in Dragonfly. This document explain
+Dashtable is a very important data structure in Dragonfly. This document explains
 how it fits inside the engine.
 
 Each selectable database holds a primary dashtable that contains all its entries. Another instance of Dashtable holds an optional expiry information, for keys that have TTL expiry on them. Dashtable is equivalent to Redis dictionary but have some wonderful properties that make Dragonfly memory efficient in various situations.
@@ -80,7 +80,7 @@ in terms of memory and cpu.
  In practice, each segment grows independently from others,
  so the table has smooth memory usage of 22-32 bytes per item or **6-16 bytes overhead**.
 
- 1. Speed: RD requires an allocation for dictEntry per insertion and deallocation per deletion. In addition, RD uses chaining, which is cache unfriendly on modern hardware. There is a consensus in engineering and research communities that classic chaining schemes are slower tha open addressing alternatives.
+ 1. Speed: RD requires an allocation for dictEntry per insertion and deallocation per deletion. In addition, RD uses chaining, which is cache unfriendly on modern hardware. There is a consensus in engineering and research communities that classic chaining schemes are slower than open addressing alternatives.
  Having said that, DT also needs to go through a single level of indirection when
  fetching a segment pointer. However, DT's directory size is relatively small:
  in the example above, all 9K could resize in L1 cache. Once the segment is determined,
@@ -95,7 +95,7 @@ Please note that with all efficiency of Dashtable, it can not decrease drastical
 overall memory usage. Its primary goal is to reduce waste around dictionary management.
 
 Having said that, by reducing metadata waste we could insert dragonfly-specific attributes
-into a table's metadata in order to implement other intelligent algorithms like forkless save. This is where some the Dragonfly's disrupting qualities [can be seen](#forkless-save).
+into a table's metadata in order to implement other intelligent algorithms like forkless save. This is where some of the Dragonfly's disrupting qualities [can be seen](#forkless-save).
 
 ## Benchmarks
 
@@ -128,10 +128,10 @@ Now I run Dragonfly on all 8 cores. Redis has the same results, of course.
 | Time        |   2.43s   |  16.0s  |
 | Memory used |    896MB  |  1.73G  |
 
-Due to shared-nothing architecture, Dragonfly maintains a dashtable per thread with its own slice of data. Each thread fills 1/8th of 20M range it owns - and it much faster, almost 8 times faster.You can see that the total usage is even smaller, because now we maintain
+Due to shared-nothing architecture, Dragonfly maintains a dashtable per thread with its own slice of data. Each thread fills 1/8th of 20M range it owns - and it much faster, almost 8 times faster. You can see that the total usage is even smaller, because now we maintain
 smaller tables in each
 thread (it's not always the case though - we could get slightly worse memory usage than with
-single-threaded case ,depends where we stand compared to hash table utilization).
+single-threaded case, depends where we stand compared to hash table utilization).
 
 ### Forkless Save
 
@@ -155,7 +155,7 @@ where Redis finishes its snapshot, reaching almost x3 times more memory usage at
 
 Efficient Expiry is very important for many scenarios. See, for example,
 [Pelikan paper'21](https://twitter.github.io/pelikan/2021/segcache.html). Twitter team says
-that their their memory footprint could be reduced by as much as by 60% by employing better expiry methodology. The authors of the post above show pros and cons of expiration methods in the table below:
+that their memory footprint could be reduced by as much as by 60% by employing better expiry methodology. The authors of the post above show pros and cons of expiration methods in the table below:
 
 <img src="https://pelikan.io/assets/img/segcache/expiration.svg" width="400">
 
@@ -190,7 +190,7 @@ at any point of time and the latter only needed to keep `20s*100K` items.
 So for `30%` bigger working set Dragonfly needed `25%` less memory at peak.
 
 <em>*Please ignore the performance advantage of Dragonfly over Redis in this test - it has no meaning.
-I run it locally on my machine and ot does not represent a real throughput benchmark. </em>
+I run it locally on my machine and it does not represent a real throughput benchmark. </em>
 
 <br>
 

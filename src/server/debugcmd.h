@@ -32,6 +32,7 @@ class DebugCmd {
   void Populate(CmdArgList args);
   std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args);
   void PopulateRangeFiber(uint64_t from, uint64_t count, const PopulateOptions& opts);
+
   void Reload(CmdArgList args);
   void Replica(CmdArgList args);
   void Load(std::string_view filename);
@@ -40,6 +41,7 @@ class DebugCmd {
   void TxAnalysis();
   void ObjHist();
   void Stacktrace();
+  void Shards();
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;

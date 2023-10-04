@@ -37,8 +37,7 @@ using namespace facade;
 
 namespace {
 
-static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", "DIM",
-                                                 "DISTANCE_METRIC"};
+static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR"};
 
 bool IsValidJsonPath(string_view path) {
   error_code ec;
@@ -116,15 +115,30 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
         (*cntx)->SendError("Knn vector dimension cannot be zero");
         return nullopt;
       }
-
       params = std::move(vector_params);
+    }
+
+    // Flags: check for SORTABLE and NOINDEX
+    uint8_t flags = 0;
+    while (parser.HasNext()) {
+      if (parser.Check("NOINDEX").IgnoreCase()) {
+        flags |= search::SchemaField::NOINDEX;
+        continue;
+      }
+
+      if (parser.Check("SORTABLE").IgnoreCase()) {
+        flags |= search::SchemaField::SORTABLE;
+        continue;
+      }
+
+      break;
     }
 
     // Skip all trailing ignored parameters
     while (kIgnoredOptions.count(parser.Peek()) > 0)
       parser.Skip(2);
 
-    schema.fields[field] = {*type, string{field_alias}, std::move(params)};
+    schema.fields[field] = {*type, flags, string{field_alias}, std::move(params)};
   }
 
   // Build field name mapping table
@@ -140,45 +154,48 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 }
 
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
-  size_t limit_offset = 0, limit_total = 10;
-
-  optional<SearchParams::FieldReturnList> return_list;
-  search::QueryParams query_params;
+  SearchParams params;
 
   while (parser.ToUpper().HasNext()) {
     // [LIMIT offset total]
     if (parser.Check("LIMIT").ExpectTail(2)) {
-      limit_offset = parser.Next().Int<size_t>();
-      limit_total = parser.Next().Int<size_t>();
+      params.limit_offset = parser.Next().Int<size_t>();
+      params.limit_total = parser.Next().Int<size_t>();
       continue;
     }
 
     // RETURN {num} [{ident} AS {name}...]
     if (parser.Check("RETURN").ExpectTail(1)) {
       size_t num_fields = parser.Next().Int<size_t>();
-      return_list = SearchParams::FieldReturnList{};
-      while (return_list->size() < num_fields) {
+      params.return_fields = SearchParams::FieldReturnList{};
+      while (params.return_fields->size() < num_fields) {
         string_view ident = parser.Next();
         string_view alias = parser.Check("AS").IgnoreCase().ExpectTail(1) ? parser.Next() : ident;
-        return_list->emplace_back(ident, alias);
+        params.return_fields->emplace_back(ident, alias);
       }
       continue;
     }
 
     // NOCONTENT
     if (parser.Check("NOCONTENT")) {
-      return_list = SearchParams::FieldReturnList{};
+      params.return_fields = SearchParams::FieldReturnList{};
       continue;
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
     if (parser.Check("PARAMS").ExpectTail(1)) {
       size_t num_args = parser.Next().Int<size_t>();
-      while (parser.HasNext() && query_params.Size() * 2 < num_args) {
+      while (parser.HasNext() && params.query_params.Size() * 2 < num_args) {
         string_view k = parser.Next();
         string_view v = parser.Next();
-        query_params[k] = v;
+        params.query_params[k] = v;
       }
+      continue;
+    }
+
+    if (parser.Check("SORTBY").ExpectTail(1)) {
+      params.sort_option =
+          search::SortOption{string{parser.Next()}, bool(parser.Check("DESC").IgnoreCase())};
       continue;
     }
 
@@ -191,7 +208,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     return nullopt;
   }
 
-  return SearchParams{limit_offset, limit_total, std::move(return_list), std::move(query_params)};
+  return params;
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
@@ -241,43 +258,48 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
   }
 }
 
-void ReplyKnn(size_t knn_limit, string_view knn_score_alias, const SearchParams& params,
-              absl::Span<SearchResult> results, ConnectionContext* cntx) {
+void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
+                 absl::Span<SearchResult> results, ConnectionContext* cntx) {
+  size_t total = 0;
   vector<SerializedSearchDoc*> docs;
   for (auto& shard_results : results) {
+    total += shard_results.total_hits;
     for (auto& doc : shard_results.docs) {
       docs.push_back(&doc);
     }
   }
 
-  size_t prefix = min(params.limit_offset + params.limit_total, knn_limit);
+  size_t agg_limit = agg.limit.value_or(total);
+  size_t prefix = min(params.limit_offset + params.limit_total, agg_limit);
 
   partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
-               [](const auto* l, const auto* r) { return l->knn_distance < r->knn_distance; });
-  docs.resize(min(docs.size(), knn_limit));
+               [desc = agg.descending](const auto* l, const auto* r) {
+                 return desc ? (*l >= *r) : (*l < *r);
+               });
 
-  size_t result_count =
-      min(docs.size() - min(docs.size(), params.limit_offset), params.limit_total);
+  docs.resize(min(docs.size(), agg_limit));
 
+  size_t start_idx = min(params.limit_offset, docs.size());
+  size_t result_count = min(docs.size() - start_idx, params.limit_total);
   bool ids_only = params.IdsOnly();
   size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
 
-  // Clear knn score alias if its excluded from return values
-  if (!params.ShouldReturnField(knn_score_alias))
-    knn_score_alias = "";
+  // Clear score alias if it's excluded from return values
+  if (!params.ShouldReturnField(agg.alias))
+    agg.alias = "";
 
-  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
+  facade::SinkReplyBuilder::ReplyAggregator agg_reply{cntx->reply_builder()};
 
   (*cntx)->StartArray(reply_size);
-  (*cntx)->SendLong(docs.size());
-  for (auto* doc : absl::MakeSpan(docs).subspan(params.limit_offset, result_count)) {
+  (*cntx)->SendLong(min(total, agg_limit));
+  for (auto* doc : absl::MakeSpan(docs).subspan(start_idx, result_count)) {
     if (ids_only) {
       (*cntx)->SendBulkString(doc->key);
       continue;
     }
 
-    if (!knn_score_alias.empty())
-      doc->values[knn_score_alias] = absl::StrCat(doc->knn_distance);
+    if (!agg.alias.empty() && holds_alternative<float>(doc->score))
+      doc->values[agg.alias] = absl::StrCat(get<float>(doc->score));
 
     SendSerializedDoc(*doc, cntx);
   }
@@ -419,7 +441,8 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, &params->query_params))
+  search::SortOption* sort_opt = params->sort_option.has_value() ? &*params->sort_option : nullptr;
+  if (!search_algo.Init(query_str, &params->query_params, sort_opt))
     return (*cntx)->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
@@ -442,8 +465,8 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
       return (*cntx)->SendError(std::move(*res.error));
   }
 
-  if (auto knn_params = search_algo.HasKnn(); knn_params)
-    ReplyKnn(knn_params->first, knn_params->second, *params, absl::MakeSpan(docs), cntx);
+  if (auto agg = search_algo.HasAggregation(); agg)
+    ReplySorted(std::move(*agg), *params, absl::MakeSpan(docs), cntx);
   else
     ReplyWithResults(*params, absl::MakeSpan(docs), cntx);
 }
@@ -457,7 +480,8 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, &params->query_params))
+  search::SortOption* sort_opt = params->sort_option.has_value() ? &*params->sort_option : nullptr;
+  if (!search_algo.Init(query_str, &params->query_params, sort_opt))
     return (*cntx)->SendError("Query syntax error");
 
   search_algo.EnableProfiling();

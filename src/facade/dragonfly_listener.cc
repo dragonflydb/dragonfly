@@ -6,6 +6,8 @@
 
 #include <openssl/err.h>
 
+#include <memory>
+
 #include "facade/tls_error.h"
 
 #ifdef DFLY_USE_SSL
@@ -33,6 +35,8 @@ ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
 ABSL_FLAG(uint32_t, tcp_keepalive, 300,
           "the period in seconds of inactivity after which keep-alives are triggerred,"
           "the duration until an inactive connection is terminated is twice the specified time");
+
+ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 
 #if 0
 enum TlsClientAuth {
@@ -138,17 +142,24 @@ bool ConfigureKeepAlive(int fd) {
 
 }  // namespace
 
-Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), protocol_(protocol) {
+Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
+    : service_(si), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
   if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslServerCntx();
   }
 #endif
-
-  http_base_.reset(new HttpListener<>);
-  http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
-  si->ConfigureHttpHandlers(http_base_.get());
+  role_ = role;
+  // We only set the HTTP interface for:
+  // 1. Privileged users (on privileged listener)
+  // 2. Main listener (if enabled)
+  const bool is_main_enabled = GetFlag(FLAGS_primary_port_http_enabled);
+  if (IsPrivilegedInterface() || (IsMainInterface() && is_main_enabled)) {
+    http_base_ = std::make_unique<HttpListener<>>();
+    http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
+    si->ConfigureHttpHandlers(http_base_.get(), IsPrivilegedInterface());
+  }
 }
 
 Listener::~Listener() {
@@ -213,12 +224,12 @@ bool Listener::AwaitDispatches(absl::Duration timeout,
   return false;
 }
 
-bool Listener::IsAdminInterface() const {
-  return is_admin_;
+bool Listener::IsPrivilegedInterface() const {
+  return role_ == Role::PRIVILEGED;
 }
 
-void Listener::SetAdminInterface(bool is_admin) {
-  is_admin_ = is_admin;
+bool Listener::IsMainInterface() const {
+  return role_ == Role::MAIN;
 }
 
 void Listener::PreShutdown() {

@@ -6,7 +6,7 @@ Dragonfly is a modern replacement for memory stores like Redis and Memcached. It
 
 Dragonfly uses a single process with a multiple-thread architecture. Each Dragonfly thread is indirectly assigned several responsibilities via fibers.
 
-One such responsibility is handling incoming connections. Once a socket listener accepts a client connection, the connection spends its entire lifetime bound to a single thread inside a fiber. Dragonfly is written to be 100% non-blocking; it uses fibers to provide asynchronisity in each thread. One of the essential properties of asynchronisity is that a thread cannot be blocked as long as it has pending CPU tasks. Dragonfly preserves this property by wrapping each unit of execution context in a fiber; we wrap units of execution that can potentially be blocked on I/O. For example, a connection loop runs within a fiber; a function that writes a snapshot runs inside a fiber, and so on.
+One such responsibility is handling incoming connections. Once a socket listener accepts a client connection, the connection spends its entire lifetime bound to a single thread inside a fiber. Dragonfly is written to be 100% non-blocking; it uses fibers to provide asynchronicity in each thread. One of the essential properties of asynchronicity is that a thread cannot be blocked as long as it has pending CPU tasks. Dragonfly preserves this property by wrapping each unit of execution context in a fiber; we wrap units of execution that can potentially be blocked on I/O. For example, a connection loop runs within a fiber; a function that writes a snapshot runs inside a fiber, and so on.
 
 As a side comment - asynchronicity and parallelism are different terms. Nodejs, for example, provides asynchronous execution but is single-threaded. Similarly, each Dragonfly thread is asynchronous on its own; therefore, Dragonfly is responsive to incoming events even when it handles long-running commands like saving to disk or running Lua scripts.
 
@@ -31,9 +31,9 @@ So when we say that thread 1 is an I/O thread, we mean that Dragonfly can pin fi
 I suggest reading my [intro post](https://www.romange.com/2018/12/15/introduction-to-fibers-in-c-/) about `Boost.Fibers` to learn more about fibers.
 
 By the way, I want to compliment `Boost.Fibers` library–it has been exceptionally well designed:
-it's unintrusive, lightweight, and efficient. Moreover, its default scheduler can be overidden. In the case of `helio`, the I/O library that powers Dragonfly, we overrode the `Boost.Fibers` scheduler to support shared-nothing architecture and integrate it with the I/O polling loop.
+it's unintrusive, lightweight, and efficient. Moreover, its default scheduler can be overridden. In the case of `helio`, the I/O library that powers Dragonfly, we overrode the `Boost.Fibers` scheduler to support shared-nothing architecture and integrate it with the I/O polling loop.
 
-Importantly, fibers require bottom-up support in the application layer to preserve their asynchronisity. For example, in the snippet below, a blocking write into `fd` won't magically allow a fiber to preempt and switch to another fiber. No, the whole thread will be blocked.
+Importantly, fibers require bottom-up support in the application layer to preserve their asynchronicity. For example, in the snippet below, a blocking write into `fd` won't magically allow a fiber to preempt and switch to another fiber. No, the whole thread will be blocked.
 
 
 ```cpp
@@ -77,7 +77,7 @@ Another way to think of this flow is that a connection fiber serves as a coordin
 <br>
 <img src="http://static.dragonflydb.io/repo-assets/coordinator.svg" border="0"/>
 
-Here, a coordinator (or connection fiber) might even reside on one of the threads that coincidently owns one of the shards. However, it iseasier to think of it as a separate entity that never directly accesses any shard data.
+Here, a coordinator (or connection fiber) might even reside on one of the threads that coincidently owns one of the shards. However, it is easier to think of it as a separate entity that never directly accesses any shard data.
 
 The coordinator serves as a virtualization layer that hides all the complexity of talking to multiple shards. It employs start-of-the-art algorithms to provide atomicity (and strict serializability) semantics for multi-key commands like "mset, mget, and blpop." It also offers strict serializability for Lua scripts and multi-command transactions.
 

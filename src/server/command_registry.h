@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
 
 #include <functional>
@@ -169,6 +170,7 @@ class CommandRegistry {
  private:
   absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
+  absl::flat_hash_set<std::string> restricted_cmds_;
 
   FamiliesVec family_of_commands_;
   size_t bit_index_;

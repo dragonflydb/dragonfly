@@ -131,7 +131,7 @@ There are also some Dragonfly-specific arguments:
 ./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
 
-Arguments can be also provided from a configuration file by runnning `dragonfly --flagfile <filename>`. The file should list one flag per line, with equal signs instead of spaces for key-value flags.
+Arguments can be also provided from a configuration file by running `dragonfly --flagfile <filename>`. The file should list one flag per line, with equal signs instead of spaces for key-value flags.
 
 For more options like logs management or TLS support, run `dragonfly --help`.
 
@@ -170,7 +170,7 @@ Go to the URL `:6379/metrics` to view Prometheus-compatible metrics.
 The Prometheus exported metrics are compatible with the Grafana dashboard, [see here](tools/local/monitoring/grafana/provisioning/dashboards/dashboard.json).
 
 
-Important! The HTTP console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, we advise you disable the console with `--http_admin_console=false` or `--nohttp_admin_console`.
+Important! The HTTP console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, we advise you to disable the console with `--http_admin_console=false` or `--nohttp_admin_console`.
 
 
 ## <a name="background"><a/>Background
