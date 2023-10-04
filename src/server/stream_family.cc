@@ -952,15 +952,15 @@ struct ClaimOpts {
   int64 delivery_time = -1;
   int retry = -1;
   uint8_t flags = 0;
-  int32_t count = 100;  // only for XAUTOCLAIM
-  streamID start;       // only for XAUTOCLAIM
+  int32_t count = 100;      // only for XAUTOCLAIM
+  streamID start = {0, 0};  // only for XAUTOCLAIM
 };
 
 struct ClaimInfo {
   bool justid = false;
   vector<streamID> ids;
   RecordVec records;
-  streamID end_id;               // only for XAUTOCLAIM
+  streamID end_id = {0, 0};      // only for XAUTOCLAIM
   vector<streamID> deleted_ids;  // only for XAUTOCLAIM
 };
 
@@ -1327,14 +1327,17 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   OpResult<pair<stream*, streamCG*>> cgr_res = FindGroup(op_args, key, opts.group);
   if (!cgr_res)
     return cgr_res.status();
-  stream* stream = cgr_res->first;
-  streamCG* group = cgr_res->second;
+  auto [stream, group] = *cgr_res;
 
   if (stream == nullptr || group == nullptr) {
     return OpStatus::KEY_NOTFOUND;
   }
 
   streamConsumer* consumer = nullptr;
+  // from Redis spec on XAutoClaim:
+  // https://redis.io/commands/xautoclaim/
+  // The maximum number of pending entries that the command scans is the product of
+  // multiplying <count>'s value by 10 (hard-coded).
   int64_t attempts = opts.count * 10;
 
   unsigned char start_key[sizeof(streamID)];
@@ -1373,10 +1376,11 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
 
     op_args.shard->tmp_str1 =
         sdscpylen(op_args.shard->tmp_str1, opts.consumer.data(), opts.consumer.size());
-
-    if (consumer == NULL &&
-        (consumer = streamLookupConsumer(group, op_args.shard->tmp_str1, SLC_DEFAULT)) == nullptr) {
-      consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, nullptr, 0, SCC_DEFAULT);
+    if (consumer == nullptr) {
+      consumer = streamLookupConsumer(group, op_args.shard->tmp_str1, SLC_DEFAULT);
+      if (consumer == nullptr) {
+        consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, nullptr, 0, SCC_DEFAULT);
+      }
     }
 
     if (nack->consumer != consumer) {
@@ -2732,9 +2736,8 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
     return (*cntx)->SendError(kSyntaxErr);
   }
-  if (opts.min_idle_time < 0) {
-    opts.min_idle_time = 0;
-  }
+
+  opts.min_idle_time = std::max((int64)0, opts.min_idle_time);
 
   string_view start = ArgS(args, 4);
   RangeId rs;
@@ -2776,7 +2779,7 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
   OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
-    cntx->SendError(NoGroupOrKey(key, opts.group));
+    (*cntx)->SendError(NoGroupOrKey(key, opts.group));
     return;
   }
   if (!result) {
@@ -2806,13 +2809,10 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   }
-  if (cresult.deleted_ids.size()) {
-    (*cntx)->StartArray(cresult.deleted_ids.size());
-    for (auto id : cresult.deleted_ids) {
-      (*cntx)->SendBulkString(StreamIdRepr(id));
-    }
-  } else {
-    (*cntx)->SendEmptyArray();
+
+  (*cntx)->StartArray(cresult.deleted_ids.size());
+  for (auto id : cresult.deleted_ids) {
+    (*cntx)->SendBulkString(StreamIdRepr(id));
   }
 }
 

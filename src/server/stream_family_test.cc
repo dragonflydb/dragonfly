@@ -756,7 +756,7 @@ TEST_F(StreamFamilyTest, XAutoClaim) {
                                 RespArray(ElementsAre("1-3", RespArray(ElementsAre("k4", "v4")))))),
           RespArray(ElementsAre()))));
 
-  // bob really have these claimed entries
+  // bob really has these claimed entries
   resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
   EXPECT_THAT(resp,
               RespArray(ElementsAre(
