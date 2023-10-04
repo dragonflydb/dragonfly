@@ -97,10 +97,10 @@ void ConnectionContext::ChangeMonitor(bool start) {
   // then notify all other threads that there is a change in the number of monitors
   auto& my_monitors = ServerState::tlocal()->Monitors();
   if (start) {
-    my_monitors.Add(owner());
+    my_monitors.Add(conn());
   } else {
-    VLOG(1) << "connection " << owner()->GetClientId() << " no longer needs to be monitored";
-    my_monitors.Remove(owner());
+    VLOG(1) << "connection " << conn()->GetClientId() << " no longer needs to be monitored";
+    my_monitors.Remove(conn());
   }
   // Tell other threads that about the change in the number of connection that we monitor
   shard_set->pool()->Await(

@@ -58,6 +58,14 @@ const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTy
 
 }  // namespace
 
+bool SerializedSearchDoc::operator<(const SerializedSearchDoc& other) const {
+  return this->score < other.score;
+}
+
+bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
+  return this->score >= other.score;
+}
+
 bool SearchParams::ShouldReturnField(std::string_view field) const {
   auto cb = [field](const auto& entry) { return entry.first == field; };
   return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
@@ -205,8 +213,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto doc_data = params.return_fields ? accessor->Serialize(base_->schema, *params.return_fields)
                                          : accessor->Serialize(base_->schema);
 
-    float score = search_results.knn_distances.empty() ? 0 : search_results.knn_distances[i];
-    out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), score});
+    auto score =
+        search_results.scores.empty() ? std::monostate{} : std::move(search_results.scores[i]);
+    out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), std::move(score)});
   }
 
   return SearchResult{search_results.total - expired_count, std::move(out),

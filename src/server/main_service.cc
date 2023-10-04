@@ -82,8 +82,8 @@ ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed com
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
-          "If set, would enable open admin access to console on the assigned port, without auth "
-          "token needed.");
+          "If set, would enable open admin access to console on the assigned port, without "
+          "authorization needed.");
 
 ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
           "Limit on maximum-memory that is used by the database. "
@@ -230,7 +230,7 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
   string endpoint;
   if (cntx->conn_state.script_info) {
     endpoint = "lua";
-  } else if (const auto* conn = cntx->owner(); conn != nullptr) {
+  } else if (const auto* conn = cntx->conn(); conn != nullptr) {
     endpoint = conn->RemoteEndpointStr();
   } else {
     endpoint = "REPLICATION:0";
@@ -821,6 +821,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   ServerState& etl = *ServerState::tlocal();
 
+  // If there is no connection owner, it means the command it being called
+  // from another command or used internally, therefore is always permitted.
+  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
+    return ErrorReply{"Cannot execute restricted command (admin only)"};
+  }
+
   if (auto err = cid->Validate(tail_args); err)
     return err;
 
@@ -913,9 +919,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   bool under_multi = dfly_cntx->conn_state.exec_info.IsRunning();
 
   if (VLOG_IS_ON(2) &&
-      cntx->owner()) {  // owner may not exists in case of this being called from replica context
+      cntx->conn()) {  // owner may not exists in case of this being called from replica context
     const char* lua = under_script ? "LUA " : "";
-    LOG(INFO) << "Got (" << cntx->owner()->GetClientId() << "): " << lua << args
+    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << lua << args
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
@@ -1198,7 +1204,7 @@ ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
   return ErrorReply{StrCat("unknown command `", cmd_name, "`"), "unknown_cmd"};
 }
 
-bool RequireAdminAuth() {
+bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
@@ -1206,7 +1212,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
 
-  if (owner->IsAdmin() && !RequireAdminAuth()) {
+  if (owner->IsPrivileged() && !RequirePrivilegedAuth()) {
     res->req_auth = false;
   } else {
     res->req_auth = !GetPassword().empty();
@@ -1263,7 +1269,7 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   builder->CloseConnection();
 
   DeactivateMonitoring(static_cast<ConnectionContext*>(cntx));
-  cntx->owner()->ShutdownSelf();
+  cntx->conn()->ShutdownSelf();
 }
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
@@ -1324,6 +1330,8 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   size_t used_mem = info->async_cmds_heap_mem + info->async_cmds.size() * sizeof(StoredCmd);
   if ((info->async_cmds.empty() || !force) && used_mem < info->async_cmds_heap_limit)
     return nullopt;
+
+  ++ServerState::tlocal()->stats.eval_squashed_flushes;
 
   auto* eval_cid = registry_.Find("EVAL");
   DCHECK(eval_cid);
@@ -1623,17 +1631,18 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
     interpreter->SetRedisFunc(
         [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
+
     result = interpreter->RunFunction(eval_args.sha, &error);
+
+    if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
+      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      result = Interpreter::RUN_ERR;
+      error = absl::StrCat(err_ref->first);
+    }
 
     // Conclude the transaction.
     if (*scheduled)
       cntx->transaction->UnlockMulti();
-  }
-
-  if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-    auto err_ref = CapturingReplyBuilder::GetError(*err);
-    result = Interpreter::RUN_ERR;
-    error = absl::StrCat(err_ref->first);
   }
 
   cntx->conn_state.script_info.reset();  // reset script_info
@@ -1868,7 +1877,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     // Most importantly, this approach allows not blocking and not awaiting in the dispatch below,
     // thus not adding any overhead to backpressure checks.
     for (auto& sub : subscribers)
-      sub.conn_cntx->owner()->EnsureAsyncMemoryBudget();
+      sub.conn_cntx->conn()->EnsureAsyncMemoryBudget();
 
     auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
     auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
@@ -1880,7 +1889,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
                             ChannelStore::Subscriber::ByThread);
 
       while (it != subscribers_ptr->end() && it->thread_id == idx) {
-        facade::Connection* conn = it->conn_cntx->owner();
+        facade::Connection* conn = it->conn_cntx->conn();
         DCHECK(conn);
         conn->SendPubMessageAsync(
             {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
@@ -1943,7 +1952,7 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 }
 
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientId();
+  VLOG(1) << "starting monitor on this connection: " << cntx->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
   // this connection, to send to it any command
   (*cntx)->SendOk();
@@ -2064,11 +2073,19 @@ GlobalState Service::GetGlobalState() const {
   return global_state_;
 }
 
-void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
-  // We set the password for the HTTP service unless it is only enabled on the
-  // admin port and the admin port is password-less.
-  if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
-    base->SetPassword(GetPassword());
+void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
+  // We skip authentication on privileged listener if the flag admin_nopass is set
+  // We also skip authentication if requirepass is empty
+  const bool should_skip_auth =
+      (is_privileged && !RequirePrivilegedAuth()) || GetPassword().empty();
+  if (!should_skip_auth) {
+    base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
+                                                std::string_view password) {
+      if (path == "/metrics")
+        return true;
+      const bool pass_verified = pass.empty() ? true : password == pass;
+      return username == "default" && pass_verified;
+    });
   }
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);

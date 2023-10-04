@@ -335,7 +335,7 @@ void Connection::HandleRequests() {
 #ifdef DFLY_USE_SSL
   if (ctx_) {
     const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
-    if (!(IsAdmin() && no_tls_on_admin_port)) {
+    if (!(IsPrivileged() && no_tls_on_admin_port)) {
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
       tls_sock->InitSSL(ctx_);
       FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
@@ -465,14 +465,21 @@ uint32_t Connection::GetClientId() const {
   return id_;
 }
 
-bool Connection::IsAdmin() const {
-  return static_cast<Listener*>(owner())->IsAdminInterface();
+bool Connection::IsPrivileged() const {
+  return static_cast<Listener*>(owner())->IsPrivilegedInterface();
+}
+
+bool Connection::IsMain() const {
+  return static_cast<Listener*>(owner())->IsMainInterface();
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
-  bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
-  bool admin = IsAdmin();
-  if (!primary_port_enabled && !admin) {
+  if (!IsPrivileged() && !IsMain()) {
+    return false;
+  }
+
+  const bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
+  if (!primary_port_enabled && !IsPrivileged()) {
     return false;
   }
 

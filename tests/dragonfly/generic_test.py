@@ -103,3 +103,19 @@ async def test_unknown_dfly_env(df_local_factory, export_dfly_password):
         with pytest.raises(DflyStartException):
             dfly = df_local_factory.create()
             dfly.start()
+
+
+async def test_restricted_commands(df_local_factory):
+    # Restrict GET and SET, then verify non-admin clients are blocked from
+    # using these commands, though admin clients can use them.
+    with df_local_factory.create(restricted_commands="get,set", admin_port=1112) as server:
+        async with aioredis.Redis(port=server.port) as client:
+            with pytest.raises(redis.exceptions.ResponseError):
+                await client.get("foo")
+
+            with pytest.raises(redis.exceptions.ResponseError):
+                await client.set("foo", "bar")
+
+        async with aioredis.Redis(port=server.admin_port) as admin_client:
+            await admin_client.get("foo")
+            await admin_client.set("foo", "bar")
