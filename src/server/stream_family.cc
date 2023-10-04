@@ -1359,7 +1359,6 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
     streamDecodeID(ri.key, &id);
 
     if (!streamEntryExists(stream, &id)) {
-      // todo: propagate this change
       raxRemove(group->pel, ri.key, ri.key_len, nullptr);
       raxRemove(nack->consumer->pel, ri.key, ri.key_len, nullptr);
       streamFreeNACK(nack);
