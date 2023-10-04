@@ -1778,7 +1778,7 @@ async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
-    fill_task = asyncio.create_task(seeder.run(target_ops=3000))
+    fill_task = asyncio.create_task(seeder.run())
 
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
