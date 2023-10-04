@@ -110,8 +110,11 @@ void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
 
 void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
   for (const auto& word : Tokenize(doc->GetString(field))) {
-    if (auto it = entries_.find(word); it != entries_.end())
+    if (auto it = entries_.find(word); it != entries_.end()) {
       it->second.Remove(id);
+      if (it->second.Size() == 0)
+        entries_.erase(it);
+    }
   }
 }
 
