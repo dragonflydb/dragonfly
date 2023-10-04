@@ -1297,6 +1297,9 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
     ServerState::tlocal()->SetPauseState(pause_state, true);
   });
+  // We should not expire/evict keys while clients are puased.
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
 
   fb2::Fiber("client_pause", [this, timeout, pause_state]() mutable {
     auto step = 10ms;
@@ -1311,6 +1314,8 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
       service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
         ServerState::tlocal()->SetPauseState(pause_state, false);
       });
+      shard_set->RunBriefInParallel(
+          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
     }
   }).Detach();
 
