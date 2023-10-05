@@ -1668,7 +1668,7 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
             # Df is blazingly fast, so by the time we tick a second time on
             # line 1674, DF already replicated all the data so the assertion
             # at the end of the test will always fail
-            fill_task = asyncio.create_task(seeder.run(target_ops=100000))
+            fill_task = asyncio.create_task(seeder.run())
 
             for _ in range(3):
                 await asyncio.sleep(random.randint(5, 10) / 10)
