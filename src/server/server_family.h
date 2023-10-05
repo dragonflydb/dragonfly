@@ -59,7 +59,8 @@ struct ReplicationMemoryStats {
   size_t full_sync_buf_bytes_ = 0;          // total bytes used for full sync buffers
 };
 
-// Global peak stats recorded after aggregating metrics over all shards
+// Global peak stats recorded after aggregating metrics over all shards.
+// Note that those values are only updated during GetMetrics calls.
 struct PeakStats {
   size_t conn_dispatch_queue_bytes = 0;  // peak value of conn_stats.dispatch_queue_bytes
   size_t conn_read_buf_capacity = 0;     // peak of total read buf capcacities
