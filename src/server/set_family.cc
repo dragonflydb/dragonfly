@@ -462,7 +462,8 @@ ResultSetView DiffResultVec(const ResultStringVec& result_vec, ShardId src_shard
   return uniques;
 }
 
-OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned required_shard_cnt) {
+OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned required_shard_cnt,
+                                 unsigned limit = 0) {
   absl::flat_hash_map<std::string_view, unsigned> uniques;
 
   for (const auto& res : result_vec) {
@@ -504,6 +505,8 @@ OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned req
 
   for (const auto& k_v : uniques) {
     if (k_v.second == required_shard_cnt) {
+      if (limit != 0 && result.size() >= limit)
+        return result;
       result.push_back(k_v.first);
     }
   }
@@ -1378,6 +1381,31 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendLong(result->size());
 }
 
+void SInterCard(CmdArgList args, ConnectionContext* cntx) {
+  unsigned num_keys;
+  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
+    return (*cntx)->SendError(kSyntaxErr);
+
+  unsigned limit = 0;
+  if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
+    if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
+      return (*cntx)->SendError("limit can't be negative");
+  } else if (args.size() > (num_keys + 1))
+    return (*cntx)->SendError(kSyntaxErr);
+
+  ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    result_set[shard->shard_id()] = OpInter(t, shard, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result =
+      InterResultVec(result_set, cntx->transaction->GetUniqueShardCnt(), limit);
+
+  return (*cntx)->SendLong(result->size());
+}
+
 void SUnion(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size());
 
@@ -1567,6 +1595,7 @@ constexpr uint32_t kSDiff = READ | SET | SLOW;
 constexpr uint32_t kSDiffStore = WRITE | SET | SLOW;
 constexpr uint32_t kSInter = READ | SET | SLOW;
 constexpr uint32_t kSInterStore = WRITE | SET | SLOW;
+constexpr uint32_t kSInterCard = READ | SET | SLOW;
 constexpr uint32_t kSMembers = READ | SET | SLOW;
 constexpr uint32_t kSIsMember = READ | SET | SLOW;
 constexpr uint32_t kSMIsMember = READ | SET | FAST;
@@ -1591,6 +1620,9 @@ void SetFamily::Register(CommandRegistry* registry) {
       << CI{"SINTERSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
             acl::kSInterStore}
              .HFUNC(SInterStore)
+      << CI{"SINTERCARD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1,
+            acl::kSInterCard}
+             .HFUNC(SInterCard)
       << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, 1, acl::kSMembers}.HFUNC(SMembers)
       << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kSIsMember}.HFUNC(SIsMember)
       << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, 1, acl::kSMIsMember}.HFUNC(SMIsMember)
