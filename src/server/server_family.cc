@@ -1417,17 +1417,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-<<<<<<< HEAD
-    append("eval_io_coordination_total", m.eval_io_coordination_cnt);
-    append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
-    append("eval_squashed_flushes", m.eval_squashed_flushes);
-    append("tx_schedule_cancel_total", m.tx_schedule_cancel_cnt);
-=======
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
+    append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
->>>>>>> 382c4f6a (fix(server): Clean up metrics collection)
   }
 
   if (should_enter("TIERED", true)) {
@@ -1517,7 +1511,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("SEARCH", true)) {
-    ADD_HEADER("# Search");
     append("search_memory", m.search_stats.used_memory);
     append("search_num_indices", m.search_stats.num_indices);
     append("search_num_entries", m.search_stats.num_entries);
