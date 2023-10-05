@@ -52,8 +52,11 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent)
-    : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
+Transaction::Transaction(const Transaction* parent, ShardId sid)
+    : multi_{make_unique<MultiData>()},
+      txid_{parent->txid()},
+      unique_shard_cnt_{1},
+      unique_shard_id_{sid} {
   if (parent->multi_) {
     multi_->mode = parent->multi_->mode;
   } else {
@@ -246,7 +249,10 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     shard_data_.front().local_mask |= ACTIVE;
 
     unique_shard_cnt_ = 1;
-    unique_shard_id_ = Shard(args_.front(), shard_set->size());  // TODO: Squashed bug
+    if (!multi_ || multi_->role != SQUASHED_STUB)
+      unique_shard_id_ = Shard(args_.front(), shard_set->size());
+    else
+      DCHECK_EQ(unique_shard_id_, Shard(args_.front(), shard_set->size()));
 
     return;
   }
@@ -361,13 +367,19 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   ScheduleInternal();
 }
 
-void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
+void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys,
+                                        bool cancel_singleshard_multi) {
   DCHECK(multi_);
   DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
   multi_->mode = LOCK_AHEAD;
   InitBase(dbid, keys);
   InitByKeys(KeyIndex::Range(0, keys.size()));
+
+  if (unique_shard_cnt_ == 1 && cancel_singleshard_multi) {
+    multi_->mode = NON_ATOMIC;
+    return;
+  }
 
   ScheduleInternal();
 }
@@ -381,11 +393,13 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_ptr_);
 
-  unique_shard_id_ = 0;
-  unique_shard_cnt_ = 0;
   args_.clear();
   cid_ = cid;
   cb_ptr_ = nullptr;
+
+  unique_shard_cnt_ = 0;
+  if (multi_->role != SQUASHED_STUB)  // Keep assigned sid to avoid computing hash in initialization
+    unique_shard_id_ = 0;
 
   if (multi_->mode == NON_ATOMIC || multi_->role == SQUASHED_STUB) {
     // Reset shard data without resizing because armed might be read from cancelled callbacks.
@@ -411,7 +425,6 @@ string Transaction::DebugId() const {
 }
 
 void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args) {
-  multi_.reset();
   InitBase(db, args);
   EnableShard(sid);
   OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
@@ -740,21 +753,30 @@ void Transaction::UnlockMulti() {
   if (multi_->mode == NON_ATOMIC)
     return;
 
+  // Distribute all keys by shards
+  size_t num_active_shards = 0;
   auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
   while (!multi_->lock_counts.empty()) {
     auto entry = multi_->lock_counts.extract(multi_->lock_counts.begin());
-    ShardId sid = Shard(entry.key(), sharded_keys->size());
-    (*sharded_keys)[sid].emplace_back(std::move(entry.key()), entry.mapped());
+    auto& keys = (*sharded_keys)[Shard(entry.key(), sharded_keys->size())];
+    keys.emplace_back(std::move(entry.key()), entry.mapped());
+    num_active_shards += keys.size() == 1 ? 1 : 0;
   }
 
   unsigned shard_journals_cnt =
       ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
 
-  uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
+  // Global transactions have to free the global lock on all shards
+  if (multi_->mode != Transaction::LOCK_AHEAD)
+    num_active_shards = shard_set->size();
+
+  uint32_t prev = run_count_.fetch_add(num_active_shards, memory_order_relaxed);
+  use_count_.fetch_add(num_active_shards, std::memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
-  use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
+    if (num_active_shards < shard_set->size() && (*sharded_keys)[i].empty())
+      continue;
     shard_set->Add(i, [this, sharded_keys, shard_journals_cnt]() {
       this->UnlockMultiShardCb(*sharded_keys, EngineShard::tlocal(), shard_journals_cnt);
       intrusive_ptr_release(this);

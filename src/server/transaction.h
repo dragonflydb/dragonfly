@@ -143,9 +143,11 @@ class Transaction {
   };
 
  public:
+  //
   explicit Transaction(const CommandId* cid);
 
-  explicit Transaction(const Transaction* parent);
+  // Initialize transaction as a squashing stub on a specific thread
+  explicit Transaction(const Transaction* parent, ShardId sid);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -208,7 +210,9 @@ class Transaction {
   void StartMultiGlobal(DbIndex dbid);
 
   // Start multi in LOCK_AHEAD mode with given keys.
-  void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys);
+  // If the transaction is determined to run only on a single shard and cancel_singleshard_multi is
+  // true, the scheduling is skipped and the transaction is downgraded to a regular transaction.
+  void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys, bool cancel_singleshard_multi = false);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
