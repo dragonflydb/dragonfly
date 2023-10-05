@@ -420,7 +420,7 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
 
     replica = df_local_factory.create()
     master = df_local_factory.create()
-    df_local_factory.start_all([replica] + [master])
+    df_local_factory.start_all([replica, master])
 
     seeder = df_seeder_factory.create(port=master.port)
     c_replica = aioredis.Redis(port=replica.port)
