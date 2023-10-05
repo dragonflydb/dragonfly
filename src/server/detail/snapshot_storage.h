@@ -72,8 +72,7 @@ class FileSnapshotStorage : public SnapshotStorage {
 
 class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
-  AwsS3SnapshotStorage(const std::string& endpoint, bool ec2_metadata,
-                       bool disable_payload_signing);
+  AwsS3SnapshotStorage(const std::string& endpoint, bool ec2_metadata, bool sign_payload);
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;

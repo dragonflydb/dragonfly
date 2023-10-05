@@ -95,9 +95,9 @@ ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws 
 // to load the credentials.
 ABSL_FLAG(bool, s3_ec2_metadata, false,
           "whether to load credentials and configuration from EC2 metadata");
-// Disables S3 payload signing (even over HTTP). This reduces the latency and
-// resource usage when writing snapshots to S3, at the expense of security.
-ABSL_FLAG(bool, s3_disable_payload_signing, false,
+// Enables S3 payload signing over HTTP. This reduces the latency and resource
+// usage when writing snapshots to S3, at the expense of security.
+ABSL_FLAG(bool, s3_sign_payload, true,
           "whether to sign the s3 request payload when uploading snapshots");
 
 ABSL_DECLARE_FLAG(int32_t, port);
@@ -435,7 +435,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
     snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
         absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_ec2_metadata),
-        absl::GetFlag(FLAGS_s3_disable_payload_signing));
+        absl::GetFlag(FLAGS_s3_sign_payload));
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {

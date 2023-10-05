@@ -175,7 +175,7 @@ io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPath
 }
 
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2_metadata,
-                                           bool disable_payload_signing) {
+                                           bool sign_payload) {
   shard_set->pool()->GetNextProactor()->Await([&] {
     if (!ec2_metadata) {
       setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
@@ -183,7 +183,7 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2
     // S3ClientConfiguration may request configuration and credentials from
     // EC2 metadata so must be run in a proactor thread.
     Aws::S3::S3ClientConfiguration s3_conf{};
-    if (disable_payload_signing) {
+    if (!sign_payload) {
       s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::ForceNever;
     }
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider =
@@ -332,7 +332,7 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObj
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
     request.SetPrefix(std::string(prefix));
-    if (continuation_token != "") {
+    if (!continuation_token.empty()) {
       request.SetContinuationToken(continuation_token);
     }
 
@@ -346,7 +346,7 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObj
       return nonstd::make_unexpected(GenericError{"Failed list objects in S3 bucket: " +
                                                   outcome.GetError().GetExceptionName()});
     }
-  } while (continuation_token != "");
+  } while (!continuation_token.empty());
   return keys;
 }
 
