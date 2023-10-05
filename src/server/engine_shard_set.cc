@@ -557,7 +557,8 @@ void EngineShard::CacheStats() {
 }
 
 size_t EngineShard::UsedMemory() const {
-  return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
+  return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal() +
+         search_indices()->GetUsedMemory();
 }
 
 BlockingController* EngineShard::EnsureBlockingController() {

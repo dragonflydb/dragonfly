@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "base/pmr/memory_resource.h"
+#include "core/mi_memory_resource.h"
 #include "core/search/search.h"
 #include "server/common.h"
 #include "server/table.h"
@@ -94,8 +96,11 @@ struct DocIndexInfo {
   std::string BuildRestoreCommand() const;
 };
 
+class ShardDocIndices;
+
 // Stores internal search indices for documents of a document index on a specific shard.
 class ShardDocIndex {
+  friend class ShardDocIndices;
   using DocId = search::DocId;
 
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
@@ -121,9 +126,6 @@ class ShardDocIndex {
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
                       search::SearchAlgorithm* search_algo) const;
 
-  // Clears internal data. Traverses all matching documents and assigns ids.
-  void Rebuild(const OpArgs& op_args);
-
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
 
@@ -131,6 +133,10 @@ class ShardDocIndex {
   void RemoveDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
 
   DocIndexInfo GetInfo() const;
+
+ private:
+  // Clears internal data. Traverses all matching documents and assigns ids.
+  void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
  private:
   std::shared_ptr<const DocIndex> base_;
@@ -141,6 +147,8 @@ class ShardDocIndex {
 // Stores shard doc indices by name on a specific shard.
 class ShardDocIndices {
  public:
+  ShardDocIndices();
+
   // Get sharded document index by its name or nullptr if not found
   ShardDocIndex* GetIndex(std::string_view name);
 
@@ -159,7 +167,11 @@ class ShardDocIndices {
   void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
   void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
+  size_t GetUsedMemory() const;
+  SearchStats GetStats() const;  // combines stats for all indices
+
  private:
+  MiMemoryResource local_mr_;
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 };
 
@@ -189,6 +201,14 @@ inline void ShardDocIndices::AddDoc(std::string_view key, const DbContext& db_cn
 
 inline void ShardDocIndices::RemoveDoc(std::string_view key, const DbContext& db_cnt,
                                        const PrimeValue& pv) {
+}
+
+inline size_t ShardDocIndices::GetUsedMemory() const {
+  return 0;
+}
+
+inline SearchStats ShardDocIndices::GetStats() const {
+  return {};
 }
 
 #endif  // __APPLE__

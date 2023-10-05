@@ -1242,8 +1242,11 @@ Metrics ServerFamily::GetMetrics() const {
       MergeInto(shard->db_slice().GetStats(), &result);
 
       result.heap_used_bytes += shard->UsedMemory();
-      if (shard->tiered_storage()) {
-        result.tiered_stats += shard->tiered_storage()->GetStats();
+      if (auto ts = shard->tiered_storage(); ts) {
+        result.tiered_stats += ts->GetStats();
+      }
+      if (auto si = shard->search_indices(); si) {
+        result.search_stats += si->GetStats();
       }
       result.shard_stats += shard->stats();
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
@@ -1501,6 +1504,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append_sorted("cmdstat_", move(commands));
     append_sorted("unknown_",
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
+  }
+
+  if (should_enter("SEARCH", true)) {
+    ADD_HEADER("# Search");
+    append("search_memory", m.search_stats.used_memory);
+    append("search_num_indices", m.search_stats.num_indices);
+    append("search_num_entries", m.search_stats.num_entries);
   }
 
   if (should_enter("ERRORSTATS", true)) {

@@ -16,7 +16,8 @@ std::string& QueryParams::operator[](std::string_view k) {
   return params[k];
 }
 
-WrappedStrPtr::WrappedStrPtr(const std::string& s) : ptr{std::make_unique<char[]>(s.size() + 1)} {
+WrappedStrPtr::WrappedStrPtr(const PMR_NS::string& s)
+    : ptr{std::make_unique<char[]>(s.size() + 1)} {
   std::strcpy(ptr.get(), s.c_str());
 }
 
