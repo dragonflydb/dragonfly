@@ -1496,7 +1496,7 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
       trans->StartMultiGlobal(dbid);
       return true;
     case Transaction::LOCK_AHEAD:
-      trans->StartMultiLockedAhead(dbid, keys, true);
+      trans->StartMultiLockedAhead(dbid, keys);
       return true;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
@@ -1536,6 +1536,26 @@ std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const 
   return {res, args.subspan(1)};
 }
 
+static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::ScriptParams& params,
+                                   const Transaction& tx) {
+  if (!sid.has_value()) {
+    return false;
+  }
+
+  if (DetermineMultiMode(params) != Transaction::LOCK_AHEAD) {
+    return false;
+  }
+
+  if (tx.GetMultiMode() != Transaction::NOT_DETERMINED) {
+    // We may be running EVAL under MULTI. Currently RunSingleShardMulti() will attempt to lock
+    // keys, in which case will be already locked by MULTI. We could optimize this path as well
+    // though.
+    return false;
+  }
+
+  return true;
+}
+
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
@@ -1563,6 +1583,14 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i));
     sinfo->keys.insert(key);
+
+    ShardId cur_sid = Shard(key, shard_count());
+    if (i == 0) {
+      sid = cur_sid;
+    }
+    if (sid.has_value() && *sid != cur_sid) {
+      sid = nullopt;
+    }
   }
 
   sinfo->async_cmds_heap_limit = absl::GetFlag(FLAGS_multi_eval_squash_buffer);
@@ -1575,24 +1603,20 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   interpreter->SetRedisFunc(
       [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
 
-  optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
-  if (!scheduled) {
-    return;
-  }
-
   Interpreter::RunResult result;
 
   // Single-shard lock ahead transaction will fallback to the nonatomic mode to enable this specific
   // optimization.
-  if (*scheduled && tx->GetUniqueShardCnt() == 1 && tx->GetMultiMode() == Transaction::NON_ATOMIC) {
+  if (CanRunSingleShardMulti(sid, *params, *tx)) {
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
 
     // disable regular multi-command squashing because we use it here explicitly
     sinfo->async_cmds_heap_limit = 0;
 
-    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx, tx->GetUniqueShard()};
+    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx, *sid};
     cntx->transaction = stub_tx.get();
 
+    tx->PrepareMultiForScheduleSingleHop(*sid, 0, args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       result = interpreter->RunFunction(eval_args.sha, &error);
       return OpStatus::OK;
@@ -1602,18 +1626,23 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   } else {
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
 
+    optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
+    if (!scheduled) {
+      return;
+    }
+
     result = interpreter->RunFunction(eval_args.sha, &error);
-  }
 
-  if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-    auto err_ref = CapturingReplyBuilder::GetError(*err);
-    result = Interpreter::RUN_ERR;
-    error = absl::StrCat(err_ref->first);
-  }
+    if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
+      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      result = Interpreter::RUN_ERR;
+      error = absl::StrCat(err_ref->first);
+    }
 
-  // Conclude the transaction.
-  if (*scheduled)
-    cntx->transaction->UnlockMulti();
+    // Conclude the transaction.
+    if (*scheduled)
+      cntx->transaction->UnlockMulti();
+  }
 
   cntx->conn_state.script_info.reset();  // reset script_info
 

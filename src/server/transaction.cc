@@ -249,10 +249,10 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     shard_data_.front().local_mask |= ACTIVE;
 
     unique_shard_cnt_ = 1;
-    if (!multi_ || multi_->role != SQUASHED_STUB)
-      unique_shard_id_ = Shard(args_.front(), shard_set->size());
-    else
+    if (multi_ && multi_->role == SQUASHED_STUB)
       DCHECK_EQ(unique_shard_id_, Shard(args_.front(), shard_set->size()));
+    else
+      unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
     return;
   }
@@ -367,19 +367,13 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   ScheduleInternal();
 }
 
-void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys,
-                                        bool cancel_singleshard_multi) {
+void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
   DCHECK(multi_);
   DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
   multi_->mode = LOCK_AHEAD;
   InitBase(dbid, keys);
   InitByKeys(KeyIndex::Range(0, keys.size()));
-
-  if (unique_shard_cnt_ == 1 && cancel_singleshard_multi) {
-    multi_->mode = NON_ATOMIC;
-    return;
-  }
 
   ScheduleInternal();
 }
@@ -425,6 +419,7 @@ string Transaction::DebugId() const {
 }
 
 void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args) {
+  multi_.reset();
   InitBase(db, args);
   EnableShard(sid);
   OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
