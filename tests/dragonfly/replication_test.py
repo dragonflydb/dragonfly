@@ -442,8 +442,6 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     num_successes = sum(results)
     assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
 
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-
     await wait_available_async(c_replica)
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
