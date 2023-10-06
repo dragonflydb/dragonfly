@@ -273,7 +273,8 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
   size_t serialized = sfile.val.size();
   if (serialized == 0)
     return 0;
-  stats_.channel_bytes += serialized;
+
+  stats_.pushed_bytes += serialized;
 
   auto id = rec_id_++;
   DVLOG(2) << "Pushed " << id;
@@ -328,6 +329,10 @@ void SliceSnapshot::CloseRecordChannel() {
   if (closed_chan_.compare_exchange_strong(expected, true)) {
     dest_->StartClosing();
   }
+}
+
+size_t SliceSnapshot::GetTotalBufferCapacity() const {
+  return serializer_->GetTotalBufferCapacity();
 }
 
 }  // namespace dfly

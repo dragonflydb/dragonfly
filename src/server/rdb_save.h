@@ -108,6 +108,10 @@ class RdbSaver {
     return save_mode_;
   }
 
+  // Can only be called for dragonfly replication.
+  // Get total size of all rdb serializer buffers and items currently placed in channel
+  size_t GetTotalBuffersSize() const;
+
  private:
   class Impl;
 
@@ -167,6 +171,8 @@ class RdbSerializer {
 
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
   std::error_code SendFullSyncCut();
+
+  size_t GetTotalBufferCapacity() const;
 
  private:
   // Prepare internal buffer for flush. Compress it.

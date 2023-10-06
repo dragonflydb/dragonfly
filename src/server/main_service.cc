@@ -2040,7 +2040,7 @@ VarzValue::Map Service::GetVarzStats() {
 
   Metrics m = server_family_.GetMetrics();
   DbStats db_stats;
-  for (const auto& s : m.db) {
+  for (const auto& s : m.db_stats) {
     db_stats += s;
   }
 

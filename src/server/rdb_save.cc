@@ -692,6 +692,10 @@ error_code RdbSerializer::SendFullSyncCut() {
   return WriteRaw(buf);
 }
 
+size_t RdbSerializer::GetTotalBufferCapacity() const {
+  return mem_buf_.Capacity();
+}
+
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   mem_buf_.Reserve(mem_buf_.InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf_.AppendBuffer();
@@ -902,16 +906,17 @@ class RdbSaver::Impl {
 
   error_code ConsumeChannel(const Cancellation* cll);
 
-  error_code Flush() {
-    if (aligned_buf_)
-      return aligned_buf_->Flush();
-
-    return error_code{};
-  }
-
   void FillFreqMap(RdbTypeFreqMap* dest) const;
 
   error_code SaveAuxFieldStrStr(string_view key, string_view val);
+
+  void Cancel();
+
+  size_t GetTotalBuffersSize() const;
+
+  error_code Flush() {
+    return aligned_buf_ ? aligned_buf_->Flush() : error_code{};
+  }
 
   size_t Size() const {
     return shard_snapshots_.size();
@@ -920,11 +925,10 @@ class RdbSaver::Impl {
   RdbSerializer* serializer() {
     return &meta_serializer_;
   }
+
   io::Sink* sink() {
     return sink_;
   }
-
-  void Cancel();
 
  private:
   unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
@@ -936,10 +940,15 @@ class RdbSaver::Impl {
   SliceSnapshot::RecordChannel channel_;
   bool push_to_sink_with_order_ = false;
   std::optional<AlignedBuffer> aligned_buf_;
-  CompressionMode
-      compression_mode_;  // Single entry compression is compatible with redis rdb snapshot
-                          // Multi entry compression is available only on df snapshot, this will
-                          // make snapshot size smaller and opreation faster.
+
+  // Single entry compression is compatible with redis rdb snapshot
+  // Multi entry compression is available only on df snapshot, this will
+  // make snapshot size smaller and opreation faster.
+  CompressionMode compression_mode_;
+
+  struct Stats {
+    size_t pulled_bytes = 0;
+  } stats_;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1014,15 +1023,12 @@ std::optional<SliceSnapshot::DbRecord> RdbSaver::Impl::RecordsPopper::InternalPo
 
 error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   error_code io_error;
-
-  size_t channel_bytes = 0;
   std::optional<SliceSnapshot::DbRecord> record;
 
   RecordsPopper records_popper(push_to_sink_with_order_, &channel_);
 
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
-
   while ((record = records_popper.Pop())) {
     if (io_error || cll->IsCancelled())
       continue;
@@ -1032,7 +1038,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
-      channel_bytes += record->value.size();
+      stats_.pulled_bytes += record->value.size();
 
       io_error = sink_->Write(io::Buffer(record->value));
       if (io_error) {
@@ -1044,12 +1050,12 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   size_t pushed_bytes = 0;
   for (auto& ptr : shard_snapshots_) {
     ptr->Join();
-    pushed_bytes += ptr->channel_bytes();
+    pushed_bytes += ptr->pushed_bytes();
   }
 
   DCHECK(!record.has_value() || !channel_.TryPop(*record));
 
-  VLOG(1) << "Channel pulled bytes: " << channel_bytes << " pushed bytes: " << pushed_bytes;
+  VLOG(1) << "Channel pulled bytes: " << stats_.pulled_bytes << " pushed bytes: " << pushed_bytes;
 
   return io_error;
 }
@@ -1088,6 +1094,17 @@ void RdbSaver::Impl::Cancel() {
   }
 
   snapshot->Join();
+}
+
+size_t RdbSaver::Impl::GetTotalBuffersSize() const {
+  DCHECK_EQ(shard_snapshots_.size(), 1u) << "Only supported for dragonfly replication";
+  auto& snapshot = shard_snapshots_.front();
+
+  // Calculate number of enqueued bytes as difference between pushed and pulled
+  size_t enqueued_bytes = snapshot->pushed_bytes() - stats_.pulled_bytes;
+  size_t serializer_bytes = snapshot->GetTotalBufferCapacity();
+
+  return enqueued_bytes + serializer_bytes;
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -1264,6 +1281,10 @@ error_code RdbSaver::SaveAuxFieldStrInt(string_view key, int64_t val) {
 
 void RdbSaver::Cancel() {
   impl_->Cancel();
+}
+
+size_t RdbSaver::GetTotalBuffersSize() const {
+  return impl_->GetTotalBuffersSize();
 }
 
 void RdbSerializer::AllocateCompressorOnce() {
