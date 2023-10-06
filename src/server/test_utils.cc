@@ -25,6 +25,7 @@ extern "C" {
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dbfilename);
+ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 
 namespace dfly {
@@ -193,6 +194,10 @@ void BaseFamilyTest::ResetService() {
   pp_.reset(fb2::Pool::Epoll(num_threads_));
 #endif
 
+  // Using a different default than production could expose bugs
+  if (absl::GetFlag(FLAGS_num_shards) == 0) {
+    absl::SetFlag(&FLAGS_num_shards, num_threads_ - 1);
+  }
   pp_->Run();
   service_ = std::make_unique<Service>(pp_.get());
 
