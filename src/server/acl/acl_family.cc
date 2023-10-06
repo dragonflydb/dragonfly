@@ -223,7 +223,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   auto file_contents = std::move(is_file_read.value());
 
   if (file_contents.empty()) {
-    return {};
+    return {facade::ErrorReply("Empty file")};
   }
 
   std::vector<std::string> usernames;

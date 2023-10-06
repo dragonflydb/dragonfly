@@ -100,6 +100,10 @@ void UserRegistry::Init() {
   auto maybe_password = absl::GetFlag(FLAGS_requirepass);
   if (!maybe_password.empty()) {
     default_user.password = std::move(maybe_password);
+  } else if (const char* env_var = getenv("DFLY_PASSWORD"); env_var) {
+    default_user.password = env_var;
+  } else if (const char* env_var = getenv("DFLY_requirepass"); env_var) {
+    default_user.password = env_var;
   }
   MaybeAddAndUpdate("default", std::move(default_user));
 }

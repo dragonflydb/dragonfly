@@ -1213,6 +1213,8 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
   if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
+  } else {
+    res->req_auth = !user_registry_.AuthUser("default", "");
   }
 
   // a bit of a hack. I set up breaker callback here for the owner.

@@ -331,10 +331,11 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     await client.execute_command("ACL SETUSER vlad +@STRING")
 
     result = await client.execute_command("ACL LIST")
-    assert 3 == len(result)
+    assert 4 == len(result)
     assert "user roy on ea71c25a7a60224 +@STRING +HSET" in result
     assert "user shahar off ea71c25a7a60224 +@SET" in result
     assert "user vlad off nopass +@STRING" in result
+    assert "user default on nopass +@ALL +ALL" in result
 
     result = await client.execute_command("ACL DELUSER shahar")
     assert result == b"OK"
@@ -399,8 +400,10 @@ async def test_require_pass(df_local_factory):
 
     client = aioredis.Redis(port=df.port)
 
-    with pytest.raises(redis.exceptions.ResponseError):
+    with pytest.raises(redis.exceptions.AuthenticationError):
         await client.execute_command("AUTH default wrongpass")
+
+    client = aioredis.Redis(password="mypass", port=df.port)
 
     res = await client.execute_command("AUTH default mypass")
     assert res == b"OK"
