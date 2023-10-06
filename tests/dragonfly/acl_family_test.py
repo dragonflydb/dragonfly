@@ -393,7 +393,7 @@ async def test_acl_log(async_client):
 
 
 @pytest.mark.asyncio
-@dfly_args({"port": 1111, "requirepass": "mypass"})
+@dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass"})
 async def test_require_pass(df_local_factory):
     df = df_local_factory.create()
     df.start()
@@ -413,3 +413,11 @@ async def test_require_pass(df_local_factory):
 
     res = await client.execute_command("AUTH default newpass")
     assert res == b"OK"
+
+    client = aioredis.Redis(password="newpass", port=df.admin_port)
+
+    await client.execute_command("SET foo 44")
+    res = await client.execute_command("GET foo")
+    assert res == b"44"
+
+    await client.close()

@@ -14,7 +14,7 @@ namespace dfly::acl {
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx,
                                                 const facade::CommandId& id) {
   const bool is_authed =
-      IsUserAllowedToInvokeCommandGeneric(cntx.acl_categories, cntx.acl_commands, id);
+      IsUserAllowedToInvokeCommandGeneric(cntx.acl_categories, cntx.acl_commands, cntx, id);
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
@@ -27,7 +27,12 @@ namespace dfly::acl {
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommandGeneric(uint32_t acl_cat,
                                                        const std::vector<uint64_t>& acl_commands,
+                                                       const ConnectionContext& cntx,
                                                        const facade::CommandId& id) {
+  if (cntx.conn()->IsPrivileged()) {
+    return true;
+  }
+
   const auto cat_credentials = id.acl_categories();
   const size_t index = id.GetFamily();
   const uint64_t command_mask = id.GetBitIndex();

@@ -488,7 +488,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   }
 
   const auto& user = registry.find(username)->second;
-  if (IsUserAllowedToInvokeCommandGeneric(user.AclCategory(), user.AclCommandsRef(), *cid)) {
+  if (IsUserAllowedToInvokeCommandGeneric(user.AclCategory(), user.AclCommandsRef(), *cntx, *cid)) {
     (*cntx)->SendOk();
     return;
   }
