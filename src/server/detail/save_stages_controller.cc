@@ -258,14 +258,6 @@ void SaveStagesController::UpdateSaveInfo() {
 }
 
 GenericError SaveStagesController::InitResources() {
-  if (is_cloud_ && !aws_) {
-    *aws_ = make_unique<cloud::AWS>("s3");
-    if (auto ec = aws_->get()->Init(); ec) {
-      aws_->reset();
-      return {ec, "Couldn't initialize AWS"};
-    }
-  }
-
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
     snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());

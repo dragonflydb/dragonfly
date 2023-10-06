@@ -15,13 +15,10 @@
 #include "server/replica.h"
 
 namespace util {
+
 class AcceptServer;
 class ListenerInterface;
 class HttpListenerBase;
-
-namespace cloud {
-class AWS;
-}  // namespace cloud
 
 }  // namespace util
 
@@ -252,7 +249,6 @@ class ServerFamily {
 
   Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
-  std::unique_ptr<util::cloud::AWS> aws_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 };
 
