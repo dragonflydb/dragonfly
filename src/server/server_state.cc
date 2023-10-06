@@ -23,6 +23,17 @@ namespace dfly {
 
 __thread ServerState* ServerState::state_ = nullptr;
 
+ServerState::Stats& ServerState::Stats::operator+=(const ServerState::Stats& other) {
+  this->ooo_tx_cnt += other.ooo_tx_cnt;
+  this->eval_io_coordination_cnt += other.eval_io_coordination_cnt;
+  this->eval_shardlocal_coordination_cnt += other.eval_shardlocal_coordination_cnt;
+  this->eval_squashed_flushes += other.eval_squashed_flushes;
+  this->tx_schedule_cancel_cnt += other.tx_schedule_cancel_cnt;
+
+  static_assert(sizeof(Stats) == 5 * 8);
+  return *this;
+}
+
 void MonitorsRepo::Add(facade::Connection* connection) {
   VLOG(1) << "register connection "
           << " at address 0x" << std::hex << (const void*)connection << " for thread "

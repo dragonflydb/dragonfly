@@ -67,26 +67,26 @@ TEST_F(TieredStorageTest, Basic) {
 
   EXPECT_EQ(5000, CheckedInt({"dbsize"}));
   Metrics m = GetMetrics();
-  EXPECT_GT(m.db[0].tiered_entries, 0u);
+  EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
 
   FillExternalKeys(5000);
   usleep(20000);  // 0.02 milliseconds
 
   m = GetMetrics();
-  DbStats stats = m.db[0];
+  DbStats stats = m.db_stats[0];
 
   LOG(INFO) << stats;
-  unsigned tiered_entries = m.db[0].tiered_entries;
+  unsigned tiered_entries = m.db_stats[0].tiered_entries;
   EXPECT_GT(tiered_entries, 0u);
   string resp = CheckedString({"debug", "object", "k1"});
   EXPECT_THAT(resp, HasSubstr("spill_len"));
   m = GetMetrics();
-  LOG(INFO) << m.db[0];
-  ASSERT_EQ(tiered_entries, m.db[0].tiered_entries);
+  LOG(INFO) << m.db_stats[0];
+  ASSERT_EQ(tiered_entries, m.db_stats[0].tiered_entries);
 
   Run({"del", "k1"});
   m = GetMetrics();
-  EXPECT_EQ(m.db[0].tiered_entries, tiered_entries - 1);
+  EXPECT_EQ(m.db_stats[0].tiered_entries, tiered_entries - 1);
 }
 
 }  // namespace dfly

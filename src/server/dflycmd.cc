@@ -680,7 +680,7 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   return {};
 }
 
-std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
+std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
 
@@ -692,6 +692,29 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
                                   replication_lags[id]});
   }
   return vec;
+}
+
+void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
+  Mutex stats_mu;
+
+  lock_guard lk_main{mu_};  // prevent state changes
+  auto cb = [this, &stats, &stats_mu](EngineShard* shard) {
+    lock_guard lk{stats_mu};
+    for (const auto& [_, info] : replica_infos_) {
+      lock_guard repl_lk{info->mu};
+      if (info->flows.empty())
+        continue;
+
+      const auto& flow = info->flows[shard->shard_id()];
+
+      if (flow.streamer)
+        stats->streamer_buf_capacity_bytes_ += flow.streamer->GetTotalBufferCapacities();
+
+      if (flow.saver)
+        stats->full_sync_buf_bytes_ += flow.saver->GetTotalBuffersSize();
+    }
+  };
+  shard_set->RunBlockingInParallel(cb);
 }
 
 pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
@@ -714,6 +737,7 @@ pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
 }
 
 std::map<uint32_t, LSN> DflyCmd::ReplicationLags() const {
+  DCHECK(!mu_.try_lock());  // expects to be under global lock
   if (replica_infos_.empty())
     return {};
 
