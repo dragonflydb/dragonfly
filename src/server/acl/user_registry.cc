@@ -7,7 +7,7 @@
 #include <limits>
 #include <mutex>
 
-#include "absl/flags/internal/flag.h"
+#include "base/flags.h"
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
