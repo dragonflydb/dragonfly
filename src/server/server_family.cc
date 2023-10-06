@@ -1020,8 +1020,10 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   // non admin port auth
   if (!cntx->conn()->IsPrivileged()) {
     const auto* registry = ServerState::tlocal()->user_registry;
-    std::string_view username = args.size() == 2 ? facade::ToSV(args[0]) : "default";
-    std::string_view password = facade::ToSV(args[1]);
+    const bool one_arg = args.size() == 1;
+    std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
+    const size_t index = one_arg ? 0 : 1;
+    std::string_view password = facade::ToSV(args[index]);
     auto is_authorized = registry->AuthUser(username, password);
     if (is_authorized) {
       cntx->authed_username = username;
