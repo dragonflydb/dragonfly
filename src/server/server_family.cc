@@ -51,8 +51,7 @@ extern "C" {
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
-#include "util/cloud/aws.h"
-#include "util/cloud/s3.h"
+#include "util/aws/aws.h"
 #include "util/fibers/fiber_file.h"
 
 using namespace std;
@@ -89,6 +88,17 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "Specifies a host and port which point to a target master "
           "to replicate. "
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
+
+ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
+// Disable EC2 metadata by default, or if a users credentials are invalid the
+// AWS client will spent 30s trying to connect to inaccessable EC2 endpoints
+// to load the credentials.
+ABSL_FLAG(bool, s3_ec2_metadata, false,
+          "whether to load credentials and configuration from EC2 metadata");
+// Enables S3 payload signing over HTTP. This reduces the latency and resource
+// usage when writing snapshots to S3, at the expense of security.
+ABSL_FLAG(bool, s3_sign_payload, true,
+          "whether to sign the s3 request payload when uploading snapshots");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -422,12 +432,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
-    aws_ = make_unique<cloud::AWS>("s3");
-    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return aws_->Init(); });
-    if (ec) {
-      LOG(FATAL) << "Failed to initialize AWS " << ec;
-    }
-    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(aws_.get());
+    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
+    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
+        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_ec2_metadata),
+        absl::GetFlag(FLAGS_s3_sign_payload));
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -898,9 +906,9 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  SaveStagesController sc{detail::SaveStagesInputs{
-      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
-      &save_mu_, &aws_, snapshot_storage_}};
+  SaveStagesController sc{detail::SaveStagesInputs{new_version, basename, trans, &service_,
+                                                   &is_saving_, fq_threadpool_.get(),
+                                                   &last_save_info_, &save_mu_, snapshot_storage_}};
   return sc.Save();
 }
 
