@@ -389,3 +389,24 @@ async def test_acl_log(async_client):
 
     res = await async_client.execute_command("ACL LOG")
     assert 2 == len(res)
+
+
+@pytest.mark.asyncio
+@dfly_args({"port": 1111, "requirepass": "mypass"})
+async def test_require_pass(df_local_factory):
+    df = df_local_factory.create()
+    df.start()
+
+    client = aioredis.Redis(port=df.port)
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command("AUTH default wrongpass")
+
+    res = await client.execute_command("AUTH default mypass")
+    assert res == b"OK"
+
+    res = await client.execute_command("CONFIG set requirepass newpass")
+    assert res == b"OK"
+
+    res = await client.execute_command("AUTH default newpass")
+    assert res == b"OK"

@@ -652,7 +652,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.Register("dbnum");       // equivalent to databases in redis.
   config_registry.RegisterMutable("dir");  // TODO: to add validation for dir
-  config_registry.RegisterMutable("requirepass");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
@@ -1212,9 +1211,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
 
-  if (owner->IsPrivileged() && !RequirePrivilegedAuth()) {
-    res->req_auth = false;
-  } else {
+  if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   }
 
