@@ -281,8 +281,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   queue_backpressure_ = &tl_queue_backpressure_;
   if (queue_backpressure_->limit == 0) {
+    queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
   }
-  queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
 }
 
 Connection::~Connection() {
