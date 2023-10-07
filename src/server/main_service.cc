@@ -605,6 +605,32 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+// Either take the interpreter from the preborrowed multi exec transaction or borrow one.
+struct BorrowedInterpreter {
+  explicit BorrowedInterpreter(ConnectionContext* cntx) {
+    if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
+      DCHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
+      interpreter_ = borrowed;
+    } else {
+      interpreter_ = ServerState::tlocal()->BorrowInterpreter();
+      owned_ = true;
+    }
+  }
+
+  ~BorrowedInterpreter() {
+    if (owned_)
+      ServerState::tlocal()->ReturnInterpreter(interpreter_);
+  }
+
+  operator Interpreter*() {
+    return interpreter_;
+  }
+
+ private:
+  Interpreter* interpreter_ = nullptr;
+  bool owned_ = false;
+};
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1396,10 +1422,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendNull();
   }
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
-
+  BorrowedInterpreter interpreter{cntx};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
@@ -1413,10 +1436,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ToLower(&args[0]);
   string_view sha = ArgS(args, 0);
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
-
+  BorrowedInterpreter interpreter{cntx};
   CallSHA(args, sha, interpreter, cntx);
 }
 
@@ -1821,6 +1841,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
+  if (state != ExecEvalState::NONE)
+    exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
+
   if (!exec_info.body.empty()) {
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
@@ -1850,6 +1873,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   }
+
+  if (exec_info.preborrowed_interpreter)
+    ServerState::tlocal()->ReturnInterpreter(exec_info.preborrowed_interpreter);
 
   if (scheduled) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
