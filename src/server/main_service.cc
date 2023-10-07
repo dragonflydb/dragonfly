@@ -610,25 +610,25 @@ struct BorrowedInterpreter {
   explicit BorrowedInterpreter(ConnectionContext* cntx) {
     if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
       DCHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
-      interpreter = borrowed;
+      interpreter_ = borrowed;
     } else {
-      interpreter = ServerState::tlocal()->BorrowInterpreter();
-      owned = true;
+      interpreter_ = ServerState::tlocal()->BorrowInterpreter();
+      owned_ = true;
     }
   }
 
   ~BorrowedInterpreter() {
-    if (owned)
-      ServerState::tlocal()->ReturnInterpreter(interpreter);
+    if (owned_)
+      ServerState::tlocal()->ReturnInterpreter(interpreter_);
   }
 
   operator Interpreter*() {
-    return interpreter;
+    return interpreter_;
   }
 
  private:
-  Interpreter* interpreter = nullptr;
-  bool owned = false;
+  Interpreter* interpreter_ = nullptr;
+  bool owned_ = false;
 };
 
 }  // namespace
