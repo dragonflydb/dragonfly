@@ -194,6 +194,18 @@ class Connection : public util::Connection {
   struct DispatchCleanup;
   struct Shutdown;
 
+  // Keeps track of total per-thread sizes of dispatch queues to
+  // limit memory taken up by pipelined / pubsub commands and slow down clients
+  // producing them to quickly via EnsureAsyncMemoryBudget.
+  struct QueueBackpressure {
+    // Block until memory usage is below limit, can be called from any thread
+    void EnsureBelowLimit();
+
+    dfly::EventCount ec;
+    std::atomic_size_t bytes = 0;
+    size_t limit = 0;
+  };
+
  private:
   // Check protocol and handle connection.
   void HandleRequests() final;
@@ -269,22 +281,17 @@ class Connection : public util::Connection {
   RespVec tmp_parse_args_;
   CmdArgVec tmp_cmd_vec_;
 
+  // Pointer to corresponding queue backpressure struct.
+  // Needed for access from different threads by EnsureAsyncMemoryBudget().
+  QueueBackpressure* queue_backpressure_;
+
   // Pooled pipieline messages per-thread.
   // Aggregated while handling pipelines,
   // graudally released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
 
-  // Keeps track of total per-thread sizes of dispatch queues to
-  // limit memory taken up by pipelined / pubsub commands and slow down clients
-  // producing them to quickly via EnsureAsyncMemoryBudget.
-  struct QueueBackpressure {
-    void EnsureBelowLimit();  // block until memory usage is above limit
-
-    dfly::EventCount ec;
-    std::atomic_size_t bytes = 0;
-    size_t limit = 0;
-  };
-  static thread_local QueueBackpressure queue_backpressure_;
+  // Per-thread queue backpressure structs.
+  static thread_local QueueBackpressure tl_queue_backpressure_;
 };
 
 }  // namespace facade

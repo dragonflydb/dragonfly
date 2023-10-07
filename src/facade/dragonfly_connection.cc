@@ -100,7 +100,7 @@ thread_local uint32_t free_req_release_weight = 0;
 }  // namespace
 
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
-thread_local Connection::QueueBackpressure Connection::queue_backpressure_;
+thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
 
 void Connection::QueueBackpressure::EnsureBelowLimit() {
   ec.await([this] { return bytes.load(memory_order_relaxed) <= limit; });
@@ -279,8 +279,10 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   last_interaction_ = creation_time_;
   id_ = next_id.fetch_add(1, memory_order_relaxed);
 
-  if (queue_backpressure_.limit == 0)
-    queue_backpressure_.limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
+  queue_backpressure_ = &tl_queue_backpressure_;
+  if (queue_backpressure_->limit == 0) {
+  }
+  queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
 }
 
 Connection::~Connection() {
@@ -884,7 +886,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     auto recycle = [this, request_cache_limit](MessageHandle msg) {
       size_t used_mem = msg.UsedMemory();
-      queue_backpressure_.bytes.fetch_sub(used_mem, memory_order_relaxed);
+      queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
 
       stats_->dispatch_queue_bytes -= used_mem;
       stats_->dispatch_queue_entries--;
@@ -943,7 +945,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       recycle(move(msg));
     }
 
-    queue_backpressure_.ec.notify();
+    queue_backpressure_->ec.notify();
   }
 
   cc_->conn_closing = true;
@@ -1067,7 +1069,7 @@ void Connection::SendAsync(MessageHandle msg) {
   };
 
   size_t used_mem = msg.UsedMemory();
-  queue_backpressure_.bytes.fetch_add(used_mem, memory_order_relaxed);
+  queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
 
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
@@ -1090,7 +1092,7 @@ void Connection::SendAsync(MessageHandle msg) {
 }
 
 void Connection::EnsureAsyncMemoryBudget() {
-  queue_backpressure_.EnsureBelowLimit();
+  queue_backpressure_->EnsureBelowLimit();
 }
 
 std::string Connection::RemoteEndpointStr() const {
