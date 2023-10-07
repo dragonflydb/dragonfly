@@ -607,7 +607,7 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
 
 // Either take the interpreter from the preborrowed multi exec transaction or borrow one.
 struct BorrowedInterpreter {
-  BorrowedInterpreter(ConnectionContext* cntx) {
+  explicit BorrowedInterpreter(ConnectionContext* cntx) {
     if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
       DCHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
       interpreter = borrowed;
@@ -626,6 +626,7 @@ struct BorrowedInterpreter {
     return interpreter;
   }
 
+ private:
   Interpreter* interpreter = nullptr;
   bool owned = false;
 };
