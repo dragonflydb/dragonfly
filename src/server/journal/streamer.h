@@ -29,6 +29,8 @@ class JournalStreamer : protected BufferedStreamerBase {
   // and manual cleanup.
   void Cancel();
 
+  using BufferedStreamerBase::GetTotalBufferCapacities;
+
  private:
   // Writer fiber that steals buffer contents and writes them to dest.
   void WriterFb(io::Sink* dest);
