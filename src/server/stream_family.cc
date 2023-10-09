@@ -911,7 +911,7 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
   return result;
 }
 
-vector<Record> GetStreamRecords(stream* s, streamID start, streamID end, int reverse,
+vector<Record> GetStreamRecords(stream* s, streamID start, streamID end, bool reverse,
                                 size_t count) {
   streamIterator si;
   int64_t numfields;
@@ -1030,7 +1030,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
   sinfo.entries_added = s->entries_added;
   sinfo.recorded_first_entry_id = s->first_id;
   sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
-  sinfo.entries = GetStreamRecords(s, s->first_id, s->last_id, 0, count);
+  sinfo.entries = GetStreamRecords(s, s->first_id, s->last_id, false, count);
 
   if (full) {
     if (s->cgroups) {
@@ -1059,12 +1059,11 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
       sinfo.cgroups = group_info_vec;
     }
   } else {
-    sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
-    vector<Record> first_entry_vector = GetStreamRecords(s, s->first_id, s->last_id, 0, 1);
+    vector<Record> first_entry_vector = GetStreamRecords(s, s->first_id, s->last_id, false, 1);
     if (first_entry_vector.size() != 0) {
       sinfo.first_entry = first_entry_vector.at(0);
     }
-    vector<Record> last_entry_vector = GetStreamRecords(s, s->first_id, s->last_id, 1, 1);
+    vector<Record> last_entry_vector = GetStreamRecords(s, s->first_id, s->last_id, true, 1);
     if (last_entry_vector.size() != 0) {
       sinfo.last_entry = last_entry_vector.at(0);
     }
@@ -1083,8 +1082,8 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
   vector<ConsumerInfo> result;
   CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
-
-  streamCG* cg = streamLookupCG(s, sdsnewlen(group_name.data(), group_name.length()));
+  shard->tmp_str1 = sdscpylen(shard->tmp_str1, group_name.data(), group_name.length());
+  streamCG* cg = streamLookupCG(s, shard->tmp_str1);
   if (cg == NULL) {
     return OpStatus::INVALID_VALUE;
   }
