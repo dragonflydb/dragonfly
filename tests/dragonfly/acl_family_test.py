@@ -408,7 +408,7 @@ async def test_require_pass(df_local_factory):
     res = await client.execute_command("AUTH default mypass")
     assert res == b"OK"
 
-    res = await client.execute_command("CONFIG set requirepass newpass")
+    res = await client.execute_command("CONFIG SET requirepass newpass")
     assert res == b"OK"
 
     res = await client.execute_command("AUTH default newpass")
