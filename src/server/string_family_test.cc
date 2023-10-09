@@ -48,7 +48,7 @@ TEST_F(StringFamilyTest, SetGet) {
   EXPECT_EQ(Run({"get", "key"}), "2");
 
   auto metrics = GetMetrics();
-  EXPECT_EQ(6, metrics.ooo_tx_transaction_cnt);
+  EXPECT_EQ(6, metrics.coordinator_stats.ooo_tx_cnt);
 }
 
 TEST_F(StringFamilyTest, Incr) {

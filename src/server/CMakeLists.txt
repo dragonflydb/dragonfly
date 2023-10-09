@@ -14,7 +14,7 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
 endif()
 
 
-add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc
+add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -28,7 +28,7 @@ if (NOT APPLE)
   cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
 endif()
 
-add_library(dragonfly_lib channel_store.cc command_registry.cc
+add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc json_family.cc
             ${SEARCH_FILES}
@@ -46,7 +46,7 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
 
-cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
+cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
          TRDP::croncpp)
 
@@ -70,7 +70,7 @@ cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
-cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
+cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(snapshot_test dragonfly_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)

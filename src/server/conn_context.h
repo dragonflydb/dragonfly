@@ -19,6 +19,7 @@ namespace dfly {
 class EngineShardSet;
 class ConnectionContext;
 class ChannelStore;
+class Interpreter;
 struct FlowInfo;
 
 // Stores command id and arguments for delayed invocation.
@@ -81,12 +82,16 @@ struct ConnectionState {
 
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
-    // List of keys registered with WATCH
-    std::vector<std::pair<DbIndex, std::string>> watched_keys;
-    // Set if a watched key was changed before EXEC
-    std::atomic_bool watched_dirty = false;
-    // Number of times watch was called on an existing key.
-    uint32_t watched_existed = 0;
+
+    std::vector<std::pair<DbIndex, std::string>> watched_keys;  // List of keys registered by WATCH
+    std::atomic_bool watched_dirty = false;  // Set if a watched key was changed before EXEC
+    uint32_t watched_existed = 0;            // Number of times watch was called on an existing key
+
+    // If the transaction contains EVAL calls, preborrow an interpreter that will be used for all of
+    // them. This has to be done to avoid potentially blocking when borrowing interpreters amid
+    // executing the multi transaction, which can create deadlocks by blocking other transactions
+    // that already borrowed all available interpreters but wait for keys to be unlocked.
+    Interpreter* preborrowed_interpreter = nullptr;
   };
 
   // Lua-script related data.

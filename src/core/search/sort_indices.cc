@@ -18,6 +18,10 @@ using namespace std;
 namespace {}  // namespace
 
 template <typename T>
+SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr) : values_{mr} {
+}
+
+template <typename T>
 std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
                                                        bool desc) const {
   auto cb = [this, desc](const auto& lhs, const auto& rhs) {
@@ -44,8 +48,12 @@ void SimpleValueSortIndex<T>::Remove(DocId id, DocumentAccessor* doc, std::strin
   values_[id] = T{};
 }
 
+template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {
+  return values_.get_allocator().resource();
+}
+
 template struct SimpleValueSortIndex<int64_t>;
-template struct SimpleValueSortIndex<std::string>;
+template struct SimpleValueSortIndex<PMR_NS::string>;
 
 int64_t NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
   int64_t v;
@@ -54,8 +62,8 @@ int64_t NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view 
   return v;
 }
 
-std::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
-  return string{doc->GetString(field)};
+PMR_NS::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
+  return PMR_NS::string{doc->GetString(field), GetMemRes()};
 }
 
 }  // namespace dfly::search

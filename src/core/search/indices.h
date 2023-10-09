@@ -11,6 +11,7 @@
 #include <optional>
 #include <vector>
 
+#include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 #include "core/search/compressed_sorted_set.h"
 
@@ -19,17 +20,22 @@ namespace dfly::search {
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
+  explicit NumericIndex(PMR_NS::memory_resource* mr);
+
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
   std::vector<DocId> Range(int64_t l, int64_t r) const;
 
  private:
-  absl::btree_set<std::pair<int64_t, DocId>> entries_;
+  using Entry = std::pair<int64_t, DocId>;
+  absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
 };
 
 // Base index for string based indices.
 struct BaseStringIndex : public BaseIndex {
+  BaseStringIndex(PMR_NS::memory_resource* mr);
+
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
@@ -40,18 +46,48 @@ struct BaseStringIndex : public BaseIndex {
   const CompressedSortedSet* Matching(std::string_view str) const;
 
  protected:
-  absl::flat_hash_map<std::string, CompressedSortedSet> entries_;
+  CompressedSortedSet* GetOrCreate(std::string_view word);
+
+  struct PmrEqual {
+    using is_transparent = void;
+    bool operator()(const PMR_NS::string& lhs, const PMR_NS::string& rhs) const {
+      return lhs == rhs;
+    }
+    bool operator()(const PMR_NS::string& lhs, const std::string_view& rhs) const {
+      return lhs == rhs;
+    }
+  };
+
+  struct PmrHash {
+    using is_transparent = void;
+    size_t operator()(const std::string_view& sv) const {
+      return absl::Hash<std::string_view>()(sv);
+    }
+    size_t operator()(const PMR_NS::string& pmrs) const {
+      return operator()(std::string_view{pmrs.data(), pmrs.size()});
+    }
+  };
+
+  absl::flat_hash_map<PMR_NS::string, CompressedSortedSet, PmrHash, PmrEqual,
+                      PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, CompressedSortedSet>>>
+      entries_;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TextIndex : public BaseStringIndex {
+  TextIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
+  }
+
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex {
+  TagIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
+  }
+
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
 };
 
@@ -68,7 +104,7 @@ struct BaseVectorIndex : public BaseIndex {
 // Index for vector fields.
 // Only supports lookup by id.
 struct FlatVectorIndex : public BaseVectorIndex {
-  FlatVectorIndex(size_t dim, VectorSimilarity sim);
+  FlatVectorIndex(size_t dim, VectorSimilarity sim, PMR_NS::memory_resource* mr);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -76,13 +112,13 @@ struct FlatVectorIndex : public BaseVectorIndex {
   const float* Get(DocId doc) const;
 
  private:
-  std::vector<float> entries_;
+  PMR_NS::vector<float> entries_;
 };
 
 struct HnswlibAdapter;
 
 struct HnswVectorIndex : public BaseVectorIndex {
-  HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity);
+  HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;

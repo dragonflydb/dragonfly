@@ -95,6 +95,30 @@ TEST_F(SearchFamilyTest, InfoIndex) {
                                   "num_docs", IntArg(15))));
 }
 
+TEST_F(SearchFamilyTest, Stats) {
+  EXPECT_EQ(
+      Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc1-", "SCHEMA", "name", "TEXT"}),
+      "OK");
+
+  EXPECT_EQ(
+      Run({"ft.create", "idx-2", "ON", "HASH", "PREFIX", "1", "doc2-", "SCHEMA", "name", "TEXT"}),
+      "OK");
+
+  for (size_t i = 0; i < 50; i++) {
+    Run({"hset", absl::StrCat("doc1-", i), "name", absl::StrCat("Name of", i)});
+    Run({"hset", absl::StrCat("doc2-", i), "name", absl::StrCat("Name of", i)});
+  }
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.search_stats.num_indices, 2);
+  EXPECT_EQ(metrics.search_stats.num_entries, 50 * 2);
+
+  size_t expected_usage = 2 * (50 + 3 /* number of distinct words*/) * (24 + 48 /* kv size */) +
+                          50 * 2 * 1 /* posting list entries */;
+  EXPECT_GE(metrics.search_stats.used_memory, expected_usage);
+  EXPECT_LE(metrics.search_stats.used_memory, 3 * expected_usage);
+}
+
 TEST_F(SearchFamilyTest, Simple) {
   Run({"hset", "d:1", "foo", "baz", "k", "v"});
   Run({"hset", "d:2", "foo", "bar", "k", "v"});

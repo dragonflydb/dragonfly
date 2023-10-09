@@ -440,25 +440,26 @@ struct BasicSearch {
 
 }  // namespace
 
-FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, indices_{} {
-  CreateIndices();
-  CreateSortIndices();
+FieldIndices::FieldIndices(Schema schema, PMR_NS::memory_resource* mr)
+    : schema_{move(schema)}, all_ids_{}, indices_{} {
+  CreateIndices(mr);
+  CreateSortIndices(mr);
 }
 
-void FieldIndices::CreateIndices() {
+void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
   for (const auto& [field_ident, field_info] : schema_.fields) {
     if ((field_info.flags & SchemaField::NOINDEX) > 0)
       continue;
 
     switch (field_info.type) {
       case SchemaField::TAG:
-        indices_[field_ident] = make_unique<TagIndex>();
+        indices_[field_ident] = make_unique<TagIndex>(mr);
         break;
       case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>();
+        indices_[field_ident] = make_unique<TextIndex>(mr);
         break;
       case SchemaField::NUMERIC:
-        indices_[field_ident] = make_unique<NumericIndex>();
+        indices_[field_ident] = make_unique<NumericIndex>(mr);
         break;
       case SchemaField::VECTOR:
         unique_ptr<BaseVectorIndex> vector_index;
@@ -467,9 +468,10 @@ void FieldIndices::CreateIndices() {
         const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
 
         if (vparams.use_hnsw)
-          vector_index = make_unique<HnswVectorIndex>(vparams.dim, vparams.sim, vparams.capacity);
+          vector_index =
+              make_unique<HnswVectorIndex>(vparams.dim, vparams.sim, vparams.capacity, mr);
         else
-          vector_index = make_unique<FlatVectorIndex>(vparams.dim, vparams.sim);
+          vector_index = make_unique<FlatVectorIndex>(vparams.dim, vparams.sim, mr);
 
         indices_[field_ident] = std::move(vector_index);
         break;
@@ -477,7 +479,7 @@ void FieldIndices::CreateIndices() {
   }
 }
 
-void FieldIndices::CreateSortIndices() {
+void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
   for (const auto& [field_ident, field_info] : schema_.fields) {
     if ((field_info.flags & SchemaField::SORTABLE) == 0)
       continue;
@@ -485,10 +487,10 @@ void FieldIndices::CreateSortIndices() {
     switch (field_info.type) {
       case SchemaField::TAG:
       case SchemaField::TEXT:
-        sort_indices_[field_ident] = make_unique<StringSortIndex>();
+        sort_indices_[field_ident] = make_unique<StringSortIndex>(mr);
         break;
       case SchemaField::NUMERIC:
-        sort_indices_[field_ident] = make_unique<NumericSortIndex>();
+        sort_indices_[field_ident] = make_unique<NumericSortIndex>(mr);
         break;
       case SchemaField::VECTOR:
         break;

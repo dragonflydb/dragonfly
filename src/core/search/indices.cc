@@ -55,6 +55,9 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist) {
 
 };  // namespace
 
+NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
+}
+
 void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   int64_t num;
   if (absl::SimpleAtoi(doc->GetString(field), &num))
@@ -79,6 +82,9 @@ vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
   return out;
 }
 
+BaseStringIndex::BaseStringIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
+}
+
 const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
   str = absl::StripAsciiWhitespace(str);
 
@@ -92,14 +98,24 @@ const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
+CompressedSortedSet* BaseStringIndex::GetOrCreate(string_view word) {
+  auto* mr = entries_.get_allocator().resource();
+  return &entries_.try_emplace(PMR_NS::string{word, mr}, mr).first->second;
+}
+
 void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   for (const auto& word : Tokenize(doc->GetString(field)))
-    entries_[word].Insert(id);
+    GetOrCreate(word)->Insert(id);
 }
 
 void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  for (const auto& word : Tokenize(doc->GetString(field)))
-    entries_[word].Remove(id);
+  for (const auto& word : Tokenize(doc->GetString(field))) {
+    if (auto it = entries_.find(word); it != entries_.end()) {
+      it->second.Remove(id);
+      if (it->second.Size() == 0)
+        entries_.erase(it);
+    }
+  }
 }
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
@@ -117,8 +133,8 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
   return {dim_, sim_};
 }
 
-FlatVectorIndex::FlatVectorIndex(size_t dim, VectorSimilarity sim)
-    : BaseVectorIndex{dim, sim}, entries_{} {
+FlatVectorIndex::FlatVectorIndex(size_t dim, VectorSimilarity sim, PMR_NS::memory_resource* mr)
+    : BaseVectorIndex{dim, sim}, entries_{mr} {
 }
 
 void FlatVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
@@ -201,8 +217,10 @@ struct HnswlibAdapter {
   hnswlib::HierarchicalNSW<float> world_;
 };
 
-HnswVectorIndex::HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity)
+HnswVectorIndex::HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity,
+                                 PMR_NS::memory_resource*)
     : BaseVectorIndex{dim, sim}, adapter_{make_unique<HnswlibAdapter>(dim, sim, capacity)} {
+  // TODO: Patch hnsw to use MR
 }
 
 HnswVectorIndex::~HnswVectorIndex() {

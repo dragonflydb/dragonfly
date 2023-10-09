@@ -5,13 +5,21 @@
 
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
+#include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/s3/S3Client.h>
+#include <aws/s3/model/ListObjectsV2Request.h>
+#include <aws/s3/model/PutObjectRequest.h>
 
 #include <regex>
 
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
-#include "util/cloud/s3.h"
+#include "util/aws/aws.h"
+#include "util/aws/credentials_provider_chain.h"
+#include "util/aws/s3_endpoint_provider.h"
+#include "util/aws/s3_read_file.h"
+#include "util/aws/s3_write_file.h"
 #include "util/fibers/fiber_file.h"
 
 namespace dfly {
@@ -166,30 +174,44 @@ io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPath
   return paths;
 }
 
-AwsS3SnapshotStorage::AwsS3SnapshotStorage(util::cloud::AWS* aws) : aws_{aws} {
+AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2_metadata,
+                                           bool sign_payload) {
+  shard_set->pool()->GetNextProactor()->Await([&] {
+    if (!ec2_metadata) {
+      setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
+    }
+    // S3ClientConfiguration may request configuration and credentials from
+    // EC2 metadata so must be run in a proactor thread.
+    Aws::S3::S3ClientConfiguration s3_conf{};
+    if (!sign_payload) {
+      s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::ForceNever;
+    }
+    std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider =
+        std::make_shared<util::aws::CredentialsProviderChain>();
+    // Pass a custom endpoint. If empty uses the S3 endpoint.
+    std::shared_ptr<Aws::S3::S3EndpointProviderBase> endpoint_provider =
+        std::make_shared<util::aws::S3EndpointProvider>(endpoint);
+    s3_ = std::make_shared<Aws::S3::S3Client>(credentials_provider, endpoint_provider, s3_conf);
+  });
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  DCHECK(aws_);
+  util::fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+  return proactor->Await([&]() -> io::Result<std::pair<io::Sink*, uint8_t>, GenericError> {
+    std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(path);
+    if (!bucket_path) {
+      return nonstd::make_unexpected(GenericError("Invalid S3 path"));
+    }
+    auto [bucket, key] = *bucket_path;
+    io::Result<util::aws::S3WriteFile> file = util::aws::S3WriteFile::Open(bucket, key, s3_);
+    if (!file) {
+      return nonstd::make_unexpected(GenericError(file.error(), "Failed to open write file"));
+    }
 
-  std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(path);
-  if (!bucket_path) {
-    return nonstd::make_unexpected(GenericError("Invalid S3 path"));
-  }
-  auto [bucket_name, obj_path] = *bucket_path;
-
-  util::cloud::S3Bucket bucket(*aws_, bucket_name);
-  std::error_code ec = bucket.Connect(kBucketConnectMs);
-  if (ec) {
-    return nonstd::make_unexpected(GenericError(ec, "Couldn't connect to S3 bucket"));
-  }
-  auto res = bucket.OpenWriteFile(obj_path);
-  if (!res) {
-    return nonstd::make_unexpected(GenericError(res.error(), "Couldn't open file for writing"));
-  }
-
-  return std::pair<io::Sink*, uint8_t>(*res, FileType::CLOUD);
+    util::aws::S3WriteFile* f = new util::aws::S3WriteFile(std::move(*file));
+    return std::pair<io::Sink*, uint8_t>(f, FileType::CLOUD);
+  });
 }
 
 io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
@@ -197,18 +219,8 @@ io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& pa
   if (!bucket_path) {
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
   }
-  auto [bucket_name, obj_path] = *bucket_path;
-
-  util::cloud::S3Bucket bucket{*aws_, bucket_name};
-  std::error_code ec = bucket.Connect(kBucketConnectMs);
-  if (ec) {
-    return nonstd::make_unexpected(GenericError(ec, "Couldn't connect to S3 bucket"));
-  }
-  auto res = bucket.OpenReadFile(obj_path);
-  if (!res) {
-    return nonstd::make_unexpected(GenericError(res.error(), "Couldn't open file for reading"));
-  }
-  return res;
+  auto [bucket, key] = *bucket_path;
+  return new util::aws::S3ReadFile(bucket, key, s3_);
 }
 
 io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string_view dir,
@@ -312,19 +324,29 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPat
 
 io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObjects(
     std::string_view bucket_name, std::string_view prefix) {
-  util::cloud::S3Bucket bucket(*aws_, bucket_name);
-  std::error_code ec = bucket.Connect(kBucketConnectMs);
-  if (ec) {
-    return nonstd::make_unexpected(GenericError{ec, "Couldn't connect to S3 bucket"});
-  }
-
+  // Each list objects request has a 1000 object limit, so page through the
+  // objects if needed.
+  std::string continuation_token;
   std::vector<std::string> keys;
-  ec = bucket.ListAllObjects(
-      prefix, [&](size_t sz, std::string_view name) { keys.push_back(std::string(name)); });
-  if (ec) {
-    return nonstd::make_unexpected(GenericError{ec, "Couldn't list objects in S3 bucket"});
-  }
+  do {
+    Aws::S3::Model::ListObjectsV2Request request;
+    request.SetBucket(std::string(bucket_name));
+    request.SetPrefix(std::string(prefix));
+    if (!continuation_token.empty()) {
+      request.SetContinuationToken(continuation_token);
+    }
 
+    Aws::S3::Model::ListObjectsV2Outcome outcome = s3_->ListObjectsV2(request);
+    if (outcome.IsSuccess()) {
+      continuation_token = outcome.GetResult().GetNextContinuationToken();
+      for (const auto& object : outcome.GetResult().GetContents()) {
+        keys.push_back(object.GetKey());
+      }
+    } else {
+      return nonstd::make_unexpected(GenericError{"Failed list objects in S3 bucket: " +
+                                                  outcome.GetError().GetExceptionName()});
+    }
+  } while (!continuation_token.empty());
   return keys;
 }
 

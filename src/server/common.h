@@ -136,6 +136,14 @@ struct TieredStats {
   TieredStats& operator+=(const TieredStats&);
 };
 
+struct SearchStats {
+  size_t used_memory = 0;
+  size_t num_indices = 0;
+  size_t num_entries = 0;
+
+  SearchStats& operator+=(const SearchStats&);
+};
+
 enum class GlobalState : uint8_t {
   ACTIVE,
   LOADING,

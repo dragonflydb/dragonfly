@@ -98,6 +98,8 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t eval_squashed_flushes = 0;
 
     uint64_t tx_schedule_cancel_cnt = 0;
+
+    Stats& operator+=(const Stats& other);
   };
 
   static ServerState* tlocal() {
