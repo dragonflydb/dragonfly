@@ -7,9 +7,12 @@
 #include <limits>
 #include <mutex>
 
+#include "base/flags.h"
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
+
+ABSL_DECLARE_FLAG(std::string, requirepass);
 
 namespace dfly::acl {
 
@@ -89,7 +92,20 @@ User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
 void UserRegistry::Init() {
   // Add default user
   User::UpdateRequest::CommandsUpdateType tmp(NumberOfFamilies());
-  MaybeAddAndUpdate("default", DefaultUserUpdateRequest());
+  // if there exists an acl file to load from, requirepass
+  // will not overwrite the default's user password loaded from
+  // that file. Loading the default's user password from a file
+  // has higher priority than the deprecated flag
+  auto default_user = DefaultUserUpdateRequest();
+  auto maybe_password = absl::GetFlag(FLAGS_requirepass);
+  if (!maybe_password.empty()) {
+    default_user.password = std::move(maybe_password);
+  } else if (const char* env_var = getenv("DFLY_PASSWORD"); env_var) {
+    default_user.password = env_var;
+  } else if (const char* env_var = getenv("DFLY_requirepass"); env_var) {
+    default_user.password = env_var;
+  }
+  MaybeAddAndUpdate("default", std::move(default_user));
 }
 
 }  // namespace dfly::acl
