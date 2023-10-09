@@ -1761,6 +1761,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
   ConnectionContext ctxt{&sink, nullptr};
+  ctxt.skip_acl_validation = true;
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)
