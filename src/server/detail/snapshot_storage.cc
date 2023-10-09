@@ -35,8 +35,9 @@ std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_vie
   std::string_view clean = absl::StripPrefix(path, kS3Prefix);
 
   size_t pos = clean.find('/');
-  if (pos == std::string_view::npos)
-    return std::nullopt;
+  if (pos == std::string_view::npos) {
+    return std::make_pair(std::string(clean), "");
+  }
 
   std::string bucket_name{clean.substr(0, pos)};
   std::string obj_path{clean.substr(pos + 1)};
