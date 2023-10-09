@@ -18,6 +18,8 @@
 #include <filesystem>
 #include <optional>
 
+#include "facade/error.h"
+
 extern "C" {
 #include "redis/redis_aux.h"
 }
@@ -1036,7 +1038,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
+    return (*cntx)->SendError(facade::kAuthRejected);
   }
 
   if (!cntx->req_auth) {

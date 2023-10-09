@@ -77,6 +77,14 @@ const CommandId* StoredCmd::Cid() const {
   return cid_;
 }
 
+ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* owner)
+    : facade::ConnectionContext(stream, owner) {
+  if (owner) {
+    skip_acl_validation = owner->IsPrivileged();
+  }
+  acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
+}
+
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
                                      facade::CapturingReplyBuilder* crb)
     : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {

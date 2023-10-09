@@ -360,7 +360,7 @@ async def test_acl_log(async_client):
 
     await async_client.execute_command("ACL SETUSER elon >mars ON +@string +@dangerous")
 
-    with pytest.raises(redis.exceptions.ResponseError):
+    with pytest.raises(redis.exceptions.AuthenticationError):
         await async_client.execute_command("AUTH elon wrong")
 
     res = await async_client.execute_command("ACL LOG")
