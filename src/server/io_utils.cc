@@ -75,4 +75,9 @@ bool BufferedStreamerBase::IsStopped() {
 bool BufferedStreamerBase::IsStalled() {
   return buffered_ > max_buffered_cnt_ || producer_buf_.InputLen() > max_buffered_mem_;
 }
+
+size_t BufferedStreamerBase::GetTotalBufferCapacities() const {
+  return consumer_buf_.Capacity() + producer_buf_.Capacity();
+}
+
 }  // namespace dfly

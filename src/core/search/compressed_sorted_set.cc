@@ -16,6 +16,9 @@ using VarintBuffer = array<uint8_t, sizeof(CompressedSortedSet::IntType) * 2>;
 
 }  // namespace
 
+CompressedSortedSet::CompressedSortedSet(PMR_NS::memory_resource* mr) : diffs_{mr} {
+}
+
 CompressedSortedSet::ConstIterator::ConstIterator(const CompressedSortedSet& list)
     : stash_{}, diffs_{list.diffs_} {
   ReadNext();

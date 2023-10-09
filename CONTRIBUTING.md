@@ -8,7 +8,7 @@ Feel free to browse our [Discussions](https://github.com/dragonflydb/dragonfly/d
 
 See [building from source](./docs/build-from-source.md)
 
-Please note that in order to build development/debug version,
+Please note that to build a development/debug version,
 it's better to alter the configure and build steps above with:
 
 ```sh
@@ -36,7 +36,7 @@ Once you have done these things, we look forward to adding your contributions an
 ## Unit testing
 
 ```
-# Build specific test
+# Build a specific test
 cd build-dbg && ninja [test_name]
 # e.g cd build-dbg && ninja generic_family_test
 
@@ -54,7 +54,7 @@ cd contrib/charts/dragonfly
 go test -v ./... -update
 ```
 
-This makes it easy to see the changes in the rendered output without having to manually run `helm template` and diff the output.
+This makes it easy to see the changes in the rendered output without having to manually run the `helm template` and diff the output.
 
 ## Signoff Commits
 
@@ -92,23 +92,23 @@ The commit message should be structured as follows:
 
 ---
 
-This repo uses automated tools to standardize the formatting of code, text files and commits.
+This repo uses automated tools to standardize the formatting of code, text files, and commits.
 
 - [Pre-commit hooks](#pre-commit-hooks) validate and automatically apply code
    formatting rules.
 
 ## `pre-commit` hooks
 
-The Dragonfly DB team has agreed to systematically use a number of pre-commit hooks to
-normalize formatting of code. You need to install and enable pre-commit to have these used
-when you do your own commits.
+The Dragonfly DB team has agreed to systematically use several pre-commit hooks to
+normalize the formatting of code. You need to install and enable pre-commit to have these used
+when you do your commits.
 
 ## Codebase guidelines
 
 This repo conforms to the Google's C++ Style Guide. Keep in mind we use an older version of the
 style guide which can be found [here](https://github.com/google/styleguide/blob/505ba68c74eb97e6966f60907ce893001bedc706/cppguide.html).
 
-Any exception to the rules specified on the style guide will be documented here.
+Any exceptions to the rules specified in the style guide will be documented here.
 
 ## License terms for contributions
 

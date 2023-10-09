@@ -2,7 +2,7 @@
 
 ## Running the server
 
-Dragonfly runs on linux. We advice running it on linux version 5.11 or later
+Dragonfly runs on linux. We advise running it on linux version 5.11 or later
 but you can also run Dragonfly on older kernels as well.
 
 > :warning: **Dragonfly releases are compiled with LTO (link time optimization)**:

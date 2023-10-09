@@ -43,6 +43,9 @@ ABSL_FLAG(string, admin_bind, "",
 ABSL_FLAG(uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
+ABSL_FLAG(uint64_t, pipeline_queue_limit, 1ULL << 27,  // 128MB
+          "Amount of memory to use for storing pipelined commands in bytes - per IO thread");
+
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
 ABSL_FLAG(uint64_t, pipeline_squash, 0,
@@ -91,13 +94,17 @@ bool MatchHttp11Line(string_view line) {
 }
 
 constexpr size_t kMinReadSize = 256;
-constexpr size_t kMaxDispatchQMemory = 5_MB;
 
 thread_local uint32_t free_req_release_weight = 0;
 
 }  // namespace
 
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
+thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
+
+void Connection::QueueBackpressure::EnsureBelowLimit() {
+  ec.await([this] { return bytes.load(memory_order_relaxed) <= limit; });
+}
 
 struct Connection::Shutdown {
   absl::flat_hash_map<ShutdownHandle, ShutdownCb> map;
@@ -226,7 +233,6 @@ void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  ++stats->async_writes_cnt;
   unsigned i = 0;
   array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
@@ -272,6 +278,11 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   creation_time_ = time(nullptr);
   last_interaction_ = creation_time_;
   id_ = next_id.fetch_add(1, memory_order_relaxed);
+
+  queue_backpressure_ = &tl_queue_backpressure_;
+  if (queue_backpressure_->limit == 0) {
+    queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
+  }
 }
 
 Connection::~Connection() {
@@ -335,7 +346,7 @@ void Connection::HandleRequests() {
 #ifdef DFLY_USE_SSL
   if (ctx_) {
     const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
-    if (!(IsAdmin() && no_tls_on_admin_port)) {
+    if (!(IsPrivileged() && no_tls_on_admin_port)) {
       unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
       tls_sock->InitSSL(ctx_);
       FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
@@ -465,14 +476,21 @@ uint32_t Connection::GetClientId() const {
   return id_;
 }
 
-bool Connection::IsAdmin() const {
-  return static_cast<Listener*>(owner())->IsAdminInterface();
+bool Connection::IsPrivileged() const {
+  return static_cast<Listener*>(owner())->IsPrivilegedInterface();
+}
+
+bool Connection::IsMain() const {
+  return static_cast<Listener*>(owner())->IsMainInterface();
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
-  bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
-  bool admin = IsAdmin();
-  if (!primary_port_enabled && !admin) {
+  if (!IsPrivileged() && !IsMain()) {
+    return false;
+  }
+
+  const bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
+  if (!primary_port_enabled && !IsPrivileged()) {
     return false;
   }
 
@@ -840,8 +858,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
-  uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
 
+  uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
@@ -867,13 +885,17 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     builder->SetBatchMode(dispatch_q_.size() > 1);
 
     auto recycle = [this, request_cache_limit](MessageHandle msg) {
-      dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
+      size_t used_mem = msg.UsedMemory();
+      queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
+
+      stats_->dispatch_queue_bytes -= used_mem;
+      stats_->dispatch_queue_entries--;
 
       // Retain pipeline message in pool.
       if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
         dispatch_q_cmds_count_--;
-        if (stats_->pipeline_cache_capacity < request_cache_limit) {
-          stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
+        if (stats_->pipeline_cmd_cache_bytes < request_cache_limit) {
+          stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
           pipeline_req_pool_.push_back(move(*pipe));
         }
       }
@@ -923,7 +945,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       recycle(move(msg));
     }
 
-    evc_bp_.notify();
+    queue_backpressure_->ec.notify();
   }
 
   cc_->conn_closing = true;
@@ -970,7 +992,7 @@ void Connection::ShrinkPipelinePool() {
 
   if (free_req_release_weight > stats_->num_conns) {
     free_req_release_weight = 0;
-    stats_->pipeline_cache_capacity -= pipeline_req_pool_.back()->StorageCapacity();
+    stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
     pipeline_req_pool_.pop_back();
   }
 }
@@ -981,7 +1003,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
 
   free_req_release_weight = 0;  // Reset the release weight.
   auto ptr = move(pipeline_req_pool_.back());
-  stats_->pipeline_cache_capacity -= ptr->StorageCapacity();
+  stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
   pipeline_req_pool_.pop_back();
   return ptr;
 }
@@ -1046,12 +1068,16 @@ void Connection::SendAsync(MessageHandle msg) {
     dispatch_q_.insert(it, std::move(msg));
   };
 
-  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+  size_t used_mem = msg.UsedMemory();
+  queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
+
+  stats_->dispatch_queue_entries++;
+  stats_->dispatch_queue_bytes += used_mem;
+
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
     // We need to reorder the queue, since multiple updates might happen before we
     // pop the message, invalidating the correct order since we always push at the front
     place_in_dispatch_q(std::move(msg));
-
   } else {
     dispatch_q_.push_back(std::move(msg));
   }
@@ -1066,8 +1092,7 @@ void Connection::SendAsync(MessageHandle msg) {
 }
 
 void Connection::EnsureAsyncMemoryBudget() {
-  evc_bp_.await(
-      [this] { return dispatch_q_bytes_.load(memory_order_relaxed) <= kMaxDispatchQMemory; });
+  queue_backpressure_->EnsureBelowLimit();
 }
 
 std::string Connection::RemoteEndpointStr() const {

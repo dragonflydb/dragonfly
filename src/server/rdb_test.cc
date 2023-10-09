@@ -285,9 +285,9 @@ TEST_F(RdbTest, SaveManyDbs) {
   });
 
   auto metrics = GetMetrics();
-  ASSERT_EQ(2, metrics.db.size());
-  EXPECT_EQ(50000, metrics.db[0].key_count);
-  EXPECT_EQ(10000, metrics.db[1].key_count);
+  ASSERT_EQ(2, metrics.db_stats.size());
+  EXPECT_EQ(50000, metrics.db_stats[0].key_count);
+  EXPECT_EQ(10000, metrics.db_stats[1].key_count);
 
   auto save_fb = pp_->at(0)->LaunchFiber([&] {
     RespExpr resp = Run({"save"});
@@ -317,10 +317,10 @@ TEST_F(RdbTest, SaveManyDbs) {
   EXPECT_EQ(resp, "OK");
 
   metrics = GetMetrics();
-  ASSERT_EQ(2, metrics.db.size());
-  EXPECT_EQ(50000, metrics.db[0].key_count);
-  EXPECT_EQ(10000, metrics.db[1].key_count);
-  if (metrics.db[1].key_count != 10000) {
+  ASSERT_EQ(2, metrics.db_stats.size());
+  EXPECT_EQ(50000, metrics.db_stats[0].key_count);
+  EXPECT_EQ(10000, metrics.db_stats[1].key_count);
+  if (metrics.db_stats[1].key_count != 10000) {
     Run({"select", "1"});
     resp = Run({"scan", "0", "match", "ab*"});
     StringVec vec = StrArray(resp.GetVec()[1]);

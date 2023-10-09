@@ -162,12 +162,12 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
-    : base_{std::move(index)}, indices_{{}}, key_index_{} {
+    : base_{std::move(index)}, indices_{{}, nullptr}, key_index_{} {
 }
 
-void ShardDocIndex::Rebuild(const OpArgs& op_args) {
+void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   key_index_ = DocKeyIndex{};
-  indices_ = search::FieldIndices{base_->schema};
+  indices_ = search::FieldIndices{base_->schema, mr};
 
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
@@ -226,6 +226,9 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
   return {*base_, key_index_.Size()};
 }
 
+ShardDocIndices::ShardDocIndices() : local_mr_{ServerState::tlocal()->data_heap()} {
+}
+
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
@@ -239,7 +242,7 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
   // Don't build while loading, shutting down, etc.
   // After loading, indices are rebuilt separately
   if (ServerState::tlocal()->gstate() == GlobalState::ACTIVE)
-    it->second->Rebuild(op_args);
+    it->second->Rebuild(op_args, &local_mr_);
 
   op_args.shard->db_slice().SetDocDeletionCallback(
       [this](string_view key, const DbContext& cntx, const PrimeValue& pv) {
@@ -263,7 +266,7 @@ bool ShardDocIndices::DropIndex(string_view name) {
 
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
   for (auto& [_, ptr] : indices_)
-    ptr->Rebuild(op_args);
+    ptr->Rebuild(op_args, &local_mr_);
 }
 
 vector<string> ShardDocIndices::GetIndexNames() const {
@@ -286,6 +289,18 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const
     if (index->Matches(key, pv.ObjType()))
       index->RemoveDoc(key, db_cntx, pv);
   }
+}
+
+size_t ShardDocIndices::GetUsedMemory() const {
+  return local_mr_.used();
+}
+
+SearchStats ShardDocIndices::GetStats() const {
+  size_t total_entries = 0;
+  for (const auto& [_, index] : indices_)
+    total_entries += index->GetInfo().num_docs;
+
+  return {GetUsedMemory(), indices_.size(), total_entries};
 }
 
 }  // namespace dfly

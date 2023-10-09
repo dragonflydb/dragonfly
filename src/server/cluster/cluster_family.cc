@@ -378,7 +378,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kClusterDisabled);
   }
 
-  if (cntx->conn() && !cntx->conn()->IsAdmin()) {
+  if (cntx->conn() && !cntx->conn()->IsPrivileged()) {
     return (*cntx)->SendError(kDflyClusterCmdPort);
   }
 

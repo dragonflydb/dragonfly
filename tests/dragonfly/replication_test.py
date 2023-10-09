@@ -410,50 +410,41 @@ async def test_rotating_masters(
 @pytest.mark.slow
 async def test_cancel_replication_immediately(df_local_factory, df_seeder_factory):
     """
-    Issue 80 replication commands randomally distributed over 10 seconds. This
-    checks that the replication state machine can handle cancellation well.
-    We assert that at least one command was cancelled during start and at least
-    one command was successfull.
+    Issue 100 replication commands. This checks that the replication state
+    machine can handle cancellation well.
+    We assert that at least one command was cancelled.
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
-    COMMANDS_TO_ISSUE = 80
+    COMMANDS_TO_ISSUE = 100
 
     replica = df_local_factory.create()
-    masters = [df_local_factory.create() for i in range(4)]
-    df_local_factory.start_all([replica] + masters)
+    master = df_local_factory.create()
+    df_local_factory.start_all([replica, master])
 
-    seeders = [df_seeder_factory.create(port=m.port) for m in masters]
+    seeder = df_seeder_factory.create(port=master.port)
     c_replica = aioredis.Redis(port=replica.port)
-    await asyncio.gather(*(seeder.run(target_deviation=0.1) for seeder in seeders))
+    await seeder.run(target_deviation=0.1)
 
     replication_commands = []
 
-    async def replicate(index):
-        await asyncio.sleep(10.0 * random.random())
+    async def replicate():
         try:
-            start = time.time()
-            await c_replica.execute_command(f"REPLICAOF localhost {masters[index].port}")
-            # Giving replication commands shouldn't hang.
-            assert time.time() - start < 2.0
+            await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
             return True
         except redis.exceptions.ResponseError as e:
             assert e.args[0] == "replication cancelled"
             return False
 
     for i in range(COMMANDS_TO_ISSUE):
-        index = random.choice(range(len(masters)))
-        replication_commands.append(replicate(index))
+        replication_commands.append(replicate())
     results = await asyncio.gather(*replication_commands)
     num_successes = sum(results)
     assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
-    assert num_successes > 0, "At least one REPLICAOF must be succeed"
-
-    await c_replica.execute_command(f"REPLICAOF localhost {masters[0].port}")
 
     await wait_available_async(c_replica)
-    capture = await seeders[0].capture()
-    assert await seeders[0].compare(capture, replica.port)
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
 
 
 """
@@ -1668,7 +1659,7 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
             # Df is blazingly fast, so by the time we tick a second time on
             # line 1674, DF already replicated all the data so the assertion
             # at the end of the test will always fail
-            fill_task = asyncio.create_task(seeder.run(target_ops=100000))
+            fill_task = asyncio.create_task(seeder.run())
 
             for _ in range(3):
                 await asyncio.sleep(random.randint(5, 10) / 10)

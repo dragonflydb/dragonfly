@@ -510,6 +510,16 @@ TEST_F(StreamFamilyTest, Xclaim) {
   EXPECT_THAT(resp.GetString(), "1-6");
   resp = Run({"xpending", "foo", "group", "1-6", "1-6", "1"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("1-6", "bob", ArgType(RespExpr::INT64), IntArg(5)));
+
+  // test LASTID
+  Run({"xreadgroup", "group", "group", "bob", "count", "2", "streams", "foo", ">"});
+  Run({"xclaim", "foo", "group", "alice", "0", "1-6", "LASTID", "1-4"});
+  resp = Run({"xinfo", "groups", "foo"});
+  EXPECT_EQ(resp.GetVec()[7], "1-6");
+
+  Run({"xclaim", "foo", "group", "bob", "0", "1-6", "LASTID", "1-9"});
+  resp = Run({"xinfo", "groups", "foo"});
+  EXPECT_EQ(resp.GetVec()[7], "1-9");
 }
 
 TEST_F(StreamFamilyTest, XTrim) {

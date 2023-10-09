@@ -82,8 +82,8 @@ ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed com
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
-          "If set, would enable open admin access to console on the assigned port, without auth "
-          "token needed.");
+          "If set, would enable open admin access to console on the assigned port, without "
+          "authorization needed.");
 
 ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
           "Limit on maximum-memory that is used by the database. "
@@ -605,6 +605,32 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+// Either take the interpreter from the preborrowed multi exec transaction or borrow one.
+struct BorrowedInterpreter {
+  explicit BorrowedInterpreter(ConnectionContext* cntx) {
+    if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
+      DCHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
+      interpreter_ = borrowed;
+    } else {
+      interpreter_ = ServerState::tlocal()->BorrowInterpreter();
+      owned_ = true;
+    }
+  }
+
+  ~BorrowedInterpreter() {
+    if (owned_)
+      ServerState::tlocal()->ReturnInterpreter(interpreter_);
+  }
+
+  operator Interpreter*() {
+    return interpreter_;
+  }
+
+ private:
+  Interpreter* interpreter_ = nullptr;
+  bool owned_ = false;
+};
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -823,7 +849,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
-  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsAdmin() && cid->IsRestricted()) {
+  if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
     return ErrorReply{"Cannot execute restricted command (admin only)"};
   }
 
@@ -1204,7 +1230,7 @@ ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
   return ErrorReply{StrCat("unknown command `", cmd_name, "`"), "unknown_cmd"};
 }
 
-bool RequireAdminAuth() {
+bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
@@ -1212,7 +1238,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
 
-  if (owner->IsAdmin() && !RequireAdminAuth()) {
+  if (owner->IsPrivileged() && !RequirePrivilegedAuth()) {
     res->req_auth = false;
   } else {
     res->req_auth = !GetPassword().empty();
@@ -1331,6 +1357,8 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   if ((info->async_cmds.empty() || !force) && used_mem < info->async_cmds_heap_limit)
     return nullopt;
 
+  ++ServerState::tlocal()->stats.eval_squashed_flushes;
+
   auto* eval_cid = registry_.Find("EVAL");
   DCHECK(eval_cid);
   cntx->transaction->MultiSwitchCmd(eval_cid);
@@ -1394,10 +1422,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendNull();
   }
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
-
+  BorrowedInterpreter interpreter{cntx};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
@@ -1411,10 +1436,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ToLower(&args[0]);
   string_view sha = ArgS(args, 0);
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
-
+  BorrowedInterpreter interpreter{cntx};
   CallSHA(args, sha, interpreter, cntx);
 }
 
@@ -1629,17 +1651,18 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
     interpreter->SetRedisFunc(
         [cntx, this](Interpreter::CallArgs args) { CallFromScript(cntx, args); });
+
     result = interpreter->RunFunction(eval_args.sha, &error);
+
+    if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
+      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      result = Interpreter::RUN_ERR;
+      error = absl::StrCat(err_ref->first);
+    }
 
     // Conclude the transaction.
     if (*scheduled)
       cntx->transaction->UnlockMulti();
-  }
-
-  if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-    auto err_ref = CapturingReplyBuilder::GetError(*err);
-    result = Interpreter::RUN_ERR;
-    error = absl::StrCat(err_ref->first);
   }
 
   cntx->conn_state.script_info.reset();  // reset script_info
@@ -1818,6 +1841,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
+  if (state != ExecEvalState::NONE)
+    exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
+
   if (!exec_info.body.empty()) {
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
@@ -1847,6 +1873,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   }
+
+  if (exec_info.preborrowed_interpreter)
+    ServerState::tlocal()->ReturnInterpreter(exec_info.preborrowed_interpreter);
 
   if (scheduled) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
@@ -2040,7 +2069,7 @@ VarzValue::Map Service::GetVarzStats() {
 
   Metrics m = server_family_.GetMetrics();
   DbStats db_stats;
-  for (const auto& s : m.db) {
+  for (const auto& s : m.db_stats) {
     db_stats += s;
   }
 
@@ -2070,11 +2099,19 @@ GlobalState Service::GetGlobalState() const {
   return global_state_;
 }
 
-void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
-  // We set the password for the HTTP service unless it is only enabled on the
-  // admin port and the admin port is password-less.
-  if (GetFlag(FLAGS_primary_port_http_enabled) || !GetFlag(FLAGS_admin_nopass)) {
-    base->SetPassword(GetPassword());
+void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
+  // We skip authentication on privileged listener if the flag admin_nopass is set
+  // We also skip authentication if requirepass is empty
+  const bool should_skip_auth =
+      (is_privileged && !RequirePrivilegedAuth()) || GetPassword().empty();
+  if (!should_skip_auth) {
+    base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
+                                                std::string_view password) {
+      if (path == "/metrics")
+        return true;
+      const bool pass_verified = pass.empty() ? true : password == pass;
+      return username == "default" && pass_verified;
+    });
   }
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);

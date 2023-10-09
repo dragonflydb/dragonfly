@@ -20,9 +20,9 @@ TODO: to rename them in the codebase to another name (SnapshotShard?) since `sna
 3. Each SnapshotShard instantiates its own RdbSerializer that is used to serialize each K/V entry into a binary representation according to the Redis format spec. SnapshotShards combine multiple blobs from the same Dash bucket into a single blob. They always send blob data at bucket granularity, i.e. they never send blob into the channel that only partially covers the bucket. This is needed in order to guarantee snapshot isolation.
 4. The RdbSerializer uses `io::Sink` to emit binary data. The SnapshotShard instance passes into it a `StringFile` which is just a memory-only based sink that wraps `std::string` object. Once `StringFile` instance becomes large, it's flushed into the channel (as long as it follows the rules above).
 4. RdbSave also creates a fiber (SaveBody) that pull all the blobs from the channel. Blobs migh come in unspecified order though it's guaranteed that each blob is self sufficient but itself.
-5. DF uses direct I/O, to improve i/o throughput, which, in turn requires properly aligned memory buffers to work. Unfortunately, blobs that come from the rdb channel come in different sizes and they are not aligned by OS page granularity. Therefore, DF passes all the data from rdb channel through AlignedBuffer transformation. The purpose of this class is to copy the incoming data into a properly aligned buffer. Once it accumalates enough data, it flushes it into the output file.
+5. DF uses direct I/O, to improve i/o throughput, which, in turn requires properly aligned memory buffers to work. Unfortunately, blobs that come from the rdb channel come in different sizes and they are not aligned by OS page granularity. Therefore, DF passes all the data from rdb channel through AlignedBuffer transformation. The purpose of this class is to copy the incoming data into a properly aligned buffer. Once it accumulates enough data, it flushes it into the output file.
 
-To summarize, this configuration employes a single sink to create one file or one stream of data that represents the whole database.
+To summarize, this configuration employs a single sink to create one file or one stream of data that represents the whole database.
 
 ## Dragonfly Snapshot (TBD)
 
@@ -48,7 +48,7 @@ this *relaxed snapshotting*. The reason for relaxed snapshotting is to avoid kee
 of all mutations during the snapshot creation.
 
 As a side comment - we could, in theory, support the same (relaxed)
-semantics for file snapshots, but it's no necessary since it might increase the snapshot sizes.
+semantics for file snapshots, but it's not necessary since it might increase the snapshot sizes.
 
 The snapshotting phase (full-sync) can take up lots of time which add lots of memory pressure on the system.
 Keeping the change-log aside during the full-sync phase will only add more pressure.
@@ -58,7 +58,7 @@ in order to know when the snapshotting finished and the stable state replication
 
 ## Conservative and relaxed snapshotting variations
 
-Both algorithms maintain a scanning process (fiber) that iterarively goes over the main dictionary
+Both algorithms maintain a scanning process (fiber) that iteratively goes over the main dictionary
 and serializes its data. Before starting the process, the SnapshotShard captures
 the change epoch of its shard (this epoch is increased with each write request).
 
@@ -70,7 +70,7 @@ For sake of simplicity, we can assume that each entry in the shard maintains its
 By capturing the epoch number we establish a cut: all entries with `version <= SnapshotShard.epoch`
 have not been serialized yet and were not modified by the concurrent writes.
 
-The DashTable iteration algorithm guarantees convergeance and coverage ("at most once"),
+The DashTable iteration algorithm guarantees convergence and coverage ("at most once"),
 but it does not guarantee that each entry is visited *exactly once*.
 Therefore, we use entry versions for two things: 1) to avoid serialization of the same entry multiple times,
 and 2) to correctly serialize entries that need to change due to concurrent writes.
@@ -86,7 +86,7 @@ Serialization Fiber:
  }
 ```
 
-To allow concurrent writes during the snapshotting phase, we setup a hook that is triggerred on each
+To allow concurrent writes during the snapshotting phase, we setup a hook that is triggered on each
 entry mutation in the table:
 
 OnWriteHook:
