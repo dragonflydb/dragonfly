@@ -1186,6 +1186,8 @@ struct ClaimOpts {
   int64 delivery_time = -1;
   int retry = -1;
   uint8_t flags = 0;
+  int32_t count = 100;      // only for XAUTOCLAIM
+  streamID start = {0, 0};  // only for XAUTOCLAIM
   streamID last_id;
 };
 
@@ -1193,6 +1195,8 @@ struct ClaimInfo {
   bool justid = false;
   vector<streamID> ids;
   RecordVec records;
+  streamID end_id = {0, 0};      // only for XAUTOCLAIM
+  vector<streamID> deleted_ids;  // only for XAUTOCLAIM
 };
 
 void AppendClaimResultItem(ClaimInfo& result, stream* s, streamID id) {
@@ -1559,6 +1563,98 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
     }
   }
   return acknowledged;
+}
+
+OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts) {
+  OpResult<pair<stream*, streamCG*>> cgr_res = FindGroup(op_args, key, opts.group);
+  if (!cgr_res)
+    return cgr_res.status();
+  auto [stream, group] = *cgr_res;
+
+  if (stream == nullptr || group == nullptr) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  streamConsumer* consumer = nullptr;
+  // from Redis spec on XAutoClaim:
+  // https://redis.io/commands/xautoclaim/
+  // The maximum number of pending entries that the command scans is the product of
+  // multiplying <count>'s value by 10 (hard-coded).
+  int64_t attempts = opts.count * 10;
+
+  unsigned char start_key[sizeof(streamID)];
+  streamID start_id = opts.start;
+  streamEncodeID(start_key, &start_id);
+  raxIterator ri;
+  raxStart(&ri, group->pel);
+  raxSeek(&ri, ">=", start_key, sizeof(start_key));
+
+  ClaimInfo result;
+  result.justid = (opts.flags & kClaimJustID);
+
+  auto now = GetCurrentTimeMs();
+  int count = opts.count;
+  while (attempts-- && count && raxNext(&ri)) {
+    streamNACK* nack = (streamNACK*)ri.data;
+
+    streamID id;
+    streamDecodeID(ri.key, &id);
+
+    if (!streamEntryExists(stream, &id)) {
+      raxRemove(group->pel, ri.key, ri.key_len, nullptr);
+      raxRemove(nack->consumer->pel, ri.key, ri.key_len, nullptr);
+      streamFreeNACK(nack);
+      result.deleted_ids.push_back(id);
+      raxSeek(&ri, ">=", ri.key, ri.key_len);
+      continue;
+    }
+
+    if (opts.min_idle_time) {
+      mstime_t this_idle = now - nack->delivery_time;
+      if (this_idle < opts.min_idle_time)
+        continue;
+    }
+
+    op_args.shard->tmp_str1 =
+        sdscpylen(op_args.shard->tmp_str1, opts.consumer.data(), opts.consumer.size());
+    if (consumer == nullptr) {
+      consumer = streamLookupConsumer(group, op_args.shard->tmp_str1, SLC_DEFAULT);
+      if (consumer == nullptr) {
+        consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, nullptr, 0, SCC_DEFAULT);
+      }
+    }
+
+    if (nack->consumer != consumer) {
+      if (nack->consumer) {
+        raxRemove(nack->consumer->pel, ri.key, ri.key_len, nullptr);
+      }
+    }
+
+    nack->delivery_time = now;
+    if (!result.justid) {
+      nack->delivery_count++;
+    }
+
+    if (nack->consumer != consumer) {
+      raxInsert(consumer->pel, ri.key, ri.key_len, nack, nullptr);
+      nack->consumer = consumer;
+    }
+
+    AppendClaimResultItem(result, stream, id);
+    count--;
+  }
+
+  raxNext(&ri);
+  streamID end_id;
+  if (raxEOF(&ri)) {
+    end_id.ms = end_id.seq = 0;
+  } else {
+    streamDecodeID(ri.key, &end_id);
+  }
+  raxStop(&ri);
+  result.end_id = end_id;
+
+  return result;
 }
 
 struct PendingOpts {
@@ -2043,7 +2139,7 @@ void StreamFamily::XClaim(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClaim(t->GetOpArgs(shard), key, opts, absl::Span{ids.data(), ids.size()});
   };
-  OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(cb);
+  OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (!result) {
     (*cntx)->SendError(result.status());
     return;
@@ -3083,6 +3179,94 @@ void StreamFamily::XAck(CmdArgList args, ConnectionContext* cntx) {
   return;
 }
 
+void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
+  ClaimOpts opts;
+  string_view key = ArgS(args, 0);
+  opts.group = ArgS(args, 1);
+  opts.consumer = ArgS(args, 2);
+  if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  opts.min_idle_time = std::max((int64)0, opts.min_idle_time);
+
+  string_view start = ArgS(args, 4);
+  RangeId rs;
+  if (!ParseRangeId(start, &rs)) {
+    return;
+  }
+  if (rs.exclude && streamDecrID(&rs.parsed_id.val) != C_OK) {
+    return (*cntx)->SendError("invalid start ID for the interval", kSyntaxErrType);
+  }
+  opts.start = rs.parsed_id.val;
+
+  for (size_t i = 5; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+    string_view arg = ArgS(args, i);
+    bool remaining_args = args.size() - i - 1 > 0;
+
+    if (remaining_args) {
+      if (arg == "COUNT") {
+        arg = ArgS(args, ++i);
+        if (!absl::SimpleAtoi(arg, &opts.count)) {
+          return (*cntx)->SendError(kInvalidIntErr);
+        }
+        if (opts.count <= 0) {
+          return (*cntx)->SendError("COUNT must be > 0");
+        }
+        continue;
+      }
+    }
+    if (arg == "JUSTID") {
+      opts.flags |= kClaimJustID;
+    } else {
+      return (*cntx)->SendError("Unknown argument given for XAUTOCLAIM command", kSyntaxErr);
+    }
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpAutoClaim(t->GetOpArgs(shard), key, opts);
+  };
+  OpResult<ClaimInfo> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result.status() == OpStatus::KEY_NOTFOUND) {
+    (*cntx)->SendError(NoGroupOrKey(key, opts.group));
+    return;
+  }
+  if (!result) {
+    (*cntx)->SendError(result.status());
+    return;
+  }
+
+  ClaimInfo cresult = result.value();
+
+  (*cntx)->StartArray(3);
+  (*cntx)->SendBulkString(StreamIdRepr(cresult.end_id));
+  if (cresult.justid) {
+    (*cntx)->StartArray(cresult.ids.size());
+    for (auto id : cresult.ids) {
+      (*cntx)->SendBulkString(StreamIdRepr(id));
+    }
+  } else {
+    const RecordVec& crec = cresult.records;
+    (*cntx)->StartArray(crec.size());
+    for (const auto& item : crec) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendBulkString(StreamIdRepr(item.id));
+      (*cntx)->StartArray(item.kv_arr.size() * 2);
+      for (const auto& [k, v] : item.kv_arr) {
+        (*cntx)->SendBulkString(k);
+        (*cntx)->SendBulkString(v);
+      }
+    }
+  }
+
+  (*cntx)->StartArray(cresult.deleted_ids.size());
+  for (auto id : cresult.deleted_ids) {
+    (*cntx)->SendBulkString(StreamIdRepr(id));
+  }
+}
+
 #define HFUNC(x) SetHandler(&StreamFamily::x)
 
 namespace acl {
@@ -3101,6 +3285,7 @@ constexpr uint32_t kXSetId = WRITE | STREAM | SLOW;
 constexpr uint32_t kXTrim = WRITE | STREAM | SLOW;
 constexpr uint32_t kXGroupHelp = READ | STREAM | SLOW;
 constexpr uint32_t kXAck = WRITE | STREAM | FAST;
+constexpr uint32_t kXAutoClaim = WRITE | STREAM | FAST;
 }  // namespace acl
 
 void StreamFamily::Register(CommandRegistry* registry) {
@@ -3126,7 +3311,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
       << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, 1, acl::kXTrim}.HFUNC(XTrim)
       << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0, acl::kXGroupHelp}.SetHandler(
              XGroupHelp)
-      << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, 1, acl::kXAdd}.HFUNC(XAck);
+      << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, 1, acl::kXAdd}.HFUNC(XAck)
+      << CI{"XAUTOCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, 1, acl::kXClaim}.HFUNC(XAutoClaim);
 }
 
 }  // namespace dfly
