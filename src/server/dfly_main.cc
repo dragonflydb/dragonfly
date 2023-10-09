@@ -46,13 +46,6 @@
 #include "util/http/http_client.h"
 #include "util/varz.h"
 
-#define STRING_PP_NX(A) #A
-#define STRING_MAKE_PP(A) STRING_PP_NX(A)
-
-// This would create a string value from a "defined" location of the source code
-// Note that SOURCE_PATH_FROM_BUILD_ENV is taken from the build system
-#define BUILD_LOCATION_PATH STRING_MAKE_PP(SOURCE_PATH_FROM_BUILD_ENV)
-
 #ifdef __APPLE__
 #include <crt_externs.h>
 #define environ (*_NSGetEnviron())
@@ -312,6 +305,13 @@ bool HelpshortFlags(std::string_view f) {
 bool HelpFlags(std::string_view f) {
   return absl::StartsWith(f, "\033[0;3");
 }
+
+#define STRING_PP_NX(A) #A
+#define STRING_MAKE_PP(A) STRING_PP_NX(A)
+
+// This would create a string value from a "defined" location of the source code
+// Note that SOURCE_PATH_FROM_BUILD_ENV is taken from the build system
+#define BUILD_LOCATION_PATH STRING_MAKE_PP(SOURCE_PATH_FROM_BUILD_ENV)
 
 string NormalizePaths(std::string_view path) {
   const std::string FULL_PATH = BUILD_LOCATION_PATH;

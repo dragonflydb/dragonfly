@@ -4,10 +4,11 @@ cxx_link(dragonfly base dragonfly_lib)
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
   # can cause SIGILL.
-  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2 COMPILE_DEFINITIONS
-                              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
+  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2)
 endif()
 
+set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
+             SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc)
