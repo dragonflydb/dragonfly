@@ -2369,6 +2369,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::CapturingReplyBuilder crb{};
   ConnectionContext cntx{nullptr, nullptr, &crb};
   cntx.journal_emulated = true;
+  cntx.skip_acl_validation = true;
 
   absl::Cleanup cntx_clean = [&cntx] { cntx.Inject(nullptr); };
 

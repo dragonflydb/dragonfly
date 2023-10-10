@@ -2,6 +2,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include "facade/dragonfly_connection.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -33,8 +34,12 @@ void CheckConnStateClean(const ConnectionState& state) {
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, bool verify_commands, bool error_abort)
-    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr},
-      verify_commands_{verify_commands}, error_abort_{error_abort} {
+    : cmds_{cmds},
+      cntx_{cntx},
+      service_{service},
+      base_cid_{nullptr},
+      verify_commands_{verify_commands},
+      error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = cntx->transaction->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
@@ -132,6 +137,9 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx_, local_tx, &crb};
+  if (cntx_->conn()) {
+    local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
+  }
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
   for (auto* cmd : sinfo.cmds) {

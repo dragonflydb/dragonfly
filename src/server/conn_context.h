@@ -160,10 +160,7 @@ struct ConnectionState {
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
-  ConnectionContext(::io::Sink* stream, facade::Connection* owner)
-      : facade::ConnectionContext(stream, owner) {
-    acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
-  }
+  ConnectionContext(::io::Sink* stream, facade::Connection* owner);
 
   ConnectionContext(const ConnectionContext* owner, Transaction* tx,
                     facade::CapturingReplyBuilder* crb);
@@ -206,6 +203,8 @@ class ConnectionContext : public facade::ConnectionContext {
   std::string authed_username{"default"};
   uint32_t acl_categories{acl::ALL};
   std::vector<uint64_t> acl_commands;
+  // Skip ACL validation, used by internal commands and commands run on admin port
+  bool skip_acl_validation = false;
 
  private:
   void EnableMonitoring(bool enable) {

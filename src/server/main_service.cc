@@ -1239,7 +1239,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
   if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
-  } else {
+  } else if (!owner->IsPrivileged()) {
     res->req_auth = !user_registry_.AuthUser("default", "");
   }
 
