@@ -18,6 +18,8 @@
 #include <filesystem>
 #include <optional>
 
+#include "facade/error.h"
+
 extern "C" {
 #include "redis/redis_aux.h"
 }
@@ -1017,28 +1019,32 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  if (args.size() == 2) {
+  // non admin port auth
+  if (!cntx->conn()->IsPrivileged()) {
     const auto* registry = ServerState::tlocal()->user_registry;
-    std::string_view username = facade::ToSV(args[0]);
-    std::string_view password = facade::ToSV(args[1]);
+    const bool one_arg = args.size() == 1;
+    std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
+    const size_t index = one_arg ? 0 : 1;
+    std::string_view password = facade::ToSV(args[index]);
     auto is_authorized = registry->AuthUser(username, password);
     if (is_authorized) {
       cntx->authed_username = username;
       auto cred = registry->GetCredentials(username);
       cntx->acl_categories = cred.acl_categories;
       cntx->acl_commands = cred.acl_commands;
+      cntx->authenticated = true;
       return (*cntx)->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
+    return (*cntx)->SendError(facade::kAuthRejected);
   }
 
   if (!cntx->req_auth) {
     return (*cntx)->SendError(
-        "AUTH <password> called without any password configured for the "
-        "default user. Are you sure your configuration is correct?");
+        "AUTH <password> called without any password configured for "
+        "admin port. Are you sure your configuration is correct?");
   }
 
   string_view pass = ArgS(args, 0);
@@ -1755,6 +1761,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
   ConnectionContext ctxt{&sink, nullptr};
+  ctxt.skip_acl_validation = true;
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)

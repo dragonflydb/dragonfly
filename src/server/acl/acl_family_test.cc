@@ -90,10 +90,10 @@ TEST_F(AclFamilyTest, AclAuth) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"AUTH", "shahar", "wrongpass"});
-  EXPECT_THAT(resp, ErrArg("ERR Could not authorize user: shahar"));
+  EXPECT_THAT(resp, ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
 
   resp = Run({"AUTH", "shahar", "mypass"});
-  EXPECT_THAT(resp, ErrArg("ERR Could not authorize user: shahar"));
+  EXPECT_THAT(resp, ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
 
   // Activate the user
   resp = Run({"ACL", "SETUSER", "shahar", "ON", "+@fast"});

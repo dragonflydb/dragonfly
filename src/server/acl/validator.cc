@@ -13,6 +13,10 @@ namespace dfly::acl {
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx,
                                                 const facade::CommandId& id) {
+  if (cntx.skip_acl_validation) {
+    return true;
+  }
+
   const bool is_authed =
       IsUserAllowedToInvokeCommandGeneric(cntx.acl_categories, cntx.acl_commands, id);
 

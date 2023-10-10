@@ -605,6 +605,32 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+// Either take the interpreter from the preborrowed multi exec transaction or borrow one.
+struct BorrowedInterpreter {
+  explicit BorrowedInterpreter(ConnectionContext* cntx) {
+    if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
+      DCHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
+      interpreter_ = borrowed;
+    } else {
+      interpreter_ = ServerState::tlocal()->BorrowInterpreter();
+      owned_ = true;
+    }
+  }
+
+  ~BorrowedInterpreter() {
+    if (owned_)
+      ServerState::tlocal()->ReturnInterpreter(interpreter_);
+  }
+
+  operator Interpreter*() {
+    return interpreter_;
+  }
+
+ private:
+  Interpreter* interpreter_ = nullptr;
+  bool owned_ = false;
+};
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -652,7 +678,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.Register("dbnum");       // equivalent to databases in redis.
   config_registry.RegisterMutable("dir");  // TODO: to add validation for dir
-  config_registry.RegisterMutable("requirepass");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
@@ -1210,10 +1235,10 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
 
-  if (owner->IsPrivileged() && !RequirePrivilegedAuth()) {
-    res->req_auth = false;
-  } else {
+  if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
+  } else if (!owner->IsPrivileged()) {
+    res->req_auth = !user_registry_.AuthUser("default", "");
   }
 
   // a bit of a hack. I set up breaker callback here for the owner.
@@ -1394,10 +1419,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendNull();
   }
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
-
+  BorrowedInterpreter interpreter{cntx};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
@@ -1411,10 +1433,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ToLower(&args[0]);
   string_view sha = ArgS(args, 0);
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
-
+  BorrowedInterpreter interpreter{cntx};
   CallSHA(args, sha, interpreter, cntx);
 }
 
@@ -1819,6 +1838,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
+  if (state != ExecEvalState::NONE)
+    exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
+
   if (!exec_info.body.empty()) {
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
@@ -1848,6 +1870,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   }
+
+  if (exec_info.preborrowed_interpreter)
+    ServerState::tlocal()->ReturnInterpreter(exec_info.preborrowed_interpreter);
 
   if (scheduled) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";

@@ -16,6 +16,7 @@
 #include <utility>
 #include <variant>
 
+#include "absl/flags/commandlineflag.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
@@ -34,6 +35,7 @@
 #include "server/acl/validator.h"
 #include "server/command_registry.h"
 #include "server/common.h"
+#include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
@@ -221,7 +223,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   auto file_contents = std::move(is_file_read.value());
 
   if (file_contents.empty()) {
-    return {};
+    return {facade::ErrorReply("Empty file")};
   }
 
   std::vector<std::string> usernames;
@@ -559,11 +561,14 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
 void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   main_listener_ = main_listener;
   registry_ = registry;
+  config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
+    User::UpdateRequest rqst;
+    rqst.password = flag.CurrentValue();
+    registry_->MaybeAddAndUpdate("default", std::move(rqst));
+    return true;
+  });
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  if (!acl_file.empty()) {
-    if (!Load()) {
-      registry_->Init();
-    }
+  if (!acl_file.empty() && Load()) {
     return;
   }
   registry_->Init();
