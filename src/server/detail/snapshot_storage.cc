@@ -35,8 +35,9 @@ std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_vie
   std::string_view clean = absl::StripPrefix(path, kS3Prefix);
 
   size_t pos = clean.find('/');
-  if (pos == std::string_view::npos)
-    return std::nullopt;
+  if (pos == std::string_view::npos) {
+    return std::make_pair(std::string(clean), "");
+  }
 
   std::string bucket_name{clean.substr(0, pos)};
   std::string obj_path{clean.substr(pos + 1)};
@@ -183,6 +184,7 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool ec2
     // S3ClientConfiguration may request configuration and credentials from
     // EC2 metadata so must be run in a proactor thread.
     Aws::S3::S3ClientConfiguration s3_conf{};
+    LOG(INFO) << "Creating AWS S3 client; region=" << s3_conf.region << "; endpoint=" << endpoint;
     if (!sign_payload) {
       s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::ForceNever;
     }
@@ -342,6 +344,24 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObj
       for (const auto& object : outcome.GetResult().GetContents()) {
         keys.push_back(object.GetKey());
       }
+    } else if (outcome.GetError().GetExceptionName() == "PermanentRedirect") {
+      return nonstd::make_unexpected(
+          GenericError{"Failed list objects in S3 bucket: Permanent redirect; Ensure your "
+                       "configured AWS region matches the S3 bucket region"});
+    } else if (outcome.GetError().GetErrorType() == Aws::S3::S3Errors::NO_SUCH_BUCKET) {
+      return nonstd::make_unexpected(GenericError{
+          "Failed list objects in S3 bucket: Bucket not found: " + std::string(bucket_name)});
+    } else if (outcome.GetError().GetErrorType() == Aws::S3::S3Errors::INVALID_ACCESS_KEY_ID) {
+      return nonstd::make_unexpected(
+          GenericError{"Failed list objects in S3 bucket: Invalid access key ID"});
+    } else if (outcome.GetError().GetErrorType() == Aws::S3::S3Errors::SIGNATURE_DOES_NOT_MATCH) {
+      return nonstd::make_unexpected(
+          GenericError{"Failed list objects in S3 bucket: Invalid signature; Check your AWS "
+                       "credentials are correct"});
+    } else if (outcome.GetError().GetExceptionName() == "InvalidToken") {
+      return nonstd::make_unexpected(
+          GenericError{"Failed list objects in S3 bucket: Invalid token; Check your AWS "
+                       "credentials are correct"});
     } else {
       return nonstd::make_unexpected(GenericError{"Failed list objects in S3 bucket: " +
                                                   outcome.GetError().GetExceptionName()});
