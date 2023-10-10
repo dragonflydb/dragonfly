@@ -7,9 +7,9 @@ import argparse
 import matplotlib.pyplot as plt
 
 
-def simulate_balls_into_bins(balls: int, N, threshold: int, exact, trials=10000):
+def simulate_balls_into_bins(balls: int, bins: int, threshold: int, exact, trials=10000):
     """Simulate throwing M balls into N bins for a given number of trials."""
-    counts = np.zeros(N, dtype=int)
+    counts = np.zeros(bins, dtype=int)
     success = 0
     exact_success = 0
     deltas = []
@@ -19,8 +19,8 @@ def simulate_balls_into_bins(balls: int, N, threshold: int, exact, trials=10000)
         counts.fill(0)
 
         # Throw M balls into the bins
-        bins = np.random.randint(0, N, balls)
-        unique, counts_bins = np.unique(bins, return_counts=True)
+        bins_seq = np.random.randint(0, bins, balls)
+        unique, counts_bins = np.unique(bins_seq, return_counts=True)
         counts[unique] += counts_bins
         deltas.append(counts.max() - counts.min())
         # Check if any bin has K or more balls
