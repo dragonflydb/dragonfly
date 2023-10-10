@@ -404,7 +404,7 @@ void Connection::HandleRequests() {
 
       ConnectionFlow(peer);
 
-      if (!break_cb_engaged_) {
+      if (break_cb_engaged_) {
         socket_->CancelOnErrorCb();
       }
 
