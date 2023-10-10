@@ -74,6 +74,12 @@ class DflyInstance:
             del self.args["logtostderr"]
             self.args["alsologtostderr"] = None
 
+        # Run with num_shards = (proactor_threads - 1) if possible, so help expose bugs
+        if "proactor_threads" in self.args and "num_shards" not in self.args:
+            threads = int(self.args["proactor_threads"])
+            if threads > 1:
+                self.args["num_shards"] = threads - 1
+
     def __del__(self):
         assert self.proc == None
 
