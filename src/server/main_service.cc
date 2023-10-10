@@ -686,9 +686,10 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
-  if (shard_num == 0) {
-    shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
-  } else if (shard_num > pp_.size()) {
+  if (shard_num == 0 || shard_num > pp_.size()) {
+    LOG_IF(WARNING, shard_num > pp_.size())
+        << "Requested num_shards (" << shard_num << ") is bigger than thread count (" << pp_.size()
+        << "), using num_shards=" << pp_.size();
     shard_num = pp_.size();
   }
 
