@@ -238,12 +238,13 @@ class DflyInstance:
 
     def print_info_logs_to_debug_log(self):
         logs = self.log_files
+        sed_format = f"s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
+        sed_cmd = ["sed", "-e", sed_format]
         for log in logs:
             if "INFO" in log:
                 with open(log) as file:
-                    logging.debug(f"====== LOG name {log} ======")
-                    for line in file.readlines():
-                        logging.debug(line.replace("\n", ""))
+                    print(f"🪵🪵🪵🪵🪵🪵 LOG name {log} 🪵🪵🪵🪵🪵🪵")
+                    subprocess.call(sed_cmd, stdin=file)
 
     @staticmethod
     def format_args(args):
@@ -291,7 +292,7 @@ class DflyInstanceFactory:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("use_zset_tree", None)
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1"
         args.setdefault("vmodule", vmod)
 
         for k, v in args.items():
