@@ -42,7 +42,11 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
             cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc acl/helpers.cc)
+            acl/validator.cc acl/helpers.cc stacktrace.cc)
+
+if (DEFINED PRINT_STACKTRACES_ON_SIGKILL)
+  target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGKILL)
+endif()
 
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
