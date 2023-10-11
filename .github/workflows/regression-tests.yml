@@ -14,7 +14,6 @@ jobs:
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -27,6 +26,7 @@ jobs:
         run: cat /proc/cpuinfo
 
       - name: Configure & Build
+        timeout-minutes: 25
         run: |
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -36,6 +36,7 @@ jobs:
           ls -l ..
 
       - name: Run regression tests action
+        timeout-minutes: 45
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
