@@ -151,6 +151,9 @@ class DflyInstance:
                 proc.terminate()
             proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
+            logging.debug(f"Unable to kill the process on port {self._port}")
+            logging.debug(f"INFO LOGS of DF are:")
+            self.print_info_logs_to_debug_log()
             proc.kill()
             proc.communicate()
             raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")
@@ -233,6 +236,15 @@ class DflyInstance:
                 rv.append(file.path)
         return rv
 
+    def print_info_logs_to_debug_log(self):
+        logs = self.log_files
+        for log in logs:
+            if "INFO" in log:
+                with open(log) as file:
+                    logging.debug(f"====== LOG name {log} ======")
+                    for line in file.readlines():
+                        logging.debug(line.replace("\n", ""))
+
     @staticmethod
     def format_args(args):
         out = []
@@ -279,6 +291,8 @@ class DflyInstanceFactory:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("use_zset_tree", None)
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1"
+        args.setdefault("vmodule", vmod)
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
