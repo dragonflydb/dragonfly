@@ -26,7 +26,6 @@ jobs:
         run: cat /proc/cpuinfo
 
       - name: Configure & Build
-        timeout-minutes: 25
         run: |
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
