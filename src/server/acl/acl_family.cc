@@ -37,6 +37,7 @@
 #include "server/common.h"
 #include "server/config_registry.h"
 #include "server/conn_context.h"
+#include "server/error.h"
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
 
@@ -468,6 +469,34 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendSimpleString(acl);
 }
 
+void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
+  if (args.length() > 1) {
+    (*cntx)->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
+    return;
+  }
+  uint32_t random_bits = 256;
+  if (args.length() == 1) {
+    auto requested_bits = facade::ArgS(args, 0);
+
+    if (!absl::SimpleAtoi(requested_bits, &random_bits) || random_bits == 0 || random_bits > 4096) {
+      return (*cntx)->SendError(
+          "ACL GENPASS argument must be the number of bits for the output password, a positive "
+          "number up to 4096");
+    }
+  }
+  auto rbe = ServerState::tlocal()->random_bits_engine;
+  std::vector<unsigned char> data((random_bits + 3) / 4);
+  std::generate(begin(data), end(data), std::ref(*rbe));
+
+  const std::string hex_chars = "0123456789abcdef";
+  std::string response;
+  for (unsigned char c : data) {
+    response += hex_chars[c & 0x0F];
+  }
+
+  (*cntx)->SendSimpleString(response);
+}
+
 void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   auto username = facade::ArgS(args, 0);
   const auto registry_with_lock = registry_->GetRegistryWithLock();
@@ -517,6 +546,7 @@ constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kCat = acl::SLOW;
 constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kDryRun = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kGenPass = acl::SLOW;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -552,6 +582,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
                    .HFUNC(GetUser);
   *registry << CI{"ACL DRYRUN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 3, 0, 0, 0, acl::kDryRun}
                    .HFUNC(DryRun);
+  *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kGenPass}.HFUNC(
+      GenPass);
 
   cmd_registry_ = registry;
 }

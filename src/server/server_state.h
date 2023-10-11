@@ -217,6 +217,8 @@ class ServerState {  // public struct - to allow initialization.
   acl::UserRegistry* user_registry;
 
   acl::AclLog acl_log;
+  std::independent_bits_engine<std::default_random_engine, CHAR_BIT, unsigned char>*
+      random_bits_engine;
 
  private:
   int64_t live_transactions_ = 0;
