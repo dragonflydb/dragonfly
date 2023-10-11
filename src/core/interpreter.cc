@@ -113,7 +113,7 @@ void RedisTranslator::OnString(std::string_view str) {
 }
 
 void RedisTranslator::OnDouble(double d) {
-  static constexpr double kConvertEps = std::numeric_limits<double>::epsilon();
+  const double kConvertEps = std::numeric_limits<double>::epsilon();
 
   double fractpart, intpart;
   fractpart = modf(d, &intpart);
@@ -351,14 +351,14 @@ int RedisStatusReplyCommand(lua_State* lua) {
   return SingleFieldTable(lua, "ok");
 }
 
-// const char* kInstanceKey = "_INSTANCE";
-
+// See https://www.lua.org/manual/5.3/manual.html#lua_Alloc
 void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
   (void)ud;
-  (void)osize; /* not used */
   if (nsize == 0) {
-    mi_free(ptr);
+    mi_free_size(ptr, osize);
     return nullptr;
+  } else if (ptr == nullptr) {
+    return mi_malloc(nsize);
   } else {
     return mi_realloc(ptr, nsize);
   }
@@ -730,12 +730,16 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
   cmd_depth_++;
   int argc = lua_gettop(lua_);
 
+#define RETURN_ERROR(err)                      \
+  {                                            \
+    PushError(lua_, err);                      \
+    cmd_depth_--;                              \
+    return raise_error ? RaiseError(lua_) : 1; \
+  }
+
   /* Require at least one argument */
   if (argc == 0) {
-    PushError(lua_, "Please specify at least one argument for redis.call()");
-    cmd_depth_--;
-
-    return raise_error ? RaiseError(lua_) : 1;
+    RETURN_ERROR("Please specify at least one argument for redis.call()");
   }
 
   size_t blob_len = 0;
@@ -755,28 +759,28 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
         }
         continue;
       case LUA_TSTRING:
-        blob_len += lua_rawlen(lua_, idx);
+        blob_len += lua_rawlen(lua_, idx) + 1;
         continue;
       default:
-        PushError(lua_, "Lua redis() command arguments must be strings or integers");
-        cmd_depth_--;
-        return raise_error ? RaiseError(lua_) : 1;
+        RETURN_ERROR("Lua redis() command arguments must be strings or integers");
     }
   }
 
-  char name_buffer[32];               // backing storage for cmd name
-  string buffer(blob_len + 4, '\0');  // backing storage for args
+  char name_buffer[32];  // backing storage for cmd name
   absl::FixedArray<absl::Span<char>, 4> args(argc);
 
-  char* cur = buffer.data();
-  char* end = cur + blob_len;
-
   // Copy command name to name_buffer and set it as first arg.
-  unsigned len = lua_rawlen(lua_, 1);
-  DCHECK_LT(len, ABSL_ARRAYSIZE(name_buffer));
-  memcpy(name_buffer, lua_tostring(lua_, 1), len);
-  args[0] = {name_buffer, len};
+  unsigned name_len = lua_rawlen(lua_, 1);
+  if (name_len >= sizeof(name_buffer)) {
+    RETURN_ERROR("Lua redis() command name too long");
+  }
 
+  memcpy(name_buffer, lua_tostring(lua_, 1), name_len);
+  args[0] = {name_buffer, name_len};
+  buffer_.resize(blob_len + 4, '\0');  // backing storage for args
+
+  char* cur = buffer_.data();
+  char* end = cur + blob_len;
   for (int idx = 2; idx <= argc; idx++) {
     size_t len = 0;
     switch (lua_type(lua_, idx)) {
@@ -794,7 +798,7 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
         break;
       case LUA_TSTRING:
         len = lua_rawlen(lua_, idx);
-        memcpy(cur, lua_tostring(lua_, idx), len);
+        memcpy(cur, lua_tostring(lua_, idx), len + 1);  // + 1 for null terminator
     };
 
     args[idx - 1] = {cur, len};
@@ -805,8 +809,15 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
    * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
   RedisTranslator translator(lua_);
-  redis_func_(CallArgs{MutSliceSpan{args}, &buffer, &translator, async, raise_error, &raise_error});
+  redis_func_(
+      CallArgs{MutSliceSpan{args}, &buffer_, &translator, async, raise_error, &raise_error});
   cmd_depth_--;
+
+  // Shrink reusable buffer if it's too big.
+  if (buffer_.capacity() > 128) {
+    buffer_.clear();
+    buffer_.shrink_to_fit();
+  }
 
   // Raise error for regular 'call' command if needed.
   if (raise_error && translator.HasError()) {

@@ -159,8 +159,9 @@ void Connection::PipelineMessage::SetArgs(const RespVec& args) {
     size_t s = buf.size();
     if (s)
       memcpy(next, buf.data(), s);
+    next[s] = '\0';
     this->args[i] = MutableSlice(next, s);
-    next += s;
+    next += (s + 1);
   }
 }
 
@@ -959,7 +960,7 @@ Connection::PipelineMessagePtr Connection::FromArgs(RespVec args, mi_heap_t* hea
   size_t backed_sz = 0;
   for (const auto& arg : args) {
     CHECK_EQ(RespExpr::STRING, arg.type);
-    backed_sz += arg.GetBuf().size();
+    backed_sz += arg.GetBuf().size() + 1;  // for '\0'
   }
   DCHECK(backed_sz);
 

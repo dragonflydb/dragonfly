@@ -77,19 +77,21 @@ class InterpreterTest : public ::testing::Test {
     CHECK_EQ(0, lua_pcall(lua(), 0, num_results, 0));
   }
 
-  void SetGlobalArray(const char* name, vector<string> vec);
+  void SetGlobalArray(const char* name, const vector<string_view>& vec);
 
   bool Execute(string_view script);
 
   Interpreter intptr_;
   TestSerializer ser_;
   string error_;
+  vector<unique_ptr<string>> strings_;
 };
 
-void InterpreterTest::SetGlobalArray(const char* name, vector<string> vec) {
+void InterpreterTest::SetGlobalArray(const char* name, const vector<string_view>& vec) {
   vector<MutableSlice> slices(vec.size());
   for (size_t i = 0; i < vec.size(); ++i) {
-    slices[i] = MutableSlice{vec[i]};
+    strings_.emplace_back(new string(vec[i]));
+    slices[i] = MutableSlice{*strings_.back()};
   }
   intptr_.SetGlobalArray(name, MutSliceSpan{slices});
 }
@@ -318,6 +320,10 @@ TEST_F(InterpreterTest, ArgKeys) {
   SetGlobalArray("KEYS", {"key1", "key2"});
   EXPECT_TRUE(Execute("return {ARGV[1], KEYS[1], KEYS[2]}"));
   EXPECT_EQ("[str(foo) str(key1) str(key2)]", ser_.res);
+
+  SetGlobalArray("INTKEYS", {"123456", "1"});
+  EXPECT_TRUE(Execute("return INTKEYS[1] + 0")) << error_;
+  EXPECT_EQ("i(123456)", ser_.res);
 }
 
 TEST_F(InterpreterTest, Modules) {

@@ -371,6 +371,7 @@ void InterpreterReplier::PostItem() {
 
 void InterpreterReplier::SendError(string_view str, std::string_view type) {
   DCHECK(array_len_.empty());
+  DVLOG(1) << "Lua/df_call error " << str;
   explr_->OnError(str);
 }
 
@@ -1377,7 +1378,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
   DCHECK(cntx->transaction);
-  DVLOG(1) << "CallFromScript " << cntx->transaction->DebugId() << " " << ArgS(ca.args, 0);
+  DVLOG(1) << "CallFromScript " << ArgS(ca.args, 0);
 
   InterpreterReplier replier(ca.translator);
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);

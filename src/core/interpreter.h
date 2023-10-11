@@ -130,6 +130,7 @@ class Interpreter {
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
+  std::string buffer_;
 };
 
 // Manages an internal interpreter pool. This allows multiple connections residing on the same
