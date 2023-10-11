@@ -21,13 +21,13 @@ using namespace facade;
 StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mode)
     : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
-  for (auto args : args)
-    total_size += args.size();
-
+  for (auto args : args) {
+    total_size += args.size() + 1;  // +1 for null terminator
+  }
   buffer_.resize(total_size);
   char* next = buffer_.data();
   for (unsigned i = 0; i < args.size(); i++) {
-    memcpy(next, args[i].data(), args[i].size());
+    memcpy(next, args[i].data(), args[i].size() + 1);
     sizes_[i] = args[i].size();
     next += args[i].size();
   }
