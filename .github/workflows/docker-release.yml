@@ -36,8 +36,8 @@ jobs:
       run: |
         # If env.IS_PRERELEASE is true, set tag to alpha and do not enable tag_latest
         # If env.IS_PRERELEASE is not true (aka false), don't set an extra tag and enable tag_latest
-        echo "::set-output name=tag::${{ env.IS_PRERELEASE == 'true' && 'alpha' }}"
-        echo "::set-output name=tag_latest::${{ env.IS_PRERELEASE == 'true' && 'false' || 'true' }}"
+        echo "tag=${{ env.IS_PRERELEASE == 'true' && 'alpha' }}" >> $GITHUB_OUTPUT
+        echo "tag_latest=${{ env.IS_PRERELEASE == 'true' && 'false' || 'true' }}" >> $GITHUB_OUTPUT
 
   release-container:
     needs: release-container-prereq
