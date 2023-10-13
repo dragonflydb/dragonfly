@@ -14,7 +14,6 @@ jobs:
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -36,6 +35,7 @@ jobs:
           ls -l ..
 
       - name: Run regression tests action
+        timeout-minutes: 45
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
