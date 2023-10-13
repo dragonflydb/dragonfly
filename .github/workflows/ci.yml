@@ -159,7 +159,7 @@ jobs:
         run: |
           changed=$(ct list-changed --config .ct.yaml)
           if [[ -n "$changed" ]]; then
-            echo "::set-output name=changed::true"
+            echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Run chart-testing (lint)
