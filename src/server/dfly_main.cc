@@ -891,7 +891,6 @@ Usage: dragonfly [FLAGS]
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
   print_stack_on_signal = true;
 #endif
-  LOG(INFO) << "Running with stacktrace " << print_stack_on_signal;
   AcceptServer acceptor(pool.get(), true, print_stack_on_signal);
 
   int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
