@@ -33,8 +33,12 @@ void CheckConnStateClean(const ConnectionState& state) {
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, bool verify_commands, bool error_abort)
-    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr},
-      verify_commands_{verify_commands}, error_abort_{error_abort} {
+    : cmds_{cmds},
+      cntx_{cntx},
+      service_{service},
+      base_cid_{nullptr},
+      verify_commands_{verify_commands},
+      error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = cntx->transaction->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
@@ -48,7 +52,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
-      sinfo.local_tx = new Transaction{cntx_->transaction};
+      sinfo.local_tx = new Transaction{cntx_->transaction, sid};
     } else {
       sinfo.local_tx = new Transaction{base_cid_};
       sinfo.local_tx->StartMultiNonAtomic();

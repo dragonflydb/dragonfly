@@ -1632,10 +1632,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
-    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx};
+    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx, *sid};
     cntx->transaction = stub_tx.get();
 
-    tx->PrepareMultiForScheduleSingleHop(*sid, 0, args);
+    tx->PrepareMultiForScheduleSingleHop(*sid, tx->GetDbIndex(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       result = interpreter->RunFunction(eval_args.sha, &error);
       return OpStatus::OK;
