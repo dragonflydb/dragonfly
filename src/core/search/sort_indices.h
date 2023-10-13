@@ -35,10 +35,10 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
   PMR_NS::vector<T> values_;
 };
 
-struct NumericSortIndex : public SimpleValueSortIndex<int64_t> {
+struct NumericSortIndex : public SimpleValueSortIndex<double> {
   NumericSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
 
-  int64_t Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  double Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
 };
 
 // TODO: Map tags to integers for fast sort

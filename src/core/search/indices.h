@@ -25,10 +25,10 @@ struct NumericIndex : public BaseIndex {
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
-  std::vector<DocId> Range(int64_t l, int64_t r) const;
+  std::vector<DocId> Range(double l, double r) const;
 
  private:
-  using Entry = std::pair<int64_t, DocId>;
+  using Entry = std::pair<double, DocId>;
   absl::btree_set<Entry, std::less<Entry>, PMR_NS::polymorphic_allocator<Entry>> entries_;
 };
 

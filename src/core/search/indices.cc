@@ -59,8 +59,8 @@ NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
 void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  int64_t num;
-  if (absl::SimpleAtoi(doc->GetString(field), &num))
+  double num;
+  if (absl::SimpleAtod(doc->GetString(field), &num))
     entries_.emplace(num, id);
 }
 
@@ -70,9 +70,9 @@ void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
     entries_.erase({num, id});
 }
 
-vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
+vector<DocId> NumericIndex::Range(double l, double r) const {
   auto it_l = entries_.lower_bound({l, 0});
-  auto it_r = entries_.lower_bound({r + 1, 0});
+  auto it_r = entries_.lower_bound({r, numeric_limits<DocId>::max()});
 
   vector<DocId> out;
   for (auto it = it_l; it != it_r; ++it)
