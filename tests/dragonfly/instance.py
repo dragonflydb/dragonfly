@@ -151,6 +151,14 @@ class DflyInstance:
                 proc.terminate()
             proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
+            # We need to send SIGINT to DF such that it prints the stacktrace
+            proc.send_signal(signal.SIGINT)
+            # Then we sleep for 5 seconds such that DF has enough time to print the stacktraces
+            # We can't really synchronize here because SIGTERM and SIGKILL do not block even if
+            # sigaction explicitly blocks other incoming signals until it handles SIGINT.
+            # Even worse, on SIGTERM and SIGKILL none of the handlers registered via sigaction
+            # are guranteed to run
+            time.sleep(5)
             proc.kill()
             proc.communicate()
             raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")

@@ -1,5 +1,12 @@
 add_executable(dragonfly dfly_main.cc)
 cxx_link(dragonfly base dragonfly_lib)
+option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGKILL" OFF)
+
+if (PRINT_STACKTRACES_ON_SIGNAL)
+  target_compile_definitions(dragonfly PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
+endif()
+
+
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
@@ -42,12 +49,7 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
             cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc acl/helpers.cc stacktrace.cc)
-
-if (DEFINED PRINT_STACKTRACES_ON_SIGKILL)
-  target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGKILL)
-endif()
-
+            acl/validator.cc acl/helpers.cc)
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
 

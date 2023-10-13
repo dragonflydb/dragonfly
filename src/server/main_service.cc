@@ -19,7 +19,6 @@ extern "C" {
 #include <absl/strings/str_format.h>
 #include <xxhash.h>
 
-#include <csignal>
 #include <filesystem>
 
 #include "base/flags.h"
@@ -649,9 +648,6 @@ Service::Service(ProactorPool* pp)
   }
 
   shard_set = new EngineShardSet(pp);
-#ifdef PRINT_STACKTRACES_ON_SIGKILL
-  signal(SIGKILL, PrintAllFiberStackTraces);
-#endif
   // We support less than 1024 threads and we support less than 1024 shards.
   // For example, Scan uses 10 bits in cursor to encode shard id it currently traverses.
   CHECK_LT(pp->size(), kMaxThreadSize);

@@ -19,7 +19,6 @@
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
-#include "server/stacktrace.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 
@@ -740,7 +739,11 @@ void DebugCmd::ObjHist() {
 }
 
 void DebugCmd::Stacktrace() {
-  PrintStackTraceOfAllFibers();
+  fb2::Mutex m;
+  shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+    std::unique_lock lk(m);
+    fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+  });
   (*cntx_)->SendOk();
 }
 
