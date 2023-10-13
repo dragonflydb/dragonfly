@@ -11,6 +11,7 @@
 #include "base/bits.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/conn_context.h"
@@ -54,12 +55,22 @@ bool CommandId::IsTransactional() const {
 }
 
 void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
-  uint64_t before = absl::GetCurrentTimeNanos();
-  handler_(std::move(args), cntx);
-  uint64_t after = absl::GetCurrentTimeNanos();
-  auto& ent = command_stats_[ServerState::tlocal()->thread_index()];
+  ServerState* ss = ServerState::tlocal();
+  int64_t before = absl::GetCurrentTimeNanos();
+  handler_(args, cntx);
+  int64_t after = absl::GetCurrentTimeNanos();
+  int64_t execution_time_micro_s = (after - before) / 1000;
+  const auto* conn = cntx->conn();
+  auto& ent = command_stats_[ss->thread_index()];
+  // TODO: we should probably discard more commands here,
+  // not just the blocking ones
+  if (!(opt_mask_ & CO::BLOCKING) && ss->log_slower_than_usec >= 0 &&
+      execution_time_micro_s > ss->log_slower_than_usec && conn != nullptr) {
+    ss->GetSlowLog().Add(name(), args, conn->GetName(), conn->RemoteEndpointStr(),
+                         execution_time_micro_s, after);
+  }
   ++ent.first;
-  ent.second += (after - before) / 1000;
+  ent.second += execution_time_micro_s;
 }
 
 optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {

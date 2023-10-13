@@ -70,6 +70,10 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
   messages.push_back(move(pmsg));
 }
 
+std::string TestConnection::RemoteEndpointStr() const {
+  return "";
+}
+
 void TransactionSuspension::Start() {
   CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::NONE};
 
