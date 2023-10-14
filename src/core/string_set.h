@@ -52,6 +52,9 @@ class StringSet : public DenseSet {
     using pointer = sds*;
     using reference = sds&;
 
+    explicit iterator(const IteratorBase& o) : IteratorBase(o) {
+    }
+
     iterator() : IteratorBase() {
     }
 
@@ -78,6 +81,9 @@ class StringSet : public DenseSet {
     value_type operator->() {
       return (value_type)curr_entry_->GetObject();
     }
+
+    using IteratorBase::ExpiryTime;
+    using IteratorBase::HasExpiry;
   };
 
   class const_iterator : private IteratorBase {
@@ -122,16 +128,19 @@ class StringSet : public DenseSet {
   iterator end() {
     return iterator{this, true};
   }
+  /*
+    const_iterator cbegin() const {
+      return const_iterator{this, false};
+    }
 
-  const_iterator cbegin() const {
-    return const_iterator{this, false};
-  }
-
-  const_iterator cend() const {
-    return const_iterator{this, true};
-  }
-
+    const_iterator cend() const {
+      return const_iterator{this, true};
+    }
+  */
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;
+  iterator Find(std::string_view member) {
+    return iterator{FindIt(&member, 1)};
+  }
 
  protected:
   uint64_t Hash(const void* ptr, uint32_t cookie) const override;
