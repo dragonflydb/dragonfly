@@ -247,11 +247,24 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
     requests.push_back(std::move(std::get<User::UpdateRequest>(req)));
   }
 
+  absl::flat_hash_set<std::string_view> usernames_set;
+  for (const auto& username : usernames) {
+    usernames_set.insert(username);
+  }
+
   auto registry_with_wlock = registry_->GetRegistryWithWriteLock();
   auto& registry = registry_with_wlock.registry;
   // TODO(see what redis is doing here)
   if (!init) {
     registry.clear();
+  }
+  // Evict open connections for users not present in the updated ACL
+  for (const auto& [username, _] : registry) {
+    if (username == "default")
+      continue;
+    if (!usernames_set.contains(username)) {
+      EvictOpenConnectionsOnAllProactors(username);
+    }
   }
   std::vector<uint32_t> categories;
   NestedVector commands;
