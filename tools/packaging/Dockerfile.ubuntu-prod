@@ -7,7 +7,7 @@ WORKDIR /build
 COPY tools/docker/fetch_release.sh /tmp/
 COPY releases/dragonfly-* /tmp/
 
-ARG SUEXEC_HASH d6c40440609a23483f12eb6295b5191e94baf08298a856bab6e15b10c3b82891
+ARG SUEXEC_HASH=d6c40440609a23483f12eb6295b5191e94baf08298a856bab6e15b10c3b82891
 RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/212b75144bbc06722fbd7661f651390dc47a43d1/su-exec.c && \
     if [ "$SUEXEC_HASH" != $(sha256sum su-exec.c | awk '{print $1}') ]; then echo "Wrong hash!" && exit 1; fi && \
     gcc -Wall -O2 su-exec.c -o su-exec

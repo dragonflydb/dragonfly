@@ -8,7 +8,6 @@
 #include <iostream>
 #include <memory>
 #include <ostream>
-#include <regex>
 #include <variant>
 #include <vector>
 
@@ -28,14 +27,13 @@ struct AstTermNode {
   AstTermNode(std::string term);
 
   std::string term;
-  std::regex pattern;
 };
 
 // Matches numeric range
 struct AstRangeNode {
-  AstRangeNode(int64_t lo, int64_t hi);
+  AstRangeNode(double lo, double hi);
 
-  int64_t lo, hi;
+  double lo, hi;
 };
 
 // Negates subtree
@@ -75,7 +73,8 @@ struct AstTagsNode {
 // Applies nearest neighbor search to the final result set
 struct AstKnnNode {
   AstKnnNode() = default;
-  AstKnnNode(size_t limit, std::string_view field, OwnedFtVector vec, std::string_view score_alias);
+  AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
+             std::string_view score_alias);
   AstKnnNode(AstNode&& sub, AstKnnNode&& self);
 
   friend std::ostream& operator<<(std::ostream& stream, const AstKnnNode& matrix) {

@@ -125,6 +125,22 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
   }
 }
 
+void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
+    const UserRegistry::RegistryType& registry) {
+  auto close_cb = [&registry]([[maybe_unused]] size_t id, util::Connection* conn) {
+    DCHECK(conn);
+    auto connection = static_cast<facade::Connection*>(conn);
+    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
+    if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
+      connection->ShutdownSelf();
+    }
+  };
+
+  if (main_listener_) {
+    main_listener_->TraverseConnections(close_cb);
+  }
+}
+
 void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
   if (username == "default") {
@@ -251,6 +267,8 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   auto& registry = registry_with_wlock.registry;
   // TODO(see what redis is doing here)
   if (!init) {
+    // Evict open connections for old users
+    EvictOpenConnectionsOnAllProactorsWithRegistry(registry);
     registry.clear();
   }
   std::vector<uint32_t> categories;
@@ -265,10 +283,6 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   if (!registry.contains("default")) {
     auto& user = registry["default"];
     user.Update(registry_->DefaultUserUpdateRequest());
-  }
-
-  if (!init) {
-    StreamUpdatesToAllProactorConnections(usernames, categories, commands);
   }
 
   return {};

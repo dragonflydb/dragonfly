@@ -389,6 +389,9 @@ TEST_F(StringSetTest, Iteration) {
 TEST_F(StringSetTest, Ttl) {
   EXPECT_TRUE(ss_->Add("bla"sv, 1));
   EXPECT_FALSE(ss_->Add("bla"sv, 1));
+  auto it = ss_->Find("bla"sv);
+  EXPECT_EQ(1u, it.ExpiryTime());
+
   ss_->set_time(1);
   EXPECT_TRUE(ss_->Add("bla"sv, 1));
   EXPECT_EQ(1u, ss_->Size());
@@ -397,11 +400,16 @@ TEST_F(StringSetTest, Ttl) {
     EXPECT_TRUE(ss_->Add(StrCat("foo", i), 1));
   }
   EXPECT_EQ(101u, ss_->Size());
+  it = ss_->Find("foo50");
+  EXPECT_STREQ("foo50", *it);
+  EXPECT_EQ(2u, it.ExpiryTime());
 
   ss_->set_time(2);
   for (unsigned i = 0; i < 100; ++i) {
     EXPECT_TRUE(ss_->Add(StrCat("bar", i)));
   }
+  it = ss_->Find("bar50");
+  EXPECT_FALSE(it.HasExpiry());
 
   for (auto it = ss_->begin(); it != ss_->end(); ++it) {
     ASSERT_TRUE(absl::StartsWith(*it, "bar")) << *it;

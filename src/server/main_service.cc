@@ -75,7 +75,7 @@ ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose aut
 ABSL_FLAG(uint32_t, multi_exec_mode, 2,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
 
-ABSL_FLAG(bool, multi_exec_squash, false,
+ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
@@ -1104,7 +1104,14 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     const bool is_multi =
         dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
 
-    if (!is_multi && cid != nullptr) {
+    // Generally, executing any multi-transactions (including eval) is not possible because they
+    // might request a stricter multi mode than non-atomic which is used for squashing.
+    // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
+    // invocations, we can potentially execute multiple eval in parallel, which is very powerful
+    // paired with shardlocal eval
+    const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
+
+    if (!is_multi && !is_eval && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
       stored_cmds.emplace_back(cid, tail_args);
       continue;
@@ -1594,16 +1601,16 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   DCHECK(!cntx->conn_state.script_info);  // we should not call eval from the script.
 
-  optional<ShardId> sid;
-
   // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
+
+  optional<ShardId> sid;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
-    string_view key = KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i));
-    sinfo->keys.insert(key);
+    string_view key = ArgS(eval_args.keys, i);
+    sinfo->keys.insert(KeyLockArgs::GetLockKey(key));
 
     ShardId cur_sid = Shard(key, shard_count());
     if (i == 0) {
@@ -1620,7 +1627,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
-  absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
+
+  absl::Cleanup clean = [interpreter, &sinfo]() {
+    interpreter->ResetStack();
+    sinfo.reset();
+  };
 
   Interpreter::RunResult result;
 
@@ -1633,10 +1644,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
-    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx};
+    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx, *sid};
     cntx->transaction = stub_tx.get();
 
-    tx->PrepareMultiForScheduleSingleHop(*sid, 0, args);
+    tx->PrepareMultiForScheduleSingleHop(*sid, tx->GetDbIndex(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       result = interpreter->RunFunction(eval_args.sha, &error);
       return OpStatus::OK;
@@ -1665,8 +1676,6 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     if (*scheduled)
       cntx->transaction->UnlockMulti();
   }
-
-  cntx->conn_state.script_info.reset();  // reset script_info
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);

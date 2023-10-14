@@ -52,7 +52,7 @@ struct WrappedStrPtr {
   std::unique_ptr<char[]> ptr;
 };
 
-using ResultScore = std::variant<std::monostate, float, int64_t, WrappedStrPtr>;
+using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {

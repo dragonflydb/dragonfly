@@ -72,7 +72,8 @@ using namespace std;
 %right NOT_OP
 %precedence LPAREN RPAREN
 
-%token <int64_t> INT64 "int64"
+%token <double> DOUBLE "double"
+%token <uint32_t> UINT32 "uint32"
 %nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 
@@ -90,7 +91,7 @@ final_query:
       { driver->Set(AstKnnNode(move($1), move($3))); }
 
 knn_query:
-  LBRACKET KNN INT64 FIELD TERM opt_knn_alias RBRACKET
+  LBRACKET KNN UINT32 FIELD TERM opt_knn_alias RBRACKET
     { $$ = AstKnnNode($3, $4, BytesToFtVector($5), $6); }
 
 opt_knn_alias:
@@ -118,15 +119,16 @@ search_unary_expr:
   LPAREN search_expr RPAREN           { $$ = move($2); }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(move($2)); }
   | TERM                              { $$ = AstTermNode(move($1)); }
-  | INT64                             { $$ = AstTermNode(to_string($1)); }
+  | UINT32                            { $$ = AstTermNode(to_string($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(move($1), move($3)); }
 
 field_cond:
   TERM                                  { $$ = AstTermNode(move($1)); }
-  | INT64                               { $$ = AstTermNode(to_string($1)); }
+  | UINT32                              { $$ = AstTermNode(to_string($1)); }
   | NOT_OP field_cond                   { $$ = AstNegateNode(move($2)); }
   | LPAREN field_cond_expr RPAREN       { $$ = move($2); }
-  | LBRACKET INT64 INT64 RBRACKET       { $$ = AstRangeNode(move($2), move($3)); }
+  | LBRACKET DOUBLE DOUBLE RBRACKET     { $$ = AstRangeNode(move($2), move($3)); }
+  | LBRACKET UINT32 UINT32 RBRACKET     { $$ = AstRangeNode(move($2), move($3)); }
   | LCURLBR tag_list RCURLBR            { $$ = move($2); }
 
 field_cond_expr:
@@ -146,13 +148,13 @@ field_unary_expr:
   LPAREN field_cond_expr RPAREN                  { $$ = move($2); }
   | NOT_OP field_unary_expr                      { $$ = AstNegateNode(move($2)); };
   | TERM                                         { $$ = AstTermNode(move($1)); }
-  | INT64                                        { $$ = AstTermNode(to_string($1)); }
+  | UINT32                                       { $$ = AstTermNode(to_string($1)); }
 
 tag_list:
   TERM                       { $$ = AstTagsNode(move($1)); }
-  | INT64                    { $$ = AstTagsNode(to_string($1)); }
+  | UINT32                   { $$ = AstTagsNode(to_string($1)); }
   | tag_list OR_OP TERM      { $$ = AstTagsNode(move($1), move($3)); }
-  | tag_list OR_OP INT64     { $$ = AstTagsNode(move($1), to_string($3)); }
+  | tag_list OR_OP DOUBLE    { $$ = AstTagsNode(move($1), to_string($3)); }
 
 %%
 

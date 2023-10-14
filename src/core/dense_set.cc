@@ -57,6 +57,7 @@ void DenseSet::IteratorBase::Advance() {
       ++curr_list_;
       if (curr_list_ == owner_->entries_.end()) {
         curr_entry_ = nullptr;
+        owner_ = nullptr;
         return;
       }
       owner_->ExpireIfNeeded(nullptr, &(*curr_list_));
@@ -410,38 +411,49 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   ++size_;
 }
 
-auto DenseSet::Find(const void* ptr, uint32_t bid, uint32_t cookie) -> pair<DensePtr*, DensePtr*> {
-  // could do it with zigzag decoding but this is clearer.
-  int offset[] = {0, -1, 1};
+auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
+    -> tuple<size_t, DensePtr*, DensePtr*> {
+  DensePtr* curr = &entries_[bid];
+  ExpireIfNeeded(nullptr, curr);
+
+  if (Equal(*curr, ptr, cookie)) {
+    return {bid, nullptr, curr};
+  }
 
   // first look for displaced nodes since this is quicker than iterating a potential long chain
-  for (int j = 0; j < 3; ++j) {
-    if ((bid == 0 && j == 1) || (bid + 1 == entries_.size() && j == 2))
-      continue;
-
-    DensePtr* curr = &entries_[bid + offset[j]];
-
+  if (bid > 0) {
+    curr = &entries_[bid - 1];
     ExpireIfNeeded(nullptr, curr);
+
     if (Equal(*curr, ptr, cookie)) {
-      return make_pair(nullptr, curr);
+      return {bid - 1, nullptr, curr};
+    }
+  }
+
+  if (bid + 1 < entries_.size()) {
+    curr = &entries_[bid + 1];
+    ExpireIfNeeded(nullptr, curr);
+
+    if (Equal(*curr, ptr, cookie)) {
+      return {bid + 1, nullptr, curr};
     }
   }
 
   // if the node is not displaced, search the correct chain
   DensePtr* prev = &entries_[bid];
-  DensePtr* curr = prev->Next();
+  curr = prev->Next();
   while (curr != nullptr) {
     ExpireIfNeeded(prev, curr);
 
     if (Equal(*curr, ptr, cookie)) {
-      return make_pair(prev, curr);
+      return {bid, prev, curr};
     }
     prev = curr;
     curr = curr->Next();
   }
 
   // not in the Set
-  return make_pair(nullptr, nullptr);
+  return {0, nullptr, nullptr};
 }
 
 void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
