@@ -44,10 +44,10 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
 
-ABSL_FLAG(string, round_robin_prefix, "",
+ABSL_FLAG(string, shard_round_robin_prefix, "",
           "When non-empty, keys with hash-tags, whose hash-tag starts with this prefix are not "
           "distributed across shards based on their value but instead via round-robin. Use "
-          "cautiously! This can efficiently support up to a few hunderds of keys.");
+          "cautiously! This can efficiently support up to a few hunderds of hash-tags.");
 
 namespace dfly {
 
@@ -83,7 +83,7 @@ ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
 class RoundRobinSharder {
  public:
   void Init() {
-    round_robin_prefix_ = absl::GetFlag(FLAGS_round_robin_prefix);
+    round_robin_prefix_ = absl::GetFlag(FLAGS_shard_round_robin_prefix);
 
     if (IsEnabled()) {
       // ~100k entries will consume 200kb per thread, and will allow 100 keys with < 2.5% collision
