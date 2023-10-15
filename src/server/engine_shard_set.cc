@@ -78,7 +78,13 @@ ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
   return usage;
 }
 
-// TODO: document this class.
+// RoundRobinSharder implements a way to distribute keys that begin with some prefix.
+// Round-robin is disabled by default. It is not a general use-case optimization, but instead only
+// reasonable when there are a few highly contended keys, which we'd like to spread between the
+// shards evenly.
+// When enabled, the distribution is done via hash table: the hash of the key is used to look into
+// a pre-allocated vector. This means that collisions are possible, but are very unlikely if only
+// a few keys are used.
 // Thread safe.
 class RoundRobinSharder {
  public:
