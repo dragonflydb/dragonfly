@@ -174,10 +174,12 @@ class EngineShard {
     void ResetScanState();
   };
 
-  EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
+  EngineShard(util::ProactorBase* pb, mi_heap_t* heap);
 
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
+
+  void StartPeriodicFiber(util::ProactorBase* pb);
 
   void Heartbeat();
   void RunPeriodic(std::chrono::milliseconds period_ms);
