@@ -251,7 +251,10 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     shard_data_.front().local_mask |= ACTIVE;
 
     unique_shard_cnt_ = 1;
-    unique_shard_id_ = Shard(args_.front(), shard_set->size());
+    if (is_stub)  // stub transactions don't migrate
+      DCHECK_EQ(unique_shard_id_, Shard(args_.front(), shard_set->size()));
+    else
+      unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
     return;
   }
