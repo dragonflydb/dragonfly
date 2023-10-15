@@ -1452,12 +1452,10 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
 
-    if (name == "ZDIFF" && num_custom_keys == 0) {
-      return OpStatus::INVALID_INT;
-    }
-
-    if (name == "ZUNION" && num_custom_keys == 0) {
-      return OpStatus::SYNTAX_ERR;
+    if (num_custom_keys == 0 &&
+        (absl::StartsWith(name, "ZDIFF") || absl::StartsWith(name, "ZUNION") ||
+         absl::StartsWith(name, "ZINTER"))) {
+      return OpStatus::AT_LEAST_ONE_KEY;
     }
 
     if (args.size() < size_t(num_custom_keys) + num_keys_index + 1)
