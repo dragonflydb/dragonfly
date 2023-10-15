@@ -47,7 +47,7 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
 ABSL_FLAG(string, shard_round_robin_prefix, "",
           "When non-empty, keys with hash-tags, whose hash-tag starts with this prefix are not "
           "distributed across shards based on their value but instead via round-robin. Use "
-          "cautiously! This can efficiently support up to a few hunderds of hash-tags.");
+          "cautiously! This can efficiently support up to a few hundreds of hash-tags.");
 
 namespace dfly {
 
@@ -82,7 +82,7 @@ ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
 // Thread safe.
 class RoundRobinSharder {
  public:
-  void Init() {
+  static void Init() {
     round_robin_prefix_ = absl::GetFlag(FLAGS_shard_round_robin_prefix);
 
     if (IsEnabled()) {
@@ -101,11 +101,16 @@ class RoundRobinSharder {
     }
   }
 
-  bool IsEnabled() const {
+  static void Destroy() {
+    round_robin_shards_.clear();
+    round_robin_shards_tl_cache_.clear();
+  }
+
+  static bool IsEnabled() {
     return !round_robin_prefix_.empty();
   }
 
-  optional<ShardId> TryGetShardId(string_view key, XXH64_hash_t key_hash) {
+  static optional<ShardId> TryGetShardId(string_view key, XXH64_hash_t key_hash) {
     if (!IsEnabled()) {
       return nullopt;
     }
@@ -125,7 +130,7 @@ class RoundRobinSharder {
       if (sid == kInvalidSid) {
         sid = next_shard_;
         round_robin_shards_[index] = sid;
-        next_shard_ = (next_shard_ + 1) % round_robin_shards_.size();
+        next_shard_ = (next_shard_ + 1) % shard_set->size();
       }
       round_robin_shards_tl_cache_[index] = sid;
     }
@@ -146,8 +151,6 @@ thread_local vector<ShardId> RoundRobinSharder::round_robin_shards_tl_cache_;
 vector<ShardId> RoundRobinSharder::round_robin_shards_;
 ShardId RoundRobinSharder::next_shard_;
 Mutex RoundRobinSharder::mutex_;
-
-RoundRobinSharder g_round_robin_sharder;
 
 }  // namespace
 
@@ -368,9 +371,9 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
     CHECK(!ec) << ec.message();  // TODO
   }
 
-  shard_->shard_search_indices_.reset(new ShardDocIndices());
+  RoundRobinSharder::Init();
 
-  g_round_robin_sharder.Init();
+  shard_->shard_search_indices_.reset(new ShardDocIndices());
 }
 
 void EngineShard::DestroyThreadLocal() {
@@ -387,6 +390,7 @@ void EngineShard::DestroyThreadLocal() {
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
   mi_heap_delete(tlh);
+  RoundRobinSharder::Destroy();
   VLOG(1) << "Shard reset " << index;
 }
 
@@ -715,7 +719,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
 
   if (has_hashtags) {
-    auto round_robin = g_round_robin_sharder.TryGetShardId(v, hash);
+    auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
     if (round_robin.has_value()) {
       return *round_robin;
     }
