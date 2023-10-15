@@ -14,3 +14,4 @@ genfiles/*
 /CMakeLists.txt.user
 _deps
 releases
+.DS_Store
