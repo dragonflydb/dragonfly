@@ -22,11 +22,11 @@ AclLog::AclLog() : total_entries_allowed_(absl::GetFlag(FLAGS_acllog_max_len)) {
 
 void AclLog::Add(const ConnectionContext& cntx, std::string object, Reason reason,
                  std::string tried_to_auth) {
-  if (total_entries_allowed_.load(std::memory_order_relaxed) == 0) {
+  if (total_entries_allowed_ == 0) {
     return;
   }
 
-  while (log_.size() <= total_entries_allowed_.load(std::memory_order_relaxed)) {
+  if (log_.size() == total_entries_allowed_) {
     log_.pop_back();
   }
 
@@ -53,6 +53,14 @@ AclLog::LogType AclLog::GetLog(size_t number_of_entries) const {
   auto start = log_.begin();
   auto end = log_.size() <= number_of_entries ? log_.end() : std::next(start, number_of_entries);
   return {start, end};
+}
+
+void AclLog::SetTotalEntries(size_t total_entries) {
+  while (total_entries_allowed_ > total_entries) {
+    log_.pop_back();
+  }
+
+  total_entries_allowed_ = total_entries;
 }
 
 }  // namespace dfly::acl
