@@ -145,7 +145,8 @@ class Transaction {
  public:
   explicit Transaction(const CommandId* cid);
 
-  explicit Transaction(const Transaction* parent);
+  // Initialize transaction for squashing placed on a specific shard with a given parent tx
+  explicit Transaction(const Transaction* parent, ShardId shard_id);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
