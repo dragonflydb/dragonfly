@@ -57,6 +57,7 @@ void DenseSet::IteratorBase::Advance() {
       ++curr_list_;
       if (curr_list_ == owner_->entries_.end()) {
         curr_entry_ = nullptr;
+        owner_ = nullptr;
         return;
       }
       owner_->ExpireIfNeeded(nullptr, &(*curr_list_));
