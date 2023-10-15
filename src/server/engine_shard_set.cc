@@ -702,11 +702,14 @@ void EngineShardSet::TEST_EnableCacheMode() {
   RunBriefInParallel([](EngineShard* shard) { shard->db_slice().TEST_EnableCacheMode(); });
 }
 
-ShardId Shard(std::string_view v, ShardId shard_num) {
+ShardId Shard(string_view v, ShardId shard_num) {
   bool has_hashtags = false;
   if (ClusterConfig::IsEnabledOrEmulated()) {
-    v = ClusterConfig::KeyTag(v);
-    has_hashtags = true;
+    string_view v_hash_tag = ClusterConfig::KeyTag(v);
+    if (v_hash_tag.size() != v.size()) {
+      has_hashtags = true;
+      v = v_hash_tag;
+    }
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
