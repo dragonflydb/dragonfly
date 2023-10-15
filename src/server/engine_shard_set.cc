@@ -4,6 +4,8 @@
 
 #include "server/engine_shard_set.h"
 
+#include <absl/strings/match.h>
+
 extern "C" {
 #include "redis/object.h"
 #include "redis/zmalloc.h"
@@ -41,6 +43,12 @@ ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
 ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
+
+ABSL_FLAG(string, shard_round_robin_prefix, "",
+          "When non-empty, keys with hash-tags, whose hash-tag starts with this prefix are not "
+          "distributed across shards based on their value but instead via round-robin. Use "
+          "cautiously! This can efficiently support up to a few hundreds of hash-tags.");
+
 namespace dfly {
 
 using namespace util;
@@ -69,6 +77,86 @@ ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
                                       &usage.wasted_mem);
   return usage;
 }
+
+// RoundRobinSharder implements a way to distribute keys that begin with some prefix.
+// Round-robin is disabled by default. It is not a general use-case optimization, but instead only
+// reasonable when there are a few highly contended keys, which we'd like to spread between the
+// shards evenly.
+// When enabled, the distribution is done via hash table: the hash of the key is used to look into
+// a pre-allocated vector. This means that collisions are possible, but are very unlikely if only
+// a few keys are used.
+// Thread safe.
+class RoundRobinSharder {
+ public:
+  static void Init() {
+    round_robin_prefix_ = absl::GetFlag(FLAGS_shard_round_robin_prefix);
+
+    if (IsEnabled()) {
+      // ~100k entries will consume 200kb per thread, and will allow 100 keys with < 2.5% collision
+      // probability. Since this has a considerable footprint, we only allocate when enabled. We're
+      // using a prime number close to 100k for better utilization.
+      constexpr size_t kRoundRobinSize = 100'003;
+      round_robin_shards_tl_cache_.resize(kRoundRobinSize);
+      std::fill(round_robin_shards_tl_cache_.begin(), round_robin_shards_tl_cache_.end(),
+                kInvalidSid);
+
+      std::lock_guard guard(mutex_);
+      if (round_robin_shards_.empty()) {
+        round_robin_shards_ = round_robin_shards_tl_cache_;
+      }
+    }
+  }
+
+  static void Destroy() {
+    round_robin_shards_.clear();
+    round_robin_shards_tl_cache_.clear();
+  }
+
+  static bool IsEnabled() {
+    return !round_robin_prefix_.empty();
+  }
+
+  static optional<ShardId> TryGetShardId(string_view key, XXH64_hash_t key_hash) {
+    if (!IsEnabled()) {
+      return nullopt;
+    }
+
+    DCHECK(!round_robin_shards_tl_cache_.empty());
+
+    if (!absl::StartsWith(key, round_robin_prefix_)) {
+      return nullopt;
+    }
+
+    size_t index = key_hash % round_robin_shards_tl_cache_.size();
+    ShardId sid = round_robin_shards_tl_cache_[index];
+
+    if (sid == kInvalidSid) {
+      std::lock_guard guard(mutex_);
+      sid = round_robin_shards_[index];
+      if (sid == kInvalidSid) {
+        sid = next_shard_;
+        round_robin_shards_[index] = sid;
+        next_shard_ = (next_shard_ + 1) % shard_set->size();
+      }
+      round_robin_shards_tl_cache_[index] = sid;
+    }
+
+    return sid;
+  }
+
+ private:
+  static thread_local string round_robin_prefix_;
+  static thread_local vector<ShardId> round_robin_shards_tl_cache_;
+  static vector<ShardId> round_robin_shards_ ABSL_GUARDED_BY(mutex_);
+  static ShardId next_shard_ ABSL_GUARDED_BY(mutex_);
+  static Mutex mutex_;
+};
+
+thread_local string RoundRobinSharder::round_robin_prefix_;
+thread_local vector<ShardId> RoundRobinSharder::round_robin_shards_tl_cache_;
+vector<ShardId> RoundRobinSharder::round_robin_shards_;
+ShardId RoundRobinSharder::next_shard_;
+Mutex RoundRobinSharder::mutex_;
 
 }  // namespace
 
@@ -289,6 +377,8 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
     CHECK(!ec) << ec.message();  // TODO
   }
 
+  RoundRobinSharder::Init();
+
   shard_->shard_search_indices_.reset(new ShardDocIndices());
 }
 
@@ -306,6 +396,7 @@ void EngineShard::DestroyThreadLocal() {
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
   mi_heap_delete(tlh);
+  RoundRobinSharder::Destroy();
   VLOG(1) << "Shard reset " << index;
 }
 
@@ -619,6 +710,28 @@ void EngineShardSet::TEST_EnableHeartBeat() {
 
 void EngineShardSet::TEST_EnableCacheMode() {
   RunBriefInParallel([](EngineShard* shard) { shard->db_slice().TEST_EnableCacheMode(); });
+}
+
+ShardId Shard(string_view v, ShardId shard_num) {
+  bool has_hashtags = false;
+  if (ClusterConfig::IsEnabledOrEmulated()) {
+    string_view v_hash_tag = ClusterConfig::KeyTag(v);
+    if (v_hash_tag.size() != v.size()) {
+      has_hashtags = true;
+      v = v_hash_tag;
+    }
+  }
+
+  XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
+
+  if (has_hashtags) {
+    auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
+    if (round_robin.has_value()) {
+      return *round_robin;
+    }
+  }
+
+  return hash % shard_num;
 }
 
 }  // namespace dfly

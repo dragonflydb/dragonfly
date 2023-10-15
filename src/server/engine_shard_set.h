@@ -360,13 +360,7 @@ template <typename U, typename P> void EngineShardSet::RunBlockingInParallel(U&&
   bc.Wait();
 }
 
-inline ShardId Shard(std::string_view v, ShardId shard_num) {
-  if (ClusterConfig::IsEnabledOrEmulated()) {
-    v = ClusterConfig::KeyTag(v);
-  }
-  XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
-  return hash % shard_num;
-}
+ShardId Shard(std::string_view v, ShardId shard_num);
 
 // absl::GetCurrentTimeNanos is twice faster than clock_gettime(CLOCK_REALTIME) on my laptop
 // and 4 times faster than on a VM. it takes 5-10ns to do a call.
