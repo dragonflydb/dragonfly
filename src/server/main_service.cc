@@ -1602,8 +1602,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
-    string_view key = KeyLockArgs::GetLockKey(ArgS(eval_args.keys, i));
-    sinfo->keys.insert(key);
+    string_view key = ArgS(eval_args.keys, i);
+    sinfo->keys.insert(KeyLockArgs::GetLockKey(key));
 
     ShardId cur_sid = Shard(key, shard_count());
     if (i == 0) {
