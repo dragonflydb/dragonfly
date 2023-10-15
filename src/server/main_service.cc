@@ -1101,10 +1101,16 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    const bool is_multi =
+    bool is_multi =
         dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
 
-    if (!is_multi && cid != nullptr) {
+    // Generally, executing any multi-transactions (including eval) is not possible because they
+    // migh request a stricter multi mode than non-atomic which is used for squashing.
+    // TODO: By allowing promotion we can potentially execute multiple eval in parallel, which is
+    // very powerful paired with shardlocal eval
+    bool is_eval = CO::IsEvalKind(ArgS(args, 0));
+
+    if (!is_multi && !is_eval && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
       stored_cmds.emplace_back(cid, tail_args);
       continue;
@@ -1594,13 +1600,15 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   DCHECK(!cntx->conn_state.script_info);  // we should not call eval from the script.
 
-  optional<ShardId> sid;
-
   // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
+
+  absl::Cleanup sinfo_clean = [&sinfo]() { sinfo.reset(); };
+
+  optional<ShardId> sid;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
     sinfo->keys.insert(KeyLockArgs::GetLockKey(key));
@@ -1665,8 +1673,6 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     if (*scheduled)
       cntx->transaction->UnlockMulti();
   }
-
-  cntx->conn_state.script_info.reset();  // reset script_info
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
