@@ -58,7 +58,7 @@ class StringSet : public DenseSet {
     iterator() : IteratorBase() {
     }
 
-    iterator(DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
+    iterator(DenseSet* set) : IteratorBase(set, false) {
     }
 
     iterator& operator++() {
@@ -67,7 +67,10 @@ class StringSet : public DenseSet {
     }
 
     bool operator==(const iterator& b) const {
-      return curr_list_ == b.curr_list_;
+      if (owner_ == nullptr && b.owner_ == nullptr) {  // to allow comparison with end()
+        return true;
+      }
+      return owner_ == b.owner_ && curr_entry_ == b.curr_entry_;
     }
 
     bool operator!=(const iterator& b) const {
@@ -86,57 +89,14 @@ class StringSet : public DenseSet {
     using IteratorBase::HasExpiry;
   };
 
-  class const_iterator : private IteratorBase {
-   public:
-    using iterator_category = std::input_iterator_tag;
-    using value_type = const char*;
-    using pointer = value_type*;
-    using reference = value_type&;
-
-    const_iterator() : IteratorBase() {
-    }
-
-    const_iterator(const DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
-    }
-
-    const_iterator& operator++() {
-      Advance();
-      return *this;
-    }
-
-    bool operator==(const const_iterator& b) const {
-      return curr_list_ == b.curr_list_;
-    }
-
-    bool operator!=(const const_iterator& b) const {
-      return !(*this == b);
-    }
-
-    value_type operator*() const {
-      return (value_type)curr_entry_->GetObject();
-    }
-
-    value_type operator->() const {
-      return (value_type)curr_entry_->GetObject();
-    }
-  };
-
   iterator begin() {
-    return iterator{this, false};
+    return iterator{this};
   }
 
   iterator end() {
-    return iterator{this, true};
+    return iterator{};
   }
-  /*
-    const_iterator cbegin() const {
-      return const_iterator{this, false};
-    }
 
-    const_iterator cend() const {
-      return const_iterator{this, true};
-    }
-  */
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;
   iterator Find(std::string_view member) {
     return iterator{FindIt(&member, 1)};
