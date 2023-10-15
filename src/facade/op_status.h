@@ -27,6 +27,7 @@ enum class OpStatus : uint16_t {
   ENTRIES_ADDED_SMALL,
   INVALID_NUMERIC_RESULT,
   CANCELLED,
+  AT_LEAST_ONE_KEY,
 };
 
 class OpResultBase {

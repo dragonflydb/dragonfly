@@ -75,7 +75,7 @@ ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose aut
 ABSL_FLAG(uint32_t, multi_exec_mode, 2,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
 
-ABSL_FLAG(bool, multi_exec_squash, false,
+ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
@@ -1633,10 +1633,10 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
-    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx};
+    boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx, *sid};
     cntx->transaction = stub_tx.get();
 
-    tx->PrepareMultiForScheduleSingleHop(*sid, 0, args);
+    tx->PrepareMultiForScheduleSingleHop(*sid, tx->GetDbIndex(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       result = interpreter->RunFunction(eval_args.sha, &error);
       return OpStatus::OK;

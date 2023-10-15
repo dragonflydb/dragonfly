@@ -174,10 +174,12 @@ class EngineShard {
     void ResetScanState();
   };
 
-  EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
+  EngineShard(util::ProactorBase* pb, mi_heap_t* heap);
 
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
+
+  void StartPeriodicFiber(util::ProactorBase* pb);
 
   void Heartbeat();
   void RunPeriodic(std::chrono::milliseconds period_ms);
@@ -360,13 +362,7 @@ template <typename U, typename P> void EngineShardSet::RunBlockingInParallel(U&&
   bc.Wait();
 }
 
-inline ShardId Shard(std::string_view v, ShardId shard_num) {
-  if (ClusterConfig::IsEnabledOrEmulated()) {
-    v = ClusterConfig::KeyTag(v);
-  }
-  XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
-  return hash % shard_num;
-}
+ShardId Shard(std::string_view v, ShardId shard_num);
 
 // absl::GetCurrentTimeNanos is twice faster than clock_gettime(CLOCK_REALTIME) on my laptop
 // and 4 times faster than on a VM. it takes 5-10ns to do a call.
