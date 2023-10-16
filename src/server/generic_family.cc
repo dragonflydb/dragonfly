@@ -24,6 +24,7 @@ extern "C" {
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
+#include "server/set_family.h"
 #include "server/transaction.h"
 #include "util/varz.h"
 
@@ -618,6 +619,27 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   return res.status();
 }
 
+// returns -2 if the key was not found, -3 if the field was not found,
+// -1 if ttl on the field was not found.
+OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
+  auto& db_slice = shard->db_slice();
+  const DbContext& db_cntx = t->GetDbContext();
+  auto [it, expire_it] = db_slice.FindExt(db_cntx, key);
+  if (!IsValid(it))
+    return -2;
+
+  if (it->second.ObjType() != OBJ_SET)  // TODO: to finish for hashes.
+    return OpStatus::WRONG_TYPE;
+
+  if (it->second.ObjType() == OBJ_SET) {
+    int32_t res = SetFamily::FieldExpireTime(db_cntx, it->second, field);
+    return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
+  }
+
+  // TODO: to finish with hash family.
+  return OpStatus::INVALID_VALUE;
+}
+
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {
@@ -1060,6 +1082,24 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+// Returns -2 if key not found, WRONG_TYPE if key is not a set or hash
+// -1 if the field does not have associated TTL on it, and -3 if field is not found.
+void GenericFamily::FieldTtl(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view field = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
+
+  OpResult<long> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result) {
+    (*cntx)->SendLong(*result);
+    return;
+  }
+
+  (*cntx)->SendError(result.status());
+}
+
 void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view target_db_sv = ArgS(args, 1);
@@ -1455,6 +1495,7 @@ constexpr uint32_t kSelect = FAST | CONNECTION;
 constexpr uint32_t kScan = KEYSPACE | READ | SLOW;
 constexpr uint32_t kTTL = KEYSPACE | READ | FAST;
 constexpr uint32_t kPTTL = KEYSPACE | READ | FAST;
+constexpr uint32_t kFieldTtl = KEYSPACE | READ | FAST;
 constexpr uint32_t kTime = FAST;
 constexpr uint32_t kType = KEYSPACE | READ | FAST;
 constexpr uint32_t kDump = KEYSPACE | READ | SLOW;
@@ -1495,6 +1536,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kScan}.HFUNC(Scan)
       << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kTTL}.HFUNC(Ttl)
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kPTTL}.HFUNC(Pttl)
+      << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, 1, acl::kDump}.HFUNC(Dump)
