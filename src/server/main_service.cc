@@ -1101,14 +1101,15 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    bool is_multi =
+    const bool is_multi =
         dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
 
     // Generally, executing any multi-transactions (including eval) is not possible because they
-    // migh request a stricter multi mode than non-atomic which is used for squashing.
-    // TODO: By allowing promotion we can potentially execute multiple eval in parallel, which is
-    // very powerful paired with shardlocal eval
-    bool is_eval = CO::IsEvalKind(ArgS(args, 0));
+    // might request a stricter multi mode than non-atomic which is used for squashing.
+    // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
+    // invocations, we can potentially execute multiple eval in parallel, which is very powerful
+    // paired with shardlocal eval
+    const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
 
     if (!is_multi && !is_eval && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
@@ -1606,8 +1607,6 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
 
-  absl::Cleanup sinfo_clean = [&sinfo]() { sinfo.reset(); };
-
   optional<ShardId> sid;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
@@ -1628,7 +1627,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
-  absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
+
+  absl::Cleanup clean = [interpreter, &sinfo]() {
+    interpreter->ResetStack();
+    sinfo.reset();
+  };
 
   Interpreter::RunResult result;
 
