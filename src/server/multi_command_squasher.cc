@@ -58,6 +58,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
       sinfo.local_tx = new Transaction{base_cid_};
       sinfo.local_tx->StartMultiNonAtomic();
     }
+    num_shards_++;
   }
 
   return sinfo;
@@ -99,6 +100,8 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   sinfo.had_writes |= (cmd->Cid()->opt_mask() & CO::WRITE);
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
+
+  num_squashed_++;
 
   // Because the squashed hop is currently blocking, we cannot add more than the max channel size,
   // otherwise a deadlock occurs.
@@ -260,6 +263,9 @@ void MultiCommandSquasher::Run() {
         sd.local_tx->UnlockMulti();
     }
   }
+
+  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
+          << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
 }
 
 bool MultiCommandSquasher::IsAtomic() const {
