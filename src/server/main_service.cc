@@ -2046,38 +2046,60 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
     }
   });
 
-  if (args.size() > 0) {
-    ToUpper(&args[0]);
-    string_view subcmd = ArgS(args, 0);
-    if (subcmd == "COUNT") {
-      return (*cntx)->SendLong(cmd_cnt);
-    } else {
-      return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
-    }
-  }
-
-  (*cntx)->StartArray(cmd_cnt);
-
-  registry_.Traverse([&](string_view name, const CommandId& cd) {
-    if (cd.opt_mask() & CO::HIDDEN)
-      return;
+  auto serialize_command = [&cntx](string_view name, const CommandId& cid) {
     (*cntx)->StartArray(6);
-    (*cntx)->SendSimpleString(cd.name());
-    (*cntx)->SendLong(cd.arity());
-    (*cntx)->StartArray(CommandId::OptCount(cd.opt_mask()));
+    (*cntx)->SendSimpleString(cid.name());
+    (*cntx)->SendLong(cid.arity());
+    (*cntx)->StartArray(CommandId::OptCount(cid.opt_mask()));
 
     for (uint32_t i = 0; i < 32; ++i) {
       unsigned obit = (1u << i);
-      if (cd.opt_mask() & obit) {
+      if (cid.opt_mask() & obit) {
         const char* name = CO::OptName(CO::CommandOpt{obit});
         (*cntx)->SendSimpleString(name);
       }
     }
 
-    (*cntx)->SendLong(cd.first_key_pos());
-    (*cntx)->SendLong(cd.last_key_pos());
-    (*cntx)->SendLong(cd.key_arg_step());
-  });
+    (*cntx)->SendLong(cid.first_key_pos());
+    (*cntx)->SendLong(cid.last_key_pos());
+    (*cntx)->SendLong(cid.key_arg_step());
+  };
+
+  // If no arguments are specified, reply with all commands
+  if (args.empty()) {
+    (*cntx)->StartArray(cmd_cnt);
+    registry_.Traverse([&](string_view name, const CommandId& cid) {
+      if (cid.opt_mask() & CO::HIDDEN)
+        return;
+      serialize_command(name, cid);
+    });
+    return;
+  }
+
+  ToUpper(&args[0]);
+  string_view subcmd = ArgS(args, 0);
+
+  // COUNT
+  if (subcmd == "COUNT") {
+    return (*cntx)->SendLong(cmd_cnt);
+  }
+
+  // INFO [cmd]
+  if (subcmd == "INFO" && args.size() == 2) {
+    ToUpper(&args[1]);
+    string_view cmd = ArgS(args, 1);
+
+    if (const auto* cid = registry_.Find(cmd); cid) {
+      (*cntx)->StartArray(1);
+      serialize_command(cmd, *cid);
+    } else {
+      (*cntx)->SendNull();
+    }
+
+    return;
+  }
+
+  return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
 }
 
 VarzValue::Map Service::GetVarzStats() {
