@@ -182,6 +182,10 @@ class Connection : public util::Connection {
 
   ConnectionContext* cntx();
 
+  // Requests that at some point, this connection will be migrated to `dest` thread.
+  // Connections will migrate at most once, and only when the flag --migrate_connections is true.
+  void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
@@ -285,9 +289,12 @@ class Connection : public util::Connection {
   // Needed for access from different threads by EnsureAsyncMemoryBudget().
   QueueBackpressure* queue_backpressure_;
 
-  // Pooled pipieline messages per-thread.
-  // Aggregated while handling pipelines,
-  // graudally released while handling regular commands.
+  // Connection migration vars, see RequestAsyncMigration() above.
+  bool migration_enabled_;
+  util::fb2::ProactorBase* migration_request_ = nullptr;
+
+  // Pooled pipeline messages per-thread
+  // Aggregated while handling pipelines, gradually released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
 
   // Per-thread queue backpressure structs.

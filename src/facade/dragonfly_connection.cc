@@ -59,6 +59,11 @@ ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
 ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
+ABSL_FLAG(bool, migrate_connections, true,
+          "When enabled, Dragonfly will try to migrate connections to the target thread on which "
+          "they operate. Currently this is only supported for Lua script invocations, and can "
+          "happen at most once per connection.");
+
 using namespace util;
 using nonstd::make_unexpected;
 
@@ -284,6 +289,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   if (queue_backpressure_->limit == 0) {
     queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
   }
+
+  migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
 }
 
 Connection::~Connection() {
@@ -769,6 +776,20 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   do {
     FetchBuilderStats(stats_, orig_builder);
 
+    if (migration_request_) {
+      ProactorBase* dest = migration_request_;
+
+      dispatch_fb_.JoinIfNeeded();
+      DCHECK(dispatch_q_.empty());
+      migration_request_ = nullptr;
+      this->Migrate(dest);
+
+      // We're now running in `dest` thread
+      queue_backpressure_ = &tl_queue_backpressure_;
+      dispatch_fb_ =
+          fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
+    }
+
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     DCHECK(!append_buf.empty());
 
@@ -865,8 +886,10 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   while (!builder->GetError()) {
-    evc_.await(
-        [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
+    evc_.await([this] {
+      return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch) ||
+             migration_request_;
+    });
     if (cc_->conn_closing)
       break;
 
@@ -947,6 +970,12 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     }
 
     queue_backpressure_->ec.notify();
+
+    if (migration_request_ != nullptr && dispatch_q_.empty()) {
+      // Subtle! Return without setting conn_closing = true and clearing queue.
+      // Open question: how should we handle pipeline_req_pool_ ?
+      return;
+    }
   }
 
   cc_->conn_closing = true;
@@ -1112,6 +1141,18 @@ std::string Connection::RemoteEndpointAddress() const {
 
 facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
+}
+
+void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
+  if (!migration_enabled_) {
+    return;
+  }
+
+  // Connections can migrate at most once.
+  migration_enabled_ = false;
+
+  migration_request_ = dest;
+  evc_.notify();
 }
 
 }  // namespace facade
