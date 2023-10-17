@@ -603,6 +603,7 @@ TEST_F(GenericFamilyTest, Info) {
 }
 
 TEST_F(GenericFamilyTest, FieldTtl) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;  // to reset to test time.
   EXPECT_THAT(Run({"saddex", "key", "1", "val1"}), IntArg(1));
   EXPECT_THAT(Run({"saddex", "key", "2", "val2"}), IntArg(1));
   EXPECT_EQ(-2, CheckedInt({"fieldttl", "nokey", "val1"}));  // key not found

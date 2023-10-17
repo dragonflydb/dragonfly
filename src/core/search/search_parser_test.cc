@@ -77,7 +77,7 @@ TEST_F(SearchParserTest, Scanner) {
 
   NEXT_TOK(TOK_LPAREN);
   NEXT_EQ(TOK_TERM, string, "5a");
-  NEXT_EQ(TOK_INT64, int64_t, 6);
+  NEXT_EQ(TOK_UINT32, uint32_t, 6);
   NEXT_TOK(TOK_RPAREN);
 
   SetInput(R"( "hello\"world" )");
@@ -98,6 +98,11 @@ TEST_F(SearchParserTest, Scanner) {
   SetInput("почтальон Печкин");
   NEXT_EQ(TOK_TERM, string, "почтальон");
   NEXT_EQ(TOK_TERM, string, "Печкин");
+
+  double d;
+  absl::SimpleAtod("33.3", &d);
+  SetInput("33.3");
+  NEXT_EQ(TOK_DOUBLE, double, d);
 
   SetInput("18446744073709551616");
   NEXT_ERROR();
@@ -122,7 +127,7 @@ TEST_F(SearchParserTest, ParseParams) {
 
   SetInput("$name $k");
   NEXT_EQ(TOK_TERM, string, "alex");
-  NEXT_EQ(TOK_INT64, int64_t, 10);
+  NEXT_EQ(TOK_UINT32, uint32_t, 10);
 }
 
 }  // namespace dfly::search
