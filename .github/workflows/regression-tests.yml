@@ -35,7 +35,6 @@ jobs:
           ls -l ..
 
       - name: Run regression tests action
-        timeout-minutes: 45
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
