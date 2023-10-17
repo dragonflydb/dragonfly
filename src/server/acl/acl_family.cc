@@ -471,7 +471,8 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
 
 void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
   if (args.length() > 1) {
-    (*cntx)->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
+    (*cntx)->SendError(
+        "Unknown subcommand or wrong number of arguments for 'GENPASS'. Try ACL HELP.");
     return;
   }
   uint32_t random_bits = 256;
@@ -484,14 +485,15 @@ void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
           "number up to 4096");
     }
   }
-  auto rbe = ServerState::tlocal()->random_bits_engine;
+  std::random_device urandom("/dev/urandom");
+  std::independent_bits_engine<std::default_random_engine, CHAR_BIT, unsigned char>
+      random_bits_engine(urandom());
   std::vector<unsigned char> data((random_bits + 3) / 4);
-  std::generate(begin(data), end(data), std::ref(*rbe));
+  std::generate(begin(data), end(data), std::ref(random_bits_engine));
 
-  const std::string hex_chars = "0123456789abcdef";
   std::string response;
-  for (unsigned char c : data) {
-    response += hex_chars[c & 0x0F];
+  for (auto c : data) {
+    absl::StrAppend(&response, absl::Hex(c & 0x0F, absl::kNoPad));
   }
 
   (*cntx)->SendSimpleString(response);

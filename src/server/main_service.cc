@@ -2281,11 +2281,6 @@ void Service::RegisterCommands() {
 
 void Service::TestInit() {
   acl_family_.Init(nullptr, &user_registry_);
-  proactor_pool().AwaitFiberOnAll([](auto index, auto* context) {
-    ServerState::tlocal()->random_bits_engine =
-        new std::independent_bits_engine<std::default_random_engine, CHAR_BIT, unsigned char>();
-    ServerState::tlocal()->random_bits_engine->seed(1);
-  });
 }
 
 void SetMaxMemoryFlag(uint64_t value) {

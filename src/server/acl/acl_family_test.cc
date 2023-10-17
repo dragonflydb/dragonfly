@@ -284,8 +284,6 @@ TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
 }
 
 TEST_F(AclFamilyTest, AclGenPassOutOfRange) {
-  TestInitAclFam();
-
   std::string expectedError =
       "ERR ACL GENPASS argument must be the number of bits for the output password, a positive "
       "number up to 4096";
@@ -305,7 +303,7 @@ TEST_F(AclFamilyTest, AclGenPass) {
   auto actualPassword = resp.GetString();
 
   // should be 256 bits or 64 bytes in hex
-  //  EXPECT_THAT(actualPassword.length(), 64);
+  EXPECT_THAT(actualPassword.length(), 64);
 
   // 1 bits - 4 bits should all produce a single hex character
   for (int i = 1; i <= 4; i++) {

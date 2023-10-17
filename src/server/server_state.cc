@@ -68,9 +68,6 @@ ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_pe
   mi_heap_t* tlh = mi_heap_new();
   init_zmalloc_threadlocal(tlh);
   data_heap_ = tlh;
-  std::random_device dev;
-  random_bits_engine =
-      new std::independent_bits_engine<std::default_random_engine, CHAR_BIT, unsigned char>(dev());
 }
 
 ServerState::~ServerState() {
