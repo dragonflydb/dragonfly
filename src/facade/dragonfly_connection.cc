@@ -337,8 +337,17 @@ void Connection::HandleRequests() {
   ThisFiber::SetName("DflyConnection");
 
   if (absl::GetFlag(FLAGS_tcp_nodelay)) {
-    int val = 1;
-    CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)));
+    int val = 0;
+
+    // Get the underlying address family first to avoid setting tcp options on unix domain sockets
+    socklen_t bufsize = sizeof(val);
+    int res = getsockopt(socket_->native_handle(), SOL_SOCKET, SO_DOMAIN, &val, &bufsize);
+    LOG_IF(ERROR, res != 0) << "Bad getsockopt call " << res;
+
+    if (res == 0 && (val == AF_INET || val == AF_INET6)) {
+      val = 1;
+      setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+    }
   }
 
   auto remote_ep = socket_->RemoteEndpoint();
