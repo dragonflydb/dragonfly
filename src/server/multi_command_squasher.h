@@ -83,6 +83,9 @@ class MultiCommandSquasher {
   std::vector<ShardExecInfo> sharded_;
   std::vector<ShardId> order_;  // reply order for squashed cmds
 
+  size_t num_squashed_ = 0;
+  size_t num_shards_ = 0;
+
   std::vector<MutableSlice> tmp_keylist_;
 };
 

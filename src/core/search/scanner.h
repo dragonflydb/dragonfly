@@ -46,11 +46,11 @@ class Scanner : public Lexer {
     if (str.empty())
       throw std::runtime_error(absl::StrCat("Query parameter ", name, " not found"));
 
-    int64_t val = 0;
+    uint32_t val = 0;
     if (!absl::SimpleAtoi(str, &val))
       return Parser::make_TERM(std::string{str}, loc);
 
-    return Parser::make_INT64(val, loc);
+    return Parser::make_UINT32(val, loc);
   }
 
  private:

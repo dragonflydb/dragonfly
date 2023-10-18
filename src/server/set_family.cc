@@ -305,6 +305,31 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
   }
 }
 
+// returns -3 if member is not found, -1 if no ttl is associated with this member.
+int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view member) {
+  if (st.second == kEncodingIntSet) {
+    long long llval;
+    if (!string2ll(member.data(), member.size(), &llval))
+      return -3;
+
+    return -1;
+  }
+
+  if (IsDenseEncoding(st)) {
+    StringSet* ss = (StringSet*)st.first;
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
+
+    auto it = ss->Find(member);
+    if (it == ss->end())
+      return -3;
+
+    return it.ExpiryTime();
+  } else {
+    // Old encoding, does not support expiry.
+    return -1;
+  }
+}
+
 void FindInSet(StringVec& memberships, const DbContext& db_context, const SetType& st,
                const vector<string_view>& members) {
   for (const auto& member : members) {
@@ -1494,9 +1519,9 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  vector<string_view> vals(args.size() - 3);
-  for (size_t i = 3; i < args.size(); ++i) {
-    vals[i - 3] = ArgS(args, i);
+  vector<string_view> vals(args.size() - 2);
+  for (size_t i = 2; i < args.size(); ++i) {
+    vals[i - 2] = ArgS(args, i);
   }
 
   ArgSlice arg_slice{vals.data(), vals.size()};
@@ -1626,6 +1651,14 @@ void SetFamily::ConvertTo(const intset* src, dict* dest) {
     sds s = sdsnewlen(buf, next - buf);
     CHECK(dictAddRaw(dest, s, NULL));
   }
+}
+
+int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
+                                   std::string_view field) {
+  DCHECK_EQ(OBJ_SET, pv.ObjType());
+
+  SetType st{pv.RObjPtr(), pv.Encoding()};
+  return GetExpiry(db_context, st, field);
 }
 
 }  // namespace dfly

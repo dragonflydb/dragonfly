@@ -52,12 +52,12 @@ template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRe
   return values_.get_allocator().resource();
 }
 
-template struct SimpleValueSortIndex<int64_t>;
+template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
-int64_t NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
-  int64_t v;
-  if (!absl::SimpleAtoi(doc->GetString(field), &v))
+double NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
+  double v;
+  if (!absl::SimpleAtod(doc->GetString(field), &v))
     return 0;
   return v;
 }

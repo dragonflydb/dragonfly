@@ -19,7 +19,7 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
-            ${TX_LINUX_SRCS} acl/acl_log.cc
+            ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc
             )
 
 if (NOT APPLE)
@@ -69,6 +69,7 @@ cxx_test(multi_test dfly_test_lib LABELS DFLY)
 cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
 cxx_test(hset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(list_family_test dfly_test_lib LABELS DFLY)
+cxx_test(server_family_test dfly_test_lib LABELS DFLY)
 cxx_test(set_family_test dfly_test_lib LABELS DFLY)
 cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
@@ -87,6 +88,7 @@ cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
+cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 
 
 

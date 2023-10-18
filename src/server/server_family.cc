@@ -19,6 +19,7 @@
 #include <optional>
 
 #include "facade/error.h"
+#include "slowlog.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -90,6 +91,10 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "Specifies a host and port which point to a target master "
           "to replicate. "
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
+ABSL_FLAG(int32_t, slowlog_log_slower_than, 10000,
+          "Add commands slower than this threshold to slow log. The value is expressed in "
+          "microseconds and if it's negative - disables the slowlog.");
+ABSL_FLAG(uint32_t, slowlog_max_len, 20, "Slow log maximum length.");
 
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
 // Disable EC2 metadata by default, or if a users credentials are invalid the
@@ -155,6 +160,81 @@ std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
   return (flag.has_value()) ? absl::StrCat(flag.host, ":", flag.port) : "";
 }
 
+void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
+                std::string_view sub_cmd) {
+  size_t requested_slow_log_length = UINT32_MAX;
+  size_t argc = args.size();
+  if (argc >= 3) {
+    (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
+    return;
+  } else if (argc == 2) {
+    string_view length = facade::ArgS(args, 1);
+    int64_t num;
+    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
+      (*cntx)->SendError("count should be greater than or equal to -1");
+      return;
+    }
+    if (num >= 0) {
+      requested_slow_log_length = num;
+    }
+  }
+
+  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
+  std::vector<boost::circular_buffer<dfly::SlowLogEntry>> entries(service.proactor_pool().size());
+  service.proactor_pool().AwaitFiberOnAll([&](auto index, auto* context) {
+    auto shard_entries = dfly::ServerState::tlocal()->GetSlowLog().Entries();
+    entries[index] = shard_entries;
+  });
+  std::vector<std::pair<dfly::SlowLogEntry, unsigned>> merged_slow_log;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    for (const auto& log_item : entries[i]) {
+      merged_slow_log.emplace_back(log_item, i);
+    }
+  }
+  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
+    return e1.first.unix_timestamp > e2.first.unix_timestamp;
+  });
+
+  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
+
+  (*cntx)->StartArray(requested_slow_log_length);
+  for (size_t i = 0; i < requested_slow_log_length; ++i) {
+    const auto& entry = merged_slow_log[i].first;
+    const auto& args = entry.cmd_args;
+
+    (*cntx)->StartArray(6);
+
+    (*cntx)->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
+    (*cntx)->SendLong(entry.unix_timestamp / 1000000000);
+    (*cntx)->SendLong(entry.execution_time_micro);
+
+    // if we truncated the args, there is one pseudo-element containing the number of truncated
+    // args that we must add, so the result length is increased by 1
+    size_t len = args.size() + int(args.size() < entry.original_length);
+
+    (*cntx)->StartArray(len);
+
+    for (const auto& arg : args) {
+      if (arg.second > 0) {
+        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
+        auto cmd_arg = arg.first.substr(0, dfly::kMaximumSlowlogArgLength - suffix.length());
+        (*cntx)->SendBulkString(absl::StrCat(cmd_arg, suffix));
+      } else {
+        (*cntx)->SendBulkString(arg.first);
+      }
+    }
+    // if we truncated arguments - add a special string to indicate that.
+    if (args.size() < entry.original_length) {
+      (*cntx)->SendBulkString(
+          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
+    }
+
+    (*cntx)->SendBulkString(entry.client_ip);
+    (*cntx)->SendBulkString(entry.client_name);
+  }
+  return;
+}
+
 namespace dfly {
 
 namespace fs = std::filesystem;
@@ -212,21 +292,6 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
   }
 
   return min_match <= max;
-}
-
-void SlowLog(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
-
-  if (sub_cmd == "LEN") {
-    return (*cntx)->SendLong(0);
-  }
-
-  if (sub_cmd == "GET") {
-    return (*cntx)->SendEmptyArray();
-  }
-
-  (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -396,6 +461,17 @@ void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclient
   }
 }
 
+void SetSlowLogMaxLen(util::ProactorPool& pool, uint32_t val) {
+  pool.AwaitFiberOnAll(
+      [&val](auto index, auto* context) { ServerState::tlocal()->GetSlowLog().ChangeLength(val); });
+}
+
+void SetSlowLogThreshold(util::ProactorPool& pool, int32_t val) {
+  pool.AwaitFiberOnAll([val](auto index, auto* context) {
+    ServerState::tlocal()->log_slower_than_usec = val < 0 ? UINT32_MAX : uint32_t(val);
+  });
+}
+
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
@@ -407,6 +483,22 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     auto res = flag.TryGet<uint32_t>();
     if (res.has_value())
       SetMaxClients(listeners_, res.value());
+    return res.has_value();
+  });
+
+  SetSlowLogThreshold(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_log_slower_than));
+  config_registry.RegisterMutable("slowlog_log_slower_than",
+                                  [this](const absl::CommandLineFlag& flag) {
+                                    auto res = flag.TryGet<int32_t>();
+                                    if (res.has_value())
+                                      SetSlowLogThreshold(service_.proactor_pool(), res.value());
+                                    return res.has_value();
+                                  });
+  SetSlowLogMaxLen(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_max_len));
+  config_registry.RegisterMutable("slowlog_max_len", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<uint32_t>();
+    if (res.has_value())
+      SetSlowLogMaxLen(service_.proactor_pool(), res.value());
     return res.has_value();
   });
 
@@ -1994,6 +2086,50 @@ void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
   dfly_cmd_->Run(args, cntx);
 }
 
+void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
+
+  if (sub_cmd == "HELP") {
+    string_view help[] = {
+        "SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "GET [<count>]",
+        "    Return top <count> entries from the slowlog (default: 10, -1 mean all).",
+        "    Entries are made of:",
+        "    id, timestamp, time in microseconds, arguments array, client IP and port,",
+        "    client name",
+        "LEN",
+        "    Return the length of the slowlog.",
+        "RESET",
+        "    Reset the slowlog.",
+        "HELP",
+        "    Prints this help.",
+    };
+    (*cntx)->SendSimpleStrArr(help);
+    return;
+  }
+
+  if (sub_cmd == "LEN") {
+    vector<int> lengths(service_.proactor_pool().size());
+    service_.proactor_pool().AwaitFiberOnAll([&lengths](auto index, auto* context) {
+      lengths[index] = ServerState::tlocal()->GetSlowLog().Length();
+    });
+    int sum = std::accumulate(lengths.begin(), lengths.end(), 0);
+    return (*cntx)->SendLong(sum);
+  }
+
+  if (sub_cmd == "RESET") {
+    service_.proactor_pool().AwaitFiberOnAll(
+        [](auto index, auto* context) { ServerState::tlocal()->GetSlowLog().Reset(); });
+    return (*cntx)->SendOk();
+  }
+
+  if (sub_cmd == "GET") {
+    return SlowLogGet(args, cntx, service_, sub_cmd);
+  }
+  (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
+}
+
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 namespace acl {
@@ -2051,7 +2187,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0, acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.SetHandler(SlowLog)
+      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, 0, acl::kScript}.HFUNC(
              Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, acl::kDfly}.HFUNC(Dfly);
