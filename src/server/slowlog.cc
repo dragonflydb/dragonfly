@@ -4,13 +4,11 @@
 
 #include "server/slowlog.h"
 
+#include "base/logging.h"
+
 namespace dfly {
 
 using namespace std;
-
-size_t SlowLogShard::Length() const {
-  return log_entries_.size();
-}
 
 void SlowLogShard::ChangeLength(const size_t new_length) {
   log_entries_.set_capacity(new_length);
@@ -23,6 +21,8 @@ void SlowLogShard::Reset() {
 void SlowLogShard::Add(const string_view command_name, CmdArgList args,
                        const string_view client_name, const string_view client_ip,
                        uint64_t execution_time_usec, uint64_t unix_ts) {
+  DCHECK_GT(log_entries_.capacity(), 0u);
+
   vector<pair<string, uint32_t>> slowlog_args;
   size_t slowlog_effective_length = args.size();
   if (args.size() > kMaximumSlowlogArgCount) {

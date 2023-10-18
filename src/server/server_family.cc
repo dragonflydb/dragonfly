@@ -467,8 +467,9 @@ void SetSlowLogMaxLen(util::ProactorPool& pool, uint32_t val) {
 }
 
 void SetSlowLogThreshold(util::ProactorPool& pool, int32_t val) {
-  pool.AwaitFiberOnAll(
-      [&val](auto index, auto* context) { ServerState::tlocal()->log_slower_than_usec = val; });
+  pool.AwaitFiberOnAll([val](auto index, auto* context) {
+    ServerState::tlocal()->log_slower_than_usec = val < 0 ? UINT32_MAX : uint32_t(val);
+  });
 }
 
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
