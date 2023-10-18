@@ -212,7 +212,7 @@ class ServerState {  // public struct - to allow initialization.
 
   bool is_master = true;
   std::string remote_client_id_;  // for cluster support
-  int32_t log_slower_than_usec = 0;
+  uint32_t log_slower_than_usec = UINT32_MAX;
 
   facade::ConnectionStats connection_stats;
 
