@@ -268,7 +268,7 @@ void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg
 }
 
 void Connection::DispatchOperations::operator()(const MigrationRequestMessage& msg) {
-  // TODO???
+  // no-op
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -798,8 +798,10 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
       // We're now running in `dest` thread
       queue_backpressure_ = &tl_queue_backpressure_;
-      dispatch_fb_ =
-          fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
+      if (!dispatch_fb_.IsJoinable()) {
+        dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
+                                  [&, peer] { DispatchFiber(peer); });
+      }
       LOG(ERROR) << "XXX relaunched fiber " << this;
     }
 
@@ -976,9 +978,15 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       dispatch_q_.pop_front();
 
       if (holds_alternative<MigrationRequestMessage>(msg.handle)) {
-        // TODO document
-        LOG(ERROR) << "XXX Got migration request message for " << this;
-        return;
+        if (dispatch_q_.empty()) {
+          // TODO document
+          LOG(ERROR) << "XXX Got migration request message for " << this;
+          recycle(move(msg));
+          return;
+        } else {
+          LOG(ERROR) << "XXX Retrying migration request message for " << this;
+          SendAsync({MigrationRequestMessage{}});
+        }
       }
 
       cc_->async_dispatch = true;
@@ -1097,10 +1105,10 @@ void Connection::SendAsync(MessageHandle msg) {
     return;
 
   if (!dispatch_fb_.IsJoinable()) {
+    LOG(ERROR) << "XXX SendAsync - creating Fiber " << this;
     DCHECK_EQ(dispatch_q_.size(), 0u);
-    auto* peer = socket_.get();
-    dispatch_fb_ =
-        fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
+    dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
+                              [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }
 
   auto place_in_dispatch_q = [this](MessageHandle msg) {
