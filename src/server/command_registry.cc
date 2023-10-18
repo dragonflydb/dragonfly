@@ -64,8 +64,8 @@ void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
   auto& ent = command_stats_[ss->thread_index()];
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
-  if (!(opt_mask_ & CO::BLOCKING) && ss->log_slower_than_usec >= 0 &&
-      execution_time_micro_s > ss->log_slower_than_usec && conn != nullptr) {
+  if (!(opt_mask_ & CO::BLOCKING) && conn != nullptr && ss->GetSlowLog().Capacity() > 0 &&
+      execution_time_micro_s > ss->log_slower_than_usec) {
     ss->GetSlowLog().Add(name(), args, conn->GetName(), conn->RemoteEndpointStr(),
                          execution_time_micro_s, after);
   }

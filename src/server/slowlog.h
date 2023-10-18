@@ -28,8 +28,6 @@ struct SlowLogEntry {
 
 class SlowLogShard {
  public:
-  SlowLogShard(){};
-
   boost::circular_buffer<SlowLogEntry>& Entries() {
     return log_entries_;
   }
@@ -38,7 +36,13 @@ class SlowLogShard {
            const std::string_view client_ip, uint64_t execution_time, uint64_t unix_timestamp);
   void Reset();
   void ChangeLength(size_t new_length);
-  size_t Length() const;
+  size_t Length() const {
+    return log_entries_.size();
+  }
+
+  size_t Capacity() const {
+    return log_entries_.capacity();
+  }
 
  private:
   uint32_t slowlog_entry_id_ = 0;
