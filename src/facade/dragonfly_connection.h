@@ -85,6 +85,8 @@ class Connection : public util::Connection {
     std::vector<std::vector<uint64_t>> commands;
   };
 
+  struct MigrationRequestMessage {};
+
   struct PipelineMessage {
     PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
@@ -117,7 +119,9 @@ class Connection : public util::Connection {
 
     bool IsPipelineMsg() const;
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage> handle;
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage,
+                 MigrationRequestMessage>
+        handle;
   };
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, NUM_PHASES };

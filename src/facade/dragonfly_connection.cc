@@ -147,6 +147,7 @@ struct Connection::DispatchOperations {
   void operator()(Connection::PipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
+  void operator()(const MigrationRequestMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -212,8 +213,12 @@ size_t Connection::MessageHandle::UsedMemory() const {
   auto acl_update_size = [](const AclUpdateMessage& msg) -> size_t {
     return sizeof(AclUpdateMessage);
   };
-  return sizeof(MessageHandle) +
-         visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size}, this->handle);
+  auto migration_request_size = [](const MigrationRequestMessage& msg) -> size_t {
+    return sizeof(MigrationRequestMessage);
+  };
+  return sizeof(MessageHandle) + visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size,
+                                                  migration_request_size},
+                                       this->handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -260,6 +265,10 @@ void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg
 
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
   self->last_interaction_ = time(nullptr);
+}
+
+void Connection::DispatchOperations::operator()(const MigrationRequestMessage& msg) {
+  // TODO???
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -778,16 +787,20 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
     if (migration_request_) {
       ProactorBase* dest = migration_request_;
+      LOG(ERROR) << "XXX migrating " << this;
 
       dispatch_fb_.JoinIfNeeded();
-      DCHECK(dispatch_q_.empty());
+      LOG(ERROR) << "XXX After join " << this;
+      // DCHECK(dispatch_q_.empty());
       migration_request_ = nullptr;
       this->Migrate(dest);
+      LOG(ERROR) << "XXX After migrate " << this;
 
       // We're now running in `dest` thread
       queue_backpressure_ = &tl_queue_backpressure_;
       dispatch_fb_ =
           fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
+      LOG(ERROR) << "XXX relaunched fiber " << this;
     }
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
@@ -795,7 +808,9 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
     phase_ = READ_SOCKET;
 
+    LOG(ERROR) << "XXX Before recv " << this;
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
+    LOG(ERROR) << "XXX After recv " << this;
     last_interaction_ = time(nullptr);
 
     if (!recv_sz) {
@@ -886,10 +901,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   while (!builder->GetError()) {
-    evc_.await([this] {
-      return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch) ||
-             migration_request_;
-    });
+    evc_.await(
+        [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)
       break;
 
@@ -962,6 +975,12 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
+      if (holds_alternative<MigrationRequestMessage>(msg.handle)) {
+        // TODO document
+        LOG(ERROR) << "XXX Got migration request message for " << this;
+        return;
+      }
+
       cc_->async_dispatch = true;
       std::visit(dispatch_op, msg.handle);
       cc_->async_dispatch = false;
@@ -970,12 +989,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     }
 
     queue_backpressure_->ec.notify();
-
-    if (migration_request_ != nullptr && dispatch_q_.empty()) {
-      // Subtle! Return without setting conn_closing = true and clearing queue.
-      // Open question: how should we handle pipeline_req_pool_ ?
-      return;
-    }
   }
 
   cc_->conn_closing = true;
@@ -1144,15 +1157,18 @@ facade::ConnectionContext* Connection::cntx() {
 }
 
 void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
-  if (!migration_enabled_) {
+  // TODO XXX Current implementation "hopes" that no new subscriptions will be added while migration
+  // is in progress. We need to enforce that.
+  if (!migration_enabled_ || cc_ == nullptr || cc_->subscriptions > 0) {
     return;
   }
 
+  LOG(ERROR) << "XXX Sending migration request for " << this;
   // Connections can migrate at most once.
   migration_enabled_ = false;
 
   migration_request_ = dest;
-  evc_.notify();
+  SendAsync({MigrationRequestMessage{}});
 }
 
 }  // namespace facade
