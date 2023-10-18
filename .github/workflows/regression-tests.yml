@@ -41,3 +41,10 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           run-only-on-ubuntu-latest: false
           build-folder-name: build
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: logs
+          path: /tmp/dragonfly.*
