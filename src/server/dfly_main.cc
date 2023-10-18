@@ -887,11 +887,7 @@ Usage: dragonfly [FLAGS]
 
   pool->Run();
 
-  bool print_stack_on_signal = false;
-#ifdef PRINT_STACKTRACES_ON_SIGNAL
-  print_stack_on_signal = true;
-#endif
-  AcceptServer acceptor(pool.get(), true, print_stack_on_signal);
+  AcceptServer acceptor(pool.get(), true);
 
   int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
 

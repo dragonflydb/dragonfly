@@ -19,6 +19,7 @@ extern "C" {
 #include <absl/strings/str_format.h>
 #include <xxhash.h>
 
+#include <csignal>
 #include <filesystem>
 
 #include "base/flags.h"
@@ -646,6 +647,18 @@ Service::Service(ProactorPool* pp)
     LOG(ERROR) << "Setting --lock_on_hashtags without --cluster_mode is unsupported";
     exit(1);
   }
+
+#ifdef PRINT_STACKTRACES_ON_SIGNAL
+  LOG(INFO) << "PRINT STACKTRACES REGISTERED";
+  pp_.GetNextProactor()->RegisterSignal({SIGUSR1}, [this](int signal) {
+    LOG(INFO) << "Received " << strsignal(signal);
+    util::fb2::Mutex m;
+    pp_.AwaitFiberOnAll([&m](unsigned index, util::ProactorBase* base) {
+      std::unique_lock lk(m);
+      util::fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+    });
+  });
+#endif
 
   shard_set = new EngineShardSet(pp);
 
