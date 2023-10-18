@@ -94,6 +94,31 @@ TEST_F(SetFamilyTest, SInter) {
   EXPECT_THAT(resp, IntArg(0));
 }
 
+TEST_F(SetFamilyTest, SInterCard) {
+  Run({"sadd", "s1", "2", "b", "1", "a"});
+  Run({"sadd", "s2", "3", "c", "2", "b"});
+  Run({"sadd", "s3", "2", "b", "3", "c"});
+
+  EXPECT_EQ(2, CheckedInt({"sintercard", "2", "s1", "s2"}));
+  EXPECT_EQ(0, CheckedInt({"sintercard", "2", "s1", "s4"}));
+  EXPECT_EQ(2, CheckedInt({"sintercard", "2", "s2", "s3", "LIMIT", "2"}));
+  EXPECT_EQ(4, CheckedInt({"sintercard", "1", "s1"}));
+
+  auto resp = Run({"sintercard", "a", "s1", "s2"});
+  // redis does not throw this message, but SimpleAtoi does
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  resp = Run({"sintercard", "2", "s1", "s2", "LIMIT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"sintercard", "2", "s1", "s2", "LIMIT", "a"});
+  EXPECT_THAT(resp, ErrArg("limit can't be negative"));
+  resp = Run({"sintercard", "2", "s1", "s2", "LIMIT", "-1"});
+  EXPECT_THAT(resp, ErrArg("limit can't be negative"));
+  resp = Run({"sintercard", "2", "s1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"sintercard", "-1", "s1"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+}
+
 TEST_F(SetFamilyTest, SMove) {
   auto resp = Run({"sadd", "a", "1", "2", "3", "4"});
   Run({"sadd", "b", "3", "5", "6", "2"});
