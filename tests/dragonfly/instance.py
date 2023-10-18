@@ -42,6 +42,16 @@ class DflyStartException(Exception):
     pass
 
 
+def monotonic_integer_generator():
+    i = 0
+    while i < 10000000000:
+        yield i
+        i += 1
+
+
+uid_iterator = monotonic_integer_generator()
+
+
 class DflyInstance:
     """
     Represents a runnable and stoppable Dragonfly instance
@@ -129,6 +139,11 @@ class DflyInstance:
             raise DflyStartException("Process didn't start listening on port in time")
 
         self.log_files = self.get_logs_from_psutil()
+        id = next(uid_iterator)
+        logging.info(f"Starting instance with id {id} and port {self._port}")
+        logging.info(f"Log files are: ")
+        for log in self.log_files:
+            logging.info(f"🪵🪵🪵🪵🪵🪵 {log} 🪵🪵🪵🪵🪵🪵")
 
         # Remove first 6 lines - our default header with log locations (as it carries no useful information)
         # Next, replace log-level + date with port and colored arrow
