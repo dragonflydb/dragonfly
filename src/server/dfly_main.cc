@@ -887,7 +887,7 @@ Usage: dragonfly [FLAGS]
 
   pool->Run();
 
-  AcceptServer acceptor(pool.get(), true);
+  AcceptServer acceptor(pool.get());
 
   int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
 
