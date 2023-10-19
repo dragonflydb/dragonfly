@@ -250,6 +250,11 @@ class Connection : public util::Connection {
   // Returns non-null request ptr if pool has vacant entries.
   PipelineMessagePtr GetFromPipelinePool();
 
+  void HandleMigrateRequest();
+  bool ShouldEndDispatchFiber(const MessageHandle& msg);
+
+  void LaunchDispatchFiberIfNeeded();
+
  private:
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
