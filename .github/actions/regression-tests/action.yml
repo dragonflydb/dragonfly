@@ -49,10 +49,12 @@ runs:
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
-        timeout 20m pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO --df alsologtostderr --df enable_multi_shard_sync=true || code=$?; if [[ $code -eq 124 ]]; then echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"; exit 1; fi
+        run_pytest_with_args() {
+          timeout 20m pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO --df alsologtostderr $1 $2 || code=$?; if [[ $code -eq 124 ]]; then echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"; exit 1; fi
+        }
 
-
-        timeout 20m pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep2_report.json dragonfly/replication_test.py --log-cli-level=INFO --df alsologtostderr --df enable_multi_shard_sync=false || code=$?; if [[ $code -eq 124 ]]; then echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"; exit 1; fi
+        run_pytest_with_args(--df enable_multi_shard_sync=true)
+        run_pytest_with_args(--df enable_multi_shard_sync=false)
 
     - name: Print last log on timeout
       if: failure()
@@ -63,7 +65,7 @@ runs:
       run: |
         if [[ "${{ env.TIMEDOUT_STEP_1 }}" -eq 1 ]] || [[ "${{ env.TIMEDOUT_STEP_2 }}" -eq 1 ]]; then
           echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout 🪵🪵🪵🪵🪵🪵\n\n"
-          ${GITHUB_WORKSPACE}/tools/extract_latest_log.py --path /tmp/ | xargs cat
+          ls -t /tmp/dragonfly*log*INFO* | head -n 1 | xargs cat
           echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout end 🪵🪵🪵🪵🪵🪵\n\n"
         fi
 
