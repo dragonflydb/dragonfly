@@ -54,7 +54,7 @@ runs:
         }
 
         #        run_pytest_with_args(--df enable_multi_shard_sync=true)
-        run_pytest_with_args(--df enable_multi_shard_sync=false)
+        (run_pytest_with_args --df enable_multi_shard_sync=false)
 
     - name: Print last log on timeout
       if: failure()
