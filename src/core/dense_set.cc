@@ -413,6 +413,8 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
 
 auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
     -> tuple<size_t, DensePtr*, DensePtr*> {
+  DCHECK_LT(bid, entries_.size());
+
   DensePtr* curr = &entries_[bid];
   ExpireIfNeeded(nullptr, curr);
 

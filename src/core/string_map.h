@@ -49,7 +49,10 @@ class StringMap : public DenseSet {
     iterator() : IteratorBase() {
     }
 
-    iterator(DenseSet* owner, bool is_end) : IteratorBase(owner, is_end) {
+    explicit iterator(const IteratorBase& o) : IteratorBase(o) {
+    }
+
+    iterator(DenseSet* owner) : IteratorBase(owner, false) {
     }
 
     detail::SdsPair operator->() const {
@@ -88,12 +91,18 @@ class StringMap : public DenseSet {
     }
 
     bool operator==(const iterator& b) const {
-      return curr_list_ == b.curr_list_;
+      if (owner_ == nullptr && b.owner_ == nullptr) {  // to allow comparison with end()
+        return true;
+      }
+      return owner_ == b.owner_ && curr_entry_ == b.curr_entry_;
     }
 
     bool operator!=(const iterator& b) const {
       return !(*this == b);
     }
+
+    using IteratorBase::ExpiryTime;
+    using IteratorBase::HasExpiry;
   };
 
   // Returns true if field was added
@@ -111,16 +120,18 @@ class StringMap : public DenseSet {
   /// @brief  Returns value of the key or nullptr if key not found.
   /// @param key
   /// @return sds
-  sds Find(std::string_view key);
+  iterator Find(std::string_view member) {
+    return iterator{FindIt(&member, 1)};
+  }
 
   void Clear();
 
   iterator begin() {
-    return iterator{this, false};
+    return iterator{this};
   }
 
   iterator end() {
-    return iterator{this, true};
+    return iterator{};
   }
 
   // Returns a random key value pair.

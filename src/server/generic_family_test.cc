@@ -606,10 +606,13 @@ TEST_F(GenericFamilyTest, FieldTtl) {
   TEST_current_time_ms = kMemberExpiryBase * 1000;  // to reset to test time.
   EXPECT_THAT(Run({"saddex", "key", "1", "val1"}), IntArg(1));
   EXPECT_THAT(Run({"saddex", "key", "2", "val2"}), IntArg(1));
+  EXPECT_THAT(Run({"sadd", "key", "val3"}), IntArg(1));
+
   EXPECT_EQ(-2, CheckedInt({"fieldttl", "nokey", "val1"}));  // key not found
   EXPECT_EQ(-3, CheckedInt({"fieldttl", "key", "bar"}));     // field not found
   EXPECT_EQ(1, CheckedInt({"fieldttl", "key", "val1"}));
   EXPECT_EQ(2, CheckedInt({"fieldttl", "key", "val2"}));
+  EXPECT_EQ(-1, CheckedInt({"fieldttl", "key", "val3"}));
 
   AdvanceTime(1100);
   EXPECT_EQ(-3, CheckedInt({"fieldttl", "key", "val1"}));
@@ -617,6 +620,13 @@ TEST_F(GenericFamilyTest, FieldTtl) {
 
   Run({"set", "str", "val"});
   EXPECT_THAT(Run({"fieldttl", "str", "bar"}), ErrArg("wrong"));
+
+  EXPECT_EQ(2, CheckedInt({"HSETEX", "k2", "1", "f1", "v1", "f2", "v2"}));
+  EXPECT_EQ(1, CheckedInt({"HSET", "k2", "f3", "v3"}));
+
+  EXPECT_EQ(1, CheckedInt({"fieldttl", "k2", "f1"}));
+  EXPECT_EQ(-1, CheckedInt({"fieldttl", "k2", "f3"}));
+  EXPECT_EQ(-3, CheckedInt({"fieldttl", "k2", "f4"}));
 }
 
 }  // namespace dfly

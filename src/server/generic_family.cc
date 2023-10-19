@@ -20,6 +20,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/hset_family.h"
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
@@ -628,16 +629,17 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   if (!IsValid(it))
     return -2;
 
-  if (it->second.ObjType() != OBJ_SET)  // TODO: to finish for hashes.
+  if (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)
     return OpStatus::WRONG_TYPE;
 
+  int32_t res = -1;
   if (it->second.ObjType() == OBJ_SET) {
-    int32_t res = SetFamily::FieldExpireTime(db_cntx, it->second, field);
-    return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
+    res = SetFamily::FieldExpireTime(db_cntx, it->second, field);
+  } else {
+    DCHECK_EQ(OBJ_HASH, it->second.ObjType());
+    res = HSetFamily::FieldExpireTime(db_cntx, it->second, field);
   }
-
-  // TODO: to finish with hash family.
-  return OpStatus::INVALID_VALUE;
+  return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
 
 }  // namespace
