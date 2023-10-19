@@ -44,7 +44,7 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.
 
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
 
-option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGKILL" OFF)
+option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
 
 if (PRINT_STACKTRACES_ON_SIGNAL)
   target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
