@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
 import re
 import psutil
+import itertools
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 
@@ -42,14 +43,7 @@ class DflyStartException(Exception):
     pass
 
 
-def monotonic_integer_generator():
-    i = 0
-    while i < 10000000000:
-        yield i
-        i += 1
-
-
-uid_iterator = monotonic_integer_generator()
+uid_iterator = itertools.count()
 
 
 class DflyInstance:
