@@ -1606,6 +1606,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
+  sinfo->keys.reserve(eval_args.keys.size());
 
   optional<ShardId> sid;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
@@ -1654,6 +1655,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     cntx->transaction = tx;
+    if (*sid != ServerState::tlocal()->thread_index()) {
+      VLOG(1) << "Migrating connection " << cntx->conn() << " from " << ProactorBase::GetIndex()
+              << " to " << *sid;
+      cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
+    }
   } else {
     optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
     if (!scheduled) {

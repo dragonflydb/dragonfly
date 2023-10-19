@@ -59,6 +59,11 @@ ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
 ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
+ABSL_FLAG(bool, migrate_connections, true,
+          "When enabled, Dragonfly will try to migrate connections to the target thread on which "
+          "they operate. Currently this is only supported for Lua script invocations, and can "
+          "happen at most once per connection.");
+
 using namespace util;
 using nonstd::make_unexpected;
 
@@ -142,6 +147,7 @@ struct Connection::DispatchOperations {
   void operator()(Connection::PipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
+  void operator()(const MigrationRequestMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -207,8 +213,12 @@ size_t Connection::MessageHandle::UsedMemory() const {
   auto acl_update_size = [](const AclUpdateMessage& msg) -> size_t {
     return sizeof(AclUpdateMessage);
   };
-  return sizeof(MessageHandle) +
-         visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size}, this->handle);
+  auto migration_request_size = [](const MigrationRequestMessage& msg) -> size_t {
+    return sizeof(MigrationRequestMessage);
+  };
+  return sizeof(MessageHandle) + visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size,
+                                                  migration_request_size},
+                                       this->handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -257,6 +267,10 @@ void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg
   self->last_interaction_ = time(nullptr);
 }
 
+void Connection::DispatchOperations::operator()(const MigrationRequestMessage& msg) {
+  // no-op
+}
+
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service), name_{} {
@@ -284,6 +298,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   if (queue_backpressure_->limit == 0) {
     queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
   }
+
+  migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
 }
 
 Connection::~Connection() {
@@ -759,6 +775,32 @@ void Connection::OnBreakCb(int32_t mask) {
   evc_.notify();  // Notify dispatch fiber.
 }
 
+void Connection::HandleMigrateRequest() {
+  if (!migration_request_) {
+    return;
+  }
+
+  ProactorBase* dest = migration_request_;
+
+  if (dispatch_fb_.IsJoinable()) {
+    SendAsync({MigrationRequestMessage{}});
+    dispatch_fb_.Join();
+  }
+
+  // We don't support migrating with subscriptions as it would require moving thread local
+  // handles. We can't check above, as the queue might have contained a subscribe request.
+  if (cc_->subscriptions == 0) {
+    migration_request_ = nullptr;
+    this->Migrate(dest);
+
+    // We're now running in `dest` thread
+    queue_backpressure_ = &tl_queue_backpressure_;
+  }
+
+  // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
+  LaunchDispatchFiberIfNeeded();
+}
+
 auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_builder)
     -> variant<error_code, ParserStatus> {
   error_code ec;
@@ -768,6 +810,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
   do {
     FetchBuilderStats(stats_, orig_builder);
+
+    HandleMigrateRequest();
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     DCHECK(!append_buf.empty());
@@ -847,6 +891,31 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     return ec;
 
   return parse_status;
+}
+
+bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
+  if (!holds_alternative<MigrationRequestMessage>(msg.handle)) {
+    return false;
+  }
+
+  if (dispatch_q_.empty()) {
+    // Migration requests means we should terminate this function (and allow the fiber to
+    // join), so that we can re-launch the fiber in the new thread.
+    // We intentionally return and not break in order to keep the connection open.
+    return true;
+  }
+
+  // There shouldn't be any other migration requests in the queue, but it's worth checking
+  // as otherwise it would lead to an endless loop.
+  bool has_migration_req =
+      any_of(dispatch_q_.begin(), dispatch_q_.end(), [](const MessageHandle& msg) {
+        return holds_alternative<MigrationRequestMessage>(msg.handle);
+      });
+  if (!has_migration_req) {
+    SendAsync({MigrationRequestMessage{}});
+  }
+
+  return false;
 }
 
 // DispatchFiber handles commands coming from the InputLoop.
@@ -938,6 +1007,11 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     } else {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
+
+      if (ShouldEndDispatchFiber(msg)) {
+        recycle(move(msg));
+        return;
+      }
 
       cc_->async_dispatch = true;
       std::visit(dispatch_op, msg.handle);
@@ -1046,6 +1120,13 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({std::move(msg)});
 }
 
+void Connection::LaunchDispatchFiberIfNeeded() {
+  if (!dispatch_fb_.IsJoinable()) {
+    dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
+                              [&, peer = socket_.get()]() { DispatchFiber(peer); });
+  }
+}
+
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(owner());
@@ -1054,12 +1135,7 @@ void Connection::SendAsync(MessageHandle msg) {
   if (cc_->conn_closing)
     return;
 
-  if (!dispatch_fb_.IsJoinable()) {
-    DCHECK_EQ(dispatch_q_.size(), 0u);
-    auto* peer = socket_.get();
-    dispatch_fb_ =
-        fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
-  }
+  LaunchDispatchFiberIfNeeded();
 
   auto place_in_dispatch_q = [this](MessageHandle msg) {
     auto it = dispatch_q_.begin();
@@ -1112,6 +1188,16 @@ std::string Connection::RemoteEndpointAddress() const {
 
 facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
+}
+
+void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
+  if (!migration_enabled_ || cc_ == nullptr) {
+    return;
+  }
+
+  // Connections can migrate at most once.
+  migration_enabled_ = false;
+  migration_request_ = dest;
 }
 
 }  // namespace facade
