@@ -471,8 +471,7 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
 
 void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
   if (args.length() > 1) {
-    (*cntx)->SendError(
-        "Unknown subcommand or wrong number of arguments for 'GENPASS'. Try ACL HELP.");
+    (*cntx)->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
     return;
   }
   uint32_t random_bits = 256;
@@ -486,14 +485,16 @@ void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
     }
   }
   std::random_device urandom("/dev/urandom");
-  std::independent_bits_engine<std::default_random_engine, CHAR_BIT, unsigned char>
-      random_bits_engine(urandom());
-  std::vector<unsigned char> data((random_bits + 3) / 4);
-  std::generate(begin(data), end(data), std::ref(random_bits_engine));
-
+  const size_t result_length = (random_bits + 3) / 4;
+  constexpr size_t step_size = sizeof(decltype(std::random_device::max()));
   std::string response;
-  for (auto c : data) {
-    absl::StrAppend(&response, absl::Hex(c & 0x0F, absl::kNoPad));
+  for (size_t bytes_written = 0; bytes_written < result_length; bytes_written += step_size) {
+    absl::StrAppend(&response, absl::Hex(urandom(), absl::kZeroPad8));
+  }
+
+  if (response.size() > result_length) {
+    const size_t stride = response.size() - result_length;
+    response.erase(response.end() - stride, response.end());
   }
 
   (*cntx)->SendSimpleString(response);

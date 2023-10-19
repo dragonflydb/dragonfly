@@ -305,7 +305,7 @@ TEST_F(AclFamilyTest, AclGenPass) {
   // should be 256 bits or 64 bytes in hex
   EXPECT_THAT(actualPassword.length(), 64);
 
-  // 1 bits - 4 bits should all produce a single hex character
+  // 1 bit - 4 bits should all produce a single hex character
   for (int i = 1; i <= 4; i++) {
     resp = Run({"ACL", "GENPASS", std::to_string(i)});
     EXPECT_THAT(resp.GetString().length(), 1);
