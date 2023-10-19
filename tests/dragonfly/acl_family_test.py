@@ -421,3 +421,20 @@ async def test_require_pass(df_local_factory):
     assert res == b"44"
 
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
+    acl_file_content = "ACL SETUSER roy ON >ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@STRING +HSET"
+
+    acl = create_temp_file(acl_file_content, tmp_dir)
+
+    await async_client.execute_command(f"CONFIG SET aclfile {acl}")
+
+    await async_client.execute_command("ACL LOAD")
+
+    result = await async_client.execute_command("ACL LIST")
+    assert 2 == len(result)
+
+    result = await async_client.execute_command("AUTH roy mypass")
+    assert result == "OK"

@@ -586,6 +586,7 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
     return;
   }
   registry_->Init();
+  config_registry.RegisterMutable("aclfile");
 }
 
 }  // namespace dfly::acl
