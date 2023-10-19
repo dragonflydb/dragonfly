@@ -785,24 +785,24 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   do {
     FetchBuilderStats(stats_, orig_builder);
 
-    if (migration_request_) {
+    if (migration_request_ && cc_->subscriptions == 0) {
       ProactorBase* dest = migration_request_;
-      LOG(ERROR) << "XXX migrating " << this;
 
-      dispatch_fb_.JoinIfNeeded();
-      LOG(ERROR) << "XXX After join " << this;
-      // DCHECK(dispatch_q_.empty());
+      if (dispatch_fb_.IsJoinable()) {
+        SendAsync({MigrationRequestMessage{}});
+        dispatch_fb_.Join();
+      }
+
       migration_request_ = nullptr;
       this->Migrate(dest);
-      LOG(ERROR) << "XXX After migrate " << this;
 
       // We're now running in `dest` thread
       queue_backpressure_ = &tl_queue_backpressure_;
+      // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
       if (!dispatch_fb_.IsJoinable()) {
         dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
                                   [&, peer] { DispatchFiber(peer); });
       }
-      LOG(ERROR) << "XXX relaunched fiber " << this;
     }
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
@@ -810,9 +810,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
     phase_ = READ_SOCKET;
 
-    LOG(ERROR) << "XXX Before recv " << this;
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
-    LOG(ERROR) << "XXX After recv " << this;
     last_interaction_ = time(nullptr);
 
     if (!recv_sz) {
@@ -979,13 +977,21 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
       if (holds_alternative<MigrationRequestMessage>(msg.handle)) {
         if (dispatch_q_.empty()) {
-          // TODO document
-          LOG(ERROR) << "XXX Got migration request message for " << this;
+          // Migration requests means we should terminate this function (and allow the fiber to
+          // join), so that we can re-launch the fiber in the new thread.
+          // We intentionally return and not break in order to keep the connection open.
           recycle(move(msg));
           return;
         } else {
-          LOG(ERROR) << "XXX Retrying migration request message for " << this;
-          SendAsync({MigrationRequestMessage{}});
+          // There shouldn't be any other migration requests in the queue, but it's worth checking
+          // as otherwise it would lead to an endless loop.
+          bool has_migration_req =
+              any_of(dispatch_q_.begin(), dispatch_q_.end(), [](const MessageHandle& msg) {
+                return holds_alternative<MigrationRequestMessage>(msg.handle);
+              });
+          if (!has_migration_req) {
+            SendAsync({MigrationRequestMessage{}});
+          }
         }
       }
 
@@ -1105,7 +1111,6 @@ void Connection::SendAsync(MessageHandle msg) {
     return;
 
   if (!dispatch_fb_.IsJoinable()) {
-    LOG(ERROR) << "XXX SendAsync - creating Fiber " << this;
     DCHECK_EQ(dispatch_q_.size(), 0u);
     dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
@@ -1165,18 +1170,13 @@ facade::ConnectionContext* Connection::cntx() {
 }
 
 void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
-  // TODO XXX Current implementation "hopes" that no new subscriptions will be added while migration
-  // is in progress. We need to enforce that.
-  if (!migration_enabled_ || cc_ == nullptr || cc_->subscriptions > 0) {
+  if (!migration_enabled_ || cc_ == nullptr) {
     return;
   }
 
-  LOG(ERROR) << "XXX Sending migration request for " << this;
   // Connections can migrate at most once.
   migration_enabled_ = false;
-
   migration_request_ = dest;
-  SendAsync({MigrationRequestMessage{}});
 }
 
 }  // namespace facade
