@@ -436,3 +436,6 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
     result = await async_client.execute_command("ACL LIST")
     assert 2 == len(result)
     assert "user roy on 000a00 +@STRING +HSET" in result
+
+    result = await async_client.execute_command("AUTH roy mypass")
+    assert result == "OK"
