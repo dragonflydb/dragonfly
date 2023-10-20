@@ -32,7 +32,7 @@ class ConfigRegistry {
   };
 
   // Returns true if the value was updated.
-  SetResult Set(std::string_view config_name, std::string_view value);
+  SetResult Set(std::string_view config_name, std::string_view value, bool apply);
 
   std::optional<std::string> Get(std::string_view config_name);
 

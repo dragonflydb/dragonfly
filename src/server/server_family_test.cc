@@ -181,4 +181,12 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
   EXPECT_THAT(resp.GetInt(), 0);
 }
 
+TEST_F(ServerFamilyTest, ConfigSet) {
+  // Invalid arguments.
+  auto resp = Run({"config", "set", "foo"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'config|set' command"));
+  resp = Run({"config", "set", "foo", "1", "car"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'config|set' command"));
+}
+
 }  // namespace dfly

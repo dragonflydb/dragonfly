@@ -16,7 +16,8 @@ namespace dfly {
 using namespace std;
 
 // Returns true if the value was updated.
-auto ConfigRegistry::Set(std::string_view config_name, std::string_view value) -> SetResult {
+auto ConfigRegistry::Set(std::string_view config_name, std::string_view value, bool apply)
+    -> SetResult {
   unique_lock lk(mu_);
   auto it = registry_.find(config_name);
   if (it == registry_.end())
@@ -33,8 +34,12 @@ auto ConfigRegistry::Set(std::string_view config_name, std::string_view value) -
   if (!flag->ParseFrom(value, &error))
     return SetResult::INVALID;
 
-  bool success = !cb || cb(*flag);
-  return success ? SetResult::OK : SetResult::INVALID;
+  if (apply) {
+    bool success = !cb || cb(*flag);
+    return success ? SetResult::OK : SetResult::INVALID;
+  }
+
+  return SetResult::OK;
 }
 
 std::optional<std::string> ConfigRegistry::Get(std::string_view config_name) {
