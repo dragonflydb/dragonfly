@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
 import re
 import psutil
+import itertools
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 
@@ -40,6 +41,9 @@ class Colors:
 
 class DflyStartException(Exception):
     pass
+
+
+uid_iterator = itertools.count()
 
 
 class DflyInstance:
@@ -129,6 +133,11 @@ class DflyInstance:
             raise DflyStartException("Process didn't start listening on port in time")
 
         self.log_files = self.get_logs_from_psutil()
+        id = next(uid_iterator)
+        logging.info(f"Starting instance with id {id} and port {self._port}")
+        logging.info(f"Log files are: ")
+        for log in self.log_files:
+            logging.info(f"🪵🪵🪵🪵🪵🪵 {log} 🪵🪵🪵🪵🪵🪵")
 
         # Remove first 6 lines - our default header with log locations (as it carries no useful information)
         # Next, replace log-level + date with port and colored arrow
