@@ -233,7 +233,10 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
     sds val = nullptr;
     if (!inserted) {
-      val = sm->Find(field);
+      auto it = sm->Find(field);
+      if (it != sm->end()) {
+        val = it->second;
+      }
     }
 
     optional<string_view> sv;
@@ -451,9 +454,9 @@ OpResult<vector<OptStr>> OpMGet(const OpArgs& op_args, std::string_view key, Cmd
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (size_t i = 0; i < fields.size(); ++i) {
-      sds val = sm->Find(ToSV(fields[i]));
-      if (val) {
-        result[i].emplace(val, sdslen(val));
+      auto it = sm->Find(ToSV(fields[i]));
+      if (it != sm->end()) {
+        result[i].emplace(it->second, sdslen(it->second));
       }
     }
   }
@@ -495,7 +498,7 @@ OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field)
   DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-  return sm->Find(field) ? 1 : 0;
+  return sm->Contains(field) ? 1 : 0;
 };
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
@@ -518,12 +521,12 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
 
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
-  sds val = sm->Find(field);
+  auto it = sm->Find(field);
 
-  if (!val)
+  if (it == sm->end())
     return OpStatus::KEY_NOTFOUND;
 
-  return string(val, sdslen(val));
+  return string(it->second, sdslen(it->second));
 }
 
 OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_t mask) {
@@ -599,8 +602,8 @@ OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view fi
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-  sds res = sm->Find(field);
-  return res ? sdslen(res) : 0;
+  auto it = sm->Find(field);
+  return it != sm->end() ? sdslen(it->second) : 0;
 }
 
 struct OpSetParams {
@@ -1201,4 +1204,25 @@ StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
 
   return sm;
 }
+
+// returns -1 if no expiry is associated with the field, -3 if no field is found.
+int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
+                                    std::string_view field) {
+  DCHECK_EQ(OBJ_HASH, pv.ObjType());
+
+  if (pv.Encoding() == kEncodingListPack) {
+    uint8_t intbuf[LP_INTBUF_SIZE];
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    optional<string_view> res = LpFind(lp, field, intbuf);
+    return res ? -1 : -3;
+  } else {
+    StringMap* string_map = (StringMap*)pv.RObjPtr();
+    string_map->set_time(MemberTimeSeconds(db_context.time_now_ms));
+    auto it = string_map->Find(field);
+    if (it == string_map->end())
+      return -3;
+    return it.HasExpiry() ? it.ExpiryTime() : -1;
+  }
+}
+
 }  // namespace dfly

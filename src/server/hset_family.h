@@ -8,6 +8,7 @@
 
 #include "facade/op_status.h"
 #include "server/common.h"
+#include "server/table.h"
 
 namespace dfly {
 
@@ -24,6 +25,9 @@ class HSetFamily {
 
   // Does not free lp.
   static StringMap* ConvertToStrMap(uint8_t* lp);
+
+  static int32_t FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
+                                 std::string_view field);
 
  private:
   // TODO: to move it to anonymous namespace in cc file.

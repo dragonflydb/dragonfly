@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -272,6 +273,9 @@ class DenseSet {
   void* FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const;
 
   IteratorBase FindIt(const void* ptr, uint32_t cookie) {
+    if (Empty())
+      return IteratorBase{};
+
     auto [bid, _, curr] = Find2(ptr, BucketId(ptr, cookie), cookie);
     if (curr) {
       return IteratorBase(this, entries_.begin() + bid, curr);
@@ -319,6 +323,7 @@ class DenseSet {
   }
 
   uint32_t BucketId(uint64_t hash) const {
+    assert(capacity_log_ > 0);
     return hash >> (64 - capacity_log_);
   }
 

@@ -323,7 +323,7 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
     if (it == ss->end())
       return -3;
 
-    return it.ExpiryTime();
+    return it.HasExpiry() ? it.ExpiryTime() : -1;
   } else {
     // Old encoding, does not support expiry.
     return -1;
