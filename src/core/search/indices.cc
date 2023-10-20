@@ -163,6 +163,8 @@ struct HnswlibAdapter {
   }
 
   void Add(float* data, DocId id) {
+    if (world_.cur_element_count + 1 >= world_.max_elements_)
+      world_.resizeIndex(world_.cur_element_count * 2);
     world_.addPoint(data, id);
   }
 

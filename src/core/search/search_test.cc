@@ -500,6 +500,23 @@ TEST_P(KnnTest, Simple2D) {
   }
 }
 
+TEST_P(KnnTest, AutoResize) {
+  // Make sure index resizes automatically even with a small initial capacity
+  const size_t kInitialCapacity = 5;
+
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params =
+      SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2, kInitialCapacity};
+  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+
+  for (size_t i = 0; i < 100; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i)})}}};
+    indices.Add(i, &doc);
+  }
+
+  EXPECT_EQ(indices.GetAllDocs().size(), 100);
+}
+
 INSTANTIATE_TEST_SUITE_P(KnnFlat, KnnTest, testing::Values(false));
 INSTANTIATE_TEST_SUITE_P(KnnHnsw, KnnTest, testing::Values(true));
 
