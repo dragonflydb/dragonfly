@@ -408,7 +408,9 @@ async def test_rotating_masters(
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_cancel_replication_immediately(df_local_factory, df_seeder_factory):
+async def test_cancel_replication_immediately(
+    df_local_factory, df_seeder_factory: DflySeederFactory
+):
     """
     Issue 100 replication commands. This checks that the replication state
     machine can handle cancellation well.
@@ -423,7 +425,8 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     df_local_factory.start_all([replica, master])
 
     seeder = df_seeder_factory.create(port=master.port)
-    c_replica = aioredis.Redis(port=replica.port)
+    c_replica = aioredis.Redis(port=replica.port, socket_timeout=20)
+
     await seeder.run(target_deviation=0.1)
 
     replication_commands = []
@@ -437,14 +440,20 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
             return False
 
     for i in range(COMMANDS_TO_ISSUE):
-        replication_commands.append(replicate())
-    results = await asyncio.gather(*replication_commands)
-    num_successes = sum(results)
+        replication_commands.append(asyncio.create_task(replicate()))
+    num_successes = 0
+    for result in asyncio.as_completed(replication_commands, timeout=30):
+        r = await result
+        num_successes += r
+
+    logging.info(f"succeses: {num_successes}")
     assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
 
     await wait_available_async(c_replica)
     capture = await seeder.capture()
+    logging.info(f"number of items captured {len(capture)}")
     assert await seeder.compare(capture, replica.port)
+    await c_replica.close()
 
 
 """
