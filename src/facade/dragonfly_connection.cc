@@ -303,6 +303,9 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 }
 
 Connection::~Connection() {
+#ifdef DFLY_USE_SSL
+  SSL_CTX_free(ctx_);
+#endif
 }
 
 // Called from Connection::Shutdown() right after socket_->Shutdown call.

@@ -67,24 +67,31 @@ namespace {
 
 #ifdef DFLY_USE_SSL
 
+// Creates the TLS context. Returns nullptr if the TLS configuration is invalid.
 // To connect: openssl s_client -state -crlf -connect 127.0.0.1:6380
 SSL_CTX* CreateSslServerCntx() {
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
   if (tls_key_file.empty()) {
     LOG(ERROR) << "To use TLS, a server certificate must be provided with the --tls_key_file flag!";
-    exit(-1);
+    return nullptr;
   }
 
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
   unsigned mask = SSL_VERIFY_NONE;
 
-  DFLY_SSL_CHECK(1 == SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+  if (SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
+    LOG(ERROR) << "Failed to load TLS key";
+    return nullptr;
+  }
   const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
 
   if (!tls_cert_file.empty()) {
     // TO connect with redis-cli you need both tls-key-file and tls-cert-file
     // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
-    DFLY_SSL_CHECK(1 == SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+    if (SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()) != 1) {
+      LOG(ERROR) << "Failed to load TLS certificate";
+      return nullptr;
+    }
   }
 
   const auto tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
@@ -92,7 +99,10 @@ SSL_CTX* CreateSslServerCntx() {
   if (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()) {
     const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
     const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
-    DFLY_SSL_CHECK(1 == SSL_CTX_load_verify_locations(ctx, file, dir));
+    if (SSL_CTX_load_verify_locations(ctx, file, dir) != 1) {
+      LOG(ERROR) << "Failed to load TLS verify locations (CA cert file or CA cert dir)";
+      return nullptr;
+    }
     mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
   }
 
@@ -145,9 +155,10 @@ bool ConfigureKeepAlive(int fd) {
 Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
     : service_(si), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
-  if (GetFlag(FLAGS_tls)) {
-    OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
-    ctx_ = CreateSslServerCntx();
+  // Always initialise OpenSSL so we can enable TLS at runtime.
+  OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
+  if (!ReconfigureTLS()) {
+    exit(-1);
   }
 #endif
   role_ = role;
@@ -169,6 +180,13 @@ Listener::~Listener() {
 }
 
 util::Connection* Listener::NewConnection(ProactorBase* proactor) {
+#ifdef DFLY_USE_SSL
+  // Increment reference counter so if we swap the ctx the connections
+  // reference won't be freed.
+  if (ctx_) {
+    SSL_CTX_up_ref(ctx_);
+  }
+#endif
   return new Connection{protocol_, http_base_.get(), ctx_, service_};
 }
 
@@ -196,6 +214,27 @@ error_code Listener::ConfigureServerSocket(int fd) {
   }
 
   return error_code{};
+}
+
+bool Listener::ReconfigureTLS() {
+  SSL_CTX* prev_ctx = ctx_;
+  if (GetFlag(FLAGS_tls)) {
+    SSL_CTX* ctx = CreateSslServerCntx();
+    if (!ctx) {
+      return false;
+    }
+    ctx_ = ctx;
+  } else {
+    ctx_ = nullptr;
+  }
+
+  if (prev_ctx) {
+    // SSL_CTX is reference counted so if other connections have a reference
+    // to the context it won't be freed yet.
+    SSL_CTX_free(prev_ctx);
+  }
+
+  return true;
 }
 
 void Listener::PreAcceptLoop(util::ProactorBase* pb) {
