@@ -1199,7 +1199,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SET") {
-    if (args.size() < 3) {
+    if (args.size() != 3) {
       return (*cntx)->SendError(WrongNumArgsError("config|set"));
     }
 
