@@ -5,6 +5,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/reflection.h>
 
+#include "src/server/common.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
@@ -29,10 +30,11 @@ class ConfigRegistry {
     UNKNOWN,
     READONLY,
     INVALID,
+    WRONG_ARGS_NUMBER,
+    DUPLICATE,
   };
 
-  // Returns true if the value was updated.
-  SetResult Set(std::string_view config_name, std::string_view value, bool apply);
+  SetResult Set(CmdArgList args);
 
   std::optional<std::string> Get(std::string_view config_name);
 

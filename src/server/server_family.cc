@@ -1192,104 +1192,16 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
-void ConfigRollBack(const std::unordered_map<std::string_view, std::string>& prev_config,
-                    bool apply) {
-  for (auto const& [key, value] : prev_config) {
-    ConfigRegistry::SetResult result = config_registry.Set(key, value, false);
-    if (result != ConfigRegistry::SetResult::OK) {
-      // Log the error, but theres nothing else we can do.
-      LOG(ERROR) << "failed to roll back config; key=" << key;
-    }
-  }
-  if (apply) {
-    for (auto const& [key, value] : prev_config) {
-      ConfigRegistry::SetResult result = config_registry.Set(key, value, true);
-      if (result != ConfigRegistry::SetResult::OK) {
-        // Log the error, but theres nothing else we can do.
-        LOG(ERROR) << "failed to roll back config; key=" << key;
-      }
-    }
-  }
-}
-
 void ConfigSet(CmdArgList args, ConnectionContext* cntx) {
-  // Require an even number of arguments for conf-value pairs.
-  if (args.size() < 3 || args.size() % 2 != 1) {
-    return (*cntx)->SendError(WrongNumArgsError("config|set"));
+  ConfigRegistry::SetResult result = config_registry.Set(args.subspan(1));
+  switch (result) {
+    case ConfigRegistry::SetResult::OK:
+      return (*cntx)->SendOk();
+    default:
+      // TODO(andydunstall): Error handling... Return the bad argument from
+      // Set
+      return (*cntx)->SendError("...");
   }
-
-  // Lookup the previous config and verify the parameters all exist and
-  // have no duplicates.
-  std::unordered_map<std::string_view, std::string> prev_config;
-  for (size_t indx = 1; indx < args.size(); indx += 2) {
-    ToLower(&args[indx]);
-    const std::string_view config_name = ArgS(args, indx);
-
-    const std::optional<std::string> prev = config_registry.Get(config_name);
-    if (!prev) {
-      // No need to roll back as no config has been updated.
-      return (*cntx)->SendError(absl::StrCat("config not found: ", config_name));
-    }
-    if (prev_config.find(config_name) != prev_config.end()) {
-      // No need to roll back as no config has been updated.
-      return (*cntx)->SendError(absl::StrCat("duplicate parameter: ", config_name));
-    }
-    prev_config.emplace(config_name, *prev);
-  }
-
-  // Set all config flags without applying the registered callbacks. This
-  // ensures callbacks run with the latest flags.
-  for (size_t indx = 1; indx < args.size(); indx += 2) {
-    const std::string_view config_name = ArgS(args, indx);
-    ConfigRegistry::SetResult result =
-        config_registry.Set(config_name, ArgS(args, indx + 1), false);
-    std::string error_message;
-    switch (result) {
-      case ConfigRegistry::SetResult::OK:
-        continue;
-      case ConfigRegistry::SetResult::UNKNOWN:
-        error_message = absl::StrCat("unknown option: ", config_name);
-        break;
-      case ConfigRegistry::SetResult::READONLY:
-        error_message = absl::StrCat("cannot set immutable config: ", config_name);
-        break;
-      case ConfigRegistry::SetResult::INVALID:
-        error_message = absl::StrCat("invalid config argument: ", config_name);
-        break;
-      default:
-        error_message = absl::StrCat("unknown error: ", config_name);
-        break;
-    }
-    ConfigRollBack(prev_config, false);
-    return (*cntx)->SendError(error_message);
-  }
-
-  // Finally apply the config which runs the registered callbacks.
-  for (size_t indx = 1; indx < args.size(); indx += 2) {
-    const std::string_view config_name = ArgS(args, indx);
-    ConfigRegistry::SetResult result = config_registry.Set(config_name, ArgS(args, indx + 1), true);
-    std::string error_message;
-    switch (result) {
-      case ConfigRegistry::SetResult::OK:
-        continue;
-      case ConfigRegistry::SetResult::UNKNOWN:
-        error_message = absl::StrCat("unknown option: ", config_name);
-        break;
-      case ConfigRegistry::SetResult::READONLY:
-        error_message = absl::StrCat("cannot set immutable config: ", config_name);
-        break;
-      case ConfigRegistry::SetResult::INVALID:
-        error_message = absl::StrCat("invalid config argument: ", config_name);
-        break;
-      default:
-        error_message = absl::StrCat("unknown error: ", config_name);
-        break;
-    }
-    ConfigRollBack(prev_config, true);
-    return (*cntx)->SendError(error_message);
-  }
-
-  return (*cntx)->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
