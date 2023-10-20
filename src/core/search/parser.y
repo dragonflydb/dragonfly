@@ -74,6 +74,7 @@ using namespace std;
 
 %token <double> DOUBLE "double"
 %token <uint32_t> UINT32 "uint32"
+%nterm <double> generic_number
 %nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 
@@ -123,13 +124,12 @@ search_unary_expr:
   | FIELD COLON field_cond            { $$ = AstFieldNode(move($1), move($3)); }
 
 field_cond:
-  TERM                                  { $$ = AstTermNode(move($1)); }
-  | UINT32                              { $$ = AstTermNode(to_string($1)); }
-  | NOT_OP field_cond                   { $$ = AstNegateNode(move($2)); }
-  | LPAREN field_cond_expr RPAREN       { $$ = move($2); }
-  | LBRACKET DOUBLE DOUBLE RBRACKET     { $$ = AstRangeNode(move($2), move($3)); }
-  | LBRACKET UINT32 UINT32 RBRACKET     { $$ = AstRangeNode(move($2), move($3)); }
-  | LCURLBR tag_list RCURLBR            { $$ = move($2); }
+  TERM                                                  { $$ = AstTermNode(move($1)); }
+  | UINT32                                              { $$ = AstTermNode(to_string($1)); }
+  | NOT_OP field_cond                                   { $$ = AstNegateNode(move($2)); }
+  | LPAREN field_cond_expr RPAREN                       { $$ = move($2); }
+  | LBRACKET generic_number generic_number RBRACKET     { $$ = AstRangeNode(move($2), move($3)); }
+  | LCURLBR tag_list RCURLBR                            { $$ = move($2); }
 
 field_cond_expr:
   field_unary_expr                       { $$ = move($1); }
@@ -155,6 +155,10 @@ tag_list:
   | UINT32                   { $$ = AstTagsNode(to_string($1)); }
   | tag_list OR_OP TERM      { $$ = AstTagsNode(move($1), move($3)); }
   | tag_list OR_OP DOUBLE    { $$ = AstTagsNode(move($1), to_string($3)); }
+
+generic_number:
+  DOUBLE { $$ = $1; }
+  | UINT32 { $$ = $1; }
 
 %%
 
