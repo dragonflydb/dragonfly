@@ -160,6 +160,14 @@ class DflyInstance:
                 proc.terminate()
             proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
+            # We need to send SIGUSR1 to DF such that it prints the stacktrace
+            proc.send_signal(signal.SIGUSR1)
+            # Then we sleep for 5 seconds such that DF has enough time to print the stacktraces
+            # We can't really synchronize here because SIGTERM and SIGKILL do not block even if
+            # sigaction explicitly blocks other incoming signals until it handles SIGUSR1.
+            # Even worse, on SIGTERM and SIGKILL none of the handlers registered via sigaction
+            # are guranteed to run
+            time.sleep(5)
             logging.debug(f"Unable to kill the process on port {self._port}")
             logging.debug(f"INFO LOGS of DF are:")
             self.print_info_logs_to_debug_log()

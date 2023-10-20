@@ -21,8 +21,6 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc
             )
-cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
-
 
 if (NOT APPLE)
   SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc)
@@ -44,6 +42,13 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.
             cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)
 
+cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
+
+option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
+
+if (PRINT_STACKTRACES_ON_SIGNAL)
+  target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
+endif()
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
 

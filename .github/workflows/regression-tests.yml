@@ -28,7 +28,7 @@ jobs:
       - name: Configure & Build
         run: |
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
-                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON
 
           cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
           pwd
