@@ -1192,38 +1192,42 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
+void ConfigSet(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() < 3) {
+    return (*cntx)->SendError(WrongNumArgsError("config|set"));
+  }
+
+  ToLower(&args[1]);
+  string_view param = ArgS(args, 1);
+
+  ConfigRegistry::SetResult result = config_registry.Set(param, ArgS(args, 2));
+
+  const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
+  switch (result) {
+    case ConfigRegistry::SetResult::OK:
+      return (*cntx)->SendOk();
+    case ConfigRegistry::SetResult::UNKNOWN:
+      return (*cntx)->SendError(
+          absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
+          kConfigErrType);
+
+    case ConfigRegistry::SetResult::READONLY:
+      return (*cntx)->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
+                                kConfigErrType);
+
+    case ConfigRegistry::SetResult::INVALID:
+      return (*cntx)->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                                kConfigErrType);
+  }
+  ABSL_UNREACHABLE();
+}
+
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SET") {
-    if (args.size() < 3) {
-      return (*cntx)->SendError(WrongNumArgsError("config|set"));
-    }
-
-    ToLower(&args[1]);
-    string_view param = ArgS(args, 1);
-
-    ConfigRegistry::SetResult result = config_registry.Set(param, ArgS(args, 2));
-
-    const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
-    switch (result) {
-      case ConfigRegistry::SetResult::OK:
-        return (*cntx)->SendOk();
-      case ConfigRegistry::SetResult::UNKNOWN:
-        return (*cntx)->SendError(
-            absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
-            kConfigErrType);
-
-      case ConfigRegistry::SetResult::READONLY:
-        return (*cntx)->SendError(
-            absl::StrCat(kErrPrefix, param, "') - can't set immutable config"), kConfigErrType);
-
-      case ConfigRegistry::SetResult::INVALID:
-        return (*cntx)->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
-                                  kConfigErrType);
-    }
-    ABSL_UNREACHABLE();
+    return ConfigSet(args, cntx);
   }
 
   if (sub_cmd == "GET" && args.size() == 2) {
