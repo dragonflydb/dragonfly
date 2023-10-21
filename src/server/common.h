@@ -192,18 +192,16 @@ template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
   size_t indx = 0;
 
   for (size_t i = 0; i < len / 16; ++i) {  // 2 chars per byte
-    absl::AlphaNum an(absl::Hex(gen(), absl::kZeroPad16));
-
-    for (unsigned j = 0; j < 16; ++j) {
-      res[indx++] = an.Piece()[j];
-    }
+    absl::numbers_internal::FastHexToBufferZeroPad16(gen(), res.data() + indx);
+    indx += 16;
   }
 
   if (indx < res.size()) {
-    absl::AlphaNum an(absl::Hex(gen(), absl::kZeroPad16));
+    char buf[32];
+    absl::numbers_internal::FastHexToBufferZeroPad16(gen(), buf);
 
     for (unsigned j = 0; indx < res.size(); indx++, j++) {
-      res[indx] = an.Piece()[j];
+      res[indx] = buf[j];
     }
   }
 
