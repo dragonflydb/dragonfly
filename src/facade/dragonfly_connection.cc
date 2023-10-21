@@ -350,7 +350,7 @@ void Connection::HandleRequests() {
     }
   }
 
-  auto remote_ep = socket_->RemoteEndpoint();
+  auto remote_ep = RemoteEndpointStr();
 
   FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
@@ -411,18 +411,13 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-std::string Connection::LocalBindAddress() const {
-  auto le = socket_->LocalEndpoint();
-  return le.address().to_string();
-}
-
 std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() const {
   CHECK(service_ && socket_);
   CHECK_LT(unsigned(phase_), NUM_PHASES);
 
   string before;
-  auto le = socket_->LocalEndpoint();
-  auto re = socket_->RemoteEndpoint();
+  auto le = LocalBindStr();
+  auto re = RemoteEndpointStr();
   time_t now = time(nullptr);
 
   int cpu = 0;
@@ -438,8 +433,7 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");
 
-  absl::StrAppend(&before, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
-  absl::StrAppend(&before, " laddr=", le.address().to_string(), ":", le.port());
+  absl::StrAppend(&before, "id=", id_, " addr=", re, " laddr=", le);
   absl::StrAppend(&before, " fd=", socket_->native_handle(), " name=", name_);
 
   string after;
@@ -1105,16 +1099,34 @@ void Connection::EnsureAsyncMemoryBudget() {
   queue_backpressure_->EnsureBelowLimit();
 }
 
+std::string Connection::LocalBindStr() const {
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
+
+  auto le = socket_->LocalEndpoint();
+  return absl::StrCat(le.address().to_string(), ":", le.port());
+}
+
+std::string Connection::LocalBindAddress() const {
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
+
+  auto le = socket_->LocalEndpoint();
+  return le.address().to_string();
+}
+
 std::string Connection::RemoteEndpointStr() const {
-  const bool unix_socket = socket_->IsUDS();
-  std::string connection_str = unix_socket ? "unix:" : std::string{};
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
 
   auto re = socket_->RemoteEndpoint();
-  absl::StrAppend(&connection_str, re.address().to_string(), ":", re.port());
-  return connection_str;
+  return absl::StrCat(re.address().to_string(), ":", re.port());
 }
 
 std::string Connection::RemoteEndpointAddress() const {
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
+
   auto re = socket_->RemoteEndpoint();
   return re.address().to_string();
 }
