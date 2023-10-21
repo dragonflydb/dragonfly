@@ -433,3 +433,68 @@ async def test_index_persistence(df_server):
 
     await i1.dropindex()
     await i2.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+def test_redis_om(df_server):
+    try:
+        import redis_om
+    except ModuleNotFoundError:
+        pytest.skip("Redis-om not installed")
+
+    client = redis.Redis(port=df_server.port)
+
+    class TestCar(redis_om.HashModel):
+        producer: str = redis_om.Field(index=True)
+        description: str = redis_om.Field(index=True, full_text_search=True)
+        speed: int = redis_om.Field(index=True, sortable=True)
+
+        class Meta:
+            database = client
+
+    def extract_producers(testset):
+        return sorted([car.producer for car in testset])
+
+    def make_car(producer, description, speed):
+        return TestCar(producer=producer, description=description, speed=speed)
+
+    CARS = [
+        make_car("BMW", "Very fast and elegant", 200),
+        make_car("Audi", "Fast & stylish", 170),
+        make_car("Mercedes", "High class for high prices", 150),
+        make_car("Honda", "Good allrounder with flashy looks", 120),
+        make_car("Peugeot", "Good allrounder for the whole family", 100),
+        make_car("Mini", "Fashinable cooper for the big city", 80),
+    ]
+
+    for car in CARS:
+        car.save()
+
+    redis_om.Migrator().run()
+
+    # Get all cars
+    assert extract_producers(TestCar.find().all()) == extract_producers(CARS)
+
+    # Get all cars which Audi or Honda
+    assert extract_producers(
+        TestCar.find((TestCar.producer == "Peugeot") | (TestCar.producer == "Mini"))
+    ) == ["Mini", "Peugeot"]
+
+    # Get only fast cars
+    assert extract_producers(TestCar.find(TestCar.speed >= 150).all()) == extract_producers(
+        [c for c in CARS if c.speed >= 150]
+    )
+
+    # Get all cars which are fast based on description
+    assert extract_producers(TestCar.find(TestCar.description % "fast")) == ["Audi", "BMW"]
+
+    # Get a fast allrounder
+    assert extract_producers(
+        TestCar.find((TestCar.speed >= 110) & (TestCar.description % "allrounder"))
+    ) == ["Honda"]
+
+    # What's the slowest car
+    assert extract_producers([TestCar.find().sort_by("speed").first()]) == ["Mini"]
+
+    for index in client.execute_command("FT._LIST"):
+        client.ft(index.decode()).dropindex()
