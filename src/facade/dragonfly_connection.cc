@@ -336,18 +336,10 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 void Connection::HandleRequests() {
   ThisFiber::SetName("DflyConnection");
 
-  if (absl::GetFlag(FLAGS_tcp_nodelay)) {
-    int val = 0;
-
-    // Get the underlying address family first to avoid setting tcp options on unix domain sockets
-    socklen_t bufsize = sizeof(val);
-    int res = getsockopt(socket_->native_handle(), SOL_SOCKET, SO_DOMAIN, &val, &bufsize);
-    LOG_IF(ERROR, res != 0) << "Bad getsockopt call " << res;
-
-    if (res == 0 && (val == AF_INET || val == AF_INET6)) {
-      val = 1;
-      setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-    }
+  if (absl::GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
+    int val = 1;
+    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+    DCHECK_EQ(res, 0);
   }
 
   auto remote_ep = RemoteEndpointStr();
