@@ -438,3 +438,32 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
 
     result = await async_client.execute_command("AUTH roy mypass")
     assert result == "OK"
+
+
+@pytest.mark.asyncio
+async def test_set_len_acl_log(async_client):
+    res = await async_client.execute_command("ACL LOG")
+    assert [] == res
+
+    await async_client.execute_command("ACL SETUSER elon >mars ON +@string +@dangerous")
+
+    for x in range(7):
+        with pytest.raises(redis.exceptions.AuthenticationError):
+            await async_client.execute_command("AUTH elon wrong")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 7 == len(res)
+
+    await async_client.execute_command(f"CONFIG SET acllog_max_len 3")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 3 == len(res)
+
+    await async_client.execute_command(f"CONFIG SET acllog_max_len 10")
+
+    for x in range(7):
+        with pytest.raises(redis.exceptions.AuthenticationError):
+            await async_client.execute_command("AUTH elon wrong")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 10 == len(res)
