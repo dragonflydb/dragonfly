@@ -66,7 +66,7 @@ term_char [_]|\w
 "AS"           return Parser::make_AS (loc());
 
 [0-9]+                   return make_UINT32(matched_view(), loc());
-[+-]?([0-9]*[.])?[0-9]+  return make_DOUBLE(matched_view(), loc());
+[+-]?(([0-9]*[.])?[0-9]+|inf)  return make_DOUBLE(matched_view(), loc());
 
 {dq}{str_char}*{dq}  return make_StringLit(matched_view(1, 1), loc());
 
