@@ -27,7 +27,7 @@ constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 144u);
+  static_assert(kSizeConnStats == 136u);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);

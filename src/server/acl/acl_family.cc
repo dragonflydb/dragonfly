@@ -503,13 +503,10 @@ void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
   constexpr size_t step_size = sizeof(decltype(std::random_device::max()));
   std::string response;
   for (size_t bytes_written = 0; bytes_written < result_length; bytes_written += step_size) {
-    absl::StrAppend(&response, absl::Hex(urandom(), absl::kZeroPad8));
+    absl::StrAppendFormat(&response, "%08x", urandom());
   }
 
-  if (response.size() > result_length) {
-    const size_t stride = response.size() - result_length;
-    response.erase(response.end() - stride, response.end());
-  }
+  response.resize(result_length);
 
   (*cntx)->SendSimpleString(response);
 }

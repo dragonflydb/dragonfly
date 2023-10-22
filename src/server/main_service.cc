@@ -212,7 +212,7 @@ auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
         if (isprint(c)) {
           result += c;
         } else {
-          absl::StrAppend(&result, "\\x", absl::Hex((unsigned char)c, absl::kZeroPad2));
+          absl::StrAppendFormat(&result, "\\x%02x", c);
         }
         break;
     }
