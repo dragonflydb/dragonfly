@@ -13,6 +13,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "io/proc_reader.h"
 #include "server/blocking_controller.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
@@ -621,11 +622,45 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
+  bool runs_global_periodic = (shard_id() == 0);  // Only shard 0 runs global periodic.
+  unsigned global_count = 0;
+  int64_t last_stats_time = time(nullptr);
+
   while (true) {
     Heartbeat();
     if (fiber_periodic_done_.WaitFor(period_ms)) {
       VLOG(2) << "finished running engine shard periodic task";
       return;
+    }
+
+    if (runs_global_periodic) {
+      ++global_count;
+
+      // Every 8 runs, update the global stats.
+      if (global_count % 8 == 0) {
+        uint64_t sum = 0;
+        const auto& stats = EngineShardSet::GetCachedStats();
+        for (const auto& s : stats)
+          sum += s.used_memory.load(memory_order_relaxed);
+
+        used_mem_current.store(sum, memory_order_relaxed);
+
+        // Single writer, so no races.
+        if (sum > used_mem_peak.load(memory_order_relaxed))
+          used_mem_peak.store(sum, memory_order_relaxed);
+
+        int64_t cur_time = time(nullptr);
+        if (cur_time != last_stats_time) {
+          last_stats_time = cur_time;
+          io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
+          if (sdata_res) {
+            size_t total_rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+            rss_mem_current.store(total_rss, memory_order_relaxed);
+            if (rss_mem_peak.load(memory_order_relaxed) < total_rss)
+              rss_mem_peak.store(total_rss, memory_order_relaxed);
+          }
+        }
+      }
     }
   }
 }

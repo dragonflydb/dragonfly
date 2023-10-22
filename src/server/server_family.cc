@@ -507,27 +507,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
-  // Unlike EngineShard::Heartbeat that runs independently in each shard thread,
-  // this callback runs in a single thread and it aggregates globally stats from all the shards.
-  auto cache_cb = [] {
-    uint64_t sum = 0;
-    const auto& stats = EngineShardSet::GetCachedStats();
-    for (const auto& s : stats)
-      sum += s.used_memory.load(memory_order_relaxed);
-
-    used_mem_current.store(sum, memory_order_relaxed);
-
-    // Single writer, so no races.
-    if (sum > used_mem_peak.load(memory_order_relaxed))
-      used_mem_peak.store(sum, memory_order_relaxed);
-  };
-
-  uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
-  uint32_t period_ms = max(1u, 1000 / cache_hz);
-
-  stats_caching_task_ =
-      pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
-
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
@@ -1438,20 +1417,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("MEMORY")) {
-    io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
-
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
     append("used_memory_peak", used_mem_peak.load(memory_order_relaxed));
 
-    if (sdata_res.has_value()) {
-      size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
-      append("used_memory_rss", rss);
-      append("used_memory_rss_human", HumanReadableNumBytes(rss));
-    } else {
-      LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
-                             << sdata_res.error().message();
-    }
+    size_t rss = rss_mem_current.load(memory_order_relaxed);
+    append("used_memory_rss", rss);
+    append("used_memory_rss_human", HumanReadableNumBytes(rss));
+    append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
 
     append("comitted_memory", GetMallocCurrentCommitted());
 
