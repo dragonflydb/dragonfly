@@ -161,13 +161,16 @@ class Connection : public util::Connection {
 
   std::string GetClientInfo(unsigned thread_id) const;
   std::string GetClientInfo() const;
-  virtual std::string RemoteEndpointStr() const;
+
+  virtual std::string RemoteEndpointStr() const;  // virtual because overwritten in test_utils
   std::string RemoteEndpointAddress() const;
+
+  std::string LocalBindStr() const;
   std::string LocalBindAddress() const;
 
   uint32_t GetClientId() const;
-  // Virtual because behavior is overridden in test_utils.
-  virtual bool IsPrivileged() const;
+
+  virtual bool IsPrivileged() const;  // virtual because overwritten in test_utils
 
   bool IsMain() const;
 

@@ -536,3 +536,14 @@ async def test_memcached_large_request(df_local_factory):
     memcached_client = pymemcache.Client(("localhost", server.mc_port), default_noreply=False)
 
     assert memcached_client.set(b"key", b"d" * 4096, noreply=False)
+
+
+@pytest.mark.asyncio
+async def test_unix_domain_socket(df_local_factory, tmp_dir):
+    server = df_local_factory.create(proactor_threads=1, port=BASE_PORT, unixsocket="./df.sock")
+    server.start()
+
+    await asyncio.sleep(0.5)
+
+    r = aioredis.Redis(unix_socket_path=tmp_dir / "df.sock")
+    assert await r.ping()
