@@ -64,6 +64,9 @@ string_view KeyLockArgs::GetLockKey(string_view key) {
 
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);
+atomic_uint64_t rss_mem_current(0);
+atomic_uint64_t rss_mem_peak(0);
+
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
 
