@@ -283,14 +283,27 @@ TEST_F(SearchTest, MatchRange) {
 
 TEST_F(SearchTest, MatchDoubleRange) {
   PrepareSchema({{"f1", SchemaField::NUMERIC}});
-  PrepareQuery("@f1: [100.03 199.97]");
 
-  ExpectAll(Map{{"f1", "130"}}, Map{{"f1", "170"}}, Map{{"f1", "100.03"}}, Map{{"f1", "199.97"}});
+  {
+    PrepareQuery("@f1: [100.03 199.97]");
 
-  ExpectNone(Map{{"f1", "0"}}, Map{{"f1", "200"}}, Map{{"f1", "100.02999"}},
-             Map{{"f1", "199.9700001"}});
+    ExpectAll(Map{{"f1", "130"}}, Map{{"f1", "170"}}, Map{{"f1", "100.03"}}, Map{{"f1", "199.97"}});
 
-  EXPECT_TRUE(Check()) << GetError();
+    ExpectNone(Map{{"f1", "0"}}, Map{{"f1", "200"}}, Map{{"f1", "100.02999"}},
+               Map{{"f1", "199.9700001"}});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@f1: [(100 (199.9]");
+
+    ExpectAll(Map{{"f1", "150"}}, Map{{"f1", "100.00001"}}, Map{{"f1", "199.8999999"}});
+
+    ExpectNone(Map{{"f1", "50"}}, Map{{"f1", "100"}}, Map{{"f1", "199.9"}}, Map{{"f1", "200"}});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
 }
 
 TEST_F(SearchTest, MatchStar) {
