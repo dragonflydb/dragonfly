@@ -33,6 +33,7 @@ runs:
         cd ${GITHUB_WORKSPACE}/tests
         echo "Current commit is ${{github.sha}}"
         pip3 install -r dragonfly/requirements.txt
+        echo $?
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
