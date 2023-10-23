@@ -461,10 +461,11 @@ def test_redis_om(df_server):
     CARS = [
         make_car("BMW", "Very fast and elegant", 200),
         make_car("Audi", "Fast & stylish", 170),
-        make_car("Mercedes", "High class for high prices", 150),
+        make_car("Mercedes", "High class but expensive!", 150),
         make_car("Honda", "Good allrounder with flashy looks", 120),
         make_car("Peugeot", "Good allrounder for the whole family", 100),
         make_car("Mini", "Fashinable cooper for the big city", 80),
+        make_car("John Deere", "It's not a car, it's a tractor in fact!", 50),
     ]
 
     for car in CARS:
@@ -475,7 +476,7 @@ def test_redis_om(df_server):
     # Get all cars
     assert extract_producers(TestCar.find().all()) == extract_producers(CARS)
 
-    # Get all cars which Audi or Honda
+    # Get all cars of a specific producer
     assert extract_producers(
         TestCar.find((TestCar.producer == "Peugeot") | (TestCar.producer == "Mini"))
     ) == ["Mini", "Peugeot"]
@@ -485,8 +486,18 @@ def test_redis_om(df_server):
         [c for c in CARS if c.speed >= 150]
     )
 
+    # Get only slow cars
+    assert extract_producers(TestCar.find(TestCar.speed < 100).all()) == extract_producers(
+        [c for c in CARS if c.speed < 100]
+    )
+
     # Get all cars which are fast based on description
     assert extract_producers(TestCar.find(TestCar.description % "fast")) == ["Audi", "BMW"]
+
+    # Get all cars which are not marked as extensive by descriptions
+    assert extract_producers(
+        TestCar.find(~(TestCar.description % "expensive")).all()
+    ) == extract_producers([c for c in CARS if c.producer != "Mercedes"])
 
     # Get a fast allrounder
     assert extract_producers(
@@ -494,7 +505,10 @@ def test_redis_om(df_server):
     ) == ["Honda"]
 
     # What's the slowest car
-    assert extract_producers([TestCar.find().sort_by("speed").first()]) == ["Mini"]
+    assert extract_producers([TestCar.find().sort_by("speed").first()]) == ["John Deere"]
+
+    # What's the fastest car
+    assert extract_producers([TestCar.find().sort_by("-speed").first()]) == ["BMW"]
 
     for index in client.execute_command("FT._LIST"):
         client.ft(index.decode()).dropindex()

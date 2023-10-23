@@ -31,7 +31,7 @@ struct AstTermNode {
 
 // Matches numeric range
 struct AstRangeNode {
-  AstRangeNode(double lo, double hi);
+  AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl);
 
   double lo, hi;
 };
