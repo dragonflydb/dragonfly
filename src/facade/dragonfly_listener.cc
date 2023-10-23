@@ -156,7 +156,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
     : service_(si), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
   // Always initialise OpenSSL so we can enable TLS at runtime.
-  OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
+  OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, nullptr);
   if (!ReconfigureTLS()) {
     exit(-1);
   }
@@ -180,13 +180,6 @@ Listener::~Listener() {
 }
 
 util::Connection* Listener::NewConnection(ProactorBase* proactor) {
-#ifdef DFLY_USE_SSL
-  // Increment reference counter so if we swap the ctx the connections
-  // reference won't be freed.
-  if (ctx_) {
-    SSL_CTX_up_ref(ctx_);
-  }
-#endif
   return new Connection{protocol_, http_base_.get(), ctx_, service_};
 }
 

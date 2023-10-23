@@ -300,6 +300,14 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   }
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
+
+#ifdef DFLY_USE_SSL
+  // Increment reference counter so Listener won't free the context while we're
+  // still using it.
+  if (ctx) {
+    SSL_CTX_up_ref(ctx);
+  }
+#endif
 }
 
 Connection::~Connection() {
