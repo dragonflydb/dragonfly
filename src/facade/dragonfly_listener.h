@@ -34,6 +34,9 @@ class Listener : public util::ListenerInterface {
 
   std::error_code ConfigureServerSocket(int fd) final;
 
+  // ReconfigureTLS MUST be called from the same proactor as the listener.
+  bool ReconfigureTLS();
+
   // Wait until all connections that pass the filter have stopped dispatching or until a timeout has
   // run out. Returns true if the all connections have stopped dispatching.
   bool AwaitDispatches(absl::Duration timeout,

@@ -298,9 +298,9 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
 // enabled. That means either using a password or giving a root
 // certificate for authenticating client certificates which will
 // be required.
-void ValidateServerTlsFlags() {
+bool ValidateServerTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls)) {
-    return;
+    return true;
   }
 
   bool has_auth = false;
@@ -316,8 +316,10 @@ void ValidateServerTlsFlags() {
 
   if (!has_auth) {
     LOG(ERROR) << "TLS configured but no authentication method is used!";
-    exit(1);
+    return false;
   }
+
+  return true;
 }
 
 bool IsReplicatingNoOne(string_view host, string_view port) {
@@ -446,7 +448,9 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     exit(1);
   }
 
-  ValidateServerTlsFlags();
+  if (!ValidateServerTlsFlags()) {
+    exit(1);
+  }
   ValidateClientTlsFlags();
 }
 
@@ -501,6 +505,25 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       SetSlowLogMaxLen(service_.proactor_pool(), res.value());
     return res.has_value();
   });
+
+  // We only reconfigure TLS when the 'tls' config key changes. Therefore to
+  // update TLS certs, first update tls_cert_file, then set 'tls true'.
+  config_registry.RegisterMutable("tls", [this](const absl::CommandLineFlag& flag) {
+    if (!ValidateServerTlsFlags()) {
+      return false;
+    }
+    for (facade::Listener* l : listeners_) {
+      // Must reconfigure in the listener proactor to avoid a race.
+      if (!l->socket()->proactor()->Await([l] { return l->ReconfigureTLS(); })) {
+        return false;
+      }
+    }
+    return true;
+  });
+  config_registry.RegisterMutable("tls_cert_file");
+  config_registry.RegisterMutable("tls_key_file");
+  config_registry.RegisterMutable("tls_ca_cert_file");
+  config_registry.RegisterMutable("tls_ca_cert_dir");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1176,7 +1199,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SET") {
-    if (args.size() < 3) {
+    if (args.size() != 3) {
       return (*cntx)->SendError(WrongNumArgsError("config|set"));
     }
 
