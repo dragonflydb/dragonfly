@@ -342,7 +342,8 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   DCHECK_EQ(OBJ_ENCODING_QUICKLIST, obj->encoding);
   const quicklist* ql = reinterpret_cast<const quicklist*>(obj->ptr);
   quicklistNode* node = ql->head;
-  DVLOG(1) << "Saving list of length " << ql->len;
+  DVLOG(2) << "Saving list of length " << ql->len;
+
   RETURN_ON_ERR(SaveLen(ql->len));
 
   while (node) {
