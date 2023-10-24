@@ -346,10 +346,10 @@ async def test_index_persistence(df_server):
 
     # Build two indices and fill them with data
 
-    SCHEMA_1 = [TextField("title"), NumericField("views"), TagField("topic")]
+    SCHEMA_1 = [TextField("title"), NumericField("views", sortable=True), TagField("topic")]
     SCHEMA_2 = [
         TextField("name"),
-        NumericField("age"),
+        NumericField("age", sortable=True),
         TagField("job"),
         VectorField(
             "pos",
@@ -430,6 +430,14 @@ async def test_index_persistence(df_server):
 
     assert (await i2.search("@job:{writer}")).total == 100
     assert (await i2.search("@job:{writer} @age:[100 200]")).total == 50
+
+    # Check fields are sortable
+    assert (await i1.search(Query("*").sort_by("views", asc=True).paging(0, 1))).docs[0][
+        "id"
+    ] == "blog-0"
+    assert (await i2.search(Query("*").sort_by("age", asc=False).paging(0, 1))).docs[0][
+        "age"
+    ] == "199"
 
     await i1.dropindex()
     await i2.dropindex()

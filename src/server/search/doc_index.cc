@@ -96,9 +96,18 @@ string DocIndexInfo::BuildRestoreCommand() const {
 
   absl::StrAppend(&out, " SCHEMA");
   for (const auto& [fident, finfo] : base_index.schema.fields) {
+    // Store field name, alias and type
     absl::StrAppend(&out, " ", fident, " AS ", finfo.short_name, " ",
                     SearchFieldTypeToString(finfo.type));
 
+    // Store shared field flags
+    if (finfo.flags & search::SchemaField::SORTABLE)
+      absl::StrAppend(&out, " SORTABLE");
+
+    if (finfo.flags & search::SchemaField::NOINDEX)
+      absl::StrAppend(&out, " NOINDEX");
+
+    // Store specific params
     Overloaded info{
         [](monostate) {},
         [out = &out](const search::SchemaField::VectorParams& params) {
