@@ -633,12 +633,11 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  fb2::Fiber("flush_all", [all_dbs = std::move(all_dbs)]() mutable {
-    for (auto& db : all_dbs) {
-      db.reset();
-    }
-    mi_heap_collect(ServerState::tlocal()->data_heap(), true);
-  }).Detach();
+  // Explicitly drop reference counted pointers in place.
+  // If snapshotting is currently in progress, they will keep alive until it finishes.
+  for (auto& db : all_dbs)
+    db.reset();
+  mi_heap_collect(ServerState::tlocal()->data_heap(), true);
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {

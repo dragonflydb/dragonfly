@@ -81,10 +81,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  RETURN_ON_ERR(
-      cntx_.SwitchErrorHandler([this](const GenericError& ge) { this->DefaultErrorHandler(ge); }));
-
-  auto check_connection_error = [this, &cntx](const error_code& ec, const char* msg) -> error_code {
+  auto check_connection_error = [this, &cntx](error_code ec, const char* msg) -> error_code {
     if (cntx_.IsCancelled()) {
       (*cntx)->SendError("replication cancelled");
       return std::make_error_code(errc::operation_canceled);
@@ -92,10 +89,14 @@ error_code Replica::Start(ConnectionContext* cntx) {
     if (ec) {
       (*cntx)->SendError(absl::StrCat(msg, ec.message()));
       cntx_.Cancel();
-      return ec;
     }
-    return {};
+    return ec;
   };
+
+  // 0. Set basic error handler that is reponsible for cleaning up on errors.
+  // Can return an error only if replication was cancelled immediately.
+  auto err = cntx_.SwitchErrorHandler([this](const auto& ge) { this->DefaultErrorHandler(ge); });
+  RETURN_ON_ERR(check_connection_error(err, "replication cancelled"));
 
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
