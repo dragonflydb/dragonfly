@@ -1755,9 +1755,17 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
                                      ActionOnConnectionFail on_err) {
   LOG(INFO) << "Replicating " << host << ":" << port_sv;
 
-  // Wait until all transactions finished and prevent any other from executing
-  cntx->transaction->Schedule();
-  cntx->transaction->Execute([](auto*, auto*) { return OpStatus::OK; }, false);
+  // Wait until all transactions finished and prevent any other from executing.
+  // The --replicaof flag executed on startup has no corresponding transaction.
+  if (auto* tx = cntx->transaction; tx) {
+    tx->Schedule();
+    tx->Execute([](auto*, auto*) { return OpStatus::OK; }, false);
+  }
+
+  absl::Cleanup tx_clean = [tx = cntx->transaction] {
+    if (tx)
+      tx->Conclude();
+  };
 
   unique_lock lk(replicaof_mu_);
 
@@ -1804,7 +1812,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   // Release both the replica lock and the global transaction lock.
   // We proceed connecting below without any locks to allow interrupting the replica immediately.
   // From this point and onward, it should be highly responsive.
-  cntx->transaction->Conclude();
+  std::move(tx_clean).Invoke();
   lk.unlock();
 
   error_code ec{};
