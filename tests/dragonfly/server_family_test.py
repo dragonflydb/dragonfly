@@ -105,7 +105,31 @@ async def test_scan(async_client: aioredis.Redis):
         assert keys[0] == key
 
 
-@pytest.mark.skip("Skip because it fails on arm release")
+def configure_slowlog_parsing(async_client: aioredis.Redis):
+    def parse_slowlog_get(response, **options):
+        logging.info(f"slowlog response: {response}")
+
+        def stringify(item):
+            if isinstance(item, bytes):
+                return item.decode()
+            if isinstance(item, list):
+                return [stringify(i) for i in item]
+            return item
+
+        def parse_item(item):
+            item = stringify(item)
+            result = {"id": item[0], "start_time": int(item[1]), "duration": int(item[2])}
+            result["command"] = " ".join(item[3])
+            result["client_address"] = item[4]
+            result["client_name"] = item[5]
+            return result
+
+        return [parse_item(item) for item in response]
+
+    async_client.set_response_callback("SLOWLOG GET", parse_slowlog_get)
+    return async_client
+
+
 @pytest.mark.asyncio
 @dfly_args({"slowlog_log_slower_than": 0, "slowlog_max_len": 3})
 async def test_slowlog_client_name_and_ip(df_local_factory, async_client: aioredis.Redis):
@@ -114,16 +138,16 @@ async def test_slowlog_client_name_and_ip(df_local_factory, async_client: aiored
     expected_clientname = "dragonfly"
 
     await async_client.client_setname(expected_clientname)
+    async_client = configure_slowlog_parsing(async_client)
 
     client_list = await async_client.client_list()
     addr = client_list[0]["addr"]
 
     slowlog = await async_client.slowlog_get(1)
-    assert slowlog[0]["client_name"].decode() == expected_clientname
-    assert slowlog[0]["client_address"].decode() == addr
+    assert slowlog[0]["client_name"] == expected_clientname
+    assert slowlog[0]["client_address"] == addr
 
 
-@pytest.mark.skip("Skip because it fails on arm release")
 @pytest.mark.asyncio
 @dfly_args({"slowlog_log_slower_than": 0, "slowlog_max_len": 3})
 async def test_blocking_commands_should_not_show_up_in_slow_log(
@@ -132,8 +156,10 @@ async def test_blocking_commands_should_not_show_up_in_slow_log(
     await async_client.slowlog_reset()
     df = df_local_factory.create()
     df.start()
+    async_client = configure_slowlog_parsing(async_client)
 
     await async_client.blpop("mykey", 0.5)
+    reply = await async_client.slowlog_get()
 
     # blpop does not show up, only the previous reset
-    assert (await async_client.slowlog_get())[0]["command"].decode() == "SLOWLOG RESET"
+    assert reply[0]["command"] == "SLOWLOG RESET"
