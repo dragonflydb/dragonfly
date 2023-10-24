@@ -1191,10 +1191,11 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendBulkString(result);
   }
 
-  if (sub_cmd != "SETINFO") {
-    LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
+  if (sub_cmd == "SETINFO") {
+    return (*cntx)->SendOk();
   }
 
+  LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
