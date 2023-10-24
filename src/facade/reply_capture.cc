@@ -130,6 +130,7 @@ void CapturingReplyBuilder::SendDirect(Payload&& val) {
 }
 
 void CapturingReplyBuilder::Capture(Payload val) {
+  has_replied_ = true;
   if (!stack_.empty()) {
     stack_.top().first->arr.push_back(std::move(val));
     stack_.top().second--;

@@ -1066,12 +1066,14 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     DispatchMonitor(cntx, cid, tail_args);
   }
 
+  cntx->reply_builder()->ExpectReply();
   try {
     cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
   }
+  DCHECK(cntx->reply_builder()->HasReplied());
 
   if (record_stats) {
     DCHECK(cntx->transaction);

@@ -37,7 +37,7 @@ DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 }  // namespace
 
 SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink)
-    : sink_(sink), should_batch_(false), should_aggregate_(false) {
+    : sink_(sink), should_batch_(false), should_aggregate_(false), has_replied_(false) {
 }
 
 void SinkReplyBuilder::CloseConnection() {
@@ -48,6 +48,8 @@ void SinkReplyBuilder::CloseConnection() {
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   DCHECK(sink_);
   constexpr size_t kMaxBatchSize = 1024;
+
+  has_replied_ = true;
 
   size_t bsize = 0;
   for (unsigned i = 0; i < len; ++i) {
@@ -90,6 +92,14 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
     DVLOG(1) << "Error writing to stream: " << ec.message();
     ec_ = ec;
   }
+}
+
+void SinkReplyBuilder::ExpectReply() {
+  has_replied_ = false;
+}
+
+bool SinkReplyBuilder::HasReplied() const {
+  return has_replied_;
 }
 
 void SinkReplyBuilder::SendRaw(std::string_view raw) {
