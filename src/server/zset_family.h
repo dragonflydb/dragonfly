@@ -98,6 +98,7 @@ class ZSetFamily {
   static void GeoHash(CmdArgList args, ConnectionContext* cntx);
   static void GeoPos(CmdArgList args, ConnectionContext* cntx);
   static void GeoDist(CmdArgList args, ConnectionContext* cntx);
+  static void GeoSearch(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

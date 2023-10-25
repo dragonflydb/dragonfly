@@ -7,6 +7,7 @@
 #include "server/acl/acl_commands_def.h"
 
 extern "C" {
+#include "redis/geo.h"
 #include "redis/geohash.h"
 #include "redis/geohash_helper.h"
 #include "redis/listpack.h"
@@ -38,6 +39,11 @@ namespace {
 using CI = CommandId;
 
 static const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
+static const char kFromMemberLonglatErr[] =
+    "FROMMEMBER and FROMLONLAT options at the same time are not compatible";
+static const char kByRadiusBoxErr[] =
+    "BYRADIUS and BYBOX options at the same time are not compatible";
+static const char kAscDescErr[] = "ASC and DESC options at the same time are not compatible";
 static const char kScoreNaN[] = "resulting score is not a number (NaN)";
 static const char kFloatRangeErr[] = "min or max is not a float";
 static const char kLexRangeErr[] = "min or max not valid string range item";
@@ -47,6 +53,20 @@ using MScoreResponse = std::vector<std::optional<double>>;
 
 using ScoredMember = std::pair<std::string, double>;
 using ScoredArray = std::vector<ScoredMember>;
+
+typedef struct GeoPoint {
+  double longitude;
+  double latitude;
+  double dist;
+  double score;
+  std::string member;
+  GeoPoint() = default;
+  GeoPoint(double _longitude, double _latitude, double _dist, double _score,
+           const std::string& _member)
+      : longitude(_longitude), latitude(_latitude), dist(_dist), score(_score), member(_member){};
+
+} GeoPoint;
+using GeoArray = std::vector<GeoPoint>;
 
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
   auto interval = si;
@@ -1348,6 +1368,23 @@ auto OpRange(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args, st
   return iv.PopResult();
 }
 
+auto OpRanges(const std::vector<ZSetFamily::ZRangeSpec>& range_specs, const OpArgs& op_args,
+              string_view key) -> OpResult<vector<ScoredArray>> {
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
+  if (!res_it)
+    return res_it.status();
+
+  PrimeValue& pv = res_it.value()->second;
+  vector<ScoredArray> result_arrays;
+  for (auto& range_spec : range_specs) {
+    IntervalVisitor iv{Action::RANGE, range_spec.params, &pv};
+    std::visit(iv, range_spec.interval);
+    result_arrays.push_back(iv.PopResult());
+  }
+
+  return result_arrays;
+}
+
 OpResult<unsigned> OpRemRange(const OpArgs& op_args, string_view key,
                               const ZSetFamily::ZRangeSpec& range_spec) {
   auto& db_slice = op_args.shard->db_slice();
@@ -2599,6 +2636,296 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
                              distance_multiplier);
 }
 
+// Search all eight neighbors + self geohash box
+int membersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHashRadius* n,
+                          GeoShape* shape, GeoArray& ga, unsigned long limit) {
+  GeoHashBits neighbors[9];
+  unsigned int i, last_processed = 0;
+
+  neighbors[0] = n->hash;
+  neighbors[1] = n->neighbors.north;
+  neighbors[2] = n->neighbors.south;
+  neighbors[3] = n->neighbors.east;
+  neighbors[4] = n->neighbors.west;
+  neighbors[5] = n->neighbors.north_east;
+  neighbors[6] = n->neighbors.north_west;
+  neighbors[7] = n->neighbors.south_east;
+  neighbors[8] = n->neighbors.south_west;
+
+  // Get range_specs for neighbors (*and* our own hashbox)
+  std::vector<ZSetFamily::ZRangeSpec> range_specs;
+  for (i = 0; i < sizeof(neighbors) / sizeof(*neighbors); i++) {
+    if (HASHISZERO(neighbors[i])) {
+      continue;
+    }
+
+    // When a huge Radius (in the 5000 km range or more) is used,
+    // adjacent neighbors can be the same, leading to duplicated
+    // elements. Skip every range which is the same as the one
+    // processed previously.
+    if (last_processed && neighbors[i].bits == neighbors[last_processed].bits &&
+        neighbors[i].step == neighbors[last_processed].step) {
+      continue;
+    }
+
+    GeoHashFix52Bits min, max;
+    scoresOfGeoHashBox(neighbors[i], &min, &max);
+
+    ZSetFamily::ScoreInterval si;
+    si.first = ZSetFamily::Bound{static_cast<double>(min), false};
+    si.second = ZSetFamily::Bound{static_cast<double>(max), true};
+
+    range_specs.emplace_back();
+    auto& range_spec = range_specs.back();
+    range_spec.interval = si;
+    ZSetFamily::RangeParams range_params;
+    range_params.interval_type = ZSetFamily::RangeParams::IntervalType::SCORE;
+    range_params.with_scores = true;
+    range_spec.params = range_params;
+
+    last_processed = i;
+  }
+
+  // get all the matching members and add them to the potential result list
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRanges(range_specs, t->GetOpArgs(shard), key);
+  };
+  OpResult<vector<ScoredArray>> result_arrays =
+      cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result_arrays.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(kWrongTypeErr);
+    return -1;
+  }
+
+  // filter potential result list
+  unsigned long count = 0;
+  double xy[2];
+  double distance;
+  for (auto& arr : *result_arrays) {
+    for (auto& p : arr) {
+      if (geoWithinShape(shape, p.second, xy, &distance) == true) {
+        ga.emplace_back(xy[0], xy[1], distance, p.second, p.first);
+        count++;
+        if (limit > 0 && ga.size() >= limit)
+          break;
+      }
+    }
+  }
+
+  return count;
+}
+
+void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  GeoShape shape = {};
+
+  // FROMMEMBER or FROMLONLAT is set
+  bool from_set = false;
+  // BYRADIUS or BYBOX is set
+  bool by_set = false;
+
+  // optional flags
+  uint64_t count = -1;
+  bool any = false;
+  bool asc = false;
+  bool desc = false;
+  bool withcoord = false;
+  bool withdist = false;
+  bool withhash = false;
+
+  // parse arguments
+  size_t i = 1;
+  for (; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+
+    string_view cur_arg = ArgS(args, i);
+
+    if (cur_arg == "FROMMEMBER") {
+      if (from_set) {
+        return (*cntx)->SendError(kFromMemberLonglatErr);
+      } else if (i + 1 < args.size()) {
+        string_view member;
+        member = ArgS(args, i + 1);
+
+        // member to latlong, set shape.xy
+        auto cb = [&](Transaction* t, EngineShard* shard) {
+          return OpScore(t->GetOpArgs(shard), key, member);
+        };
+        OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+        if (result.status() == OpStatus::WRONG_TYPE) {
+          return (*cntx)->SendError(kWrongTypeErr);
+        } else if (!result) {
+          return (*cntx)->SendError("Member not found");
+        }
+        ScoreToLongLat(*result, shape.xy);
+        from_set = true;
+        i++;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+    } else if (cur_arg == "FROMLONLAT") {
+      if (from_set) {
+        return (*cntx)->SendError(kFromMemberLonglatErr);
+      } else if (i + 2 < args.size()) {
+        string_view longitude_str = ArgS(args, i + 1);
+        string_view latitude_str = ArgS(args, i + 2);
+        pair<double, double> longlat;
+        if (!ParseLongLat(longitude_str, latitude_str, &longlat)) {
+          string err = absl::StrCat("-ERR invalid longitude,latitude pair ", longitude_str, ",",
+                                    latitude_str);
+          return (*cntx)->SendError(err, kSyntaxErrType);
+        }
+        shape.xy[0] = longlat.first;
+        shape.xy[1] = longlat.second;
+        from_set = true;
+        i += 2;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+    } else if (cur_arg == "BYRADIUS") {
+      if (by_set) {
+        return (*cntx)->SendError(kByRadiusBoxErr);
+      } else if (i + 2 < args.size()) {
+        if (!ParseDouble(ArgS(args, i + 1), &shape.t.radius)) {
+          return (*cntx)->SendError(kInvalidFloatErr);
+        }
+        string_view unit;
+        unit = ArgS(args, i + 2);
+        shape.conversion = ExtractUnit(unit);
+        if (shape.conversion == -1) {
+          return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
+        }
+        shape.type = CIRCULAR_TYPE;
+        by_set = true;
+        i += 2;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+    } else if (cur_arg == "BYBOX") {
+      if (by_set) {
+        return (*cntx)->SendError(kByRadiusBoxErr);
+      } else if (i + 3 < args.size()) {
+        if (!ParseDouble(ArgS(args, i + 1), &shape.t.r.width)) {
+          return (*cntx)->SendError(kInvalidFloatErr);
+        }
+        if (!ParseDouble(ArgS(args, i + 2), &shape.t.r.height)) {
+          return (*cntx)->SendError(kInvalidFloatErr);
+        }
+        string_view unit;
+        unit = ArgS(args, i + 3);
+        shape.conversion = ExtractUnit(unit);
+        if (shape.conversion == -1) {
+          return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
+        }
+        shape.type = RECTANGLE_TYPE;
+        by_set = true;
+        i += 3;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+    } else if (cur_arg == "ASC") {
+      if (desc) {
+        return (*cntx)->SendError(kAscDescErr);
+      } else {
+        asc = true;
+      }
+    } else if (cur_arg == "DESC") {
+      if (asc) {
+        return (*cntx)->SendError(kAscDescErr);
+      } else {
+        desc = true;
+      }
+    } else if (cur_arg == "COUNT") {
+      if (i + 1 < args.size()) {
+        // TODO: need a string_view impl of stoull
+        count = std::stoull(std::string(ArgS(args, i + 1)));
+        i++;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      if (i + 1 < args.size() && ArgS(args, i + 1) == "ANY") {
+        any = true;
+        i++;
+      }
+    } else if (cur_arg == "WITHCOORD") {
+      withcoord = true;
+    } else if (cur_arg == "WITHDIST") {
+      withdist = true;
+    } else if (cur_arg == "WITHHASH")
+      withhash = true;
+    else {
+      return (*cntx)->SendError(kSyntaxErr);
+      break;
+    }
+  }
+
+  // check mandatory options
+  if (!from_set) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+  if (!by_set) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  // query
+  GeoHashRadius georadius = geohashCalculateAreasByShapeWGS84(&shape);
+  GeoArray ga;
+  membersOfAllNeighbors(cntx, key, &georadius, &shape, ga, any ? count : 0);
+
+  // if no matching results, the user gets an empty reply.
+  if (ga.empty()) {
+    (*cntx)->SendNull();
+  }
+
+  // sort and trim by count
+  auto asc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist < b.dist; };
+  auto desc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist > b.dist; };
+  if (asc) {
+    if (count > 0) {
+      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), asc_comparator);
+      ga.resize(count);
+    } else {
+      std::sort(ga.begin(), ga.end(), asc_comparator);
+    }
+  } else if (desc) {
+    if (count > 0) {
+      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), desc_comparator);
+      ga.resize(count);
+    } else {
+      std::sort(ga.begin(), ga.end(), desc_comparator);
+    }
+  }
+
+  // generate reply array withdist, withcoords, withhash
+  int record_size = 1;
+  if (withdist) {
+    record_size++;
+  }
+  if (withcoord) {
+    record_size++;
+  }
+  if (withhash) {
+    record_size++;
+  }
+  (*cntx)->StartArray(ga.size());
+  for (const auto& p : ga) {
+    // [member, dist, x, y, hash]
+    (*cntx)->StartArray(record_size);
+    (*cntx)->SendBulkString(p.member);
+    if (withdist) {
+      (*cntx)->SendDouble(p.dist);
+    }
+    if (withcoord) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendDouble(p.longitude);
+      (*cntx)->SendDouble(p.latitude);
+    }
+    if (withhash) {
+      (*cntx)->SendDouble(p.score);
+    }
+  }
+}
+
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 namespace acl {
@@ -2635,6 +2962,7 @@ constexpr uint32_t kGeoAdd = WRITE | GEO | SLOW;
 constexpr uint32_t kGeoHash = READ | GEO | SLOW;
 constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
+constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
 }  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
@@ -2695,7 +3023,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"GEOADD", CO::FAST | CO::WRITE | CO::DENYOOM, -5, 1, 1, 1, acl::kGeoAdd}.HFUNC(GeoAdd)
       << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
       << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
-      << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1, acl::kGeoDist}.HFUNC(GeoDist);
+      << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
+      << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch);
 }
 
 }  // namespace dfly
