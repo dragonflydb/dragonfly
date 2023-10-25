@@ -1047,38 +1047,33 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 }
 
-#ifndef NDEBUG
-
-#define ENABLE_DCHECK_REPLIED                                                               \
-  CapturingReplyBuilder crb{ReplyMode::FULL};                                               \
-  RedisReplyBuilder* old = nullptr;                                                         \
-  const bool is_repl_conf = cid->name() == "REPLCONF";                                      \
-  const bool is_dfly = cid->name() == "DFLY";                                               \
-  const bool is_exec = cid->name() == "EXEC";                                               \
-  const bool is_script = bool(cntx->conn_state.script_info);                                \
-  const bool is_redis = dynamic_cast<RedisReplyBuilder*>(cntx->reply_builder()) != nullptr; \
-  bool should_dcheck = !is_dfly && !is_repl_conf && !is_exec && !is_script && is_redis;     \
-  absl::Cleanup clean = [cntx, old]() {                                                     \
-    if (old)                                                                                \
-      cntx->Inject(old);                                                                    \
-  };                                                                                        \
-  if (should_dcheck) {                                                                      \
-    old = static_cast<RedisReplyBuilder*>(cntx->Inject(&crb));                              \
+class ReplyGuard {
+ public:
+  ReplyGuard(ConnectionContext* cntx, std::string_view cid_name) : cntx(cntx) {
+    const bool is_script = bool(cntx->conn_state.script_info);
+    const bool is_redis = dynamic_cast<RedisReplyBuilder*>(cntx->reply_builder()) != nullptr;
+    const bool is_one_of =
+        absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY", "EXEC"}).contains(cid_name);
+    const bool should_dcheck = !is_one_of && !is_script && is_redis;
+    if (should_dcheck) {
+      old = static_cast<RedisReplyBuilder*>(cntx->Inject(&crb));
+    }
   }
 
-#define DCHECK_REPLIED                                   \
-  if (old) {                                             \
-    auto reply = crb.Take();                             \
-    DCHECK(reply.index() > 0);                           \
-    CapturingReplyBuilder::Apply(std::move(reply), old); \
+  ~ReplyGuard() {
+    if (old) {
+      auto reply = crb.Take();
+      DCHECK(reply.index() > 0);
+      CapturingReplyBuilder::Apply(std::move(reply), old);
+      cntx->Inject(old);
+    }
   }
 
-#else
-
-#define ENABLE_DCHECK_REPLIED
-#define DCHECK_REPLIED
-
-#endif
+ private:
+  RedisReplyBuilder* old = nullptr;
+  CapturingReplyBuilder crb;
+  ConnectionContext* cntx = nullptr;
+};
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx,
                         bool record_stats) {
@@ -1099,14 +1094,15 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     DispatchMonitor(cntx, cid, tail_args);
   }
 
-  ENABLE_DCHECK_REPLIED
+#ifndef NDEBUG
+  ReplyGuard reply_guard(cntx, cid->name());
+#endif
   try {
     cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
   }
-  DCHECK_REPLIED
 
   if (record_stats) {
     DCHECK(cntx->transaction);
