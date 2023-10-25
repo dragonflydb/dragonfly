@@ -1757,16 +1757,6 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
 
   // Wait until all transactions finished and prevent any other from executing.
   // The --replicaof flag executed on startup has no corresponding transaction.
-  if (auto* tx = cntx->transaction; tx) {
-    tx->Schedule();
-    tx->Execute([](auto*, auto*) { return OpStatus::OK; }, false);
-  }
-
-  absl::Cleanup tx_clean = absl::MakeCleanup([tx = cntx->transaction] {
-    if (tx)
-      tx->Conclude();
-  });
-
   unique_lock lk(replicaof_mu_);
 
   // If NO ONE was supplied, just stop the current replica (if it exists)
@@ -1807,12 +1797,12 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
   replica_ = new_replica;
 
+  // TODO: disconnect pending blocked clients (pubsub, blocking commands)
   SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
 
   // Release both the replica lock and the global transaction lock.
   // We proceed connecting below without any locks to allow interrupting the replica immediately.
   // From this point and onward, it should be highly responsive.
-  std::move(tx_clean).Invoke();
   lk.unlock();
 
   error_code ec{};
@@ -1830,7 +1820,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   lk.lock();
   if (ec && replica_ == new_replica) {
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    SetMasterFlagOnAllThreads(false);
+    SetMasterFlagOnAllThreads(true);
     replica_.reset();
   }
 }
@@ -1838,6 +1828,9 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   string_view host = ArgS(args, 0);
   string_view port = ArgS(args, 1);
+
+  if (!IsReplicatingNoOne(host, port))
+    Drakarys(cntx->transaction, DbSlice::kDbAll);
 
   ReplicaOfInternal(host, port, cntx, ActionOnConnectionFail::kReturnOnError);
 }
