@@ -947,7 +947,7 @@ class RdbSaver::Impl {
   CompressionMode compression_mode_;
 
   struct Stats {
-    size_t pulled_bytes = 0;
+    std::atomic<size_t> pulled_bytes{0};
   } stats_;
 };
 
@@ -1038,7 +1038,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
-      stats_.pulled_bytes += record->value.size();
+      stats_.pulled_bytes.fetch_add(record->value.size(), memory_order_relaxed);
 
       io_error = sink_->Write(io::Buffer(record->value));
       if (io_error) {
@@ -1055,7 +1055,8 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 
   DCHECK(!record.has_value() || !channel_.TryPop(*record));
 
-  VLOG(1) << "Channel pulled bytes: " << stats_.pulled_bytes << " pushed bytes: " << pushed_bytes;
+  VLOG(1) << "Channel pulled bytes: " << stats_.pulled_bytes.load(memory_order_relaxed)
+          << " pushed bytes: " << pushed_bytes;
 
   return io_error;
 }
@@ -1096,21 +1097,22 @@ void RdbSaver::Impl::Cancel() {
   snapshot->Join();
 }
 
+// This function is called from connection thread when info command is invoked.
+// All accessed variableds must be thread safe, as they are fetched not from the rdb saver thread.
 size_t RdbSaver::Impl::GetTotalBuffersSize() const {
   std::atomic<size_t> pushed_bytes{0};
   std::atomic<size_t> serializer_bytes{0};
-  size_t pulled_bytes = stats_.pulled_bytes;
+  size_t pulled_bytes = stats_.pulled_bytes.load(memory_order_relaxed);
+
+  auto cb = [this, &pushed_bytes, &serializer_bytes](ShardId sid) {
+    auto& snapshot = shard_snapshots_[sid];
+    pushed_bytes.fetch_add(snapshot->pushed_bytes(), memory_order_relaxed);
+    serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
+  };
 
   if (shard_snapshots_.size() == 1) {
-    auto& snapshot = shard_snapshots_.front();
-    pushed_bytes.store(snapshot->pushed_bytes(), memory_order_relaxed);
-    serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
+    cb(0);
   } else {
-    auto cb = [this, &pushed_bytes, &serializer_bytes](ShardId sid) {
-      auto& snapshot = shard_snapshots_[sid];
-      pushed_bytes.fetch_add(snapshot->pushed_bytes(), memory_order_relaxed);
-      serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
-    };
     shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
     // Note that pushed bytes and pulled bytes values are fetched at different times, as we need to
     // calc the pushed bytes using RunBriefInParallel.

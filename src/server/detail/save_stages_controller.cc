@@ -193,10 +193,7 @@ size_t SaveStagesController::GetSaveBuffersSize() {
 
   } else {
     // When rdb format save is running, there is only one rdb saver instance, it is running on the
-    // connection thread that runs the save command. How can we make sure that the value returned
-    // from GetSaveBuffersSize is valid? as it does not runs on the same thread, but pulling the
-    // pulled bytes values updated by the rdb saver, should we make this value atomic? is there
-    // another soliution?
+    // connection thread that runs the save command.
     total_bytes.store(snapshots_.front().first->GetSaveBuffersSize(), memory_order_relaxed);
   }
   return total_bytes.load(memory_order_relaxed);
