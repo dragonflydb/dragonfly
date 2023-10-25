@@ -1097,14 +1097,32 @@ void RdbSaver::Impl::Cancel() {
 }
 
 size_t RdbSaver::Impl::GetTotalBuffersSize() const {
-  DCHECK_EQ(shard_snapshots_.size(), 1u) << "Only supported for dragonfly replication";
-  auto& snapshot = shard_snapshots_.front();
+  std::atomic<size_t> pushed_bytes{0};
+  std::atomic<size_t> serializer_bytes{0};
+  size_t pulled_bytes = stats_.pulled_bytes;
 
-  // Calculate number of enqueued bytes as difference between pushed and pulled
-  size_t enqueued_bytes = snapshot->pushed_bytes() - stats_.pulled_bytes;
-  size_t serializer_bytes = snapshot->GetTotalBufferCapacity();
+  if (shard_snapshots_.size() == 1) {
+    auto& snapshot = shard_snapshots_.front();
+    pushed_bytes.store(snapshot->pushed_bytes(), memory_order_relaxed);
+    serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
+  } else {
+    auto cb = [this, &pushed_bytes, &serializer_bytes](ShardId sid) {
+      auto& snapshot = shard_snapshots_[sid];
+      pushed_bytes.fetch_add(snapshot->pushed_bytes(), memory_order_relaxed);
+      serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
+    };
+    shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+    // Note that pushed bytes and pulled bytes values are fetched at different times, as we need to
+    // calc the pushed bytes using RunBriefInParallel.
+    // pulled bytes might be higher untill we return here from RunBriefInParallel.
+  }
+  size_t total_bytes = pushed_bytes.load(memory_order_relaxed) +
+                       serializer_bytes.load(memory_order_relaxed) - pulled_bytes;
+  VLOG(2) << "pushed_bytes:" << pushed_bytes.load(memory_order_relaxed)
+          << " serializer_bytes: " << serializer_bytes.load(memory_order_relaxed)
+          << " pulled_bytes: " << pulled_bytes << " total_bytes:" << total_bytes;
 
-  return enqueued_bytes + serializer_bytes;
+  return total_bytes;
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {

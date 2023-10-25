@@ -151,7 +151,6 @@ class ServerFamily {
   // future with error_code.
   Future<GenericError> Load(const std::string& file_name);
 
-  // used within tests.
   bool IsSaving() const {
     return is_saving_.load(std::memory_order_relaxed);
   }
@@ -257,6 +256,9 @@ class ServerFamily {
 
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
+  // If a save operation is currently in progress, calling this function will provide information
+  // about the memory consumption during the save operation.
+  std::function<size_t()> save_bytes_cb_ = nullptr;
 
   // Used to override save on shutdown behavior that is usually set
   // be --dbfilename.
