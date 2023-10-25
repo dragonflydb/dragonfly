@@ -24,6 +24,14 @@ class ConnectionContext;
 class CommandRegistry;
 class EngineShard;
 
+enum ExpireFlags {
+  EXPIRE_ALWAYS = 0,
+  EXPIRE_NX = 1 << 0,  // Set expiry only when key has no expiry
+  EXPIRE_XX = 1 << 2,  // Set expiry only when the key has expiry
+  EXPIRE_GT = 1 << 3,  // GT: Set expiry only when the new expiry is greater than current one
+  EXPIRE_LT = 1 << 4,  // LT: Set expiry only when the new expiry is less than current one
+};
+
 class GenericFamily {
  public:
   static void Init(util::ProactorPool* pp);
