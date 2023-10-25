@@ -1074,7 +1074,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return false;
   }
 
-  LOG(INFO) << "CID " << cid->name();
 #ifndef NDEBUG
   if (cid->name() != "REPLCONF" && !bool(cntx->conn_state.script_info)) {
     DCHECK(cntx->reply_builder()->HasReplied());
