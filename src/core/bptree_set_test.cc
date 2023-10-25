@@ -330,7 +330,7 @@ TEST_F(BPTreeSetTest, InsertSDS) {
 
 TEST_F(BPTreeSetTest, ReverseIterate) {
   vector<ZsetPolicy::KeyT> vals;
-  for (int i = 0; i < 2; ++i) {
+  for (int i = -1000; i < 1000; ++i) {
     sds s = sdsempty();
 
     s = sdscatfmt(s, "a%u", i);
@@ -363,7 +363,7 @@ TEST_F(BPTreeSetTest, ReverseIterate) {
     res.push_back(i.d);
     return true;
   });
-  EXPECT_THAT(res, testing::ElementsAre(1, 0));
+  EXPECT_THAT(res, testing::ElementsAre(999, 998));
 
   for (auto v : vals) {
     sdsfree(v.s);
