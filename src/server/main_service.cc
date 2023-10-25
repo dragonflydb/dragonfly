@@ -1903,8 +1903,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  if (exec_info.preborrowed_interpreter)
+  if (exec_info.preborrowed_interpreter) {
     ServerState::tlocal()->ReturnInterpreter(exec_info.preborrowed_interpreter);
+    exec_info.preborrowed_interpreter = nullptr;
+  }
 
   if (scheduled) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
