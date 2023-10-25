@@ -1762,10 +1762,10 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
     tx->Execute([](auto*, auto*) { return OpStatus::OK; }, false);
   }
 
-  absl::Cleanup tx_clean = [tx = cntx->transaction] {
+  absl::Cleanup tx_clean = absl::MakeCleanup([tx = cntx->transaction] {
     if (tx)
       tx->Conclude();
-  };
+  });
 
   unique_lock lk(replicaof_mu_);
 
