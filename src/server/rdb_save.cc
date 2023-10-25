@@ -299,9 +299,12 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return make_unexpected(ec);
 
   ec = SaveValue(pv);
-  if (ec)
-    return make_unexpected(ec);
-
+  if (ec) {
+    LOG(ERROR) << "Problems saving value for key " << key << " in dbid=" << dbid;
+    // Relaxing this to allow
+    if (ec != make_error_code(errc::bad_message))
+      return make_unexpected(ec);
+  }
   return rdb_type;
 }
 
@@ -430,9 +433,21 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
 
     RETURN_ON_ERR(SaveLen(string_map->Size()));
 
+    absl::flat_hash_set<string_view> keys;
+    bool has_duplicates = false;
     for (const auto& k_v : *string_map) {
-      RETURN_ON_ERR(SaveString(string_view{k_v.first, sdslen(k_v.first)}));
+      string_view key{k_v.first, sdslen(k_v.first)};
+      if (!keys.insert(key).second) {
+        LOG(ERROR) << "Duplicate field " << key << " in hash, "
+                   << string_map->PrintDuplicateKeyInfo(key);
+        has_duplicates = true;
+        continue;
+      }
+      RETURN_ON_ERR(SaveString(key));
       RETURN_ON_ERR(SaveString(string_view{k_v.second, sdslen(k_v.second)}));
+    }
+    if (has_duplicates) {
+      return make_error_code(errc::bad_message);
     }
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());

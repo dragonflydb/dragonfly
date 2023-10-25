@@ -616,9 +616,18 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
           return;
 
         if (!string_map->AddOrSkip(key, val)) {
-          LOG(ERROR) << "Duplicate hash fields detected";
-          ec_ = RdbError(errc::rdb_file_corrupted);
-          return;
+          // TODO: I am relaxing this check to allow debugging issue 2066.
+          LOG(ERROR) << "Duplicate hash fields detected for field " << key;
+          for (unsigned j = 0; j < i; j += 2) {
+            auto prev = ToSV(seg[i].rdb_var);
+            if (prev == key) {
+              LOG(ERROR) << "Duplicate field: " << key << " appears at " << j << " and " << i;
+              break;
+            }
+          }
+          // TODO: bring back corruption failure.
+          // ec_ = RdbError(errc::rdb_file_corrupted);
+          // return;
         }
       }
     }
@@ -2272,6 +2281,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   for (const auto* item : ib) {
     PrimeValue pv;
     if (ec_ = FromOpaque(item->val, &pv); ec_) {
+      LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
       stop_early_ = true;
       break;
     }

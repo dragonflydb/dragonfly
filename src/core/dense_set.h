@@ -312,6 +312,10 @@ class DenseSet {
   // Assumes that the object does not exist in the set.
   void AddUnique(void* obj, bool has_ttl, uint64_t hashcode);
 
+  uint32_t BucketId(const void* ptr, uint32_t cookie) const {
+    return BucketId(Hash(ptr, cookie));
+  }
+
  private:
   DenseSet(const DenseSet&) = delete;
   DenseSet& operator=(DenseSet&) = delete;
@@ -325,10 +329,6 @@ class DenseSet {
   uint32_t BucketId(uint64_t hash) const {
     assert(capacity_log_ > 0);
     return hash >> (64 - capacity_log_);
-  }
-
-  uint32_t BucketId(const void* ptr, uint32_t cookie) const {
-    return BucketId(Hash(ptr, cookie));
   }
 
   // return a ChainVectorIterator (a.k.a iterator) or end if there is an empty chain found

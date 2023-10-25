@@ -4,6 +4,8 @@
 
 #include "core/string_map.h"
 
+#include <absl/strings/str_cat.h>
+
 #include "base/endian.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
@@ -271,9 +273,38 @@ void StringMap::ObjDelete(void* obj, bool has_ttl) const {
   sdsfree(s1);
 }
 
+string StringMap::PrintDuplicateKeyInfo(std::string_view key) {
+  string res;
+
+  uint32_t bid = BucketId(&key, 1);
+  absl::StrAppend(&res, "\nBucket id for ", key, " is ", bid, "\n");
+
+  auto begin_it = begin();
+  for (auto it = begin_it; it != end(); ++it) {
+    sds field = it->first;
+    if (key == string_view{field, sdslen(field)}) {
+      absl::StrAppend(&res, "Found field ", key, " at bucket ",
+                      it.GetCurrList() - begin_it.GetCurrList(), "\n");
+    }
+  }
+  return res;
+}
+
 detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
   sds f = (sds)obj;
   return detail::SdsPair(f, GetValue(f));
+}
+
+bool StringMap::iterator::ReallocIfNeeded(float ratio) {
+  // Unwrap all links to correctly call SetObject()
+  auto* ptr = curr_entry_;
+  while (ptr->IsLink())
+    ptr = ptr->AsLink();
+
+  auto* obj = ptr->GetObject();
+  auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
+  ptr->SetObject(new_obj);
+  return realloced;
 }
 
 }  // namespace dfly

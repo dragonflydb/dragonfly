@@ -67,17 +67,7 @@ class StringMap : public DenseSet {
 
     // Try reducing memory fragmentation of the value by re-allocating. Returns true if
     // re-allocation happened.
-    bool ReallocIfNeeded(float ratio) {
-      // Unwrap all links to correctly call SetObject()
-      auto* ptr = curr_entry_;
-      while (ptr->IsLink())
-        ptr = ptr->AsLink();
-
-      auto* obj = ptr->GetObject();
-      auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
-      ptr->SetObject(new_obj);
-      return realloced;
-    }
+    bool ReallocIfNeeded(float ratio);
 
     iterator& operator++() {
       Advance();
@@ -99,6 +89,10 @@ class StringMap : public DenseSet {
 
     bool operator!=(const iterator& b) const {
       return !(*this == b);
+    }
+
+    ChainVectorIterator GetCurrList() const {
+      return curr_list_;
     }
 
     using IteratorBase::ExpiryTime;
@@ -148,6 +142,8 @@ class StringMap : public DenseSet {
   // are allowed to have duplications.
   void RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
                    bool with_value);
+
+  std::string PrintDuplicateKeyInfo(std::string_view key);
 
  private:
   // Reallocate key and/or value if their pages are underutilized.
