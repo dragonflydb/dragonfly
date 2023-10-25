@@ -97,6 +97,7 @@ class DbSlice {
     bool absolute = false;
     TimeUnit unit = TimeUnit::SEC;
     bool persist = false;
+    int32_t expire_options = 0;  // ExpireFlags
 
     bool IsDefined() const {
       return persist || value > INT64_MIN;

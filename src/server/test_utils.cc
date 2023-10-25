@@ -228,6 +228,29 @@ void BaseFamilyTest::ResetService() {
         std::unique_lock lk(m);
         LOG(ERROR) << "Proactor " << index << ":\n";
         fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+        EngineShard* es = EngineShard::tlocal();
+
+        if (es != nullptr) {
+          TxQueue* txq = es->txq();
+          if (!txq->Empty()) {
+            LOG(ERROR) << "TxQueue for shard " << es->shard_id();
+
+            auto head = txq->Head();
+            auto it = head;
+            do {
+              Transaction* trans = std::get<Transaction*>(es->txq()->At(it));
+              LOG(ERROR) << "Transaction " << trans->DebugId() << " "
+                         << trans->GetLocalMask(es->shard_id()) << " "
+                         << trans->IsArmedInShard(es->shard_id());
+              it = txq->Next(it);
+            } while (it != head);
+          }
+
+          LOG(ERROR) << "TxLocks for shard " << es->shard_id();
+          for (const auto& k_v : es->db_slice().GetDBTable(0)->trans_locks) {
+            LOG(ERROR) << "Key " << k_v.first << " " << k_v.second;
+          }
+        }
       });
     }
   });

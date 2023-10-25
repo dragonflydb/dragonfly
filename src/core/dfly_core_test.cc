@@ -2,10 +2,9 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/tx_queue.h"
-
 #include "base/gtest.h"
 #include "core/intent_lock.h"
+#include "core/tx_queue.h"
 
 namespace dfly {
 
@@ -31,10 +30,21 @@ TEST_F(TxQueueTest, Basic) {
   pq_.Insert(3);
   pq_.Insert(2);
 
+  unsigned cnt = 0;
+  auto head = pq_.Head();
+  auto it = head;
+  do {
+    ++cnt;
+    it = pq_.Next(it);
+  } while (it != head);
+  EXPECT_EQ(3, cnt);
+
   ASSERT_EQ(2, Pop());
   ASSERT_EQ(3, Pop());
   ASSERT_EQ(4, Pop());
   ASSERT_TRUE(pq_.Empty());
+
+  EXPECT_EQ(TxQueue::kEnd, pq_.Head());
 
   pq_.Insert(10);
   ASSERT_EQ(10, Pop());

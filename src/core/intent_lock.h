@@ -46,6 +46,10 @@ class IntentLock {
 
   void VerifyDebug();
 
+  friend std::ostream& operator<<(std::ostream& o, const IntentLock& lock) {
+    return o << "{SHARED: " << lock.cnt_[0] << ", EXCLUSIVE: " << lock.cnt_[1] << "}";
+  }
+
  private:
   unsigned cnt_[2] = {0, 0};
 };

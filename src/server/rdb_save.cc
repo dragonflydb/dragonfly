@@ -342,7 +342,8 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   DCHECK_EQ(OBJ_ENCODING_QUICKLIST, obj->encoding);
   const quicklist* ql = reinterpret_cast<const quicklist*>(obj->ptr);
   quicklistNode* node = ql->head;
-  DVLOG(1) << "Saving list of length " << ql->len;
+  DVLOG(2) << "Saving list of length " << ql->len;
+
   RETURN_ON_ERR(SaveLen(ql->len));
 
   while (node) {
@@ -947,7 +948,7 @@ class RdbSaver::Impl {
   CompressionMode compression_mode_;
 
   struct Stats {
-    size_t pulled_bytes = 0;
+    std::atomic<size_t> pulled_bytes{0};
   } stats_;
 };
 
@@ -1038,7 +1039,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
-      stats_.pulled_bytes += record->value.size();
+      stats_.pulled_bytes.fetch_add(record->value.size(), memory_order_relaxed);
 
       io_error = sink_->Write(io::Buffer(record->value));
       if (io_error) {
@@ -1055,7 +1056,8 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 
   DCHECK(!record.has_value() || !channel_.TryPop(*record));
 
-  VLOG(1) << "Channel pulled bytes: " << stats_.pulled_bytes << " pushed bytes: " << pushed_bytes;
+  VLOG(1) << "Channel pulled bytes: " << stats_.pulled_bytes.load(memory_order_relaxed)
+          << " pushed bytes: " << pushed_bytes;
 
   return io_error;
 }
@@ -1096,15 +1098,34 @@ void RdbSaver::Impl::Cancel() {
   snapshot->Join();
 }
 
+// This function is called from connection thread when info command is invoked.
+// All accessed variableds must be thread safe, as they are fetched not from the rdb saver thread.
 size_t RdbSaver::Impl::GetTotalBuffersSize() const {
-  DCHECK_EQ(shard_snapshots_.size(), 1u) << "Only supported for dragonfly replication";
-  auto& snapshot = shard_snapshots_.front();
+  std::atomic<size_t> pushed_bytes{0};
+  std::atomic<size_t> serializer_bytes{0};
+  size_t pulled_bytes = stats_.pulled_bytes.load(memory_order_relaxed);
 
-  // Calculate number of enqueued bytes as difference between pushed and pulled
-  size_t enqueued_bytes = snapshot->pushed_bytes() - stats_.pulled_bytes;
-  size_t serializer_bytes = snapshot->GetTotalBufferCapacity();
+  auto cb = [this, &pushed_bytes, &serializer_bytes](ShardId sid) {
+    auto& snapshot = shard_snapshots_[sid];
+    pushed_bytes.fetch_add(snapshot->pushed_bytes(), memory_order_relaxed);
+    serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
+  };
 
-  return enqueued_bytes + serializer_bytes;
+  if (shard_snapshots_.size() == 1) {
+    cb(0);
+  } else {
+    shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+    // Note that pushed bytes and pulled bytes values are fetched at different times, as we need to
+    // calc the pushed bytes using RunBriefInParallel.
+    // pulled bytes might be higher untill we return here from RunBriefInParallel.
+  }
+  size_t total_bytes = pushed_bytes.load(memory_order_relaxed) +
+                       serializer_bytes.load(memory_order_relaxed) - pulled_bytes;
+  VLOG(2) << "pushed_bytes:" << pushed_bytes.load(memory_order_relaxed)
+          << " serializer_bytes: " << serializer_bytes.load(memory_order_relaxed)
+          << " pulled_bytes: " << pulled_bytes << " total_bytes:" << total_bytes;
+
+  return total_bytes;
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {

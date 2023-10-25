@@ -28,6 +28,7 @@ struct SaveStagesInputs {
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
   std::shared_ptr<LastSaveInfo>* last_save_info_;
   util::fb2::Mutex* save_mu_;
+  std::function<size_t()>* save_bytes_cb_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
 };
 
@@ -42,6 +43,7 @@ class RdbSnapshot {
 
   error_code SaveBody();
   error_code Close();
+  size_t GetSaveBuffersSize();
 
   const RdbTypeFreqMap freq_map() const {
     return freq_map_;
@@ -102,6 +104,8 @@ struct SaveStagesController : public SaveStagesInputs {
   void RunStage(void (SaveStagesController::*cb)(unsigned));
 
   RdbSaver::GlobalData GetGlobalData() const;
+
+  size_t GetSaveBuffersSize();
 
  private:
   absl::Time start_time_;

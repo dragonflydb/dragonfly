@@ -12,6 +12,7 @@ namespace dfly {
 
 class Transaction;
 
+// TxQueue implemmented as a circular doubly-linked list.
 class TxQueue {
   void Link(uint32_t p, uint32_t n) {
     uint32_t next = vec_[p].next;
@@ -76,6 +77,8 @@ class TxQueue {
     return head_;
   }
 
+  // Returns the next iterator, it's circular so it always returns a valid
+  // iterator. Can be called only if !Empty().
   Iterator Next(Iterator it) const {
     return vec_[it].next;
   }
@@ -106,7 +109,7 @@ class TxQueue {
 
   std::function<uint64_t(const Transaction*)> score_fun_;
   std::vector<QRecord> vec_;
-  uint32_t next_free_ = 0, head_ = 0;
+  uint32_t next_free_ = 0, head_ = kEnd;
   size_t size_ = 0;
 
   TxQueue(const TxQueue&) = delete;

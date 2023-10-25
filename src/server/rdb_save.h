@@ -108,7 +108,6 @@ class RdbSaver {
     return save_mode_;
   }
 
-  // Can only be called for dragonfly replication.
   // Get total size of all rdb serializer buffers and items currently placed in channel
   size_t GetTotalBuffersSize() const;
 

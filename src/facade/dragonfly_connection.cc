@@ -955,7 +955,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
     if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
       ThisFiber::Yield();
-      DVLOG(1) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
+      DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
     }
     prev_epoch = cur_epoch;
     builder->SetBatchMode(dispatch_q_.size() > 1);

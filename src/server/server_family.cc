@@ -97,6 +97,7 @@ ABSL_FLAG(int32_t, slowlog_log_slower_than, 10000,
 ABSL_FLAG(uint32_t, slowlog_max_len, 20, "Slow log maximum length.");
 
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
+ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
 // Disable EC2 metadata by default, or if a users credentials are invalid the
 // AWS client will spent 30s trying to connect to inaccessable EC2 endpoints
 // to load the credentials.
@@ -534,8 +535,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   if (IsCloudPath(flag_dir)) {
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
     snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
-        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_ec2_metadata),
-        absl::GetFlag(FLAGS_s3_sign_payload));
+        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
+        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -1007,9 +1008,9 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  SaveStagesController sc{detail::SaveStagesInputs{new_version, basename, trans, &service_,
-                                                   &is_saving_, fq_threadpool_.get(),
-                                                   &last_save_info_, &save_mu_, snapshot_storage_}};
+  SaveStagesController sc{detail::SaveStagesInputs{
+      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
+      &save_mu_, &save_bytes_cb_, snapshot_storage_}};
   return sc.Save();
 }
 
@@ -1188,6 +1189,10 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     string result = absl::StrJoin(move(client_info), "\n");
     result.append("\n");
     return (*cntx)->SendBulkString(result);
+  }
+
+  if (sub_cmd == "SETINFO") {
+    return (*cntx)->SendOk();
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
@@ -1489,6 +1494,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
+    }
+
+    if (IsSaving()) {
+      lock_guard lk{save_mu_};
+      if (save_bytes_cb_) {
+        append("save_buffer_bytes", save_bytes_cb_());
+      }
     }
   }
 

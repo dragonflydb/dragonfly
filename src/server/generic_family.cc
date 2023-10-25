@@ -734,6 +734,35 @@ void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendLong(0);
 }
 
+std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, ConnectionContext* cntx) {
+  int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
+  for (auto& arg : args) {
+    ToUpper(&arg);
+    auto arg_sv = ToSV(arg);
+    if (arg_sv == "NX") {
+      flags |= ExpireFlags::EXPIRE_NX;
+    } else if (arg_sv == "XX") {
+      flags |= ExpireFlags::EXPIRE_XX;
+    } else if (arg_sv == "GT") {
+      flags |= ExpireFlags::EXPIRE_GT;
+    } else if (arg_sv == "LT") {
+      flags |= ExpireFlags::EXPIRE_LT;
+    } else {
+      (*cntx)->SendError(absl::StrCat("Unsupported option: ", arg_sv));
+      return nullopt;
+    }
+  }
+  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ~ExpireFlags::EXPIRE_NX)) {
+    (*cntx)->SendError("NX and XX, GT or LT options at the same time are not compatible");
+    return nullopt;
+  }
+  if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT)) {
+    (*cntx)->SendError("GT and LT options at the same time are not compatible");
+    return nullopt;
+  }
+  return flags;
+}
+
 void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view sec = ArgS(args, 1);
@@ -748,7 +777,11 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int_arg = std::max<int64_t>(int_arg, -1);
-  DbSlice::ExpireParams params{.value = int_arg};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{.value = int_arg, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -768,7 +801,12 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  DbSlice::ExpireParams params{.value = int_arg, .absolute = true};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{
+      .value = int_arg, .absolute = true, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -812,7 +850,14 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, 0L);
-  DbSlice::ExpireParams params{.value = int_arg, .absolute = true, .unit = TimeUnit::MSEC};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{.value = int_arg,
+                               .absolute = true,
+                               .unit = TimeUnit::MSEC,
+                               .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -835,7 +880,12 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, 0L);
-  DbSlice::ExpireParams params{.value = int_arg, .unit = TimeUnit::MSEC};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{
+      .value = int_arg, .unit = TimeUnit::MSEC, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1522,7 +1572,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0, acl::kEcho}.HFUNC(Echo)
       << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1, acl::kExists}.HFUNC(Exists)
       << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1, acl::kTouch}.HFUNC(Exists)
-      << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kExpire}.HFUNC(
+      << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, 1, acl::kExpire}.HFUNC(
              Expire)
       << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kExpireAt}
              .HFUNC(ExpireAt)
