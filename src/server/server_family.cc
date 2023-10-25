@@ -1008,9 +1008,9 @@ GenericError ServerFamily::DoSave() {
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
-  SaveStagesController sc{detail::SaveStagesInputs{new_version, basename, trans, &service_,
-                                                   &is_saving_, fq_threadpool_.get(),
-                                                   &last_save_info_, &save_mu_, snapshot_storage_}};
+  SaveStagesController sc{detail::SaveStagesInputs{
+      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
+      &save_mu_, &save_bytes_cb_, snapshot_storage_}};
   return sc.Save();
 }
 
@@ -1490,6 +1490,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
+    }
+
+    if (IsSaving()) {
+      lock_guard lk{save_mu_};
+      if (save_bytes_cb_) {
+        append("save_buffer_bytes", save_bytes_cb_());
+      }
     }
   }
 
