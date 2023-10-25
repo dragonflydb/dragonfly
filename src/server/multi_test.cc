@@ -950,4 +950,13 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   EXPECT_EQ(Run({"get", "A"}), "2");
 }
 
+TEST_F(MultiEvalTest, MultiAndEval) {
+  // We had a bug in borrowing interpreters which caused a crash in this scenario
+  Run({"multi"});
+  Run({"eval", "return redis.call('set', 'x', 'y1')", "1", "x"});
+  Run({"exec"});
+
+  Run({"eval", "return redis.call('set', 'x', 'y1')", "1", "x"});
+}
+
 }  // namespace dfly
