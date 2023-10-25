@@ -7,6 +7,7 @@
 #include "reply_capture.h"
 
 #define SKIP_LESS(needed)     \
+  has_replied_ = true;        \
   if (reply_mode_ < needed) { \
     current_ = monostate{};   \
     return;                   \
@@ -119,6 +120,7 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
 }
 
 void CapturingReplyBuilder::SendDirect(Payload&& val) {
+  has_replied_ = true;
   bool is_err = holds_alternative<Error>(val) || holds_alternative<OpStatus>(val);
   ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
   if (reply_mode_ >= min_mode) {
@@ -130,7 +132,6 @@ void CapturingReplyBuilder::SendDirect(Payload&& val) {
 }
 
 void CapturingReplyBuilder::Capture(Payload val) {
-  has_replied_ = true;
   if (!stack_.empty()) {
     stack_.top().first->arr.push_back(std::move(val));
     stack_.top().second--;

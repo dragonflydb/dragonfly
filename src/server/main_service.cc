@@ -1073,7 +1073,12 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
   }
-  DCHECK(cntx->reply_builder()->HasReplied());
+
+#ifndef NDEBUG
+  if (cid->name() != "REPLCONF" && !bool(cntx->conn_state.script_info)) {
+    DCHECK(cntx->reply_builder()->HasReplied());
+  }
+#endif
 
   if (record_stats) {
     DCHECK(cntx->transaction);

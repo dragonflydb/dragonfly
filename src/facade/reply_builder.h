@@ -138,7 +138,6 @@ class SinkReplyBuilder {
   // Similarly to batch mode but is controlled by at operation level.
   bool should_aggregate_ : 1;
   bool has_replied_ : 1;
-  bool has_batch_replied_ : 1;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
