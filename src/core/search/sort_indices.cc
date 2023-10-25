@@ -56,14 +56,22 @@ template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
 double NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
+  auto str = doc->GetString(field);
+  if (str.empty())
+    return 0;
+
   double v;
-  if (!absl::SimpleAtod(doc->GetString(field), &v))
+  if (!absl::SimpleAtod(str.front(), &v))
     return 0;
   return v;
 }
 
 PMR_NS::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
-  return PMR_NS::string{doc->GetString(field), GetMemRes()};
+  auto str = doc->GetString(field);
+  if (str.empty())
+    return 0;
+
+  return PMR_NS::string{str.front(), GetMemRes()};
 }
 
 }  // namespace dfly::search

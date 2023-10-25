@@ -55,17 +55,19 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
   for (const auto& [fident, fname] : fields) {
     auto it = schema.fields.find(fident);
     auto type = it != schema.fields.end() ? it->second.type : search::SchemaField::TEXT;
-    out[fname] = PrintField(type, GetString(fident));
+    out[fname] = PrintField(type, absl::StrJoin(GetString(fident), ","));
   }
   return out;
 }
 
-string_view ListPackAccessor::GetString(string_view active_field) const {
-  return container_utils::LpFind(lp_, active_field, intbuf_[0].data()).value_or(""sv);
+BaseAccessor::StringInfo ListPackAccessor::GetString(string_view active_field) const {
+  auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
+  return strsv.has_value() ? StringInfo{*strsv} : StringInfo{};
 }
 
 BaseAccessor::VectorInfo ListPackAccessor::GetVector(string_view active_field) const {
-  return search::BytesToFtVector(GetString(active_field));
+  auto strlist = GetString(active_field);
+  return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
 }
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
@@ -86,13 +88,14 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   return out;
 }
 
-string_view StringMapAccessor::GetString(string_view active_field) const {
+BaseAccessor::StringInfo StringMapAccessor::GetString(string_view active_field) const {
   auto it = hset_->Find(active_field);
-  return it != hset_->end() ? it->second : ""sv;
+  return it != hset_->end() ? StringInfo{it->second} : StringInfo{};
 }
 
 BaseAccessor::VectorInfo StringMapAccessor::GetVector(string_view active_field) const {
-  return search::BytesToFtVector(GetString(active_field));
+  auto strlist = GetString(active_field);
+  return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
 }
 
 SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
@@ -106,13 +109,29 @@ SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
 struct JsonAccessor::JsonPathContainer : public jsoncons::jsonpath::jsonpath_expression<JsonType> {
 };
 
-string_view JsonAccessor::GetString(string_view active_field) const {
-  auto res = GetPath(active_field)->evaluate(json_);
-  DCHECK(res.is_array());
-  if (res.empty())
-    return "";
-  buf_ = res[0].as_string();
-  return buf_;
+BaseAccessor::StringInfo JsonAccessor::GetString(string_view active_field) const {
+  auto path_res = GetPath(active_field)->evaluate(json_);
+  DCHECK(path_res.is_array());  // json path always returns arrays
+
+  if (path_res.empty())
+    return {};
+
+  if (path_res.size() == 1) {
+    buf_ = path_res[0].as_string();
+    return {buf_};
+  }
+
+  buf_.resize(sizeof(buf_) + 1);  // prevent sso
+  buf_.clear();
+
+  StringInfo out;
+  for (auto element : path_res.array_range()) {
+    size_t start = buf_.size();
+    buf_ += element.as_string();
+    out.push_back(string_view{buf_}.substr(start));
+  }
+
+  return out;
 }
 
 BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const {
@@ -156,7 +175,7 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
                                       const SearchParams::FieldReturnList& fields) const {
   SearchDocData out{};
   for (const auto& [ident, name] : fields)
-    out[name] = GetString(ident);
+    out[name] = GetPath(ident)->evaluate(json_).to_string();
   return out;
 }
 

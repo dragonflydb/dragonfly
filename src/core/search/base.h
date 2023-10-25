@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/inlined_vector.h>
 
 #include <cstdint>
 #include <memory>
@@ -57,9 +58,11 @@ using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
   using VectorInfo = search::OwnedFtVector;
+  using StringInfo = absl::InlinedVector<std::string_view, 1>;
 
   virtual ~DocumentAccessor() = default;
-  virtual std::string_view GetString(std::string_view active_field) const = 0;
+
+  virtual StringInfo GetString(std::string_view active_field) const = 0;
   virtual VectorInfo GetVector(std::string_view active_field) const = 0;
 };
 
