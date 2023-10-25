@@ -352,6 +352,41 @@ TEST_F(BPTreeSetTest, InsertSDS) {
   }
 }
 
+TEST_F(BPTreeSetTest, Repro) {
+  vector<ZsetPolicy::KeyT> vals;
+  for (int i = 0; i < 2; ++i) {
+    sds s = sdsempty();
+
+    s = sdscatfmt(s, "a%u", i);
+    vals.emplace_back(ZsetPolicy::KeyT{.d = (double)i, .s = s});
+  }
+
+  SDSTree tree(&mi_alloc_);
+  for (auto v : vals) {
+    ASSERT_TRUE(tree.Insert(v));
+    {
+      double score = 0;
+      tree.IterateReverse(0, 0, [&score](auto i) {
+        score = i.d;
+        return false;
+      });
+      EXPECT_EQ(score, v.d);
+    }
+    {
+      double score = 0;
+      tree.Iterate(0, 0, [&score](auto i) {
+        score = i.d;
+        return false;
+      });
+      EXPECT_EQ(score, vals[0].d);
+    }
+  }
+
+  for (auto v : vals) {
+    sdsfree(v.s);
+  }
+}
+
 static string RandomString(mt19937& rand, unsigned len) {
   const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
   string ret;
