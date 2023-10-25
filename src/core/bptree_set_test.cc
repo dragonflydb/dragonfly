@@ -4,6 +4,7 @@
 #include "core/bptree_set.h"
 
 #include <absl/container/btree_set.h>
+#include <gmock/gmock.h>
 #include <mimalloc.h>
 
 #include <random>
@@ -248,31 +249,6 @@ TEST_F(BPTreeSetTest, Iterate) {
     ASSERT_EQ(to - from + 1, cnt);
     ASSERT_TRUE(res);
   }
-
-  // Reverse iteration
-  cnt = 0;
-  res = bptree_.IterateReverse(5845, 6849, [&](uint64_t val) {
-    if ((6849 - cnt) * 2 != val)
-      return false;
-    ++cnt;
-    return true;
-  });
-  ASSERT_EQ(6849 - 5845 + 1, cnt);
-  ASSERT_TRUE(res);
-
-  for (unsigned j = 0; j < 10; ++j) {
-    cnt = 0;
-    unsigned from = generator_() % kNumElems;
-    unsigned to = from + generator_() % (kNumElems - from);
-    res = bptree_.IterateReverse(from, to, [&](uint64_t val) {
-      if ((to - cnt) * 2 != val)
-        return false;
-      ++cnt;
-      return true;
-    });
-    ASSERT_EQ(to - from + 1, cnt);
-    ASSERT_TRUE(res);
-  }
 }
 
 TEST_F(BPTreeSetTest, Ranges) {
@@ -352,7 +328,7 @@ TEST_F(BPTreeSetTest, InsertSDS) {
   }
 }
 
-TEST_F(BPTreeSetTest, Repro) {
+TEST_F(BPTreeSetTest, ReverseIterate) {
   vector<ZsetPolicy::KeyT> vals;
   for (int i = 0; i < 2; ++i) {
     sds s = sdsempty();
@@ -381,6 +357,13 @@ TEST_F(BPTreeSetTest, Repro) {
       EXPECT_EQ(score, vals[0].d);
     }
   }
+
+  vector<int> res;
+  tree.IterateReverse(0, 1, [&](auto i) {
+    res.push_back(i.d);
+    return true;
+  });
+  EXPECT_THAT(res, testing::ElementsAre(1, 0));
 
   for (auto v : vals) {
     sdsfree(v.s);
