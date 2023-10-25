@@ -113,9 +113,6 @@ class SinkReplyBuilder {
     bool is_nested_ = true;
   };
 
-  void ExpectReply();
-  bool HasReplied() const;
-
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
   void SendRawVec(absl::Span<const std::string_view> msg_vec);
@@ -137,7 +134,6 @@ class SinkReplyBuilder {
 
   // Similarly to batch mode but is controlled by at operation level.
   bool should_aggregate_ : 1;
-  bool has_replied_ : 1;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
