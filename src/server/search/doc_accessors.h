@@ -39,7 +39,7 @@ struct ListPackAccessor : public BaseAccessor {
   explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
   }
 
-  StringInfo GetString(std::string_view field) const override;
+  StringList GetString(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
@@ -53,7 +53,7 @@ struct StringMapAccessor : public BaseAccessor {
   explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
 
-  StringInfo GetString(std::string_view field) const override;
+  StringList GetString(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
@@ -68,7 +68,7 @@ struct JsonAccessor : public BaseAccessor {
   explicit JsonAccessor(const JsonType* json) : json_{*json} {
   }
 
-  StringInfo GetString(std::string_view field) const override;
+  StringList GetString(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 

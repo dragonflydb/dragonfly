@@ -58,11 +58,11 @@ using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
   using VectorInfo = search::OwnedFtVector;
-  using StringInfo = absl::InlinedVector<std::string_view, 1>;
+  using StringList = absl::InlinedVector<std::string_view, 1>;
 
   virtual ~DocumentAccessor() = default;
 
-  virtual StringInfo GetString(std::string_view active_field) const = 0;
+  virtual StringList GetString(std::string_view active_field) const = 0;
   virtual VectorInfo GetVector(std::string_view active_field) const = 0;
 };
 

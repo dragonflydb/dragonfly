@@ -69,7 +69,7 @@ double NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view f
 PMR_NS::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
   auto str = doc->GetString(field);
   if (str.empty())
-    return 0;
+    return "";
 
   return PMR_NS::string{str.front(), GetMemRes()};
 }

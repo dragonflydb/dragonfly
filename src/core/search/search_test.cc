@@ -39,7 +39,7 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
-  StringInfo GetString(string_view field) const override {
+  StringList GetString(string_view field) const override {
     auto it = fields_.find(field);
     return {it != fields_.end() ? string_view{it->second} : ""};
   }

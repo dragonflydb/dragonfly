@@ -60,9 +60,9 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
   return out;
 }
 
-BaseAccessor::StringInfo ListPackAccessor::GetString(string_view active_field) const {
+BaseAccessor::StringList ListPackAccessor::GetString(string_view active_field) const {
   auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
-  return strsv.has_value() ? StringInfo{*strsv} : StringInfo{};
+  return strsv.has_value() ? StringList{*strsv} : StringList{};
 }
 
 BaseAccessor::VectorInfo ListPackAccessor::GetVector(string_view active_field) const {
@@ -88,9 +88,9 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   return out;
 }
 
-BaseAccessor::StringInfo StringMapAccessor::GetString(string_view active_field) const {
+BaseAccessor::StringList StringMapAccessor::GetString(string_view active_field) const {
   auto it = hset_->Find(active_field);
-  return it != hset_->end() ? StringInfo{it->second} : StringInfo{};
+  return it != hset_->end() ? StringList{it->second} : StringList{};
 }
 
 BaseAccessor::VectorInfo StringMapAccessor::GetVector(string_view active_field) const {
@@ -109,7 +109,7 @@ SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
 struct JsonAccessor::JsonPathContainer : public jsoncons::jsonpath::jsonpath_expression<JsonType> {
 };
 
-BaseAccessor::StringInfo JsonAccessor::GetString(string_view active_field) const {
+BaseAccessor::StringList JsonAccessor::GetString(string_view active_field) const {
   auto path_res = GetPath(active_field)->evaluate(json_);
   DCHECK(path_res.is_array());  // json path always returns arrays
 
@@ -124,7 +124,7 @@ BaseAccessor::StringInfo JsonAccessor::GetString(string_view active_field) const
   buf_.resize(sizeof(buf_) + 1);  // prevent sso
   buf_.clear();
 
-  StringInfo out;
+  StringList out;
   for (auto element : path_res.array_range()) {
     size_t start = buf_.size();
     buf_ += element.as_string();

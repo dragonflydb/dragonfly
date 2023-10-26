@@ -114,8 +114,6 @@ void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   for (string_view str : doc->GetString(field))
     tokens.merge(Tokenize(str));
 
-  VLOG(0) << "BSI add " << absl::StrJoin(tokens, ",");
-
   for (string_view token : tokens)
     GetOrCreate(token)->Insert(id);
 }
