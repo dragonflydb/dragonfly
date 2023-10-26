@@ -431,10 +431,9 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   if (pv.Encoding() == kEncodingStrMap2) {
     StringMap* string_map = (StringMap*)pv.RObjPtr();
 
-    RETURN_ON_ERR(SaveLen(string_map->Size()));
-
     absl::flat_hash_set<string_view> keys;
     bool has_duplicates = false;
+
     for (const auto& k_v : *string_map) {
       string_view key{k_v.first, sdslen(k_v.first)};
       if (!keys.insert(key).second) {
@@ -443,9 +442,19 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
         has_duplicates = true;
         continue;
       }
+    }
+
+    RETURN_ON_ERR(SaveLen(keys.size()));
+    keys.clear();
+    for (const auto& k_v : *string_map) {
+      string_view key{k_v.first, sdslen(k_v.first)};
+      if (!keys.insert(key).second) {
+        continue;
+      }
       RETURN_ON_ERR(SaveString(key));
       RETURN_ON_ERR(SaveString(string_view{k_v.second, sdslen(k_v.second)}));
     }
+
     if (has_duplicates) {
       return make_error_code(errc::bad_message);
     }
