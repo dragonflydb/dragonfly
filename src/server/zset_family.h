@@ -48,6 +48,8 @@ class ZSetFamily {
   struct ZRangeSpec {
     std::variant<IndexInterval, ScoreInterval, LexInterval, TopNScored> interval;
     RangeParams params;
+    ZRangeSpec() = default;
+    ZRangeSpec(const ScoreInterval& si, const RangeParams& rp) : interval(si), params(rp){};
   };
 
  private:

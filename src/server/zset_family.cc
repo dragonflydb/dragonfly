@@ -54,19 +54,29 @@ using MScoreResponse = std::vector<std::optional<double>>;
 using ScoredMember = std::pair<std::string, double>;
 using ScoredArray = std::vector<ScoredMember>;
 
-typedef struct GeoPoint {
+struct GeoPoint {
   double longitude;
   double latitude;
   double dist;
   double score;
   std::string member;
-  GeoPoint() = default;
+  GeoPoint() : longitude(0.0), latitude(0.0), dist(0.0), score(0.0), member(""){};
   GeoPoint(double _longitude, double _latitude, double _dist, double _score,
            const std::string& _member)
       : longitude(_longitude), latitude(_latitude), dist(_dist), score(_score), member(_member){};
-
-} GeoPoint;
+};
 using GeoArray = std::vector<GeoPoint>;
+
+struct GeoSearchOpts {
+  double conversion;
+  uint64_t count = 0;
+  bool asc = 0;
+  bool desc = 0;
+  bool any = 0;
+  bool withdist = 0;
+  bool withcoord = 0;
+  bool withhash = 0;
+};
 
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
   auto interval = si;
@@ -2636,25 +2646,26 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
                              distance_multiplier);
 }
 
+namespace {
 // Search all eight neighbors + self geohash box
-int membersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHashRadius* n,
-                          GeoShape* shape, GeoArray& ga, unsigned long limit) {
+int MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHashRadius& n,
+                          GeoShape* shape, GeoArray* ga, unsigned long limit) {
   GeoHashBits neighbors[9];
-  unsigned int i, last_processed = 0;
+  unsigned int last_processed = 0;
 
-  neighbors[0] = n->hash;
-  neighbors[1] = n->neighbors.north;
-  neighbors[2] = n->neighbors.south;
-  neighbors[3] = n->neighbors.east;
-  neighbors[4] = n->neighbors.west;
-  neighbors[5] = n->neighbors.north_east;
-  neighbors[6] = n->neighbors.north_west;
-  neighbors[7] = n->neighbors.south_east;
-  neighbors[8] = n->neighbors.south_west;
+  neighbors[0] = n.hash;
+  neighbors[1] = n.neighbors.north;
+  neighbors[2] = n.neighbors.south;
+  neighbors[3] = n.neighbors.east;
+  neighbors[4] = n.neighbors.west;
+  neighbors[5] = n.neighbors.north_east;
+  neighbors[6] = n.neighbors.north_west;
+  neighbors[7] = n.neighbors.south_east;
+  neighbors[8] = n.neighbors.south_west;
 
   // Get range_specs for neighbors (*and* our own hashbox)
   std::vector<ZSetFamily::ZRangeSpec> range_specs;
-  for (i = 0; i < sizeof(neighbors) / sizeof(*neighbors); i++) {
+  for (unsigned int i = 0; i < sizeof(neighbors) / sizeof(*neighbors); i++) {
     if (HASHISZERO(neighbors[i])) {
       continue;
     }
@@ -2675,13 +2686,10 @@ int membersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHas
     si.first = ZSetFamily::Bound{static_cast<double>(min), false};
     si.second = ZSetFamily::Bound{static_cast<double>(max), true};
 
-    range_specs.emplace_back();
-    auto& range_spec = range_specs.back();
-    range_spec.interval = si;
     ZSetFamily::RangeParams range_params;
     range_params.interval_type = ZSetFamily::RangeParams::IntervalType::SCORE;
     range_params.with_scores = true;
-    range_spec.params = range_params;
+    range_specs.emplace_back(si, range_params);
 
     last_processed = i;
   }
@@ -2703,10 +2711,10 @@ int membersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHas
   double distance;
   for (auto& arr : *result_arrays) {
     for (auto& p : arr) {
-      if (geoWithinShape(shape, p.second, xy, &distance) == true) {
-        ga.emplace_back(xy[0], xy[1], distance, p.second, p.first);
+      if (geoWithinShape(shape, p.second, xy, &distance) == 0) {
+        ga->emplace_back(xy[0], xy[1], distance, p.second, p.first);
         count++;
-        if (limit > 0 && ga.size() >= limit)
+        if (limit > 0 && ga->size() >= limit)
           break;
       }
     }
@@ -2715,27 +2723,98 @@ int membersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHas
   return count;
 }
 
+void GeoSearchGeneric(ConnectionContext* cntx, GeoShape* shape, string_view key,
+                      const GeoSearchOpts& geo_ops) {
+  double conversion = geo_ops.conversion;
+  uint64_t count = geo_ops.count;
+  bool asc = geo_ops.asc;
+  bool desc = geo_ops.desc;
+  bool any = geo_ops.any;
+  bool withdist = geo_ops.withdist;
+  bool withcoord = geo_ops.withcoord;
+  bool withhash = geo_ops.withhash;
+
+  // query
+  GeoHashRadius georadius = geohashCalculateAreasByShapeWGS84(shape);
+  GeoArray ga;
+  MembersOfAllNeighbors(cntx, key, georadius, shape, &ga, any ? count : 0);
+
+  // if no matching results, the user gets an empty reply.
+  if (ga.empty()) {
+    (*cntx)->SendNull();
+  }
+
+  // sort and trim by count
+  if (asc) {
+    auto asc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist < b.dist; };
+    if (count > 0) {
+      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), asc_comparator);
+      ga.resize(count);
+    } else {
+      std::sort(ga.begin(), ga.end(), asc_comparator);
+    }
+  } else if (desc) {
+    auto desc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist > b.dist; };
+    if (count > 0) {
+      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), desc_comparator);
+      ga.resize(count);
+    } else {
+      std::sort(ga.begin(), ga.end(), desc_comparator);
+    }
+  }
+
+  // generate reply array withdist, withcoords, withhash
+  int record_size = 1;
+  if (withdist) {
+    record_size++;
+  }
+  if (withcoord) {
+    record_size++;
+  }
+  if (withhash) {
+    record_size++;
+  }
+  (*cntx)->StartArray(ga.size());
+  for (const auto& p : ga) {
+    // [member, dist, x, y, hash]
+    (*cntx)->StartArray(record_size);
+    (*cntx)->SendBulkString(p.member);
+    if (withdist) {
+      (*cntx)->SendDouble(p.dist / conversion);
+    }
+    if (withcoord) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendDouble(p.longitude);
+      (*cntx)->SendDouble(p.latitude);
+    }
+    if (withhash) {
+      (*cntx)->SendDouble(p.score);
+    }
+  }
+}
+}  // namespace
+
 void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
+  // // optional flags
+  // uint64_t count = -1;
+  // bool any = false;
+  // bool asc = false;
+  // bool desc = false;
+  // bool withcoord = false;
+  // bool withdist = false;
+  // bool withhash = false;
+
+  // parse arguments
   string_view key = ArgS(args, 0);
   GeoShape shape = {};
+  GeoSearchOpts geo_ops;
 
   // FROMMEMBER or FROMLONLAT is set
   bool from_set = false;
   // BYRADIUS or BYBOX is set
   bool by_set = false;
 
-  // optional flags
-  uint64_t count = -1;
-  bool any = false;
-  bool asc = false;
-  bool desc = false;
-  bool withcoord = false;
-  bool withdist = false;
-  bool withhash = false;
-
-  // parse arguments
-  size_t i = 1;
-  for (; i < args.size(); ++i) {
+  for (size_t i = 1; i < args.size(); ++i) {
     ToUpper(&args[i]);
 
     string_view cur_arg = ArgS(args, i);
@@ -2792,6 +2871,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         string_view unit;
         unit = ArgS(args, i + 2);
         shape.conversion = ExtractUnit(unit);
+        geo_ops.conversion = shape.conversion;
         if (shape.conversion == -1) {
           return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
         }
@@ -2824,38 +2904,36 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         return (*cntx)->SendError(kSyntaxErr);
       }
     } else if (cur_arg == "ASC") {
-      if (desc) {
+      if (geo_ops.desc) {
         return (*cntx)->SendError(kAscDescErr);
       } else {
-        asc = true;
+        geo_ops.asc = true;
       }
     } else if (cur_arg == "DESC") {
-      if (asc) {
+      if (geo_ops.asc) {
         return (*cntx)->SendError(kAscDescErr);
       } else {
-        desc = true;
+        geo_ops.desc = true;
       }
     } else if (cur_arg == "COUNT") {
       if (i + 1 < args.size()) {
-        // TODO: need a string_view impl of stoull
-        count = std::stoull(std::string(ArgS(args, i + 1)));
+        absl::SimpleAtoi(std::string(ArgS(args, i + 1)), &geo_ops.count);
         i++;
       } else {
         return (*cntx)->SendError(kSyntaxErr);
       }
       if (i + 1 < args.size() && ArgS(args, i + 1) == "ANY") {
-        any = true;
+        geo_ops.any = true;
         i++;
       }
     } else if (cur_arg == "WITHCOORD") {
-      withcoord = true;
+      geo_ops.withcoord = true;
     } else if (cur_arg == "WITHDIST") {
-      withdist = true;
+      geo_ops.withdist = true;
     } else if (cur_arg == "WITHHASH")
-      withhash = true;
+      geo_ops.withhash = true;
     else {
       return (*cntx)->SendError(kSyntaxErr);
-      break;
     }
   }
 
@@ -2866,64 +2944,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
   if (!by_set) {
     return (*cntx)->SendError(kSyntaxErr);
   }
-
-  // query
-  GeoHashRadius georadius = geohashCalculateAreasByShapeWGS84(&shape);
-  GeoArray ga;
-  membersOfAllNeighbors(cntx, key, &georadius, &shape, ga, any ? count : 0);
-
-  // if no matching results, the user gets an empty reply.
-  if (ga.empty()) {
-    (*cntx)->SendNull();
-  }
-
-  // sort and trim by count
-  auto asc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist < b.dist; };
-  auto desc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist > b.dist; };
-  if (asc) {
-    if (count > 0) {
-      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), asc_comparator);
-      ga.resize(count);
-    } else {
-      std::sort(ga.begin(), ga.end(), asc_comparator);
-    }
-  } else if (desc) {
-    if (count > 0) {
-      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), desc_comparator);
-      ga.resize(count);
-    } else {
-      std::sort(ga.begin(), ga.end(), desc_comparator);
-    }
-  }
-
-  // generate reply array withdist, withcoords, withhash
-  int record_size = 1;
-  if (withdist) {
-    record_size++;
-  }
-  if (withcoord) {
-    record_size++;
-  }
-  if (withhash) {
-    record_size++;
-  }
-  (*cntx)->StartArray(ga.size());
-  for (const auto& p : ga) {
-    // [member, dist, x, y, hash]
-    (*cntx)->StartArray(record_size);
-    (*cntx)->SendBulkString(p.member);
-    if (withdist) {
-      (*cntx)->SendDouble(p.dist);
-    }
-    if (withcoord) {
-      (*cntx)->StartArray(2);
-      (*cntx)->SendDouble(p.longitude);
-      (*cntx)->SendDouble(p.latitude);
-    }
-    if (withhash) {
-      (*cntx)->SendDouble(p.score);
-    }
-  }
+  GeoSearchGeneric(cntx, &shape, key, geo_ops);
 }
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
