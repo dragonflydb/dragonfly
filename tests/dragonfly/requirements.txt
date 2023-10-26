@@ -7,7 +7,7 @@ pluggy==1.0.0
 py==1.11.0
 pyparsing==3.0.9
 pytest==7.1.2
-redis==5.0.0
+redis==4.6.0
 tomli==2.0.1
 wrapt==1.14.1
 pytest-asyncio==0.20.1
