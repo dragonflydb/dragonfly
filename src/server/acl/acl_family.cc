@@ -574,6 +574,7 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
 
   registry->StartFamily();
   *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
+  registry->SubCommandsSameIndex();
   *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kList}.HFUNC(
       List);
   *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSetUser}
@@ -598,7 +599,6 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
                    .HFUNC(DryRun);
   *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kGenPass}.HFUNC(
       GenPass);
-
   cmd_registry_ = registry;
 }
 

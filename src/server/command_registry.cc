@@ -7,6 +7,7 @@
 #include <absl/strings/str_split.h>
 #include <absl/time/clock.h>
 
+#include "absl/container/inlined_vector.h"
 #include "absl/strings/str_cat.h"
 #include "base/bits.h"
 #include "base/flags.h"
@@ -113,30 +114,54 @@ void CommandRegistry::Init(unsigned int thread_count) {
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
-  string_view k = cmd.name();
-  auto it = cmd_rename_map_.find(k);
+  auto k = std::string(cmd.name());
+
+  absl::InlinedVector<std::string, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
+  std::string_view c_name = maybe_subcommand.front();
+  auto it = cmd_rename_map_.find(c_name);
   if (it != cmd_rename_map_.end()) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
-    k = it->second;
+    if (maybe_subcommand.size() == 2) {
+      k = absl::StrCat(it->second, " ", maybe_subcommand[1]);
+    } else {
+      k = it->second;
+    }
   }
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
     cmd.SetRestricted(true);
   }
 
-  family_of_commands_.back().push_back(std::string(k));
   cmd.SetFamily(family_of_commands_.size() - 1);
-  cmd.SetBitIndex(1ULL << bit_index_++);
+  cmd.SetBitIndex(1ULL << bit_index_);
+  if (!same_index_) {
+    family_of_commands_.back().push_back(std::string(k));
+    ++bit_index_;
+  }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;
 }
 
 void CommandRegistry::StartFamily() {
+  same_index_ = false;
   family_of_commands_.push_back({});
   bit_index_ = 0;
+}
+
+void CommandRegistry::SubCommandsSameIndex() {
+  same_index_ = true;
+  // Because it was already incremented when the main command got inserted
+  --bit_index_;
+}
+
+std::string_view CommandRegistry::RenamedOrOriginal(std::string_view orig) const {
+  if (cmd_rename_map_.contains(orig)) {
+    return cmd_rename_map_.find(orig)->second;
+  }
+  return orig;
 }
 
 CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {

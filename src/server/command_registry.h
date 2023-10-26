@@ -163,17 +163,23 @@ class CommandRegistry {
     }
   }
 
-  using FamiliesVec = std::vector<std::vector<std::string>>;
   void StartFamily();
+
+  void SubCommandsSameIndex();
+
+  std::string_view RenamedOrOriginal(std::string_view orig) const;
+
+  using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
  private:
-  absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
+  absl::flat_hash_map<std::string, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
   absl::flat_hash_set<std::string> restricted_cmds_;
 
   FamiliesVec family_of_commands_;
   size_t bit_index_;
+  bool same_index_;
 };
 
 }  // namespace dfly
