@@ -68,7 +68,7 @@ struct GeoPoint {
 using GeoArray = std::vector<GeoPoint>;
 
 struct GeoSearchOpts {
-  double conversion;
+  double conversion = 0;
   uint64_t count = 0;
   bool asc = 0;
   bool desc = 0;
