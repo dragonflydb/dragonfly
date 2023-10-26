@@ -46,6 +46,7 @@ void SinkReplyBuilder::CloseConnection() {
 }
 
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
+  has_replied_ = true;
   DCHECK(sink_);
   constexpr size_t kMaxBatchSize = 1024;
 
@@ -96,6 +97,14 @@ void SinkReplyBuilder::SendRaw(std::string_view raw) {
   iovec v = {IoVec(raw)};
 
   Send(&v, 1);
+}
+
+void SinkReplyBuilder::ExpectReply() {
+  has_replied_ = true;
+}
+
+bool SinkReplyBuilder::HasReplied() const {
+  return has_replied_;
 }
 
 void SinkReplyBuilder::SendError(ErrorReply error) {

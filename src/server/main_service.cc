@@ -1049,30 +1049,26 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
 class ReplyGuard {
  public:
-  ReplyGuard(ConnectionContext* cntx, std::string_view cid_name) : cntx(cntx) {
+  ReplyGuard(ConnectionContext* cntx, std::string_view cid_name) {
+    auto* builder = cntx->reply_builder();
     const bool is_script = bool(cntx->conn_state.script_info);
-    const bool is_redis = dynamic_cast<RedisReplyBuilder*>(cntx->reply_builder()) != nullptr;
     const bool is_one_of =
-        absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY", "EXEC"}).contains(cid_name);
-    const bool should_dcheck = !is_one_of && !is_script && is_redis;
+        absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY", "EXEC", "EVALSHA"})
+            .contains(cid_name);
+    const bool should_dcheck = !is_one_of && !is_script;
     if (should_dcheck) {
-      old = static_cast<RedisReplyBuilder*>(cntx->Inject(&crb));
+      builder->ExpectReply();
     }
   }
 
   ~ReplyGuard() {
-    if (old) {
-      auto reply = crb.Take();
-      DCHECK(reply.index() > 0);
-      CapturingReplyBuilder::Apply(std::move(reply), old);
-      cntx->Inject(old);
+    if (builder) {
+      DCHECK(builder->HasReplied());
     }
   }
 
  private:
-  RedisReplyBuilder* old = nullptr;
-  CapturingReplyBuilder crb;
-  ConnectionContext* cntx = nullptr;
+  RedisReplyBuilder* builder = nullptr;
 };
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx,

@@ -7,6 +7,7 @@
 #include "reply_capture.h"
 
 #define SKIP_LESS(needed)     \
+  has_replied_ = true;        \
   if (reply_mode_ < needed) { \
     current_ = monostate{};   \
     return;                   \
