@@ -2649,9 +2649,10 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
 namespace {
 // Search all eight neighbors + self geohash box
 int MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHashRadius& n,
-                          GeoShape* shape, GeoArray* ga, unsigned long limit) {
-  GeoHashBits neighbors[9];
+                          const GeoShape& shape_ref, GeoArray* ga, unsigned long limit) {
+  vector<GeoHashBits> neighbors(9);
   unsigned int last_processed = 0;
+  GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
 
   neighbors[0] = n.hash;
   neighbors[1] = n.neighbors.north;
@@ -2665,7 +2666,7 @@ int MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHas
 
   // Get range_specs for neighbors (*and* our own hashbox)
   std::vector<ZSetFamily::ZRangeSpec> range_specs;
-  for (unsigned int i = 0; i < sizeof(neighbors) / sizeof(*neighbors); i++) {
+  for (unsigned int i = 0; i < neighbors.size(); i++) {
     if (HASHISZERO(neighbors[i])) {
       continue;
     }
@@ -2723,7 +2724,7 @@ int MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHas
   return count;
 }
 
-void GeoSearchGeneric(ConnectionContext* cntx, GeoShape* shape, string_view key,
+void GeoSearchGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, string_view key,
                       const GeoSearchOpts& geo_ops) {
   double conversion = geo_ops.conversion;
   uint64_t count = geo_ops.count;
@@ -2735,9 +2736,10 @@ void GeoSearchGeneric(ConnectionContext* cntx, GeoShape* shape, string_view key,
   bool withhash = geo_ops.withhash;
 
   // query
+  GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
   GeoHashRadius georadius = geohashCalculateAreasByShapeWGS84(shape);
   GeoArray ga;
-  MembersOfAllNeighbors(cntx, key, georadius, shape, &ga, any ? count : 0);
+  MembersOfAllNeighbors(cntx, key, georadius, shape_ref, &ga, any ? count : 0);
 
   // if no matching results, the user gets an empty reply.
   if (ga.empty()) {
@@ -2768,10 +2770,10 @@ void GeoSearchGeneric(ConnectionContext* cntx, GeoShape* shape, string_view key,
   if (withdist) {
     record_size++;
   }
-  if (withcoord) {
+  if (withhash) {
     record_size++;
   }
-  if (withhash) {
+  if (withcoord) {
     record_size++;
   }
   (*cntx)->StartArray(ga.size());
@@ -2782,28 +2784,19 @@ void GeoSearchGeneric(ConnectionContext* cntx, GeoShape* shape, string_view key,
     if (withdist) {
       (*cntx)->SendDouble(p.dist / conversion);
     }
+    if (withhash) {
+      (*cntx)->SendDouble(p.score);
+    }
     if (withcoord) {
       (*cntx)->StartArray(2);
       (*cntx)->SendDouble(p.longitude);
       (*cntx)->SendDouble(p.latitude);
-    }
-    if (withhash) {
-      (*cntx)->SendDouble(p.score);
     }
   }
 }
 }  // namespace
 
 void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
-  // // optional flags
-  // uint64_t count = -1;
-  // bool any = false;
-  // bool asc = false;
-  // bool desc = false;
-  // bool withcoord = false;
-  // bool withdist = false;
-  // bool withhash = false;
-
   // parse arguments
   string_view key = ArgS(args, 0);
   GeoShape shape = {};
@@ -2894,6 +2887,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         string_view unit;
         unit = ArgS(args, i + 3);
         shape.conversion = ExtractUnit(unit);
+        geo_ops.conversion = shape.conversion;
         if (shape.conversion == -1) {
           return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
         }
@@ -2944,7 +2938,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
   if (!by_set) {
     return (*cntx)->SendError(kSyntaxErr);
   }
-  GeoSearchGeneric(cntx, &shape, key, geo_ops);
+  GeoSearchGeneric(cntx, shape, key, geo_ops);
 }
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
