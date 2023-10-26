@@ -95,6 +95,10 @@ class StringMap : public DenseSet {
       return curr_list_;
     }
 
+    DenseSet::DensePtr GetCurrEntry() const {
+      return *curr_entry_;
+    }
+
     using IteratorBase::ExpiryTime;
     using IteratorBase::HasExpiry;
   };

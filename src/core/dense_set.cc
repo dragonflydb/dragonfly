@@ -299,6 +299,11 @@ void DenseSet::Grow() {
           }
 
           DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
+          if (BucketId(dptr.GetObject(), 0) != bid) {
+            LOG(ERROR) << "Wrong bucket id " << bid << ", correct one "
+                       << BucketId(dptr.GetObject(), 0) << " when growing from " << prev_size
+                       << " to " << entries_.size();
+          }
           PushFront(dest, dptr);
 
           dest->ClearDisplaced();
@@ -309,10 +314,33 @@ void DenseSet::Grow() {
         *curr = *dptr.Next();
         DCHECK(!curr->IsEmpty());
 
+        if (BucketId(dptr.GetObject(), 0) != bid) {
+          LOG(ERROR) << "Wrong bucket id " << bid << ", correct one "
+                     << BucketId(dptr.GetObject(), 0) << " when growing from " << prev_size
+                     << " to " << entries_.size();
+        }
+
         PushFront(dest, dptr);
         dest->ClearDisplaced();
       }
     }
+  }
+
+  IteratorBase it(this, false);
+  uint32_t bid = 0;
+  uint32_t pos = 0;
+  while (it.owner_) {
+    if (it.curr_list_ != entries_.begin() + bid) {
+      bid = it.curr_list_ - entries_.begin();
+      pos = 0;
+    }
+
+    if (bid != BucketId(it.curr_entry_->GetObject(), 0)) {
+      LOG(ERROR) << "Wrong position (" << bid << ", " << pos << ") for "
+                 << " expected " << BucketId(it.curr_entry_->GetObject(), 0);
+    }
+    it.Advance();
+    ++pos;
   }
 }
 
@@ -391,18 +419,31 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   if (has_ttl)
     to_insert.SetTtl(true);
 
+  if (BucketId(hashcode) != bucket_id) {
+    LOG(ERROR) << "Wrong bucket id " << bucket_id << ", correct one " << BucketId(hashcode);
+  }
   while (!entries_[bucket_id].IsEmpty() && entries_[bucket_id].IsDisplaced()) {
     DensePtr unlinked = PopPtrFront(entries_.begin() + bucket_id);
+    void* dbg_obj = unlinked.GetObject();
+    uint32_t dbg_id = BucketId(dbg_obj, 0);
 
     PushFront(entries_.begin() + bucket_id, to_insert);
+
     to_insert = unlinked;
     bucket_id -= unlinked.GetDisplacedDirection();
+    if (bucket_id != dbg_id) {
+      LOG(ERROR) << "Wrong bucket id " << bucket_id << ", correct one " << dbg_id;
+    }
   }
 
   if (!entries_[bucket_id].IsEmpty()) {
     ++num_chain_entries_;
   }
 
+  if (BucketId(to_insert.GetObject(), 0) != bucket_id) {
+    LOG(ERROR) << "Wrong bucket id " << bucket_id << ", correct one "
+               << BucketId(to_insert.GetObject(), 0);
+  }
   ChainVectorIterator list = entries_.begin() + bucket_id;
   PushFront(list, to_insert);
   obj_malloc_used_ += ObjectAllocSize(obj);

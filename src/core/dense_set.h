@@ -39,6 +39,8 @@ namespace dfly {
 
 class DenseSet {
   struct DenseLinkKey;
+
+ public:
   // we can assume that high 12 bits of user address space
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
@@ -161,6 +163,7 @@ class DenseSet {
     void* ptr_ = nullptr;
   };
 
+ private:
   struct DenseLinkKey : public DensePtr {
     DensePtr next;  // could be LinkKey* or Object *.
   };

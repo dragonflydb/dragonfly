@@ -283,8 +283,10 @@ string StringMap::PrintDuplicateKeyInfo(std::string_view key) {
   for (auto it = begin_it; it != end(); ++it) {
     sds field = it->first;
     if (key == string_view{field, sdslen(field)}) {
+      DensePtr entry = it.GetCurrEntry();
       absl::StrAppend(&res, "Found field ", key, " at bucket ",
-                      it.GetCurrList() - begin_it.GetCurrList(), "\n");
+                      it.GetCurrList() - begin_it.GetCurrList(),
+                      " displacement: ", entry.IsDisplaced(), " islink: ", entry.IsLink());
     }
   }
   return res;
