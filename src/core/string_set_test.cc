@@ -418,4 +418,16 @@ TEST_F(StringSetTest, Ttl) {
   }
 }
 
+TEST_F(StringSetTest, Grow) {
+  mt19937 generator(0);
+
+  for (size_t j = 0; j < 20; ++j) {
+    for (size_t i = 0; i < 4098; ++i) {
+      auto str = random_string(generator, 3);
+      ss_->Add(str);
+    }
+    ss_->Clear();
+  }
+}
+
 }  // namespace dfly

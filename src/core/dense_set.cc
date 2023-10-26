@@ -159,12 +159,22 @@ void DenseSet::ClearInternal() {
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     while (!it->IsEmpty()) {
       bool has_ttl = it->HasTtl();
+      bool is_displ = it->IsDisplaced();
       void* obj = PopDataFront(it);
+      int32_t delta = int32_t(BucketId(obj, 0)) - int32_t(it - entries_.begin());
+      if (is_displ) {
+        DCHECK(delta < 2 || delta > -2);
+      } else {
+        DCHECK_EQ(delta, 0);
+      }
       ObjDelete(obj, has_ttl);
     }
   }
 
   entries_.clear();
+  num_used_buckets_ = 0;
+  num_chain_entries_ = 0;
+  size_ = 0;
 }
 
 bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
@@ -335,6 +345,7 @@ void DenseSet::Grow() {
       pos = 0;
     }
 
+    DCHECK_EQ(bid, BucketId(it.curr_entry_->GetObject(), 0));
     if (bid != BucketId(it.curr_entry_->GetObject(), 0)) {
       LOG(ERROR) << "Wrong position (" << bid << ", " << pos << ") for "
                  << " expected " << BucketId(it.curr_entry_->GetObject(), 0);

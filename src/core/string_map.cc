@@ -64,7 +64,7 @@ pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t t
 }  // namespace
 
 StringMap::~StringMap() {
-  Clear();
+  ClearInternal();
 }
 
 bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
