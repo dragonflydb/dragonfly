@@ -1755,9 +1755,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
                                      ActionOnConnectionFail on_err) {
   LOG(INFO) << "Replicating " << host << ":" << port_sv;
 
-  // Wait until all transactions finished and prevent any other from executing.
-  // The --replicaof flag executed on startup has no corresponding transaction.
-  unique_lock lk(replicaof_mu_);
+  unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
   // If NO ONE was supplied, just stop the current replica (if it exists)
   if (IsReplicatingNoOne(host, port_sv)) {
@@ -1800,8 +1798,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   // TODO: disconnect pending blocked clients (pubsub, blocking commands)
   SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
 
-  // Release both the replica lock and the global transaction lock.
-  // We proceed connecting below without any locks to allow interrupting the replica immediately.
+  // We proceed connecting below without the lock to allow interrupting the replica immediately.
   // From this point and onward, it should be highly responsive.
   lk.unlock();
 
