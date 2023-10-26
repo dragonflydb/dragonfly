@@ -23,7 +23,7 @@ On Fedora:
 
 ```bash
 sudo dnf install -y automake boost-devel g++ git cmake libtool ninja-build libzstd-devel  \
-     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel
+     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel libstdc++-static
 ```
 
 On openSUSE:
