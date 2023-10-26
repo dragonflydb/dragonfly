@@ -461,7 +461,8 @@ ServerFamily::~ServerFamily() {
 void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients) {
   for (auto* listener : listeners) {
     if (!listener->IsPrivilegedInterface()) {
-      listener->SetMaxClients(maxclients);
+      listener->socket()->proactor()->Await(
+          [listener, maxclients]() { listener->SetMaxClients(maxclients); });
     }
   }
 }
