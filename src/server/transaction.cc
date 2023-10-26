@@ -661,6 +661,8 @@ void Transaction::ScheduleInternal() {
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_ptr_);
 
+  time_now_ms_ = GetCurrentTimeMs();
+
   if (multi_ && multi_->role == SQUASHED_STUB) {
     return RunSquashedMultiCb(cb);
   }
@@ -682,8 +684,6 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     // IsArmedInShard() first checks run_count_ before shard_data, so use release ordering.
     shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
     run_count_.store(1, memory_order_release);
-
-    time_now_ms_ = GetCurrentTimeMs();
 
     // NOTE: schedule_cb cannot update data on stack when run_fast is false.
     // This is because ScheduleSingleHop can finish before the callback returns.
