@@ -1578,9 +1578,8 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
 
 static std::string FullAclCommandFromArgs(CmdArgList args, std::string_view name) {
   ToUpper(&args[1]);
-  // Guranteed SSO no dynamic allocations here
-
-  return absl::StrCat(name, " ", std::string(args[1].begin(), args[1].end()));
+  auto res = absl::StrCat(name, " ", ArgS(args, 1));
+  return res;
 }
 
 std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {

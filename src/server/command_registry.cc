@@ -8,6 +8,7 @@
 #include <absl/time/clock.h>
 
 #include "absl/container/inlined_vector.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "base/bits.h"
 #include "base/flags.h"
@@ -114,20 +115,17 @@ void CommandRegistry::Init(unsigned int thread_count) {
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
-  auto k = std::string(cmd.name());
+  auto k = cmd.name();
 
-  absl::InlinedVector<std::string, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
+  absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
+  const bool is_sub_command = maybe_subcommand.size() == 2;
   std::string_view c_name = maybe_subcommand.front();
   auto it = cmd_rename_map_.find(c_name);
   if (it != cmd_rename_map_.end()) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
-    if (maybe_subcommand.size() == 2) {
-      k = absl::StrCat(it->second, " ", maybe_subcommand[1]);
-    } else {
-      k = it->second;
-    }
+    k = is_sub_command ? absl::StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
   }
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
@@ -135,10 +133,13 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
-  cmd.SetBitIndex(1ULL << bit_index_);
-  if (!same_index_) {
+  if (!is_sub_command) {
+    cmd.SetBitIndex(1ULL << bit_index_);
     family_of_commands_.back().push_back(std::string(k));
     ++bit_index_;
+  } else {
+    DCHECK(absl::StartsWith(k, family_of_commands_.back().back()));
+    cmd.SetBitIndex(1ULL << (bit_index_ - 1));
   }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
@@ -146,15 +147,8 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 }
 
 void CommandRegistry::StartFamily() {
-  same_index_ = false;
   family_of_commands_.push_back({});
   bit_index_ = 0;
-}
-
-void CommandRegistry::SubCommandsSameIndex() {
-  same_index_ = true;
-  // Because it was already incremented when the main command got inserted
-  --bit_index_;
 }
 
 std::string_view CommandRegistry::RenamedOrOriginal(std::string_view orig) const {

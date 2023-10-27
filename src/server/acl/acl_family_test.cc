@@ -27,7 +27,6 @@ class AclFamilyTest : public BaseFamilyTest {
 class AclFamilyTestRename : public BaseFamilyTest {
   void SetUp() override {
     absl::SetFlag(&FLAGS_rename_command, {"ACL=ROCKS"});
-    std::cout << "FLAGS SET" << absl::GetFlag(FLAGS_rename_command).at(0) << std::endl;
     ResetService();
   }
 };

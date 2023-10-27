@@ -165,8 +165,6 @@ class CommandRegistry {
 
   void StartFamily();
 
-  void SubCommandsSameIndex();
-
   std::string_view RenamedOrOriginal(std::string_view orig) const;
 
   using FamiliesVec = std::vector<std::vector<std::string>>;
@@ -179,7 +177,6 @@ class CommandRegistry {
 
   FamiliesVec family_of_commands_;
   size_t bit_index_;
-  bool same_index_;
 };
 
 }  // namespace dfly
