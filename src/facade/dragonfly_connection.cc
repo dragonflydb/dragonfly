@@ -43,9 +43,12 @@ ABSL_FLAG(string, admin_bind, "",
 ABSL_FLAG(uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
+ABSL_FLAG(uint64_t, pipeline_queue_limit, 1ULL << 27,  // 128MB
+          "Amount of memory to use for storing pipelined commands in bytes - per IO thread");
+
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
-ABSL_FLAG(uint64_t, pipeline_squash, 0,
+ABSL_FLAG(uint64_t, pipeline_squash, 5,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
 
 // When changing this constant, also update `test_large_cmd` test in connection_test.py.
@@ -55,6 +58,11 @@ ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
 
 ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
+
+ABSL_FLAG(bool, migrate_connections, true,
+          "When enabled, Dragonfly will try to migrate connections to the target thread on which "
+          "they operate. Currently this is only supported for Lua script invocations, and can "
+          "happen at most once per connection.");
 
 using namespace util;
 using nonstd::make_unexpected;
@@ -91,13 +99,17 @@ bool MatchHttp11Line(string_view line) {
 }
 
 constexpr size_t kMinReadSize = 256;
-constexpr size_t kMaxDispatchQMemory = 5_MB;
 
 thread_local uint32_t free_req_release_weight = 0;
 
 }  // namespace
 
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
+thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
+
+void Connection::QueueBackpressure::EnsureBelowLimit() {
+  ec.await([this] { return bytes.load(memory_order_relaxed) <= limit; });
+}
 
 struct Connection::Shutdown {
   absl::flat_hash_map<ShutdownHandle, ShutdownCb> map;
@@ -135,6 +147,7 @@ struct Connection::DispatchOperations {
   void operator()(Connection::PipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
+  void operator()(const MigrationRequestMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -152,8 +165,9 @@ void Connection::PipelineMessage::SetArgs(const RespVec& args) {
     size_t s = buf.size();
     if (s)
       memcpy(next, buf.data(), s);
+    next[s] = '\0';
     this->args[i] = MutableSlice(next, s);
-    next += s;
+    next += (s + 1);
   }
 }
 
@@ -199,8 +213,12 @@ size_t Connection::MessageHandle::UsedMemory() const {
   auto acl_update_size = [](const AclUpdateMessage& msg) -> size_t {
     return sizeof(AclUpdateMessage);
   };
-  return sizeof(MessageHandle) +
-         visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size}, this->handle);
+  auto migration_request_size = [](const MigrationRequestMessage& msg) -> size_t {
+    return sizeof(MigrationRequestMessage);
+  };
+  return sizeof(MessageHandle) + visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size,
+                                                  migration_request_size},
+                                       this->handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -226,7 +244,6 @@ void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  ++stats->async_writes_cnt;
   unsigned i = 0;
   array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
@@ -248,6 +265,10 @@ void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg
 
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
   self->last_interaction_ = time(nullptr);
+}
+
+void Connection::DispatchOperations::operator()(const MigrationRequestMessage& msg) {
+  // no-op
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -272,9 +293,27 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   creation_time_ = time(nullptr);
   last_interaction_ = creation_time_;
   id_ = next_id.fetch_add(1, memory_order_relaxed);
+
+  queue_backpressure_ = &tl_queue_backpressure_;
+  if (queue_backpressure_->limit == 0) {
+    queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
+  }
+
+  migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
+
+#ifdef DFLY_USE_SSL
+  // Increment reference counter so Listener won't free the context while we're
+  // still using it.
+  if (ctx) {
+    SSL_CTX_up_ref(ctx);
+  }
+#endif
 }
 
 Connection::~Connection() {
+#ifdef DFLY_USE_SSL
+  SSL_CTX_free(ctx_);
+#endif
 }
 
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
@@ -290,19 +329,19 @@ void Connection::OnShutdown() {
 
 void Connection::OnPreMigrateThread() {
   // If we migrating to another io_uring we should cancel any pending requests we have.
-  if (break_poll_id_ != UINT32_MAX) {
-    socket_->CancelPoll(break_poll_id_);
-    break_poll_id_ = UINT32_MAX;
+  if (break_cb_engaged_) {
+    socket_->CancelOnErrorCb();
+    break_cb_engaged_ = false;
   }
 }
 
 void Connection::OnPostMigrateThread() {
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_) {
-    DCHECK_EQ(UINT32_MAX, break_poll_id_);
+    DCHECK(!break_cb_engaged_);
 
-    break_poll_id_ =
-        socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+    socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
+    break_cb_engaged_ = true;
   }
 }
 
@@ -324,12 +363,13 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 void Connection::HandleRequests() {
   ThisFiber::SetName("DflyConnection");
 
-  if (absl::GetFlag(FLAGS_tcp_nodelay)) {
+  if (absl::GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
     int val = 1;
-    CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)));
+    int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+    DCHECK_EQ(res, 0);
   }
 
-  auto remote_ep = socket_->RemoteEndpoint();
+  auto remote_ep = RemoteEndpointStr();
 
   FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
@@ -369,14 +409,14 @@ void Connection::HandleRequests() {
     } else {
       cc_.reset(service_->CreateContext(peer, this));
       if (breaker_cb_) {
-        break_poll_id_ =
-            socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+        socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
+        break_cb_engaged_ = true;
       }
 
       ConnectionFlow(peer);
 
-      if (break_poll_id_ != UINT32_MAX) {
-        socket_->CancelPoll(break_poll_id_);
+      if (break_cb_engaged_) {
+        socket_->CancelOnErrorCb();
       }
 
       cc_.reset();
@@ -390,18 +430,13 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-std::string Connection::LocalBindAddress() const {
-  auto le = socket_->LocalEndpoint();
-  return le.address().to_string();
-}
-
 std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() const {
   CHECK(service_ && socket_);
   CHECK_LT(unsigned(phase_), NUM_PHASES);
 
   string before;
-  auto le = socket_->LocalEndpoint();
-  auto re = socket_->RemoteEndpoint();
+  auto le = LocalBindStr();
+  auto re = RemoteEndpointStr();
   time_t now = time(nullptr);
 
   int cpu = 0;
@@ -417,8 +452,7 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
   static_assert(PHASE_NAMES[PROCESS] == "process");
 
-  absl::StrAppend(&before, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
-  absl::StrAppend(&before, " laddr=", le.address().to_string(), ":", le.port());
+  absl::StrAppend(&before, "id=", id_, " addr=", re, " laddr=", le);
   absl::StrAppend(&before, " fd=", socket_->native_handle(), " name=", name_);
 
   string after;
@@ -736,15 +770,41 @@ void Connection::OnBreakCb(int32_t mask) {
   VLOG(1) << "Got event " << mask;
 
   if (!cc_) {
-    LOG(ERROR) << "Unexpected event " << mask << " " << break_poll_id_;
+    LOG(ERROR) << "Unexpected event " << mask;
     return;
   }
 
   cc_->conn_closing = true;
-  break_poll_id_ = UINT32_MAX;  // do not attempt to cancel it.
+  break_cb_engaged_ = false;  // do not attempt to cancel it.
 
   breaker_cb_(mask);
   evc_.notify();  // Notify dispatch fiber.
+}
+
+void Connection::HandleMigrateRequest() {
+  if (!migration_request_) {
+    return;
+  }
+
+  ProactorBase* dest = migration_request_;
+
+  if (dispatch_fb_.IsJoinable()) {
+    SendAsync({MigrationRequestMessage{}});
+    dispatch_fb_.Join();
+  }
+
+  // We don't support migrating with subscriptions as it would require moving thread local
+  // handles. We can't check above, as the queue might have contained a subscribe request.
+  if (cc_->subscriptions == 0) {
+    migration_request_ = nullptr;
+    this->Migrate(dest);
+
+    // We're now running in `dest` thread
+    queue_backpressure_ = &tl_queue_backpressure_;
+  }
+
+  // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
+  LaunchDispatchFiberIfNeeded();
 }
 
 auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_builder)
@@ -756,6 +816,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
   do {
     FetchBuilderStats(stats_, orig_builder);
+
+    HandleMigrateRequest();
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     DCHECK(!append_buf.empty());
@@ -837,6 +899,31 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   return parse_status;
 }
 
+bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
+  if (!holds_alternative<MigrationRequestMessage>(msg.handle)) {
+    return false;
+  }
+
+  if (dispatch_q_.empty()) {
+    // Migration requests means we should terminate this function (and allow the fiber to
+    // join), so that we can re-launch the fiber in the new thread.
+    // We intentionally return and not break in order to keep the connection open.
+    return true;
+  }
+
+  // There shouldn't be any other migration requests in the queue, but it's worth checking
+  // as otherwise it would lead to an endless loop.
+  bool has_migration_req =
+      any_of(dispatch_q_.begin(), dispatch_q_.end(), [](const MessageHandle& msg) {
+        return holds_alternative<MigrationRequestMessage>(msg.handle);
+      });
+  if (!has_migration_req) {
+    SendAsync({MigrationRequestMessage{}});
+  }
+
+  return false;
+}
+
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
 // into the dispatch queue and DispatchFiber will run those commands asynchronously with
@@ -847,8 +934,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
-  uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
 
+  uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
@@ -868,19 +955,23 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     uint64_t cur_epoch = fb2::FiberSwitchEpoch();
     if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
       ThisFiber::Yield();
-      DVLOG(1) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
+      DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
     }
     prev_epoch = cur_epoch;
     builder->SetBatchMode(dispatch_q_.size() > 1);
 
     auto recycle = [this, request_cache_limit](MessageHandle msg) {
-      dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
+      size_t used_mem = msg.UsedMemory();
+      queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
+
+      stats_->dispatch_queue_bytes -= used_mem;
+      stats_->dispatch_queue_entries--;
 
       // Retain pipeline message in pool.
       if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
         dispatch_q_cmds_count_--;
-        if (stats_->pipeline_cache_capacity < request_cache_limit) {
-          stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
+        if (stats_->pipeline_cmd_cache_bytes < request_cache_limit) {
+          stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
           pipeline_req_pool_.push_back(move(*pipe));
         }
       }
@@ -923,6 +1014,11 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
+      if (ShouldEndDispatchFiber(msg)) {
+        recycle(move(msg));
+        return;
+      }
+
       cc_->async_dispatch = true;
       std::visit(dispatch_op, msg.handle);
       cc_->async_dispatch = false;
@@ -930,7 +1026,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       recycle(move(msg));
     }
 
-    evc_bp_.notify();
+    queue_backpressure_->ec.notify();
   }
 
   cc_->conn_closing = true;
@@ -944,7 +1040,7 @@ Connection::PipelineMessagePtr Connection::FromArgs(RespVec args, mi_heap_t* hea
   size_t backed_sz = 0;
   for (const auto& arg : args) {
     CHECK_EQ(RespExpr::STRING, arg.type);
-    backed_sz += arg.GetBuf().size();
+    backed_sz += arg.GetBuf().size() + 1;  // for '\0'
   }
   DCHECK(backed_sz);
 
@@ -977,7 +1073,7 @@ void Connection::ShrinkPipelinePool() {
 
   if (free_req_release_weight > stats_->num_conns) {
     free_req_release_weight = 0;
-    stats_->pipeline_cache_capacity -= pipeline_req_pool_.back()->StorageCapacity();
+    stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
     pipeline_req_pool_.pop_back();
   }
 }
@@ -988,7 +1084,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
 
   free_req_release_weight = 0;  // Reset the release weight.
   auto ptr = move(pipeline_req_pool_.back());
-  stats_->pipeline_cache_capacity -= ptr->StorageCapacity();
+  stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
   pipeline_req_pool_.pop_back();
   return ptr;
 }
@@ -1030,6 +1126,13 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({std::move(msg)});
 }
 
+void Connection::LaunchDispatchFiberIfNeeded() {
+  if (!dispatch_fb_.IsJoinable()) {
+    dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
+                              [&, peer = socket_.get()]() { DispatchFiber(peer); });
+  }
+}
+
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(owner());
@@ -1038,12 +1141,7 @@ void Connection::SendAsync(MessageHandle msg) {
   if (cc_->conn_closing)
     return;
 
-  if (!dispatch_fb_.IsJoinable()) {
-    DCHECK_EQ(dispatch_q_.size(), 0u);
-    auto* peer = socket_.get();
-    dispatch_fb_ =
-        fb2::Fiber(dfly::Launch::post, "connection_dispatch", [&] { DispatchFiber(peer); });
-  }
+  LaunchDispatchFiberIfNeeded();
 
   auto place_in_dispatch_q = [this](MessageHandle msg) {
     auto it = dispatch_q_.begin();
@@ -1053,12 +1151,16 @@ void Connection::SendAsync(MessageHandle msg) {
     dispatch_q_.insert(it, std::move(msg));
   };
 
-  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+  size_t used_mem = msg.UsedMemory();
+  queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
+
+  stats_->dispatch_queue_entries++;
+  stats_->dispatch_queue_bytes += used_mem;
+
   if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
     // We need to reorder the queue, since multiple updates might happen before we
     // pop the message, invalidating the correct order since we always push at the front
     place_in_dispatch_q(std::move(msg));
-
   } else {
     dispatch_q_.push_back(std::move(msg));
   }
@@ -1073,26 +1175,53 @@ void Connection::SendAsync(MessageHandle msg) {
 }
 
 void Connection::EnsureAsyncMemoryBudget() {
-  evc_bp_.await(
-      [this] { return dispatch_q_bytes_.load(memory_order_relaxed) <= kMaxDispatchQMemory; });
+  queue_backpressure_->EnsureBelowLimit();
+}
+
+std::string Connection::LocalBindStr() const {
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
+
+  auto le = socket_->LocalEndpoint();
+  return absl::StrCat(le.address().to_string(), ":", le.port());
+}
+
+std::string Connection::LocalBindAddress() const {
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
+
+  auto le = socket_->LocalEndpoint();
+  return le.address().to_string();
 }
 
 std::string Connection::RemoteEndpointStr() const {
-  const bool unix_socket = socket_->IsUDS();
-  std::string connection_str = unix_socket ? "unix:" : std::string{};
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
 
   auto re = socket_->RemoteEndpoint();
-  absl::StrAppend(&connection_str, re.address().to_string(), ":", re.port());
-  return connection_str;
+  return absl::StrCat(re.address().to_string(), ":", re.port());
 }
 
 std::string Connection::RemoteEndpointAddress() const {
+  if (socket_->IsUDS())
+    return "unix-domain-socket";
+
   auto re = socket_->RemoteEndpoint();
   return re.address().to_string();
 }
 
 facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
+}
+
+void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
+  if (!migration_enabled_ || cc_ == nullptr) {
+    return;
+  }
+
+  // Connections can migrate at most once.
+  migration_enabled_ = false;
+  migration_request_ = dest;
 }
 
 }  // namespace facade

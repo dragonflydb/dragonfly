@@ -1,7 +1,26 @@
-/var/log/dragonfly/dragonfly* {
-        weekly
+# installed by debhelper by convention into /etc/logrotate.d/
+
+/var/log/dragonfly/dragonfly*.log {
+        daily
         missingok
-        rotate 12
+
         compress
+        compresscmd zstd
+        uncompresscmd unzstd
+        compressext .zst
         notifempty
+
+# do not create an empty file after the rotation.
+        nocreate
+        prerotate
+                if lsof -t $1 > /dev/null; then
+                # file is open. Skipping rotation."
+                exit 1
+                fi
+        endscript
+
+# Possible hook to upload rotated logs to cloud storage.
+        postrotate
+                echo "TBD: POSTROTATE"
+        endscript
 }

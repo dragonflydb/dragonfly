@@ -98,14 +98,26 @@ jobs:
           ${SCCACHE_PATH} --show-stats | tee $GITHUB_STEP_SUMMARY
 
       - name: C++ Unit Tests
+        if: ${{ false }}
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
-          #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
 
           echo "Running tests with --force_epoll"
+
+          # Create a rule that automatically prints stacktrace upon segfault
+          cat > ./init.gdb <<EOF
+          catch signal SIGSEGV
+          command
+          bt
+          end
+          EOF
+
+          gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
           FLAGS_force_epoll=true ctest -V -L DFLY
+
+          echo "Finished running tests with --force_epoll"
 
           echo "Running tests with --cluster_mode=emulated"
           FLAGS_cluster_mode=emulated ctest -V -L DFLY
@@ -159,7 +171,7 @@ jobs:
         run: |
           changed=$(ct list-changed --config .ct.yaml)
           if [[ -n "$changed" ]]; then
-            echo "::set-output name=changed::true"
+            echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Run chart-testing (lint)

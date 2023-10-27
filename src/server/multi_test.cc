@@ -511,9 +511,9 @@ TEST_F(MultiTest, MultiOOO) {
   // OOO works in LOCK_AHEAD mode.
   int mode = absl::GetFlag(FLAGS_multi_exec_mode);
   if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
-    EXPECT_EQ(200, metrics.ooo_tx_transaction_cnt);
+    EXPECT_EQ(200, metrics.coordinator_stats.ooo_tx_cnt);
   else
-    EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
+    EXPECT_EQ(0, metrics.coordinator_stats.ooo_tx_cnt);
 }
 
 // Lua scripts lock their keys ahead and thus can run out of order.
@@ -548,8 +548,9 @@ TEST_F(MultiTest, EvalOOO) {
   }
 
   auto metrics = GetMetrics();
-  EXPECT_EQ(1 + 2 * kTimes,
-            metrics.eval_io_coordination_cnt + metrics.eval_shardlocal_coordination_cnt);
+  auto sum = metrics.coordinator_stats.eval_io_coordination_cnt +
+             metrics.coordinator_stats.eval_shardlocal_coordination_cnt;
+  EXPECT_EQ(1 + 2 * kTimes, sum);
 }
 
 // Run MULTI/EXEC commands in parallel, where each command is:
@@ -619,7 +620,7 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   Run({"set", "a", "1"});  // won't run ooo, because it became part of global
   Run({"move", "a", "1"});
   Run({"exec"});
-  EXPECT_EQ(0, GetMetrics().ooo_tx_transaction_cnt);
+  EXPECT_EQ(0, GetMetrics().coordinator_stats.ooo_tx_cnt);
 
   // Check non atomic mode does not fall back to global.
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
@@ -875,6 +876,19 @@ TEST_F(MultiTest, TestLockedKeys) {
   EXPECT_FALSE(service_->IsLocked(0, "key2"));
 }
 
+TEST_F(MultiTest, EvalExpiration) {
+  // Make sure expiration is correctly set even from Lua scripts
+  if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
+    GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
+    return;
+  }
+
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
+  Run({"eval", "redis.call('set', 'x', 0, 'ex', 5, 'nx')", "1", "x"});
+  EXPECT_LE(CheckedInt({"pttl", "x"}), 5000);
+}
+
 class MultiEvalTest : public BaseFamilyTest {
  protected:
   MultiEvalTest() : BaseFamilyTest() {
@@ -947,6 +961,15 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
 
   EXPECT_THAT(Run({"EVAL", s, "1", "A"}), ErrArg("unknown command `SECOND WRONG`"));
   EXPECT_EQ(Run({"get", "A"}), "2");
+}
+
+TEST_F(MultiEvalTest, MultiAndEval) {
+  // We had a bug in borrowing interpreters which caused a crash in this scenario
+  Run({"multi"});
+  Run({"eval", "return redis.call('set', 'x', 'y1')", "1", "x"});
+  Run({"exec"});
+
+  Run({"eval", "return redis.call('set', 'x', 'y1')", "1", "x"});
 }
 
 }  // namespace dfly

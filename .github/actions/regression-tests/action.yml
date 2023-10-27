@@ -26,6 +26,7 @@ runs:
   # timeout-minutes: 20
   steps:
     - name: Run PyTests
+      id: first
       shell: bash
       run: |
         ls -l ${GITHUB_WORKSPACE}/
@@ -36,9 +37,10 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO
+        timeout 20m pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?; if [[ $code -ne 0 ]]; then echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"; exit 1; fi
 
     - name: Run PyTests replication test
+      id: second
       if: ${{ inputs.run-only-on-ubuntu-latest == 'true' || (inputs.run-only-on-ubuntu-latest == 'false' && matrix.runner == 'ubuntu-latest') }}
       shell: bash
       run: |
@@ -47,8 +49,25 @@ runs:
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
-        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
-        pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep2_report.json dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
+        run_pytest_with_args() {
+          timeout 20m pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO --df alsologtostderr $1 $2 || code=$?; if [[ $code -ne 0 ]]; then echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"; exit 1; fi
+        }
+
+        (run_pytest_with_args --df enable_multi_shard_sync=true)
+        (run_pytest_with_args --df enable_multi_shard_sync=false)
+
+    - name: Print last log on timeout
+      if: failure()
+      shell: bash
+      env:
+        TIMEDOUT_STEP_1: ${{ steps.first.outputs.TIMEDOUT }}
+        TIMEDOUT_STEP_2: ${{ steps.second.outputs.TIMEDOUT }}
+      run: |
+        if [[ "${{ env.TIMEDOUT_STEP_1 }}" -eq 1 ]] || [[ "${{ env.TIMEDOUT_STEP_2 }}" -eq 1 ]]; then
+          echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout 🪵🪵🪵🪵🪵🪵\n\n"
+          ls -t /tmp/dragonfly*log*INFO* | head -n 1 | xargs cat
+          echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout end 🪵🪵🪵🪵🪵🪵\n\n"
+        fi
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'

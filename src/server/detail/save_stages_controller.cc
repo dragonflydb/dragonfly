@@ -118,6 +118,10 @@ error_code RdbSnapshot::SaveBody() {
   return saver_->SaveBody(&cntx_, &freq_map_);
 }
 
+size_t RdbSnapshot::GetSaveBuffersSize() {
+  return saver_->GetTotalBuffersSize();
+}
+
 error_code RdbSnapshot::Close() {
   if (is_linux_file_) {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
@@ -156,7 +160,17 @@ GenericError SaveStagesController::Save() {
     SaveRdb();
 
   is_saving_->store(true, memory_order_relaxed);
+  {
+    lock_guard lk{*save_mu_};
+    *save_bytes_cb_ = [this]() { return GetSaveBuffersSize(); };
+  }
+
   RunStage(&SaveStagesController::SaveCb);
+  {
+    lock_guard lk{*save_mu_};
+    *save_bytes_cb_ = nullptr;
+  }
+
   is_saving_->store(false, memory_order_relaxed);
 
   RunStage(&SaveStagesController::CloseCb);
@@ -167,6 +181,22 @@ GenericError SaveStagesController::Save() {
     UpdateSaveInfo();
 
   return *shared_err_;
+}
+
+size_t SaveStagesController::GetSaveBuffersSize() {
+  std::atomic<size_t> total_bytes{0};
+  if (use_dfs_format_) {
+    auto cb = [this, &total_bytes](ShardId sid) {
+      total_bytes.fetch_add(snapshots_[sid].first->GetSaveBuffersSize(), memory_order_relaxed);
+    };
+    shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+
+  } else {
+    // When rdb format save is running, there is only one rdb saver instance, it is running on the
+    // connection thread that runs the save command.
+    total_bytes.store(snapshots_.front().first->GetSaveBuffersSize(), memory_order_relaxed);
+  }
+  return total_bytes.load(memory_order_relaxed);
 }
 
 // In the new version (.dfs) we store a file for every shard and one more summary file.
@@ -258,14 +288,6 @@ void SaveStagesController::UpdateSaveInfo() {
 }
 
 GenericError SaveStagesController::InitResources() {
-  if (is_cloud_ && !aws_) {
-    *aws_ = make_unique<cloud::AWS>("s3");
-    if (auto ec = aws_->get()->Init(); ec) {
-      aws_->reset();
-      return {ec, "Couldn't initialize AWS"};
-    }
-  }
-
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
     snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());

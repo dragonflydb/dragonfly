@@ -14,7 +14,6 @@ jobs:
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -29,7 +28,7 @@ jobs:
       - name: Configure & Build
         run: |
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
-                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON
 
           cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
           pwd
@@ -42,3 +41,10 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           run-only-on-ubuntu-latest: false
           build-folder-name: build
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: logs
+          path: /tmp/dragonfly.*

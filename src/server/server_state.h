@@ -13,6 +13,7 @@
 #include "server/acl/user_registry.h"
 #include "server/common.h"
 #include "server/script_mgr.h"
+#include "server/slowlog.h"
 #include "util/sliding_counter.h"
 
 typedef struct mi_heap_s mi_heap_t;
@@ -98,6 +99,8 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t eval_squashed_flushes = 0;
 
     uint64_t tx_schedule_cancel_cnt = 0;
+
+    Stats& operator+=(const Stats& other);
   };
 
   static ServerState* tlocal() {
@@ -209,6 +212,7 @@ class ServerState {  // public struct - to allow initialization.
 
   bool is_master = true;
   std::string remote_client_id_;  // for cluster support
+  uint32_t log_slower_than_usec = UINT32_MAX;
 
   facade::ConnectionStats connection_stats;
 
@@ -216,8 +220,13 @@ class ServerState {  // public struct - to allow initialization.
 
   acl::AclLog acl_log;
 
+  SlowLogShard& GetSlowLog() {
+    return slow_log_shard_;
+  };
+
  private:
   int64_t live_transactions_ = 0;
+  SlowLogShard slow_log_shard_;
   mi_heap_t* data_heap_;
   journal::Journal* journal_ = nullptr;
 

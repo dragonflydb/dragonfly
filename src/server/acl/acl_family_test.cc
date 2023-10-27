@@ -90,10 +90,10 @@ TEST_F(AclFamilyTest, AclAuth) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"AUTH", "shahar", "wrongpass"});
-  EXPECT_THAT(resp, ErrArg("ERR Could not authorize user: shahar"));
+  EXPECT_THAT(resp, ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
 
   resp = Run({"AUTH", "shahar", "mypass"});
-  EXPECT_THAT(resp, ErrArg("ERR Could not authorize user: shahar"));
+  EXPECT_THAT(resp, ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
 
   // Activate the user
   resp = Run({"ACL", "SETUSER", "shahar", "ON", "+@fast"});
@@ -273,6 +273,52 @@ TEST_F(AclFamilyTest, TestDryRun) {
 
   resp = Run({"ACL", "DRYRUN", "kostas", "SET"});
   EXPECT_THAT(resp, ErrArg("ERR User: kostas is not allowed to execute command: SET"));
+}
+
+TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
+  TestInitAclFam();
+
+  auto resp = Run({"ACL", "GENPASS", "1", "2"});
+  EXPECT_THAT(resp.GetString(),
+              "ERR Unknown subcommand or wrong number of arguments for 'GENPASS'. Try ACL HELP.");
+}
+
+TEST_F(AclFamilyTest, AclGenPassOutOfRange) {
+  std::string expectedError =
+      "ERR ACL GENPASS argument must be the number of bits for the output password, a positive "
+      "number up to 4096";
+
+  auto resp = Run({"ACL", "GENPASS", "-1"});
+  EXPECT_THAT(resp.GetString(), expectedError);
+
+  resp = Run({"ACL", "GENPASS", "0"});
+  EXPECT_THAT(resp.GetString(), expectedError);
+
+  resp = Run({"ACL", "GENPASS", "4097"});
+  EXPECT_THAT(resp.GetString(), expectedError);
+}
+
+TEST_F(AclFamilyTest, AclGenPass) {
+  auto resp = Run({"ACL", "GENPASS"});
+  auto actualPassword = resp.GetString();
+
+  // should be 256 bits or 64 bytes in hex
+  EXPECT_THAT(actualPassword.length(), 64);
+
+  // 1 bit - 4 bits should all produce a single hex character
+  for (int i = 1; i <= 4; i++) {
+    resp = Run({"ACL", "GENPASS", std::to_string(i)});
+    EXPECT_THAT(resp.GetString().length(), 1);
+  }
+  // 5 bits - 8 bits should all produce two hex characters
+  for (int i = 5; i <= 8; i++) {
+    resp = Run({"ACL", "GENPASS", std::to_string(i)});
+    EXPECT_THAT(resp.GetString().length(), 2);
+  }
+
+  // and the pattern continues
+  resp = Run({"ACL", "GENPASS", "9"});
+  EXPECT_THAT(resp.GetString().length(), 3);
 }
 
 }  // namespace dfly

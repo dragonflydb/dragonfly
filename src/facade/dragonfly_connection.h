@@ -85,6 +85,8 @@ class Connection : public util::Connection {
     std::vector<std::vector<uint64_t>> commands;
   };
 
+  struct MigrationRequestMessage {};
+
   struct PipelineMessage {
     PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
@@ -117,7 +119,9 @@ class Connection : public util::Connection {
 
     bool IsPipelineMsg() const;
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage> handle;
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage,
+                 MigrationRequestMessage>
+        handle;
   };
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, NUM_PHASES };
@@ -133,7 +137,7 @@ class Connection : public util::Connection {
   // Add acl update to dispatch queue.
   void SendAclUpdateAsync(AclUpdateMessage msg);
 
-  // Must be called before Send_Async to ensure the connection dispatch queue is not overfilled.
+  // Must be called before SendAsync to ensure the connection dispatch queue is not overfilled.
   // Blocks until free space is available.
   void EnsureAsyncMemoryBudget();
 
@@ -157,13 +161,16 @@ class Connection : public util::Connection {
 
   std::string GetClientInfo(unsigned thread_id) const;
   std::string GetClientInfo() const;
-  std::string RemoteEndpointStr() const;
+
+  virtual std::string RemoteEndpointStr() const;  // virtual because overwritten in test_utils
   std::string RemoteEndpointAddress() const;
+
+  std::string LocalBindStr() const;
   std::string LocalBindAddress() const;
 
   uint32_t GetClientId() const;
-  // Virtual because behavior is overridden in test_utils.
-  virtual bool IsPrivileged() const;
+
+  virtual bool IsPrivileged() const;  // virtual because overwritten in test_utils
 
   bool IsMain() const;
 
@@ -182,6 +189,10 @@ class Connection : public util::Connection {
 
   ConnectionContext* cntx();
 
+  // Requests that at some point, this connection will be migrated to `dest` thread.
+  // Connections will migrate at most once, and only when the flag --migrate_connections is true.
+  void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
@@ -193,6 +204,18 @@ class Connection : public util::Connection {
   struct DispatchOperations;
   struct DispatchCleanup;
   struct Shutdown;
+
+  // Keeps track of total per-thread sizes of dispatch queues to
+  // limit memory taken up by pipelined / pubsub commands and slow down clients
+  // producing them to quickly via EnsureAsyncMemoryBudget.
+  struct QueueBackpressure {
+    // Block until memory usage is below limit, can be called from any thread
+    void EnsureBelowLimit();
+
+    dfly::EventCount ec;
+    std::atomic_size_t bytes = 0;
+    size_t limit = 0;
+  };
 
  private:
   // Check protocol and handle connection.
@@ -230,15 +253,18 @@ class Connection : public util::Connection {
   // Returns non-null request ptr if pool has vacant entries.
   PipelineMessagePtr GetFromPipelinePool();
 
+  void HandleMigrateRequest();
+  bool ShouldEndDispatchFiber(const MessageHandle& msg);
+
+  void LaunchDispatchFiberIfNeeded();
+
  private:
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
-  std::atomic_uint64_t dispatch_q_bytes_ = 0;  // memory usage of all entries
-  dfly::EventCount evc_bp_;                    // backpressure for memory limit
-  size_t dispatch_q_cmds_count_;               // how many queued async commands
+  size_t dispatch_q_cmds_count_;  // how many queued async commands
 
   base::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
@@ -263,7 +289,7 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;
 
   unsigned parser_error_ = 0;
-  uint32_t break_poll_id_ = UINT32_MAX;
+  bool break_cb_engaged_ = false;
 
   BreakerCb breaker_cb_;
   std::unique_ptr<Shutdown> shutdown_cb_;
@@ -271,10 +297,20 @@ class Connection : public util::Connection {
   RespVec tmp_parse_args_;
   CmdArgVec tmp_cmd_vec_;
 
-  // Pooled pipieline messages per-thread.
-  // Aggregated while handling pipelines,
-  // graudally released while handling regular commands.
+  // Pointer to corresponding queue backpressure struct.
+  // Needed for access from different threads by EnsureAsyncMemoryBudget().
+  QueueBackpressure* queue_backpressure_;
+
+  // Connection migration vars, see RequestAsyncMigration() above.
+  bool migration_enabled_;
+  util::fb2::ProactorBase* migration_request_ = nullptr;
+
+  // Pooled pipeline messages per-thread
+  // Aggregated while handling pipelines, gradually released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
+
+  // Per-thread queue backpressure structs.
+  static thread_local QueueBackpressure tl_queue_backpressure_;
 };
 
 }  // namespace facade

@@ -4,10 +4,11 @@ cxx_link(dragonfly base dragonfly_lib)
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
   # can cause SIGILL.
-  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2 COMPILE_DEFINITIONS
-                              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
+  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2)
 endif()
 
+set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
+             SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc)
@@ -18,10 +19,8 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
-            ${TX_LINUX_SRCS} acl/acl_log.cc
+            ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc
             )
-cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
-
 
 if (NOT APPLE)
   SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc)
@@ -43,10 +42,17 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.
             cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)
 
+cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
+
+option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
+
+if (PRINT_STACKTRACES_ON_SIGNAL)
+  target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
+endif()
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
 
-cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
+cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
          TRDP::croncpp)
 
@@ -63,6 +69,7 @@ cxx_test(multi_test dfly_test_lib LABELS DFLY)
 cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
 cxx_test(hset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(list_family_test dfly_test_lib LABELS DFLY)
+cxx_test(server_family_test dfly_test_lib LABELS DFLY)
 cxx_test(set_family_test dfly_test_lib LABELS DFLY)
 cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
@@ -81,6 +88,7 @@ cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
+cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 
 
 

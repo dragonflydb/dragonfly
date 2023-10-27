@@ -43,6 +43,7 @@ JournalExecutor::JournalExecutor(Service* service)
       conn_context_{nullptr, nullptr, &reply_builder_} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
+  conn_context_.skip_acl_validation = true;
 }
 
 JournalExecutor::~JournalExecutor() {

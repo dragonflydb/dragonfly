@@ -346,10 +346,10 @@ async def test_index_persistence(df_server):
 
     # Build two indices and fill them with data
 
-    SCHEMA_1 = [TextField("title"), NumericField("views"), TagField("topic")]
+    SCHEMA_1 = [TextField("title"), NumericField("views", sortable=True), TagField("topic")]
     SCHEMA_2 = [
         TextField("name"),
-        NumericField("age"),
+        NumericField("age", sortable=True),
         TagField("job"),
         VectorField(
             "pos",
@@ -431,5 +431,92 @@ async def test_index_persistence(df_server):
     assert (await i2.search("@job:{writer}")).total == 100
     assert (await i2.search("@job:{writer} @age:[100 200]")).total == 50
 
+    # Check fields are sortable
+    assert (await i1.search(Query("*").sort_by("views", asc=True).paging(0, 1))).docs[0][
+        "id"
+    ] == "blog-0"
+    assert (await i2.search(Query("*").sort_by("age", asc=False).paging(0, 1))).docs[0][
+        "age"
+    ] == "199"
+
     await i1.dropindex()
     await i2.dropindex()
+
+
+@dfly_args({"proactor_threads": 4})
+def test_redis_om(df_server):
+    try:
+        import redis_om
+    except ModuleNotFoundError:
+        pytest.skip("Redis-om not installed")
+
+    client = redis.Redis(port=df_server.port)
+
+    class TestCar(redis_om.HashModel):
+        producer: str = redis_om.Field(index=True)
+        description: str = redis_om.Field(index=True, full_text_search=True)
+        speed: int = redis_om.Field(index=True, sortable=True)
+
+        class Meta:
+            database = client
+
+    def extract_producers(testset):
+        return sorted([car.producer for car in testset])
+
+    def make_car(producer, description, speed):
+        return TestCar(producer=producer, description=description, speed=speed)
+
+    CARS = [
+        make_car("BMW", "Very fast and elegant", 200),
+        make_car("Audi", "Fast & stylish", 170),
+        make_car("Mercedes", "High class but expensive!", 150),
+        make_car("Honda", "Good allrounder with flashy looks", 120),
+        make_car("Peugeot", "Good allrounder for the whole family", 100),
+        make_car("Mini", "Fashinable cooper for the big city", 80),
+        make_car("John Deere", "It's not a car, it's a tractor in fact!", 50),
+    ]
+
+    for car in CARS:
+        car.save()
+
+    redis_om.Migrator().run()
+
+    # Get all cars
+    assert extract_producers(TestCar.find().all()) == extract_producers(CARS)
+
+    # Get all cars of a specific producer
+    assert extract_producers(
+        TestCar.find((TestCar.producer == "Peugeot") | (TestCar.producer == "Mini"))
+    ) == ["Mini", "Peugeot"]
+
+    # Get only fast cars
+    assert extract_producers(TestCar.find(TestCar.speed >= 150).all()) == extract_producers(
+        [c for c in CARS if c.speed >= 150]
+    )
+
+    # Get only slow cars
+    assert extract_producers(TestCar.find(TestCar.speed < 100).all()) == extract_producers(
+        [c for c in CARS if c.speed < 100]
+    )
+
+    # Get all cars which are fast based on description
+    assert extract_producers(TestCar.find(TestCar.description % "fast")) == ["Audi", "BMW"]
+
+    # Get all cars which are not marked as extensive by descriptions
+    assert extract_producers(
+        TestCar.find(~(TestCar.description % "expensive")).all()
+    ) == extract_producers([c for c in CARS if c.producer != "Mercedes"])
+
+    # Get a fast allrounder
+    assert extract_producers(
+        TestCar.find((TestCar.speed >= 110) & (TestCar.description % "allrounder"))
+    ) == ["Honda"]
+
+    # What's the slowest car
+    assert extract_producers([TestCar.find().sort_by("speed").first()]) == ["John Deere"]
+
+    # What's the fastest car
+    assert extract_producers([TestCar.find().sort_by("-speed").first()]) == ["BMW"]
+
+    for index in client.execute_command("FT._LIST"):
+        client.ft(index.decode()).dropindex()

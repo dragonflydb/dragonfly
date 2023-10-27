@@ -21,13 +21,13 @@ using namespace facade;
 StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mode)
     : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
-  for (auto args : args)
-    total_size += args.size();
-
+  for (auto args : args) {
+    total_size += args.size() + 1;  // +1 for null terminator
+  }
   buffer_.resize(total_size);
   char* next = buffer_.data();
   for (unsigned i = 0; i < args.size(); i++) {
-    memcpy(next, args[i].data(), args[i].size());
+    memcpy(next, args[i].data(), args[i].size() + 1);
     sizes_[i] = args[i].size();
     next += args[i].size();
   }
@@ -75,6 +75,14 @@ size_t StoredCmd::UsedHeapMemory() const {
 
 const CommandId* StoredCmd::Cid() const {
   return cid_;
+}
+
+ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* owner)
+    : facade::ConnectionContext(stream, owner) {
+  if (owner) {
+    skip_acl_validation = owner->IsPrivileged();
+  }
+  acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
 }
 
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,

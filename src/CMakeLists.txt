@@ -7,8 +7,8 @@ endif()
 
 add_third_party(
   lua
-  URL https://github.com/lua/lua/archive/refs/tags/v5.4.4.tar.gz
-  PATCH_COMMAND patch -p1 -i "${CMAKE_SOURCE_DIR}/patches/lua-v5.4.4.patch"
+  GIT_REPOSITORY https://github.com/dragonflydb/lua
+  GIT_TAG Dragonfly-5.4.6
   CONFIGURE_COMMAND echo
   BUILD_IN_SOURCE 1
   BUILD_COMMAND ${DFLY_TOOLS_MAKE} all

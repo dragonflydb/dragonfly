@@ -52,8 +52,11 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent)
-    : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
+Transaction::Transaction(const Transaction* parent, ShardId shard_id)
+    : multi_{make_unique<MultiData>()},
+      txid_{parent->txid()},
+      unique_shard_cnt_{1},
+      unique_shard_id_{shard_id} {
   if (parent->multi_) {
     multi_->mode = parent->multi_->mode;
   } else {
@@ -235,7 +238,9 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
   // Stub transactions always operate only on single shard.
-  if ((key_index.HasSingleKey() && !IsAtomicMulti()) || (multi_ && multi_->role == SQUASHED_STUB)) {
+  bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
+
+  if ((key_index.HasSingleKey() && !IsAtomicMulti()) || is_stub) {
     DCHECK_GT(key_index.step, 0u);
     // We don't have to split the arguments by shards, so we can copy them directly.
     StoreKeysInArgs(key_index, needs_reverse_mapping);
@@ -246,7 +251,10 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     shard_data_.front().local_mask |= ACTIVE;
 
     unique_shard_cnt_ = 1;
-    unique_shard_id_ = Shard(args_.front(), shard_set->size());  // TODO: Squashed bug
+    if (is_stub)  // stub transactions don't migrate
+      DCHECK_EQ(unique_shard_id_, Shard(args_.front(), shard_set->size()));
+    else
+      unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
     return;
   }
@@ -381,7 +389,9 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_ptr_);
 
-  unique_shard_id_ = 0;
+  if (multi_->role != SQUASHED_STUB)  // stub transactions don't migrate between threads
+    unique_shard_id_ = 0;
+
   unique_shard_cnt_ = 0;
   args_.clear();
   cid_ = cid;
@@ -1452,12 +1462,10 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
 
-    if (name == "ZDIFF" && num_custom_keys == 0) {
-      return OpStatus::INVALID_INT;
-    }
-
-    if (name == "ZUNION" && num_custom_keys == 0) {
-      return OpStatus::SYNTAX_ERR;
+    if (num_custom_keys == 0 &&
+        (absl::StartsWith(name, "ZDIFF") || absl::StartsWith(name, "ZUNION") ||
+         absl::StartsWith(name, "ZINTER"))) {
+      return OpStatus::AT_LEAST_ONE_KEY;
     }
 
     if (args.size() < size_t(num_custom_keys) + num_keys_index + 1)

@@ -5,6 +5,8 @@ import glob
 import asyncio
 from redis import asyncio as aioredis
 from pathlib import Path
+import boto3
+import logging
 
 from . import dfly_args
 from .utility import DflySeeder, wait_available_async
@@ -261,3 +263,57 @@ class TestDflyInfoPersistenceLoadingField(SnapshotTestBase):
         assert "0" == self.extract_is_loading_field(res)
 
         await a_client.connection_pool.disconnect()
+
+
+# If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
+# configured.
+@pytest.mark.skipif(
+    "DRAGONFLY_S3_BUCKET" not in os.environ, reason="AWS S3 snapshots bucket is not configured"
+)
+@dfly_args({"dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
+class TestS3Snapshot:
+    """Test a snapshot using S3 storage"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        self.tmp_dir = tmp_dir
+
+    @pytest.mark.asyncio
+    @pytest.mark.slow
+    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
+        seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
+        await seeder.run(target_deviation=0.1)
+
+        start_capture = await seeder.capture()
+
+        try:
+            # save + flush + load
+            await async_client.execute_command("SAVE DF snapshot")
+            assert await async_client.flushall()
+            await async_client.execute_command(
+                "DEBUG LOAD "
+                + os.environ["DRAGONFLY_S3_BUCKET"]
+                + str(self.tmp_dir)
+                + "/snapshot-summary.dfs"
+            )
+
+            assert await seeder.compare(start_capture, port=df_server.port)
+        finally:
+            self._delete_objects(
+                os.environ["DRAGONFLY_S3_BUCKET"],
+                str(self.tmp_dir)[1:],
+            )
+
+    def _delete_objects(self, bucket, prefix):
+        client = boto3.client("s3")
+        resp = client.list_objects_v2(
+            Bucket=bucket,
+            Prefix=prefix,
+        )
+        keys = []
+        for obj in resp["Contents"]:
+            keys.append({"Key": obj["Key"]})
+        client.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": keys},
+        )

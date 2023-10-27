@@ -7,6 +7,7 @@
 #include <absl/strings/numbers.h>
 
 #include <algorithm>
+#include <cmath>
 #include <regex>
 
 #include "base/logging.h"
@@ -15,11 +16,11 @@ using namespace std;
 
 namespace dfly::search {
 
-AstTermNode::AstTermNode(string term)
-    : term{term}, pattern{"\\b" + term + "\\b", std::regex::icase} {
+AstTermNode::AstTermNode(string term) : term{term} {
 }
 
-AstRangeNode::AstRangeNode(int64_t lo, int64_t hi) : lo{lo}, hi{hi} {
+AstRangeNode::AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl)
+    : lo{lo_excl ? nextafter(lo, hi) : lo}, hi{hi_excl ? nextafter(hi, lo) : hi} {
 }
 
 AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(move(node))} {
@@ -56,7 +57,7 @@ AstTagsNode::AstTagsNode(AstExpr&& l, std::string tag) {
   tags.push_back(move(tag));
 }
 
-AstKnnNode::AstKnnNode(size_t limit, std::string_view field, OwnedFtVector vec,
+AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
                        std::string_view score_alias)
     : filter{nullptr},
       limit{limit},

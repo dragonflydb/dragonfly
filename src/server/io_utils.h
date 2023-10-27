@@ -25,6 +25,10 @@ class BufferedStreamerBase : public io::Sink {
       : cll_{cll}, max_buffered_cnt_{max_buffered_cnt}, max_buffered_mem_{max_buffered_mem} {
   }
 
+ public:
+  size_t GetTotalBufferCapacities() const;
+
+ protected:
   // Write some data into the internal buffer.
   //
   // Consumer needs to be woken up manually with NotifyWritten to avoid waking it up for small

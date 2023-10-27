@@ -604,7 +604,6 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
   resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
 }
-
 TEST_F(StreamFamilyTest, XPending) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});
@@ -736,12 +735,285 @@ TEST_F(StreamFamilyTest, XAck) {
   EXPECT_THAT(resp, ArrLen(0));
 }
 
-TEST_F(StreamFamilyTest, XInfo) {
-  Run({"xgroup", "create", "foo", "cgroup", "0", "mkstream"});
-  auto resp = Run({"xinfo", "groups", "foo"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("name", "cgroup", "consumers", IntArg(0), "pending",
-                                          IntArg(0), "last-delivered-id", "0-0", "entries-read",
-                                          ArgType(RespExpr::NIL), "lag", IntArg(0))));
+TEST_F(StreamFamilyTest, XInfoGroups) {
+  Run({"del", "mystream"});
+  Run({"xgroup", "create", "mystream", "mygroup", "$", "MKSTREAM"});
+
+  // non-existent-stream
+  auto resp = Run({"xinfo", "groups", "non-existent-stream"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  // group with no consumers
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp, ArrLen(12));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending",
+                                         IntArg(0), "last-delivered-id", "0-0", "entries-read",
+                                         ArgType(RespExpr::NIL), "lag", IntArg(0)));
+
+  // group with multiple consumers
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "consumer1"});
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "consumer2"});
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp, ArrLen(12));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(2));
+
+  // group with lag
+  Run({"xadd", "mystream", "1-0", "test-field-1", "test-value-1"});
+  Run({"xadd", "mystream", "2-0", "test-field-2", "test-value-2"});
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp.GetVec()[11], IntArg(2));
+  EXPECT_THAT(resp.GetVec()[7], "0-0");
+
+  // group with no lag, before ack
+  Run({"xreadgroup", "group", "mygroup", "consumer1", "STREAMS", "mystream", ">"});
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("name", "mygroup", "consumers", IntArg(2), "pending", IntArg(2),
+                          "last-delivered-id", "2-0", "entries-read", IntArg(2), "lag", IntArg(0)));
+
+  // after ack
+  Run({"xack", "mystream", "mygroup", "1-0"});
+  Run({"xack", "mystream", "mygroup", "2-0"});
+  resp = Run({"xinfo", "groups", "mystream"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("name", "mygroup", "consumers", IntArg(2), "pending", IntArg(0),
+                          "last-delivered-id", "2-0", "entries-read", IntArg(2), "lag", IntArg(0)));
 }
 
+TEST_F(StreamFamilyTest, XInfoConsumers) {
+  Run({"del", "mystream"});
+  Run({"xgroup", "create", "mystream", "mygroup", "$", "MKSTREAM"});
+
+  // no consumer
+  auto resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // invalid key
+  resp = Run({"xinfo", "consumers", "non-existent-stream", "mygroup"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  // invalid group
+  resp = Run({"xinfo", "consumers", "mystream", "non-existent-group"});
+  EXPECT_THAT(resp, ErrArg("NOGROUP"));
+
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "first-consumer"});
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "second-consumer"});
+  resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], ArrLen(6));
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(6));
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[1], "first-consumer");
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[1], "second-consumer");
+
+  Run({"xadd", "mystream", "1-0", "test-field-1", "test-value-1"});
+  Run({"xreadgroup", "group", "mygroup", "consumer1", "STREAMS", "mystream", ">"});
+  resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  // pending for first-consumer
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[3], IntArg(1));
+  // pending for second-consumer
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[3], IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XAutoClaim) {
+  Run({"xadd", "foo", "1-0", "k1", "v1"});
+  Run({"xadd", "foo", "1-1", "k2", "v2"});
+  Run({"xadd", "foo", "1-2", "k3", "v3"});
+  Run({"xadd", "foo", "1-3", "k4", "v4"});
+
+  // create a group for foo stream
+  Run({"xgroup", "create", "foo", "group", "0"});
+  // alice consume all the stream entries
+  Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+
+  // bob claims alice's two pending stream entries
+  // testing the mandatory command options.
+  auto resp = Run({"xautoclaim", "foo", "group", "bob", "0", "1-2"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          "0-0",
+          RespArray(ElementsAre(RespArray(ElementsAre("1-2", RespArray(ElementsAre("k3", "v3")))),
+                                RespArray(ElementsAre("1-3", RespArray(ElementsAre("k4", "v4")))))),
+          RespArray(ElementsAre()))));
+
+  // bob really has these claimed entries
+  resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-2", RespArray(ElementsAre("k3", "v3")))),
+                             RespArray(ElementsAre("1-3", RespArray(ElementsAre("k4", "v4")))))))));
+
+  // alice no longer have those entries
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre(
+                  "foo", RespArray(ElementsAre(
+                             RespArray(ElementsAre("1-0", RespArray(ElementsAre("k1", "v1")))),
+                             RespArray(ElementsAre("1-1", RespArray(ElementsAre("k2", "v2")))))))));
+
+  // xautoclaim ensures that entries before the min-idle-time are not claimed by bob
+  resp = Run({"xautoclaim", "foo", "group", "bob", "3600000", "0-0"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("0-0", RespArray(ElementsAre()), RespArray(ElementsAre()))));
+
+  Run({"xadd", "foo", "1-4", "k5", "v5"});
+  Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+  // xautoclaim returns only claimed ids when justid is set
+  resp = Run({"xautoclaim", "foo", "group", "bob", "0", "0-0", "justid"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-0", "1-1", "1-2", "1-3", "1-4")),
+                                  RespArray(ElementsAre()))));
+
+  Run({"xadd", "foo", "1-5", "k6", "v6"});
+  Run({"xadd", "foo", "1-6", "k7", "v7"});
+  Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+  // test count and end_id
+  resp = Run({"xautoclaim", "foo", "group", "bob", "0", "1-5", "count", "1", "justid"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("1-6", RespArray(ElementsAre("1-5")), RespArray(ElementsAre()))));
+
+  resp = Run({"xautoclaim", "foo", "group", "bob", "0", "1-6", "count", "1", "justid"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-6")), RespArray(ElementsAre()))));
+
+  resp = Run({"xautoclaim", "foo", "group", "bob", "0", "1-10", "count", "1", "justid"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("0-0", RespArray(ElementsAre()), RespArray(ElementsAre()))));
+
+  // if a message being claimed is deleted, it should be listed separately.
+  Run({"xdel", "foo", "1-2", "1-4"});
+  resp = Run({"xautoclaim", "foo", "group", "alice", "0", "0-0", "justid"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-0", "1-1", "1-3", "1-5", "1-6")),
+                                  RespArray(ElementsAre("1-2", "1-4")))));
+}
+
+TEST_F(StreamFamilyTest, XInfoStream) {
+  Run({"del", "mystream"});
+  Run({"xgroup", "create", "mystream", "mygroup", "$", "MKSTREAM"});
+  Run({"xgroup", "createconsumer", "mystream", "mygroup", "first-consumer"});
+
+  // invalid key
+  auto resp = Run({"xinfo", "stream", "non-existent-stream"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
+
+  // invalid args
+  resp = Run({"xinfo", "stream", "mystream", "extra-arg"});
+  EXPECT_THAT(
+      resp,
+      ErrArg("unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP."));
+  resp = Run({"xinfo", "stream", "mystream", "full", "count"});
+  EXPECT_THAT(
+      resp,
+      ErrArg("unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP."));
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "a"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // no message in stream
+  resp = Run({"xinfo", "stream", "mystream"});
+  EXPECT_THAT(resp, ArrLen(20));
+  EXPECT_THAT(
+      resp.GetVec(),
+      ElementsAre("length", IntArg(0), "radix-tree-keys", IntArg(0), "radix-tree-nodes", IntArg(1),
+                  "last-generated-id", "0-0", "max-deleted-entry-id", "0-0", "entries-added",
+                  IntArg(0), "recorded-first-entry-id", "0-0", "groups", IntArg(1), "first-entry",
+                  ArgType(RespExpr::NIL_ARRAY), "last-entry", ArgType(RespExpr::NIL_ARRAY)));
+
+  Run({"xadd", "mystream", "1-1", "message", "one"});
+  Run({"xadd", "mystream", "2-1", "message", "two"});
+  Run({"xadd", "mystream", "3-1", "message", "three"});
+  Run({"xadd", "mystream", "4-1", "message", "four"});
+  Run({"xadd", "mystream", "5-1", "message", "five"});
+  Run({"xadd", "mystream", "6-1", "message", "six"});
+  Run({"xadd", "mystream", "7-1", "message", "seven"});
+  Run({"xadd", "mystream", "8-1", "message", "eight"});
+  Run({"xadd", "mystream", "9-1", "message", "nine"});
+  Run({"xadd", "mystream", "10-1", "message", "ten"});
+  Run({"xadd", "mystream", "11-1", "message", "eleven"});
+  resp = Run({"xinfo", "stream", "mystream"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(11), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "0-0",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "1-1", "groups",
+                          IntArg(1), "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0], "1-1");
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[1].GetVec(), ElementsAre("message", "one"));
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[0], "11-1");
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[1].GetVec(), ElementsAre("message", "eleven"));
+
+  // full - default
+  resp = Run({"xinfo", "stream", "mystream", "full"});
+  EXPECT_THAT(resp, ArrLen(18));
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(10));
+  EXPECT_THAT(resp.GetVec()[17], ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0], ArrLen(14));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(11), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "0-0",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "1-1", "entries",
+                          ArrLen(10), "groups", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
+              ElementsAre("name", "mygroup", "last-delivered-id", "0-0", "entries-read",
+                          ArgType(RespExpr::NIL), "lag", IntArg(11), "pel-count", IntArg(0),
+                          "pending", ArrLen(0), "consumers", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
+              ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
+                          "pel-count", IntArg(0), "pending", ArrLen(0)));
+
+  // full with count less than number of messages in stream
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "5"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(5));
+
+  // full with count exceeding number of messages in stream
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "12"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(11));
+
+  // full - all messages
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "0"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(11));
+
+  // read message
+  Run({"xreadgroup", "group", "mygroup", "first-consumer", "STREAMS", "mystream", ">"});
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "0"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(11));
+  // group
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[5], IntArg(11));   // entries-read
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[7], IntArg(0));    // lag
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[9], IntArg(11));   // pel-count
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[11], ArrLen(11));  // pending list
+  // consumer
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec()[5],
+              IntArg(11));  // pel-count
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec()[7],
+              ArrLen(11));  // pending list
+
+  // delete message
+  Run({"xdel", "mystream", "1-1"});
+  resp = Run({"xinfo", "stream", "mystream"});
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(10), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "1-1",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "2-1", "groups",
+                          IntArg(1), "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0], "2-1");
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[1].GetVec(), ElementsAre("message", "two"));
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[0], "11-1");
+  EXPECT_THAT(resp.GetVec()[19].GetVec()[1].GetVec(), ElementsAre("message", "eleven"));
+
+  resp = Run({"xinfo", "stream", "mystream", "full", "count", "0"});
+  EXPECT_THAT(resp.GetVec()[15], ArrLen(10));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("length", IntArg(10), "radix-tree-keys", IntArg(1), "radix-tree-nodes",
+                          IntArg(2), "last-generated-id", "11-1", "max-deleted-entry-id", "1-1",
+                          "entries-added", IntArg(11), "recorded-first-entry-id", "2-1", "entries",
+                          ArrLen(10), "groups", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
+              ElementsAre("name", "mygroup", "last-delivered-id", "11-1", "entries-read",
+                          IntArg(11), "lag", IntArg(0), "pel-count", IntArg(11), "pending",
+                          ArrLen(11), "consumers", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
+              ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
+                          "pel-count", IntArg(11), "pending", ArrLen(11)));
+}
 }  // namespace dfly

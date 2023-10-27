@@ -75,6 +75,76 @@ TEST_F(GenericFamilyTest, Expire) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+TEST_F(GenericFamilyTest, ExpireOptions) {
+  // NX and XX are mutually exclusive
+  Run({"set", "key", "val"});
+  auto resp = Run({"expire", "key", "3600", "NX", "XX"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and GT are mutually exclusive
+  resp = Run({"expire", "key", "3600", "NX", "GT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // NX and LT are mutually exclusive
+  resp = Run({"expire", "key", "3600", "NX", "LT"});
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+
+  // GT and LT are mutually exclusive
+  resp = Run({"expire", "key", "3600", "GT", "LT"});
+  ASSERT_THAT(resp, ErrArg("GT and LT options at the same time are not compatible"));
+
+  // NX option should be added since there is no expiry
+  resp = Run({"expire", "key", "3600", "NX"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"ttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 3600);
+
+  // running again with NX option, should not change expiry
+  resp = Run({"expire", "key", "42", "NX"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // given a key with no expiry
+  Run({"set", "key2", "val"});
+  resp = Run({"expire", "key2", "404", "XX"});
+  // XX does not apply expiry since key has no existing expiry
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key2"});
+  EXPECT_THAT(resp.GetInt(), -1);
+
+  // set expiry to 101
+  resp = Run({"expire", "key", "101"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // GT should not apply expiry since new is not greater than the current one
+  resp = Run({"expire", "key", "100", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101);
+
+  // GT should apply expiry since new is greater than the current one
+  resp = Run({"expire", "key", "102", "GT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"ttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 102);
+
+  // GT should not apply since expiry is smaller than current
+  resp = Run({"expire", "key", "101", "GT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 102);
+
+  // LT should apply new expiry is smaller than current
+  resp = Run({"expire", "key", "101", "LT"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"ttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101);
+
+  resp = Run({"expire", "key", "102", "LT"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"ttl", "key"});
+  EXPECT_THAT(resp.GetInt(), 101);
+}
+
 TEST_F(GenericFamilyTest, Del) {
   for (size_t i = 0; i < 1000; ++i) {
     Run({"set", StrCat("foo", i), "1"});
@@ -600,6 +670,33 @@ TEST_F(GenericFamilyTest, Info) {
   resp = Run({"del", "k3"});
   resp = Run({"info", "persistence"});
   EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+}
+
+TEST_F(GenericFamilyTest, FieldTtl) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;  // to reset to test time.
+  EXPECT_THAT(Run({"saddex", "key", "1", "val1"}), IntArg(1));
+  EXPECT_THAT(Run({"saddex", "key", "2", "val2"}), IntArg(1));
+  EXPECT_THAT(Run({"sadd", "key", "val3"}), IntArg(1));
+
+  EXPECT_EQ(-2, CheckedInt({"fieldttl", "nokey", "val1"}));  // key not found
+  EXPECT_EQ(-3, CheckedInt({"fieldttl", "key", "bar"}));     // field not found
+  EXPECT_EQ(1, CheckedInt({"fieldttl", "key", "val1"}));
+  EXPECT_EQ(2, CheckedInt({"fieldttl", "key", "val2"}));
+  EXPECT_EQ(-1, CheckedInt({"fieldttl", "key", "val3"}));
+
+  AdvanceTime(1100);
+  EXPECT_EQ(-3, CheckedInt({"fieldttl", "key", "val1"}));
+  EXPECT_EQ(1, CheckedInt({"fieldttl", "key", "val2"}));
+
+  Run({"set", "str", "val"});
+  EXPECT_THAT(Run({"fieldttl", "str", "bar"}), ErrArg("wrong"));
+
+  EXPECT_EQ(2, CheckedInt({"HSETEX", "k2", "1", "f1", "v1", "f2", "v2"}));
+  EXPECT_EQ(1, CheckedInt({"HSET", "k2", "f3", "v3"}));
+
+  EXPECT_EQ(1, CheckedInt({"fieldttl", "k2", "f1"}));
+  EXPECT_EQ(-1, CheckedInt({"fieldttl", "k2", "f3"}));
+  EXPECT_EQ(-3, CheckedInt({"fieldttl", "k2", "f4"}));
 }
 
 }  // namespace dfly

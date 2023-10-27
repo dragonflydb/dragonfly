@@ -2,6 +2,7 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include "facade/dragonfly_connection.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -33,8 +34,12 @@ void CheckConnStateClean(const ConnectionState& state) {
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, bool verify_commands, bool error_abort)
-    : cmds_{cmds}, cntx_{cntx}, service_{service}, base_cid_{nullptr},
-      verify_commands_{verify_commands}, error_abort_{error_abort} {
+    : cmds_{cmds},
+      cntx_{cntx},
+      service_{service},
+      base_cid_{nullptr},
+      verify_commands_{verify_commands},
+      error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
   base_cid_ = cntx->transaction->GetCId();
   atomic_ = mode != Transaction::NON_ATOMIC;
@@ -48,11 +53,12 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
-      sinfo.local_tx = new Transaction{cntx_->transaction};
+      sinfo.local_tx = new Transaction{cntx_->transaction, sid};
     } else {
       sinfo.local_tx = new Transaction{base_cid_};
       sinfo.local_tx->StartMultiNonAtomic();
     }
+    num_shards_++;
   }
 
   return sinfo;
@@ -95,6 +101,8 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
 
+  num_squashed_++;
+
   // Because the squashed hop is currently blocking, we cannot add more than the max channel size,
   // otherwise a deadlock occurs.
   bool need_flush = sinfo.cmds.size() >= kMaxSquashing - 1;
@@ -132,6 +140,9 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx_, local_tx, &crb};
+  if (cntx_->conn()) {
+    local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
+  }
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
   for (auto* cmd : sinfo.cmds) {
@@ -252,6 +263,9 @@ void MultiCommandSquasher::Run() {
         sd.local_tx->UnlockMulti();
     }
   }
+
+  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
+          << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
 }
 
 bool MultiCommandSquasher::IsAtomic() const {

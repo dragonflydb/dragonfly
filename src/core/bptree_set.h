@@ -420,7 +420,7 @@ bool BPTree<T, Policy>::IterateReverse(uint32_t rank_start, uint32_t rank_end,
   assert(rank_start <= rank_end && rank_end < count_);
 
   BPTreePath path;
-  ToRank(rank_end, &path);
+  ToRank(count_ - 1 - rank_start, &path);
   for (uint32_t i = rank_start; i <= rank_end; ++i) {
     if (!cb(path.Terminal()))
       return false;

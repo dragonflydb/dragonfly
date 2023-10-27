@@ -63,7 +63,7 @@ std::string MallocStats(bool backing, unsigned tid) {
   uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
   absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
   absl::StrAppend(&str, "total reserved: ", reserved, ", comitted: ", committed, ", used: ", used,
-                  "fragmentation waste: ",
+                  " fragmentation waste: ",
                   (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
 
   return str;
@@ -88,6 +88,9 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Show malloc stats for a heap residing in specified thread-id. 0 by default.",
         "    If BACKING is specified, show stats for the backing heap.",
         "USAGE <key>",
+        "    Show memory usage of a key.",
+        "DECOMMIT",
+        "    Force decommit the memory freed by the server back to OS.",
     };
     return (*cntx_)->SendSimpleStrArr(help_arr);
   };
@@ -97,13 +100,21 @@ void MemoryCmd::Run(CmdArgList args) {
     return Usage(key);
   }
 
+  if (sub_cmd == "DECOMMIT") {
+    shard_set->pool()->Await([](auto* pb) {
+      mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+      mi_heap_collect(mi_heap_get_backing(), true);
+    });
+    return (*cntx_)->SendSimpleString("OK");
+  }
+
   if (sub_cmd == "MALLOC-STATS") {
     uint32_t tid = 0;
     bool backing = false;
-    if (args.size() >= 3) {
-      ToUpper(&args[2]);
+    if (args.size() >= 2) {
+      ToUpper(&args[1]);
 
-      unsigned tid_indx = 2;
+      unsigned tid_indx = 1;
       if (ArgS(args, tid_indx) == "BACKING") {
         ++tid_indx;
         backing = true;
@@ -114,7 +125,15 @@ void MemoryCmd::Run(CmdArgList args) {
       }
     }
 
-    tid = tid % shard_set->pool()->size();
+    if (backing && tid >= shard_set->pool()->size()) {
+      return cntx_->SendError(
+          absl::StrCat("Thread id must be less than ", shard_set->pool()->size()));
+    }
+
+    if (!backing && tid >= shard_set->size()) {
+      return cntx_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
+    }
+
     string res = shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStats(backing, tid); });
 
     return (*cntx_)->SendBulkString(res);

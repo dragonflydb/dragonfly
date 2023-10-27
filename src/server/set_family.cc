@@ -305,6 +305,31 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
   }
 }
 
+// returns -3 if member is not found, -1 if no ttl is associated with this member.
+int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view member) {
+  if (st.second == kEncodingIntSet) {
+    long long llval;
+    if (!string2ll(member.data(), member.size(), &llval))
+      return -3;
+
+    return -1;
+  }
+
+  if (IsDenseEncoding(st)) {
+    StringSet* ss = (StringSet*)st.first;
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
+
+    auto it = ss->Find(member);
+    if (it == ss->end())
+      return -3;
+
+    return it.HasExpiry() ? it.ExpiryTime() : -1;
+  } else {
+    // Old encoding, does not support expiry.
+    return -1;
+  }
+}
+
 void FindInSet(StringVec& memberships, const DbContext& db_context, const SetType& st,
                const vector<string_view>& members) {
   for (const auto& member : members) {
@@ -462,7 +487,8 @@ ResultSetView DiffResultVec(const ResultStringVec& result_vec, ShardId src_shard
   return uniques;
 }
 
-OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned required_shard_cnt) {
+OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned required_shard_cnt,
+                                 unsigned limit = 0) {
   absl::flat_hash_map<std::string_view, unsigned> uniques;
 
   for (const auto& res : result_vec) {
@@ -504,6 +530,8 @@ OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned req
 
   for (const auto& k_v : uniques) {
     if (k_v.second == required_shard_cnt) {
+      if (limit != 0 && result.size() >= limit)
+        return result;
       result.push_back(k_v.first);
     }
   }
@@ -1378,6 +1406,31 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendLong(result->size());
 }
 
+void SInterCard(CmdArgList args, ConnectionContext* cntx) {
+  unsigned num_keys;
+  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
+    return (*cntx)->SendError(kSyntaxErr);
+
+  unsigned limit = 0;
+  if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
+    if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
+      return (*cntx)->SendError("limit can't be negative");
+  } else if (args.size() > (num_keys + 1))
+    return (*cntx)->SendError(kSyntaxErr);
+
+  ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    result_set[shard->shard_id()] = OpInter(t, shard, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result =
+      InterResultVec(result_set, cntx->transaction->GetUniqueShardCnt(), limit);
+
+  return (*cntx)->SendLong(result->size());
+}
+
 void SUnion(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size());
 
@@ -1494,9 +1547,9 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  vector<string_view> vals(args.size() - 3);
-  for (size_t i = 3; i < args.size(); ++i) {
-    vals[i - 3] = ArgS(args, i);
+  vector<string_view> vals(args.size() - 2);
+  for (size_t i = 2; i < args.size(); ++i) {
+    vals[i - 2] = ArgS(args, i);
   }
 
   ArgSlice arg_slice{vals.data(), vals.size()};
@@ -1567,6 +1620,7 @@ constexpr uint32_t kSDiff = READ | SET | SLOW;
 constexpr uint32_t kSDiffStore = WRITE | SET | SLOW;
 constexpr uint32_t kSInter = READ | SET | SLOW;
 constexpr uint32_t kSInterStore = WRITE | SET | SLOW;
+constexpr uint32_t kSInterCard = READ | SET | SLOW;
 constexpr uint32_t kSMembers = READ | SET | SLOW;
 constexpr uint32_t kSIsMember = READ | SET | SLOW;
 constexpr uint32_t kSMIsMember = READ | SET | FAST;
@@ -1591,6 +1645,9 @@ void SetFamily::Register(CommandRegistry* registry) {
       << CI{"SINTERSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
             acl::kSInterStore}
              .HFUNC(SInterStore)
+      << CI{"SINTERCARD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1,
+            acl::kSInterCard}
+             .HFUNC(SInterCard)
       << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, 1, acl::kSMembers}.HFUNC(SMembers)
       << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kSIsMember}.HFUNC(SIsMember)
       << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, 1, acl::kSMIsMember}.HFUNC(SMIsMember)
@@ -1626,6 +1683,14 @@ void SetFamily::ConvertTo(const intset* src, dict* dest) {
     sds s = sdsnewlen(buf, next - buf);
     CHECK(dictAddRaw(dest, s, NULL));
   }
+}
+
+int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
+                                   std::string_view field) {
+  DCHECK_EQ(OBJ_SET, pv.ObjType());
+
+  SetType st{pv.RObjPtr(), pv.Encoding()};
+  return GetExpiry(db_context, st, field);
 }
 
 }  // namespace dfly

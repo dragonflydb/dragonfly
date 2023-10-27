@@ -25,6 +25,7 @@ extern "C" {
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dbfilename);
+ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 
 namespace dfly {
@@ -67,6 +68,10 @@ TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
 
 void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
   messages.push_back(move(pmsg));
+}
+
+std::string TestConnection::RemoteEndpointStr() const {
+  return "";
 }
 
 void TransactionSuspension::Start() {
@@ -193,6 +198,10 @@ void BaseFamilyTest::ResetService() {
   pp_.reset(fb2::Pool::Epoll(num_threads_));
 #endif
 
+  // Using a different default than production could expose bugs
+  if (absl::GetFlag(FLAGS_num_shards) == 0) {
+    absl::SetFlag(&FLAGS_num_shards, num_threads_ - 1);
+  }
   pp_->Run();
   service_ = std::make_unique<Service>(pp_.get());
 
@@ -219,6 +228,29 @@ void BaseFamilyTest::ResetService() {
         std::unique_lock lk(m);
         LOG(ERROR) << "Proactor " << index << ":\n";
         fb2::detail::FiberInterface::PrintAllFiberStackTraces();
+        EngineShard* es = EngineShard::tlocal();
+
+        if (es != nullptr) {
+          TxQueue* txq = es->txq();
+          if (!txq->Empty()) {
+            LOG(ERROR) << "TxQueue for shard " << es->shard_id();
+
+            auto head = txq->Head();
+            auto it = head;
+            do {
+              Transaction* trans = std::get<Transaction*>(es->txq()->At(it));
+              LOG(ERROR) << "Transaction " << trans->DebugId() << " "
+                         << trans->GetLocalMask(es->shard_id()) << " "
+                         << trans->IsArmedInShard(es->shard_id());
+              it = txq->Next(it);
+            } while (it != head);
+          }
+
+          LOG(ERROR) << "TxLocks for shard " << es->shard_id();
+          for (const auto& k_v : es->db_slice().GetDBTable(0)->trans_locks) {
+            LOG(ERROR) << "Key " << k_v.first << " " << k_v.second;
+          }
+        }
       });
     }
   });

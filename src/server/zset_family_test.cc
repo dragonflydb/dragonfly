@@ -322,7 +322,7 @@ TEST_F(ZSetFamilyTest, ZUnionError) {
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"zunion", "0", "myset"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 
   resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "k"});
   EXPECT_THAT(resp, ErrArg("weight value is not a float"));
@@ -402,7 +402,7 @@ TEST_F(ZSetFamilyTest, ZUnionStore) {
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"zunionstore", "key", "0", "aggregate"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 
   resp = Run({"zunionstore", "key", "0", "aggregate", "sum"});
   EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
@@ -476,10 +476,11 @@ TEST_F(ZSetFamilyTest, ZInterStore) {
 TEST_F(ZSetFamilyTest, ZInterCard) {
   EXPECT_EQ(3, CheckedInt({"zadd", "z1", "1", "a", "2", "b", "3", "c"}));
   EXPECT_EQ(3, CheckedInt({"zadd", "z2", "2", "b", "3", "c", "4", "d"}));
-  RespExpr resp;
 
   EXPECT_EQ(2, CheckedInt({"zintercard", "2", "z1", "z2"}));
   EXPECT_EQ(1, CheckedInt({"zintercard", "2", "z1", "z2", "LIMIT", "1"}));
+
+  RespExpr resp;
 
   resp = Run({"zintercard", "2", "z1", "z2", "LIM"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
@@ -487,6 +488,9 @@ TEST_F(ZSetFamilyTest, ZInterCard) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
   resp = Run({"zintercard", "2", "z1", "z2", "LIMIT", "a"});
   EXPECT_THAT(resp, ErrArg("limit value is not a positive integer"));
+
+  resp = Run({"zintercard", "0", "z1"});
+  EXPECT_THAT(resp, ErrArg("at least 1 input"));
 
   // support for sets
   EXPECT_EQ(3, CheckedInt({"sadd", "s2", "b", "c", "d"}));
@@ -632,10 +636,10 @@ TEST_F(ZSetFamilyTest, ZDiffError) {
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"zdiff", "0", "z1"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 
   resp = Run({"zdiff", "0", "z1", "z2"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
 }
 
 TEST_F(ZSetFamilyTest, ZDiff) {

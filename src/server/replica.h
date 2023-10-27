@@ -118,8 +118,6 @@ class Replica : ProtocolClient {
   // Send DFLY ${kind} to the master instance.
   std::error_code SendNextPhaseRequest(std::string_view kind);
 
-  void DefaultErrorHandler(const GenericError& err);
-
  private: /* Utility */
   struct PSyncResponse {
     // string - end of sync token (diskless)

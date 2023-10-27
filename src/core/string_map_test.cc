@@ -72,9 +72,10 @@ class StringMapTest : public ::testing::Test {
 TEST_F(StringMapTest, Basic) {
   EXPECT_TRUE(sm_->AddOrUpdate("foo", "bar"));
   EXPECT_TRUE(sm_->Contains("foo"));
-  EXPECT_STREQ("bar", sm_->Find("foo"));
+  auto it = sm_->Find("foo");
+  EXPECT_STREQ("bar", it->second);
 
-  auto it = sm_->begin();
+  it = sm_->begin();
   EXPECT_STREQ("foo", it->first);
   EXPECT_STREQ("bar", it->second);
   ++it;
@@ -160,7 +161,7 @@ TEST_F(StringMapTest, ReallocIfNeeded) {
 
   EXPECT_EQ(sm_->Size(), 1000);
   for (size_t i = 0; i < 1000; i++)
-    EXPECT_EQ(sm_->Find(build_str(i * 10)), build_str(i * 10 + 1));
+    EXPECT_EQ(sm_->Find(build_str(i * 10))->second, build_str(i * 10 + 1));
 }
 
 }  // namespace dfly

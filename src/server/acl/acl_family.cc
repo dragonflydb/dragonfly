@@ -16,6 +16,7 @@
 #include <utility>
 #include <variant>
 
+#include "absl/flags/commandlineflag.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
@@ -34,7 +35,9 @@
 #include "server/acl/validator.h"
 #include "server/command_registry.h"
 #include "server/common.h"
+#include "server/config_registry.h"
 #include "server/conn_context.h"
+#include "server/error.h"
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
 
@@ -114,6 +117,22 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
     if (ctx && ctx->authed_username == user) {
+      connection->ShutdownSelf();
+    }
+  };
+
+  if (main_listener_) {
+    main_listener_->TraverseConnections(close_cb);
+  }
+}
+
+void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
+    const UserRegistry::RegistryType& registry) {
+  auto close_cb = [&registry]([[maybe_unused]] size_t id, util::Connection* conn) {
+    DCHECK(conn);
+    auto connection = static_cast<facade::Connection*>(conn);
+    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
+    if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
       connection->ShutdownSelf();
     }
   };
@@ -221,7 +240,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   auto file_contents = std::move(is_file_read.value());
 
   if (file_contents.empty()) {
-    return {};
+    return {facade::ErrorReply("Empty file")};
   }
 
   std::vector<std::string> usernames;
@@ -249,6 +268,8 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   auto& registry = registry_with_wlock.registry;
   // TODO(see what redis is doing here)
   if (!init) {
+    // Evict open connections for old users
+    EvictOpenConnectionsOnAllProactorsWithRegistry(registry);
     registry.clear();
   }
   std::vector<uint32_t> categories;
@@ -263,10 +284,6 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   if (!registry.contains("default")) {
     auto& user = registry["default"];
     user.Update(registry_->DefaultUserUpdateRequest());
-  }
-
-  if (!init) {
-    StreamUpdatesToAllProactorConnections(usernames, categories, commands);
   }
 
   return {};
@@ -466,6 +483,34 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendSimpleString(acl);
 }
 
+void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
+  if (args.length() > 1) {
+    (*cntx)->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
+    return;
+  }
+  uint32_t random_bits = 256;
+  if (args.length() == 1) {
+    auto requested_bits = facade::ArgS(args, 0);
+
+    if (!absl::SimpleAtoi(requested_bits, &random_bits) || random_bits == 0 || random_bits > 4096) {
+      return (*cntx)->SendError(
+          "ACL GENPASS argument must be the number of bits for the output password, a positive "
+          "number up to 4096");
+    }
+  }
+  std::random_device urandom("/dev/urandom");
+  const size_t result_length = (random_bits + 3) / 4;
+  constexpr size_t step_size = sizeof(decltype(std::random_device::max()));
+  std::string response;
+  for (size_t bytes_written = 0; bytes_written < result_length; bytes_written += step_size) {
+    absl::StrAppendFormat(&response, "%08x", urandom());
+  }
+
+  response.resize(result_length);
+
+  (*cntx)->SendSimpleString(response);
+}
+
 void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   auto username = facade::ArgS(args, 0);
   const auto registry_with_lock = registry_->GetRegistryWithLock();
@@ -515,6 +560,7 @@ constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kCat = acl::SLOW;
 constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kDryRun = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+constexpr uint32_t kGenPass = acl::SLOW;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -550,6 +596,8 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
                    .HFUNC(GetUser);
   *registry << CI{"ACL DRYRUN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 3, 0, 0, 0, acl::kDryRun}
                    .HFUNC(DryRun);
+  *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kGenPass}.HFUNC(
+      GenPass);
 
   cmd_registry_ = registry;
 }
@@ -559,14 +607,18 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
 void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   main_listener_ = main_listener;
   registry_ = registry;
+  config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
+    User::UpdateRequest rqst;
+    rqst.password = flag.CurrentValue();
+    registry_->MaybeAddAndUpdate("default", std::move(rqst));
+    return true;
+  });
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  if (!acl_file.empty()) {
-    if (!Load()) {
-      registry_->Init();
-    }
+  if (!acl_file.empty() && Load()) {
     return;
   }
   registry_->Init();
+  config_registry.RegisterMutable("aclfile");
 }
 
 }  // namespace dfly::acl

@@ -7,7 +7,7 @@ pluggy==1.0.0
 py==1.11.0
 pyparsing==3.0.9
 pytest==7.1.2
-redis==5.0.0
+redis==4.6.0
 tomli==2.0.1
 wrapt==1.14.1
 pytest-asyncio==0.20.1
@@ -18,3 +18,5 @@ aiohttp==3.8.4
 numpy==1.24.3
 pytest-json-report==1.5.0
 psutil==5.9.5
+boto3==1.28.55
+redis-om==0.2.1

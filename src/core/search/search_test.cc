@@ -281,6 +281,31 @@ TEST_F(SearchTest, MatchRange) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+TEST_F(SearchTest, MatchDoubleRange) {
+  PrepareSchema({{"f1", SchemaField::NUMERIC}});
+
+  {
+    PrepareQuery("@f1: [100.03 199.97]");
+
+    ExpectAll(Map{{"f1", "130"}}, Map{{"f1", "170"}}, Map{{"f1", "100.03"}}, Map{{"f1", "199.97"}});
+
+    ExpectNone(Map{{"f1", "0"}}, Map{{"f1", "200"}}, Map{{"f1", "100.02999"}},
+               Map{{"f1", "199.9700001"}});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+
+  {
+    PrepareQuery("@f1: [(100 (199.9]");
+
+    ExpectAll(Map{{"f1", "150"}}, Map{{"f1", "100.00001"}}, Map{{"f1", "199.8999999"}});
+
+    ExpectNone(Map{{"f1", "50"}}, Map{{"f1", "100"}}, Map{{"f1", "199.9"}}, Map{{"f1", "200"}});
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
 TEST_F(SearchTest, MatchStar) {
   PrepareQuery("*");
   ExpectAll("one", "two", "three", "and", "all", "documents");
@@ -486,6 +511,23 @@ TEST_P(KnnTest, Simple2D) {
     algo.Init("* => [KNN 10 @pos $vec]", &params);
     EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(2, 4, 3, 1, 0));
   }
+}
+
+TEST_P(KnnTest, AutoResize) {
+  // Make sure index resizes automatically even with a small initial capacity
+  const size_t kInitialCapacity = 5;
+
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params =
+      SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2, kInitialCapacity};
+  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+
+  for (size_t i = 0; i < 100; i++) {
+    MockedDocument doc{Map{{"pos", ToBytes({float(i)})}}};
+    indices.Add(i, &doc);
+  }
+
+  EXPECT_EQ(indices.GetAllDocs().size(), 100);
 }
 
 INSTANTIATE_TEST_SUITE_P(KnnFlat, KnnTest, testing::Values(false));

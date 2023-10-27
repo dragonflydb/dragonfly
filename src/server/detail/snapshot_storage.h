@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <aws/s3/S3Client.h>
+
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -10,7 +12,6 @@
 
 #include "io/io.h"
 #include "server/common.h"
-#include "util/cloud/aws.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"
 
@@ -71,7 +72,8 @@ class FileSnapshotStorage : public SnapshotStorage {
 
 class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
-  AwsS3SnapshotStorage(util::cloud::AWS* aws);
+  AwsS3SnapshotStorage(const std::string& endpoint, bool https, bool ec2_metadata,
+                       bool sign_payload);
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;
@@ -90,7 +92,7 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
   io::Result<std::vector<std::string>, GenericError> ListObjects(std::string_view bucket_name,
                                                                  std::string_view prefix);
 
-  util::cloud::AWS* aws_;
+  std::shared_ptr<Aws::S3::S3Client> s3_;
 };
 
 // Returns bucket_name, obj_path for an s3 path.

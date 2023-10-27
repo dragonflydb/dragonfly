@@ -20,10 +20,12 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/hset_family.h"
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
+#include "server/set_family.h"
 #include "server/transaction.h"
 #include "util/varz.h"
 
@@ -618,6 +620,28 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   return res.status();
 }
 
+// returns -2 if the key was not found, -3 if the field was not found,
+// -1 if ttl on the field was not found.
+OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
+  auto& db_slice = shard->db_slice();
+  const DbContext& db_cntx = t->GetDbContext();
+  auto [it, expire_it] = db_slice.FindExt(db_cntx, key);
+  if (!IsValid(it))
+    return -2;
+
+  if (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)
+    return OpStatus::WRONG_TYPE;
+
+  int32_t res = -1;
+  if (it->second.ObjType() == OBJ_SET) {
+    res = SetFamily::FieldExpireTime(db_cntx, it->second, field);
+  } else {
+    DCHECK_EQ(OBJ_HASH, it->second.ObjType());
+    res = HSetFamily::FieldExpireTime(db_cntx, it->second, field);
+  }
+  return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
+}
+
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {
@@ -710,6 +734,35 @@ void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendLong(0);
 }
 
+std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, ConnectionContext* cntx) {
+  int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
+  for (auto& arg : args) {
+    ToUpper(&arg);
+    auto arg_sv = ToSV(arg);
+    if (arg_sv == "NX") {
+      flags |= ExpireFlags::EXPIRE_NX;
+    } else if (arg_sv == "XX") {
+      flags |= ExpireFlags::EXPIRE_XX;
+    } else if (arg_sv == "GT") {
+      flags |= ExpireFlags::EXPIRE_GT;
+    } else if (arg_sv == "LT") {
+      flags |= ExpireFlags::EXPIRE_LT;
+    } else {
+      (*cntx)->SendError(absl::StrCat("Unsupported option: ", arg_sv));
+      return nullopt;
+    }
+  }
+  if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ~ExpireFlags::EXPIRE_NX)) {
+    (*cntx)->SendError("NX and XX, GT or LT options at the same time are not compatible");
+    return nullopt;
+  }
+  if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT)) {
+    (*cntx)->SendError("GT and LT options at the same time are not compatible");
+    return nullopt;
+  }
+  return flags;
+}
+
 void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view sec = ArgS(args, 1);
@@ -724,7 +777,11 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int_arg = std::max<int64_t>(int_arg, -1);
-  DbSlice::ExpireParams params{.value = int_arg};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{.value = int_arg, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -744,7 +801,12 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
-  DbSlice::ExpireParams params{.value = int_arg, .absolute = true};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{
+      .value = int_arg, .absolute = true, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -788,7 +850,14 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, 0L);
-  DbSlice::ExpireParams params{.value = int_arg, .absolute = true, .unit = TimeUnit::MSEC};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{.value = int_arg,
+                               .absolute = true,
+                               .unit = TimeUnit::MSEC,
+                               .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -811,7 +880,12 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, 0L);
-  DbSlice::ExpireParams params{.value = int_arg, .unit = TimeUnit::MSEC};
+  auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
+  if (!expire_options) {
+    return;
+  }
+  DbSlice::ExpireParams params{
+      .value = int_arg, .unit = TimeUnit::MSEC, .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -1058,6 +1132,24 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
         return (*cntx)->SendError(result.status());
     }
   }
+}
+
+// Returns -2 if key not found, WRONG_TYPE if key is not a set or hash
+// -1 if the field does not have associated TTL on it, and -3 if field is not found.
+void GenericFamily::FieldTtl(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view field = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpFieldTtl(t, shard, key, field); };
+
+  OpResult<long> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result) {
+    (*cntx)->SendLong(*result);
+    return;
+  }
+
+  (*cntx)->SendError(result.status());
 }
 
 void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
@@ -1455,6 +1547,7 @@ constexpr uint32_t kSelect = FAST | CONNECTION;
 constexpr uint32_t kScan = KEYSPACE | READ | SLOW;
 constexpr uint32_t kTTL = KEYSPACE | READ | FAST;
 constexpr uint32_t kPTTL = KEYSPACE | READ | FAST;
+constexpr uint32_t kFieldTtl = KEYSPACE | READ | FAST;
 constexpr uint32_t kTime = FAST;
 constexpr uint32_t kType = KEYSPACE | READ | FAST;
 constexpr uint32_t kDump = KEYSPACE | READ | SLOW;
@@ -1479,7 +1572,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0, acl::kEcho}.HFUNC(Echo)
       << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1, acl::kExists}.HFUNC(Exists)
       << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1, acl::kTouch}.HFUNC(Exists)
-      << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kExpire}.HFUNC(
+      << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, 1, acl::kExpire}.HFUNC(
              Expire)
       << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1, acl::kExpireAt}
              .HFUNC(ExpireAt)
@@ -1495,6 +1588,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kScan}.HFUNC(Scan)
       << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kTTL}.HFUNC(Ttl)
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kPTTL}.HFUNC(Pttl)
+      << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, 1, acl::kDump}.HFUNC(Dump)

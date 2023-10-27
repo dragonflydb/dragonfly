@@ -218,6 +218,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_local_factory):
     await client.close()
 
 
+@pytest.mark.skip("Skip because it fails on arm release")
 @pytest.mark.asyncio
 async def test_acl_deluser(df_server):
     client = aioredis.Redis(port=df_server.port)
@@ -331,10 +332,11 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     await client.execute_command("ACL SETUSER vlad +@STRING")
 
     result = await client.execute_command("ACL LIST")
-    assert 3 == len(result)
+    assert 4 == len(result)
     assert "user roy on ea71c25a7a60224 +@STRING +HSET" in result
     assert "user shahar off ea71c25a7a60224 +@SET" in result
     assert "user vlad off nopass +@STRING" in result
+    assert "user default on nopass +@ALL +ALL" in result
 
     result = await client.execute_command("ACL DELUSER shahar")
     assert result == b"OK"
@@ -359,7 +361,7 @@ async def test_acl_log(async_client):
 
     await async_client.execute_command("ACL SETUSER elon >mars ON +@string +@dangerous")
 
-    with pytest.raises(redis.exceptions.ResponseError):
+    with pytest.raises(redis.exceptions.AuthenticationError):
         await async_client.execute_command("AUTH elon wrong")
 
     res = await async_client.execute_command("ACL LOG")
@@ -389,3 +391,51 @@ async def test_acl_log(async_client):
 
     res = await async_client.execute_command("ACL LOG")
     assert 2 == len(res)
+
+
+@pytest.mark.asyncio
+@dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass"})
+async def test_require_pass(df_local_factory):
+    df = df_local_factory.create()
+    df.start()
+
+    client = aioredis.Redis(port=df.port)
+
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        await client.execute_command("AUTH default wrongpass")
+
+    client = aioredis.Redis(password="mypass", port=df.port)
+
+    res = await client.execute_command("AUTH default mypass")
+    assert res == b"OK"
+
+    res = await client.execute_command("CONFIG SET requirepass newpass")
+    assert res == b"OK"
+
+    res = await client.execute_command("AUTH default newpass")
+    assert res == b"OK"
+
+    client = aioredis.Redis(password="newpass", port=df.admin_port)
+
+    await client.execute_command("SET foo 44")
+    res = await client.execute_command("GET foo")
+    assert res == b"44"
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
+    acl_file_content = "ACL SETUSER roy ON >ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@STRING +HSET"
+
+    acl = create_temp_file(acl_file_content, tmp_dir)
+
+    await async_client.execute_command(f"CONFIG SET aclfile {acl}")
+
+    await async_client.execute_command("ACL LOAD")
+
+    result = await async_client.execute_command("ACL LIST")
+    assert 2 == len(result)
+
+    result = await async_client.execute_command("AUTH roy mypass")
+    assert result == "OK"

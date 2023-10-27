@@ -18,6 +18,9 @@
 #include <filesystem>
 #include <optional>
 
+#include "facade/error.h"
+#include "slowlog.h"
+
 extern "C" {
 #include "redis/redis_aux.h"
 }
@@ -51,8 +54,7 @@ extern "C" {
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
-#include "util/cloud/aws.h"
-#include "util/cloud/s3.h"
+#include "util/aws/aws.h"
 #include "util/fibers/fiber_file.h"
 
 using namespace std;
@@ -89,6 +91,22 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
           "Specifies a host and port which point to a target master "
           "to replicate. "
           "Format should be <IPv4>:<PORT> or host:<PORT> or [<IPv6>]:<PORT>");
+ABSL_FLAG(int32_t, slowlog_log_slower_than, 10000,
+          "Add commands slower than this threshold to slow log. The value is expressed in "
+          "microseconds and if it's negative - disables the slowlog.");
+ABSL_FLAG(uint32_t, slowlog_max_len, 20, "Slow log maximum length.");
+
+ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
+ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
+// Disable EC2 metadata by default, or if a users credentials are invalid the
+// AWS client will spent 30s trying to connect to inaccessable EC2 endpoints
+// to load the credentials.
+ABSL_FLAG(bool, s3_ec2_metadata, false,
+          "whether to load credentials and configuration from EC2 metadata");
+// Enables S3 payload signing over HTTP. This reduces the latency and resource
+// usage when writing snapshots to S3, at the expense of security.
+ABSL_FLAG(bool, s3_sign_payload, true,
+          "whether to sign the s3 request payload when uploading snapshots");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -143,6 +161,81 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 
 std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
   return (flag.has_value()) ? absl::StrCat(flag.host, ":", flag.port) : "";
+}
+
+void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
+                std::string_view sub_cmd) {
+  size_t requested_slow_log_length = UINT32_MAX;
+  size_t argc = args.size();
+  if (argc >= 3) {
+    (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
+    return;
+  } else if (argc == 2) {
+    string_view length = facade::ArgS(args, 1);
+    int64_t num;
+    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
+      (*cntx)->SendError("count should be greater than or equal to -1");
+      return;
+    }
+    if (num >= 0) {
+      requested_slow_log_length = num;
+    }
+  }
+
+  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
+  std::vector<boost::circular_buffer<dfly::SlowLogEntry>> entries(service.proactor_pool().size());
+  service.proactor_pool().AwaitFiberOnAll([&](auto index, auto* context) {
+    auto shard_entries = dfly::ServerState::tlocal()->GetSlowLog().Entries();
+    entries[index] = shard_entries;
+  });
+  std::vector<std::pair<dfly::SlowLogEntry, unsigned>> merged_slow_log;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    for (const auto& log_item : entries[i]) {
+      merged_slow_log.emplace_back(log_item, i);
+    }
+  }
+  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
+    return e1.first.unix_timestamp > e2.first.unix_timestamp;
+  });
+
+  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
+
+  (*cntx)->StartArray(requested_slow_log_length);
+  for (size_t i = 0; i < requested_slow_log_length; ++i) {
+    const auto& entry = merged_slow_log[i].first;
+    const auto& args = entry.cmd_args;
+
+    (*cntx)->StartArray(6);
+
+    (*cntx)->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
+    (*cntx)->SendLong(entry.unix_timestamp / 1000000000);
+    (*cntx)->SendLong(entry.execution_time_micro);
+
+    // if we truncated the args, there is one pseudo-element containing the number of truncated
+    // args that we must add, so the result length is increased by 1
+    size_t len = args.size() + int(args.size() < entry.original_length);
+
+    (*cntx)->StartArray(len);
+
+    for (const auto& arg : args) {
+      if (arg.second > 0) {
+        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
+        auto cmd_arg = arg.first.substr(0, dfly::kMaximumSlowlogArgLength - suffix.length());
+        (*cntx)->SendBulkString(absl::StrCat(cmd_arg, suffix));
+      } else {
+        (*cntx)->SendBulkString(arg.first);
+      }
+    }
+    // if we truncated arguments - add a special string to indicate that.
+    if (args.size() < entry.original_length) {
+      (*cntx)->SendBulkString(
+          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
+    }
+
+    (*cntx)->SendBulkString(entry.client_ip);
+    (*cntx)->SendBulkString(entry.client_name);
+  }
+  return;
 }
 
 namespace dfly {
@@ -204,28 +297,13 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
   return min_match <= max;
 }
 
-void SlowLog(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
-
-  if (sub_cmd == "LEN") {
-    return (*cntx)->SendLong(0);
-  }
-
-  if (sub_cmd == "GET") {
-    return (*cntx)->SendEmptyArray();
-  }
-
-  (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
-}
-
 // Check that if TLS is used at least one form of client authentication is
 // enabled. That means either using a password or giving a root
 // certificate for authenticating client certificates which will
 // be required.
-void ValidateServerTlsFlags() {
+bool ValidateServerTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls)) {
-    return;
+    return true;
   }
 
   bool has_auth = false;
@@ -241,8 +319,10 @@ void ValidateServerTlsFlags() {
 
   if (!has_auth) {
     LOG(ERROR) << "TLS configured but no authentication method is used!";
-    exit(1);
+    return false;
   }
+
+  return true;
 }
 
 bool IsReplicatingNoOne(string_view host, string_view port) {
@@ -261,6 +341,15 @@ void RebuildAllSearchIndices(Service* service) {
     es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
     return OpStatus::OK;
   });
+}
+
+template <typename T> void UpdateMax(T* maxv, T current) {
+  *maxv = std::max(*maxv, current);
+}
+
+void SetMasterFlagOnAllThreads(bool is_master) {
+  auto cb = [is_master](auto* pb) { ServerState::tlocal()->is_master = is_master; };
+  shard_set->pool()->DispatchBrief(cb);
 }
 
 }  // namespace
@@ -367,7 +456,9 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     exit(1);
   }
 
-  ValidateServerTlsFlags();
+  if (!ValidateServerTlsFlags()) {
+    exit(1);
+  }
   ValidateClientTlsFlags();
 }
 
@@ -380,6 +471,17 @@ void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclient
       listener->SetMaxClients(maxclients);
     }
   }
+}
+
+void SetSlowLogMaxLen(util::ProactorPool& pool, uint32_t val) {
+  pool.AwaitFiberOnAll(
+      [&val](auto index, auto* context) { ServerState::tlocal()->GetSlowLog().ChangeLength(val); });
+}
+
+void SetSlowLogThreshold(util::ProactorPool& pool, int32_t val) {
+  pool.AwaitFiberOnAll([val](auto index, auto* context) {
+    ServerState::tlocal()->log_slower_than_usec = val < 0 ? UINT32_MAX : uint32_t(val);
+  });
 }
 
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
@@ -396,40 +498,52 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     return res.has_value();
   });
 
+  SetSlowLogThreshold(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_log_slower_than));
+  config_registry.RegisterMutable("slowlog_log_slower_than",
+                                  [this](const absl::CommandLineFlag& flag) {
+                                    auto res = flag.TryGet<int32_t>();
+                                    if (res.has_value())
+                                      SetSlowLogThreshold(service_.proactor_pool(), res.value());
+                                    return res.has_value();
+                                  });
+  SetSlowLogMaxLen(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_max_len));
+  config_registry.RegisterMutable("slowlog_max_len", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<uint32_t>();
+    if (res.has_value())
+      SetSlowLogMaxLen(service_.proactor_pool(), res.value());
+    return res.has_value();
+  });
+
+  // We only reconfigure TLS when the 'tls' config key changes. Therefore to
+  // update TLS certs, first update tls_cert_file, then set 'tls true'.
+  config_registry.RegisterMutable("tls", [this](const absl::CommandLineFlag& flag) {
+    if (!ValidateServerTlsFlags()) {
+      return false;
+    }
+    for (facade::Listener* l : listeners_) {
+      // Must reconfigure in the listener proactor to avoid a race.
+      if (!l->socket()->proactor()->Await([l] { return l->ReconfigureTLS(); })) {
+        return false;
+      }
+    }
+    return true;
+  });
+  config_registry.RegisterMutable("tls_cert_file");
+  config_registry.RegisterMutable("tls_key_file");
+  config_registry.RegisterMutable("tls_ca_cert_file");
+  config_registry.RegisterMutable("tls_ca_cert_dir");
+
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
     fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
-  // Unlike EngineShard::Heartbeat that runs independently in each shard thread,
-  // this callback runs in a single thread and it aggregates globally stats from all the shards.
-  auto cache_cb = [] {
-    uint64_t sum = 0;
-    const auto& stats = EngineShardSet::GetCachedStats();
-    for (const auto& s : stats)
-      sum += s.used_memory.load(memory_order_relaxed);
-
-    used_mem_current.store(sum, memory_order_relaxed);
-
-    // Single writer, so no races.
-    if (sum > used_mem_peak.load(memory_order_relaxed))
-      used_mem_peak.store(sum, memory_order_relaxed);
-  };
-
-  uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
-  uint32_t period_ms = max(1u, 1000 / cache_hz);
-
-  stats_caching_task_ =
-      pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
-
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
-    aws_ = make_unique<cloud::AWS>("s3");
-    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return aws_->Init(); });
-    if (ec) {
-      LOG(FATAL) << "Failed to initialize AWS " << ec;
-    }
-    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(aws_.get());
+    shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
+    snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
+        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
+        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -747,9 +861,10 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
                      &db_key_expire_metrics);
 
-  for (size_t i = 0; i < m.db.size(); ++i) {
-    AppendMetricValue("db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)}, &db_key_metrics);
-    AppendMetricValue("db_keys_expiring", m.db[i].expire_count, {"db"}, {StrCat("db", i)},
+  for (size_t i = 0; i < m.db_stats.size(); ++i) {
+    AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
+                      &db_key_metrics);
+    AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
                       &db_key_expire_metrics);
   }
 
@@ -902,7 +1017,7 @@ GenericError ServerFamily::DoSave() {
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
   SaveStagesController sc{detail::SaveStagesInputs{
       new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
-      &save_mu_, &aws_, snapshot_storage_}};
+      &save_mu_, &save_bytes_cb_, snapshot_storage_}};
   return sc.Save();
 }
 
@@ -1006,28 +1121,32 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  if (args.size() == 2) {
+  // non admin port auth
+  if (!cntx->conn()->IsPrivileged()) {
     const auto* registry = ServerState::tlocal()->user_registry;
-    std::string_view username = facade::ToSV(args[0]);
-    std::string_view password = facade::ToSV(args[1]);
+    const bool one_arg = args.size() == 1;
+    std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
+    const size_t index = one_arg ? 0 : 1;
+    std::string_view password = facade::ToSV(args[index]);
     auto is_authorized = registry->AuthUser(username, password);
     if (is_authorized) {
       cntx->authed_username = username;
       auto cred = registry->GetCredentials(username);
       cntx->acl_categories = cred.acl_categories;
       cntx->acl_commands = cred.acl_commands;
+      cntx->authenticated = true;
       return (*cntx)->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return (*cntx)->SendError(absl::StrCat("Could not authorize user: ", username));
+    return (*cntx)->SendError(facade::kAuthRejected);
   }
 
   if (!cntx->req_auth) {
     return (*cntx)->SendError(
-        "AUTH <password> called without any password configured for the "
-        "default user. Are you sure your configuration is correct?");
+        "AUTH <password> called without any password configured for "
+        "admin port. Are you sure your configuration is correct?");
   }
 
   string_view pass = ArgS(args, 0);
@@ -1079,6 +1198,10 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendBulkString(result);
   }
 
+  if (sub_cmd == "SETINFO") {
+    return (*cntx)->SendOk();
+  }
+
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
@@ -1088,7 +1211,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SET") {
-    if (args.size() < 3) {
+    if (args.size() != 3) {
       return (*cntx)->SendError(WrongNumArgsError("config|set"));
     }
 
@@ -1145,7 +1268,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       auto& stats = sstate.connection_stats;
       stats.err_count_map.clear();
       stats.command_cnt = 0;
-      stats.async_writes_cnt = 0;
+      stats.pipelined_cmd_cnt = 0;
     });
 
     return (*cntx)->SendOk();
@@ -1202,12 +1325,12 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
-  if (src.db_stats.size() > dest->db.size())
-    dest->db.resize(src.db_stats.size());
-  for (size_t i = 0; i < src.db_stats.size(); ++i) {
-    dest->db[i] += src.db_stats[i];
-  }
+static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
+  if (src.db_stats.size() > dest->db_stats.size())
+    dest->db_stats.resize(src.db_stats.size());
+
+  for (size_t i = 0; i < src.db_stats.size(); ++i)
+    dest->db_stats[i] += src.db_stats[i];
 
   dest->events += src.events;
   dest->small_string_bytes += src.small_string_bytes;
@@ -1215,8 +1338,13 @@ static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
 
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
-
   Mutex mu;
+
+  auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
+    auto& [calls, sum] = dest[string{name}];
+    calls += stat.first;
+    sum += stat.second;
+  };
 
   auto cb = [&](unsigned index, ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
@@ -1224,48 +1352,46 @@ Metrics ServerFamily::GetMetrics() const {
 
     lock_guard lk(mu);
 
-    result.uptime = time(NULL) - this->start_time_;
+    result.coordinator_stats += ss->stats;
     result.conn_stats += ss->connection_stats;
-    result.qps += uint64_t(ss->MovingSum6());
-    result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
-    result.eval_io_coordination_cnt += ss->stats.eval_io_coordination_cnt;
-    result.eval_shardlocal_coordination_cnt += ss->stats.eval_shardlocal_coordination_cnt;
-    result.eval_squashed_flushes += ss->stats.eval_squashed_flushes;
-    result.tx_schedule_cancel_cnt += ss->stats.tx_schedule_cancel_cnt;
 
-    service_.mutable_registry()->MergeCallStats(
-        index, [&dest_map = result.cmd_stats_map](string_view name, const CmdCallStats& src) {
-          auto& ent = dest_map[string{name}];
-          ent.first += src.first;
-          ent.second += src.second;
-        });
+    result.uptime = time(NULL) - this->start_time_;
+    result.qps += uint64_t(ss->MovingSum6());
 
     if (shard) {
-      MergeInto(shard->db_slice().GetStats(), &result);
-
       result.heap_used_bytes += shard->UsedMemory();
-      if (auto ts = shard->tiered_storage(); ts) {
-        result.tiered_stats += ts->GetStats();
-      }
-      if (auto si = shard->search_indices(); si) {
-        result.search_stats += si->GetStats();
-      }
+      MergeDbSliceStats(shard->db_slice().GetStats(), &result);
       result.shard_stats += shard->stats();
+
+      if (shard->tiered_storage())
+        result.tiered_stats += shard->tiered_storage()->GetStats();
+      if (shard->search_indices())
+        result.search_stats += shard->search_indices()->GetStats();
+
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
     }
+
+    service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
-  result.qps /= 6;  // normalize moving average stats
+
+  // Normalize moving average stats
+  result.qps /= 6;
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  result.is_master = false;
-  if (ServerState::tlocal() && ServerState::tlocal()->is_master) {
-    result.is_master = true;
+  result.is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
+  if (result.is_master)
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
-  }
+
+  // Update peak stats
+  lock_guard lk{peak_stats_mu_};
+  UpdateMax(&peak_stats_.conn_dispatch_queue_bytes, result.conn_stats.dispatch_queue_bytes);
+  UpdateMax(&peak_stats_.conn_read_buf_capacity, result.conn_stats.read_buf_capacity);
+
+  result.peak_stats = peak_stats_;
 
   return result;
 }
@@ -1285,25 +1411,26 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   string info;
 
   auto should_enter = [&](string_view name, bool hidden = false) {
-    bool res = (!hidden && section.empty()) || section == "ALL" || section == name;
-    if (res && !info.empty())
-      info.append("\r\n");
-
-    return res;
+    if ((!hidden && section.empty()) || section == "ALL" || section == name) {
+      auto normalized_name = string{name.substr(0, 1)} + absl::AsciiStrToLower(name.substr(1));
+      absl::StrAppend(&info, info.empty() ? "" : "\r\n", "# ", normalized_name, "\r\n");
+      return true;
+    }
+    return false;
   };
 
   auto append = [&info](absl::AlphaNum a1, absl::AlphaNum a2) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
-#define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
   Metrics m = GetMetrics();
+  DbStats total;
+  for (const auto& db_stats : m.db_stats)
+    total += db_stats;
 
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
-
-    ADD_HEADER("# Server");
 
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
@@ -1317,37 +1444,27 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("uptime_in_days", uptime / (3600 * 24));
   }
 
-  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
-
-  DbStats total;
-  for (const auto& db_stats : m.db) {
-    total += db_stats;
-  }
-
   if (should_enter("CLIENTS")) {
-    ADD_HEADER("# Clients");
     append("connected_clients", m.conn_stats.num_conns);
     append("client_read_buffer_bytes", m.conn_stats.read_buf_capacity);
     append("blocked_clients", m.conn_stats.num_blocked_clients);
+    append("dispatch_queue_entries", m.conn_stats.dispatch_queue_entries);
   }
 
   if (should_enter("MEMORY")) {
-    ADD_HEADER("# Memory");
-
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
     append("used_memory_peak", used_mem_peak.load(memory_order_relaxed));
 
+    size_t rss = rss_mem_current.load(memory_order_relaxed);
+    append("used_memory_rss", rss);
+    append("used_memory_rss_human", HumanReadableNumBytes(rss));
+    append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
+
     append("comitted_memory", GetMallocCurrentCommitted());
 
-    if (sdata_res.has_value()) {
-      size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
-      append("used_memory_rss", rss);
-      append("used_memory_rss_human", HumanReadableNumBytes(rss));
-    } else {
-      LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
-                             << sdata_res.error().message();
-    }
+    append("maxmemory", max_memory_limit);
+    append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
 
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
     // heap. For example, strings or intsets. members of lists, sets, zsets etc
@@ -1363,14 +1480,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
-    append("pipeline_cache_bytes", m.conn_stats.pipeline_cache_capacity);
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     append("max_eviction_per_heartbeat", GetFlag(FLAGS_max_eviction_per_heartbeat));
     append("max_segment_to_consider", GetFlag(FLAGS_max_segment_to_consider));
+    append("pipeline_cache_bytes", m.conn_stats.pipeline_cmd_cache_bytes);
+    append("dispatch_queue_bytes", m.conn_stats.dispatch_queue_bytes);
+    append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
+    append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
+
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
-
       // PHP Symphony needs this field to work.
       append("maxmemory_policy", "eviction");
     } else {
@@ -1378,11 +1498,23 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       // Compatible with redis based frameworks.
       append("maxmemory_policy", "noeviction");
     }
+
+    if (m.is_master && !m.replication_metrics.empty()) {
+      ReplicationMemoryStats repl_mem;
+      dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
+      append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
+      append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
+    }
+
+    if (IsSaving()) {
+      lock_guard lk{save_mu_};
+      if (save_bytes_cb_) {
+        append("save_buffer_bytes", save_bytes_cb_());
+      }
+    }
   }
 
   if (should_enter("STATS")) {
-    ADD_HEADER("# Stats");
-
     append("total_connections_received", m.conn_stats.conn_received_cnt);
     append("total_commands_processed", m.conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
@@ -1406,18 +1538,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("keyspace_misses", m.events.misses);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
-    append("async_writes_count", m.conn_stats.async_writes_cnt);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("eval_io_coordination_total", m.eval_io_coordination_cnt);
-    append("eval_shardlocal_coordination_total", m.eval_shardlocal_coordination_cnt);
-    append("eval_squashed_flushes", m.eval_squashed_flushes);
-    append("tx_schedule_cancel_total", m.tx_schedule_cancel_cnt);
+    append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
+    append("eval_shardlocal_coordination_total",
+           m.coordinator_stats.eval_shardlocal_coordination_cnt);
+    append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
+    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
   }
 
   if (should_enter("TIERED", true)) {
-    ADD_HEADER("# TIERED");
     append("tiered_entries", total.tiered_entries);
     append("tiered_bytes", total.tiered_size);
     append("tiered_reads", m.tiered_stats.tiered_reads);
@@ -1429,7 +1560,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("PERSISTENCE", true)) {
-    ADD_HEADER("# PERSISTENCE");
     decltype(last_save_info_) save_info;
     {
       lock_guard lk(save_mu_);
@@ -1449,8 +1579,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("REPLICATION")) {
-    ADD_HEADER("# Replication");
-
     ServerState& etl = *ServerState::tlocal();
 
     if (etl.is_master) {
@@ -1467,11 +1595,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     } else {
       append("role", "replica");
 
-      // it's safe to access replica_ because replica_ is created before etl.is_master set to
-      // false and cleared after etl.is_master is set to true. And since the code here that checks
-      // for is_master and copies shared_ptr is atomic, it1 should be correct.
-      auto replica_ptr = replica_;
-      Replica::Info rinfo = replica_ptr->GetInfo();
+      // The replica pointer can still be mutated even while master=true,
+      // we don't want to drop the replica object in this fiber
+      unique_lock lk{replicaof_mu_};
+      Replica::Info rinfo = replica_->GetInfo();
       append("master_host", rinfo.host);
       append("master_port", rinfo.port);
 
@@ -1483,20 +1610,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("COMMANDSTATS", true)) {
-    ADD_HEADER("# Commandstats");
-
-    auto unknown_cmd = service_.UknownCmdMap();
-
     auto append_sorted = [&append](string_view prefix, auto display) {
       sort(display.begin(), display.end());
-
       for (const auto& k_v : display) {
         append(StrCat(prefix, k_v.first), k_v.second);
       }
     };
 
     vector<pair<string_view, string>> commands;
-
     for (const auto& [name, stats] : m.cmd_stats_map) {
       const auto calls = stats.first, sum = stats.second;
       commands.push_back(
@@ -1505,29 +1626,28 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
                                ",")});
     }
 
+    auto unknown_cmd = service_.UknownCmdMap();
+
     append_sorted("cmdstat_", move(commands));
     append_sorted("unknown_",
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
   }
 
   if (should_enter("SEARCH", true)) {
-    ADD_HEADER("# Search");
     append("search_memory", m.search_stats.used_memory);
     append("search_num_indices", m.search_stats.num_indices);
     append("search_num_entries", m.search_stats.num_entries);
   }
 
   if (should_enter("ERRORSTATS", true)) {
-    ADD_HEADER("# Errorstats");
     for (const auto& k_v : m.conn_stats.err_count_map) {
       append(k_v.first, k_v.second);
     }
   }
 
   if (should_enter("KEYSPACE")) {
-    ADD_HEADER("# Keyspace");
-    for (size_t i = 0; i < m.db.size(); ++i) {
-      const auto& stats = m.db[i];
+    for (size_t i = 0; i < m.db_stats.size(); ++i) {
+      const auto& stats = m.db_stats[i];
       bool show = (i == 0) || (stats.key_count > 0);
       if (show) {
         string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
@@ -1539,7 +1659,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
 #ifndef __APPLE__
   if (should_enter("CPU")) {
-    ADD_HEADER("# CPU");
     struct rusage ru, cu, tu;
     getrusage(RUSAGE_SELF, &ru);
     getrusage(RUSAGE_CHILDREN, &cu);
@@ -1554,7 +1673,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 #endif
 
   if (should_enter("CLUSTER")) {
-    ADD_HEADER("# Cluster");
     append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
 
@@ -1648,29 +1766,16 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
-  auto& pool = service_.proactor_pool();
   LOG(INFO) << "Replicating " << host << ":" << port_sv;
 
-  // We lock to protect global state changes that we perform during the replication setup:
-  // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
-  // The lock is only released during replica_->Start because we want to allow cancellation during
-  // the connection. If another replication command is received during Start() of an old
-  // replication, it will acquire the lock, call Stop() on the old replica_ and wait for Stop() to
-  // complete. So Replica::Stop() must
-  // 1. Be very responsive, as it is called while holding the lock.
-  // 2. Leave the DB in a consistent state after it is done.
-  // We have a relatively involved state machine inside Replica itself which handels cancellation
-  // with those requirements.
-  VLOG(2) << "Acquire replica lock";
-  unique_lock lk(replicaof_mu_);
+  unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
+  // If NO ONE was supplied, just stop the current replica (if it exists)
   if (IsReplicatingNoOne(host, port_sv)) {
     if (!ServerState::tlocal()->is_master) {
-      auto repl_ptr = replica_;
-      CHECK(repl_ptr);
+      CHECK(replica_);
 
-      pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+      SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
       replica_->Stop();
       replica_.reset();
     }
@@ -1682,34 +1787,35 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   }
 
   uint32_t port;
-
   if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
     (*cntx)->SendError(kInvalidIntErr);
     return;
   }
 
-  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
-
-  if (replica_) {
-    replica_->Stop();  // NOTE: consider introducing update API flow.
-  } else {
-    // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
-
-    pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
-  }
-  replica_ = new_replica;
-
-  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state != GlobalState::LOADING) {
+  // First, switch into the loading state
+  if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+      new_state != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    (*cntx)->SendError("Invalid state");
     return;
   }
 
-  // Replica sends response in either case. No need to send response in this function.
-  // It's a bit confusing but simpler.
-  lk.unlock();
-  error_code ec{};
+  // If any replication is in progress, stop it, cancellation should kick in immediately
+  if (replica_)
+    replica_->Stop();
 
+  // Create a new replica and assing it
+  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
+  replica_ = new_replica;
+
+  // TODO: disconnect pending blocked clients (pubsub, blocking commands)
+  SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
+
+  // We proceed connecting below without the lock to allow interrupting the replica immediately.
+  // From this point and onward, it should be highly responsive.
+  lk.unlock();
+
+  error_code ec{};
   switch (on_err) {
     case ActionOnConnectionFail::kReturnOnError:
       ec = new_replica->Start(cntx);
@@ -1719,22 +1825,13 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
       break;
   };
 
-  VLOG(2) << "Acquire replica lock";
+  // If the replication attempt failed, clean up global state. The replica should have stopped
+  // internally.
   lk.lock();
-
-  // Since we released the replication lock during Start(..), we need to check if this still the
-  // last replicaof command we got. If it's not, then we were cancelled and just exit.
-  if (replica_ == new_replica) {
-    if (ec) {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      replica_->Stop();
-      replica_.reset();
-    }
-    bool is_master = !replica_;
-    pool.AwaitFiberOnAll(
-        [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
-  } else {
-    new_replica->Stop();
+  if (ec && replica_ == new_replica) {
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+    SetMasterFlagOnAllThreads(true);
+    replica_.reset();
   }
 }
 
@@ -1742,7 +1839,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   string_view host = ArgS(args, 0);
   string_view port = ArgS(args, 1);
 
-  // don't flush if input is NO ONE
   if (!IsReplicatingNoOne(host, port))
     Drakarys(cntx->transaction, DbSlice::kDbAll);
 
@@ -1752,10 +1848,10 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
   ConnectionContext ctxt{&sink, nullptr};
+  ctxt.skip_acl_validation = true;
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)
-
   ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
@@ -1888,9 +1984,8 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     }
 
   } else {
-    auto replica_ptr = replica_;
-    CHECK(replica_ptr);
-    Replica::Info rinfo = replica_ptr->GetInfo();
+    unique_lock lk{replicaof_mu_};
+    Replica::Info rinfo = replica_->GetInfo();
     (*cntx)->StartArray(4);
     (*cntx)->SendBulkString("replica");
     (*cntx)->SendBulkString(rinfo.host);
@@ -1984,6 +2079,50 @@ void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
   dfly_cmd_->Run(args, cntx);
 }
 
+void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
+
+  if (sub_cmd == "HELP") {
+    string_view help[] = {
+        "SLOWLOG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "GET [<count>]",
+        "    Return top <count> entries from the slowlog (default: 10, -1 mean all).",
+        "    Entries are made of:",
+        "    id, timestamp, time in microseconds, arguments array, client IP and port,",
+        "    client name",
+        "LEN",
+        "    Return the length of the slowlog.",
+        "RESET",
+        "    Reset the slowlog.",
+        "HELP",
+        "    Prints this help.",
+    };
+    (*cntx)->SendSimpleStrArr(help);
+    return;
+  }
+
+  if (sub_cmd == "LEN") {
+    vector<int> lengths(service_.proactor_pool().size());
+    service_.proactor_pool().AwaitFiberOnAll([&lengths](auto index, auto* context) {
+      lengths[index] = ServerState::tlocal()->GetSlowLog().Length();
+    });
+    int sum = std::accumulate(lengths.begin(), lengths.end(), 0);
+    return (*cntx)->SendLong(sum);
+  }
+
+  if (sub_cmd == "RESET") {
+    service_.proactor_pool().AwaitFiberOnAll(
+        [](auto index, auto* context) { ServerState::tlocal()->GetSlowLog().Reset(); });
+    return (*cntx)->SendOk();
+  }
+
+  if (sub_cmd == "GET") {
+    return SlowLogGet(args, cntx, service_, sub_cmd);
+  }
+  (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
+}
+
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 namespace acl {
@@ -2041,7 +2180,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0, acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.SetHandler(SlowLog)
+      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, 0, acl::kScript}.HFUNC(
              Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, acl::kDfly}.HFUNC(Dfly);

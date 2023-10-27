@@ -81,9 +81,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  RETURN_ON_ERR(cntx_.SwitchErrorHandler(absl::bind_front(&Replica::DefaultErrorHandler, this)));
-
-  auto check_connection_error = [this, &cntx](const error_code& ec, const char* msg) -> error_code {
+  auto check_connection_error = [this, &cntx](error_code ec, const char* msg) -> error_code {
     if (cntx_.IsCancelled()) {
       (*cntx)->SendError("replication cancelled");
       return std::make_error_code(errc::operation_canceled);
@@ -91,10 +89,14 @@ error_code Replica::Start(ConnectionContext* cntx) {
     if (ec) {
       (*cntx)->SendError(absl::StrCat(msg, ec.message()));
       cntx_.Cancel();
-      return ec;
     }
-    return {};
+    return ec;
   };
+
+  // 0. Set basic error handler that is reponsible for cleaning up on errors.
+  // Can return an error only if replication was cancelled immediately.
+  auto err = cntx_.SwitchErrorHandler([this](const auto& ge) { this->DefaultErrorHandler(ge); });
+  RETURN_ON_ERR(check_connection_error(err, "replication cancelled"));
 
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
@@ -117,7 +119,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
 
   (*cntx)->SendOk();
   return {};
-}  // namespace dfly
+}
 
 void Replica::EnableReplication(ConnectionContext* cntx) {
   VLOG(1) << "Enabling replication";
@@ -166,7 +168,7 @@ void Replica::MainReplicationFb() {
   error_code ec;
   while (state_mask_.load() & R_ENABLED) {
     // Discard all previous errors and set default error handler.
-    cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
+    cntx_.Reset([this](const GenericError& ge) { this->DefaultErrorHandler(ge); });
     // 1. Connect socket.
     if ((state_mask_.load() & R_TCP_CONNECTED) == 0) {
       ThisFiber::SleepFor(500ms);
@@ -637,10 +639,6 @@ void Replica::JoinDflyFlows() {
 
 void Replica::SetShardStates(bool replica) {
   shard_set->RunBriefInParallel([replica](EngineShard* shard) { shard->SetReplica(replica); });
-}
-
-void Replica::DefaultErrorHandler(const GenericError& err) {
-  CloseSocket();
 }
 
 error_code Replica::SendNextPhaseRequest(string_view kind) {

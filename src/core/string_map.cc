@@ -105,15 +105,6 @@ void StringMap::Clear() {
   ClearInternal();
 }
 
-sds StringMap::Find(std::string_view key) {
-  uint64_t hashcode = Hash(&key, 1);
-  sds str = (sds)FindInternal(&key, hashcode, 1);
-  if (!str)
-    return nullptr;
-
-  return GetValue(str);
-}
-
 std::pair<sds, sds> StringMap::RandomPair() {
   auto it = begin();
   it += rand() % Size();

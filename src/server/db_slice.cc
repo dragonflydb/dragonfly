@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "generic_family.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
@@ -638,12 +639,11 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  fb2::Fiber("flush_all", [all_dbs = std::move(all_dbs)]() mutable {
-    for (auto& db : all_dbs) {
-      db.reset();
-    }
-    mi_heap_collect(ServerState::tlocal()->data_heap(), true);
-  }).Detach();
+  // Explicitly drop reference counted pointers in place.
+  // If snapshotting is currently in progress, they will keep alive until it finishes.
+  for (auto& db : all_dbs)
+    db.reset();
+  mi_heap_collect(ServerState::tlocal()->data_heap(), true);
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {
@@ -737,9 +737,22 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime
     CHECK(Del(cntx.db_index, prime_it));
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
+    auto current = ExpireTime(expire_it);
+    if (params.expire_options & ExpireFlags::EXPIRE_NX) {
+      return OpStatus::SKIPPED;
+    }
+    if ((params.expire_options & ExpireFlags::EXPIRE_LT) && current <= abs_msec) {
+      return OpStatus::SKIPPED;
+    } else if ((params.expire_options & ExpireFlags::EXPIRE_GT) && current >= abs_msec) {
+      return OpStatus::SKIPPED;
+    }
+
     expire_it->second = FromAbsoluteTime(abs_msec);
     return abs_msec;
   } else {
+    if (params.expire_options & ExpireFlags::EXPIRE_XX) {
+      return OpStatus::SKIPPED;
+    }
     AddExpire(cntx.db_index, prime_it, abs_msec);
     return abs_msec;
   }

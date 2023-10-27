@@ -10,7 +10,6 @@
 #include "server/detail/snapshot_storage.h"
 #include "server/rdb_save.h"
 #include "server/server_family.h"
-#include "util/cloud/aws.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 
 namespace dfly {
@@ -29,7 +28,7 @@ struct SaveStagesInputs {
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
   std::shared_ptr<LastSaveInfo>* last_save_info_;
   util::fb2::Mutex* save_mu_;
-  std::unique_ptr<util::cloud::AWS>* aws_;
+  std::function<size_t()>* save_bytes_cb_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
 };
 
@@ -44,6 +43,7 @@ class RdbSnapshot {
 
   error_code SaveBody();
   error_code Close();
+  size_t GetSaveBuffersSize();
 
   const RdbTypeFreqMap freq_map() const {
     return freq_map_;
@@ -105,6 +105,8 @@ struct SaveStagesController : public SaveStagesInputs {
 
   RdbSaver::GlobalData GetGlobalData() const;
 
+  size_t GetSaveBuffersSize();
+
  private:
   absl::Time start_time_;
   std::filesystem::path full_path_;
@@ -118,8 +120,6 @@ struct SaveStagesController : public SaveStagesInputs {
 };
 
 GenericError ValidateFilename(const std::filesystem::path& filename, bool new_version);
-
-std::string InferLoadFile(string_view dir, util::cloud::AWS* aws);
 
 }  // namespace detail
 }  // namespace dfly

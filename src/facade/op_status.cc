@@ -28,6 +28,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return "-BUSYGROUP Consumer Group name already exists";
     case OpStatus::INVALID_NUMERIC_RESULT:
       return kInvalidNumericResult;
+    case OpStatus::AT_LEAST_ONE_KEY:
+      return "at least 1 input key is needed for this command";
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";

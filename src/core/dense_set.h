@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -174,6 +175,22 @@ class DenseSet {
   using ChainVectorConstIterator = std::vector<DensePtr, DensePtrAllocator>::const_iterator;
 
   class IteratorBase {
+    friend class DenseSet;
+
+   public:
+    IteratorBase(DenseSet* owner, ChainVectorIterator list_it, DensePtr* e)
+        : owner_(owner), curr_list_(list_it), curr_entry_(e) {
+    }
+
+    // returns the expiry time of the current entry or UINT32_MAX if no ttl is set.
+    uint32_t ExpiryTime() const {
+      return curr_entry_->HasTtl() ? owner_->ObjExpireTime(curr_entry_->GetObject()) : UINT32_MAX;
+    }
+
+    bool HasExpiry() const {
+      return curr_entry_->HasTtl();
+    }
+
    protected:
     IteratorBase() : owner_(nullptr), curr_entry_(nullptr) {
     }
@@ -254,6 +271,18 @@ class DenseSet {
   }
 
   void* FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const;
+
+  IteratorBase FindIt(const void* ptr, uint32_t cookie) {
+    if (Empty())
+      return IteratorBase{};
+
+    auto [bid, _, curr] = Find2(ptr, BucketId(ptr, cookie), cookie);
+    if (curr) {
+      return IteratorBase(this, entries_.begin() + bid, curr);
+    }
+    return IteratorBase{};
+  }
+
   void* PopInternal();
 
   // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
@@ -294,6 +323,7 @@ class DenseSet {
   }
 
   uint32_t BucketId(uint64_t hash) const {
+    assert(capacity_log_ > 0);
     return hash >> (64 - capacity_log_);
   }
 
@@ -322,7 +352,13 @@ class DenseSet {
   // ============ Pseudo Linked List in DenseSet end ==================
 
   // returns (prev, item) pair. If item is root, then prev is null.
-  std::pair<DensePtr*, DensePtr*> Find(const void* ptr, uint32_t bid, uint32_t cookie);
+  std::pair<DensePtr*, DensePtr*> Find(const void* ptr, uint32_t bid, uint32_t cookie) {
+    auto [_, p, c] = Find2(ptr, bid, cookie);
+    return {p, c};
+  }
+
+  // returns bid and (prev, item) pair. If item is root, then prev is null.
+  std::tuple<size_t, DensePtr*, DensePtr*> Find2(const void* ptr, uint32_t bid, uint32_t cookie);
 
   DenseLinkKey* NewLink(void* data, DensePtr next);
 

@@ -114,13 +114,15 @@ class SliceSnapshot {
     return snapshot_version_;
   }
 
-  size_t channel_bytes() const {
-    return stats_.channel_bytes;
+  size_t pushed_bytes() const {
+    return stats_.pushed_bytes;
   }
 
   const RdbTypeFreqMap& freq_map() const {
     return type_freq_map_;
   }
+
+  size_t GetTotalBufferCapacity() const;
 
  private:
   DbSlice* db_slice_;
@@ -146,7 +148,7 @@ class SliceSnapshot {
   uint64_t rec_id_ = 0;
 
   struct Stats {
-    size_t channel_bytes = 0;
+    size_t pushed_bytes = 0;
     size_t loop_serialized = 0, skipped = 0, side_saved = 0;
     size_t savecb_calls = 0;
   } stats_;
