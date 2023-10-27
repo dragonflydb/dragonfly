@@ -484,7 +484,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
 
-  SetMaxClients(listeners, absl::GetFlag(FLAGS_maxclients),
+  SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients),
                 [](auto* listener, auto maxclients) { listener->SetMaxClients(maxclients); });
   config_registry.RegisterMutable("maxclients", [this](const absl::CommandLineFlag& flag) {
     auto res = flag.TryGet<uint32_t>();
