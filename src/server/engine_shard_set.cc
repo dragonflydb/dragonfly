@@ -30,6 +30,14 @@ ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
 
+ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
+          "The maximum number of key-value pairs that will be deleted in each eviction "
+          "when heartbeat based eviction is triggered under memory pressure.");
+
+ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
+          "The maximum number of dashtable segments to scan in each eviction "
+          "when heartbeat based eviction is triggered under memory pressure.");
+
 // memory defragmented related flags
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
@@ -223,7 +231,9 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
     : queue_(kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
-      db_slice_(pb->GetIndex(), GetFlag(FLAGS_cache_mode), this) {
+      db_slice_(pb->GetIndex(), GetFlag(FLAGS_cache_mode),
+                GetFlag(FLAGS_max_eviction_per_heartbeat), GetFlag(FLAGS_max_segment_to_consider),
+                this) {
   fiber_q_ = MakeFiber([this, index = pb->GetIndex()] {
     ThisFiber::SetName(absl::StrCat("shard_queue", index));
     queue_.Run();

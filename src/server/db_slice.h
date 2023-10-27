@@ -106,7 +106,8 @@ class DbSlice {
     std::pair<int64_t, int64_t> Calculate(int64_t now_msec) const;
   };
 
-  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
+  DbSlice(uint32_t index, bool caching_mode, uint32_t max_evict_per_hb,
+          uint32_t max_segment_to_consider, EngineShard* owner);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
@@ -303,6 +304,8 @@ class DbSlice {
   DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
   void FreeMemWithEvictionStep(DbIndex db_indx, size_t increase_goal_bytes);
 
+  int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
+
   const DbTableArray& databases() const {
     return db_arr_;
   }
@@ -358,6 +361,8 @@ class DbSlice {
  private:
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
+  uint32_t max_eviction_per_hb_;
+  uint32_t max_segment_to_consider_;
 
   EngineShard* owner_;
 

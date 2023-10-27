@@ -92,6 +92,8 @@ ABSL_FLAG(ReplicaOfFlag, replicaof, ReplicaOfFlag{},
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
+ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
+ABSL_DECLARE_FLAG(uint32_t, max_segment_to_consider);
 ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
@@ -1364,6 +1366,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("pipeline_cache_bytes", m.conn_stats.pipeline_cache_capacity);
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
+    append("max_eviction_per_heartbeat", GetFlag(FLAGS_max_eviction_per_heartbeat));
+    append("max_segment_to_consider", GetFlag(FLAGS_max_segment_to_consider));
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
 

@@ -161,7 +161,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
   bool res = mem_budget_ >
              int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available * 1.1);
-  VLOG(2) << "available: " << new_available << ", res: " << res;
+  // VLOG(2) << "available: " << new_available << ", res: " << res;
 
   return res;
 }
@@ -252,8 +252,13 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 #undef ADD
 
-DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
-    : shard_id_(index), caching_mode_(caching_mode), owner_(owner) {
+DbSlice::DbSlice(uint32_t index, bool caching_mode, uint32_t max_eviction_per_hb,
+                 uint32_t max_segment_to_consider, EngineShard* owner)
+    : shard_id_(index),
+      caching_mode_(caching_mode),
+      max_eviction_per_hb_(max_eviction_per_hb),
+      max_segment_to_consider_(max_segment_to_consider),
+      owner_(owner) {
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
@@ -466,7 +471,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
     events_.garbage_collected = db.prime.garbage_collected();
     events_.stash_unloaded = db.prime.stash_unloaded();
-    events_.evicted_keys += evp.evicted();
+
     events_.garbage_checked += evp.checked();
 
     it.SetVersion(NextVersion());
@@ -1083,10 +1088,70 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   return result;
 }
 
-// TODO: Design a better background evicting heuristic.
+int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const {
+  // wraps around if we reached the end
+  return db_arr_[db_ind]->prime.NextSeg((size_t)segment_id) %
+         db_arr_[db_ind]->prime.GetSegmentCount();
+}
+
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
   if (!caching_mode_)
     return;
+
+  auto time_start = absl::GetCurrentTimeNanos();
+  auto& db_table = db_arr_[db_ind];
+  int32_t num_segments = db_table->prime.GetSegmentCount();
+  int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
+  int32_t num_slots = PrimeTable::Segment_t::kNumSlots;
+
+  size_t used_memory_after;
+  size_t evicted = 0;
+
+  size_t used_memory_before = owner_->UsedMemory();
+  for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
+    for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
+      // pick a random segment to start with in each eviction,
+      // as segment_id does not imply any recency, and random selection should be fair enough
+      int32_t segment_id = rand() % num_segments;
+      for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider_;
+           ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
+        const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
+        if (bucket.IsEmpty())
+          continue;
+
+        if (!bucket.IsBusy(slot_id))
+          continue;
+
+        auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
+        if (evict_it->first.IsSticky())
+          continue;
+
+        // check if the key is locked by looking up transaction table.
+        auto& lt = db_table->trans_locks;
+        std::string key_str = evict_it->first.ToString();
+        if (lt.find(KeyLockArgs::GetLockKey(key_str)) != lt.end())
+          continue;
+
+        PerformDeletion(evict_it, shard_owner(), db_table.get());
+        ++evicted;
+
+        used_memory_after = owner_->UsedMemory();
+        // returns when whichever condition is met first
+        if ((evicted == max_eviction_per_hb_) ||
+            (used_memory_before - used_memory_after >= increase_goal_bytes))
+          goto finish;
+      }
+    }
+  }
+
+finish:
+  auto time_finish = absl::GetCurrentTimeNanos();
+  events_.evicted_keys += evicted;
+  DVLOG(2) << "Memory usage before eviction: " << used_memory_before;
+  DVLOG(2) << "Memory usage after eviction: " << used_memory_after;
+  DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted << "/"
+           << max_eviction_per_hb_;
+  DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
 }
 
 void DbSlice::CreateDb(DbIndex db_ind) {
