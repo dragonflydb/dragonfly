@@ -56,7 +56,7 @@ template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
 double NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
-  auto str = doc->GetString(field);
+  auto str = doc->GetStrings(field);
   if (str.empty())
     return 0;
 
@@ -67,7 +67,7 @@ double NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view f
 }
 
 PMR_NS::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
-  auto str = doc->GetString(field);
+  auto str = doc->GetStrings(field);
   if (str.empty())
     return "";
 

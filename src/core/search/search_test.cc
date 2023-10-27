@@ -39,13 +39,13 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
-  StringList GetString(string_view field) const override {
+  StringList GetStrings(string_view field) const override {
     auto it = fields_.find(field);
     return {it != fields_.end() ? string_view{it->second} : ""};
   }
 
   VectorInfo GetVector(string_view field) const override {
-    return BytesToFtVector(GetString(field).front());
+    return BytesToFtVector(GetStrings(field).front());
   }
 
   string DebugFormat() {

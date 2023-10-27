@@ -60,7 +60,7 @@ NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
 void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  for (auto str : doc->GetString(field)) {
+  for (auto str : doc->GetStrings(field)) {
     double num;
     if (absl::SimpleAtod(str, &num))
       entries_.emplace(num, id);
@@ -68,7 +68,7 @@ void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
 }
 
 void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  for (auto str : doc->GetString(field)) {
+  for (auto str : doc->GetStrings(field)) {
     double num;
     if (absl::SimpleAtod(str, &num))
       entries_.erase({num, id});
@@ -111,7 +111,7 @@ CompressedSortedSet* BaseStringIndex::GetOrCreate(string_view word) {
 
 void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   absl::flat_hash_set<std::string> tokens;
-  for (string_view str : doc->GetString(field))
+  for (string_view str : doc->GetStrings(field))
     tokens.merge(Tokenize(str));
 
   for (string_view token : tokens)
@@ -120,7 +120,7 @@ void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
 
 void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
   absl::flat_hash_set<std::string> tokens;
-  for (string_view str : doc->GetString(field))
+  for (string_view str : doc->GetStrings(field))
     tokens.merge(Tokenize(str));
 
   for (const auto& token : tokens) {

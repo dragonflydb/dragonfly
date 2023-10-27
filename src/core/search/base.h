@@ -62,7 +62,7 @@ struct DocumentAccessor {
 
   virtual ~DocumentAccessor() = default;
 
-  virtual StringList GetString(std::string_view active_field) const = 0;
+  virtual StringList GetStrings(std::string_view active_field) const = 0;
   virtual VectorInfo GetVector(std::string_view active_field) const = 0;
 };
 
