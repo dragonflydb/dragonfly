@@ -1047,6 +1047,30 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 }
 
+class ReplyGuard {
+ public:
+  ReplyGuard(ConnectionContext* cntx, std::string_view cid_name) {
+    auto* builder = cntx->reply_builder();
+    const bool is_script = bool(cntx->conn_state.script_info);
+    const bool is_one_of =
+        absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY", "EXEC", "EVALSHA"})
+            .contains(cid_name);
+    const bool should_dcheck = !is_one_of && !is_script;
+    if (should_dcheck) {
+      builder->ExpectReply();
+    }
+  }
+
+  ~ReplyGuard() {
+    if (builder) {
+      DCHECK(builder->HasReplied());
+    }
+  }
+
+ private:
+  RedisReplyBuilder* builder = nullptr;
+};
+
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx,
                         bool record_stats) {
   DCHECK(cid);
@@ -1066,6 +1090,9 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     DispatchMonitor(cntx, cid, tail_args);
   }
 
+#ifndef NDEBUG
+  ReplyGuard reply_guard(cntx, cid->name());
+#endif
   try {
     cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
