@@ -876,6 +876,19 @@ TEST_F(MultiTest, TestLockedKeys) {
   EXPECT_FALSE(service_->IsLocked(0, "key2"));
 }
 
+TEST_F(MultiTest, EvalExpiration) {
+  // Make sure expiration is correctly set even from Lua scripts
+  if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
+    GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
+    return;
+  }
+
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
+  Run({"eval", "redis.call('set', 'x', 0, 'ex', 5, 'nx')", "1", "x"});
+  EXPECT_LE(CheckedInt({"pttl", "x"}), 5000);
+}
+
 class MultiEvalTest : public BaseFamilyTest {
  protected:
   MultiEvalTest() : BaseFamilyTest() {
