@@ -49,7 +49,7 @@ MATCHER_P2(DocIds, total, arg_ids, "") {
 
   vector<string> received_ids;
   for (size_t i = 1; i < results.size(); i += 2)
-    received_ids.push_back(results[i].GetStrings());
+    received_ids.push_back(results[i].GetString());
 
   vector<string> expected_ids = arg_ids;
   sort(received_ids.begin(), received_ids.end());
