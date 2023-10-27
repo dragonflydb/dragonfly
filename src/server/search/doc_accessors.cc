@@ -121,20 +121,20 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
     return {buf_};
   }
 
-  StringList out;
-
   // First, grow buffer and compute string sizes
+  vector<size_t> sizes;
   for (auto element : path_res.array_range()) {
     size_t start = buf_.size();
     buf_ += element.as_string();
-    out.push_back(string_view{nullptr, buf_.size() - start});
+    sizes.push_back(buf_.size() - start);
   }
 
   // Reposition start pointers to the most recent allocation of buf
+  StringList out(sizes.size());
   size_t start = 0;
-  for (auto& sv : out) {
-    sv = string_view{buf_.data() + start, sv.size()};
-    start += sv.size();
+  for (size_t i = 0; i < out.size(); i++) {
+    out[i] = string_view{buf_}.substr(start, sizes[i]);
+    start += sizes[i];
   }
 
   return out;
