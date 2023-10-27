@@ -345,6 +345,11 @@ template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
 }
 
+void SetMasterFlagOnAllThreads(bool is_master) {
+  auto cb = [is_master](auto* pb) { ServerState::tlocal()->is_master = is_master; };
+  shard_set->pool()->DispatchBrief(cb);
+}
+
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -1585,11 +1590,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     } else {
       append("role", "replica");
 
-      // it's safe to access replica_ because replica_ is created before etl.is_master set to
-      // false and cleared after etl.is_master is set to true. And since the code here that checks
-      // for is_master and copies shared_ptr is atomic, it1 should be correct.
-      auto replica_ptr = replica_;
-      Replica::Info rinfo = replica_ptr->GetInfo();
+      // The replica pointer can still be mutated even while master=true,
+      // we don't want to drop the replica object in this fiber
+      unique_lock lk{replicaof_mu_};
+      Replica::Info rinfo = replica_->GetInfo();
       append("master_host", rinfo.host);
       append("master_port", rinfo.port);
 
@@ -1757,29 +1761,16 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
-  auto& pool = service_.proactor_pool();
   LOG(INFO) << "Replicating " << host << ":" << port_sv;
 
-  // We lock to protect global state changes that we perform during the replication setup:
-  // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
-  // The lock is only released during replica_->Start because we want to allow cancellation during
-  // the connection. If another replication command is received during Start() of an old
-  // replication, it will acquire the lock, call Stop() on the old replica_ and wait for Stop() to
-  // complete. So Replica::Stop() must
-  // 1. Be very responsive, as it is called while holding the lock.
-  // 2. Leave the DB in a consistent state after it is done.
-  // We have a relatively involved state machine inside Replica itself which handels cancellation
-  // with those requirements.
-  VLOG(2) << "Acquire replica lock";
-  unique_lock lk(replicaof_mu_);
+  unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
+  // If NO ONE was supplied, just stop the current replica (if it exists)
   if (IsReplicatingNoOne(host, port_sv)) {
     if (!ServerState::tlocal()->is_master) {
-      auto repl_ptr = replica_;
-      CHECK(repl_ptr);
+      CHECK(replica_);
 
-      pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+      SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
       replica_->Stop();
       replica_.reset();
     }
@@ -1791,34 +1782,35 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   }
 
   uint32_t port;
-
   if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
     (*cntx)->SendError(kInvalidIntErr);
     return;
   }
 
-  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
-
-  if (replica_) {
-    replica_->Stop();  // NOTE: consider introducing update API flow.
-  } else {
-    // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
-
-    pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
-  }
-  replica_ = new_replica;
-
-  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state != GlobalState::LOADING) {
+  // First, switch into the loading state
+  if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+      new_state != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    (*cntx)->SendError("Invalid state");
     return;
   }
 
-  // Replica sends response in either case. No need to send response in this function.
-  // It's a bit confusing but simpler.
-  lk.unlock();
-  error_code ec{};
+  // If any replication is in progress, stop it, cancellation should kick in immediately
+  if (replica_)
+    replica_->Stop();
 
+  // Create a new replica and assing it
+  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
+  replica_ = new_replica;
+
+  // TODO: disconnect pending blocked clients (pubsub, blocking commands)
+  SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
+
+  // We proceed connecting below without the lock to allow interrupting the replica immediately.
+  // From this point and onward, it should be highly responsive.
+  lk.unlock();
+
+  error_code ec{};
   switch (on_err) {
     case ActionOnConnectionFail::kReturnOnError:
       ec = new_replica->Start(cntx);
@@ -1828,22 +1820,13 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
       break;
   };
 
-  VLOG(2) << "Acquire replica lock";
+  // If the replication attempt failed, clean up global state. The replica should have stopped
+  // internally.
   lk.lock();
-
-  // Since we released the replication lock during Start(..), we need to check if this still the
-  // last replicaof command we got. If it's not, then we were cancelled and just exit.
-  if (replica_ == new_replica) {
-    if (ec) {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      replica_->Stop();
-      replica_.reset();
-    }
-    bool is_master = !replica_;
-    pool.AwaitFiberOnAll(
-        [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
-  } else {
-    new_replica->Stop();
+  if (ec && replica_ == new_replica) {
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+    SetMasterFlagOnAllThreads(true);
+    replica_.reset();
   }
 }
 
@@ -1851,7 +1834,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   string_view host = ArgS(args, 0);
   string_view port = ArgS(args, 1);
 
-  // don't flush if input is NO ONE
   if (!IsReplicatingNoOne(host, port))
     Drakarys(cntx->transaction, DbSlice::kDbAll);
 
@@ -1865,7 +1847,6 @@ void ServerFamily::Replicate(string_view host, string_view port) {
 
   // we don't flush the database as the context is null
   // (and also because there is nothing to flush)
-
   ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
@@ -1998,9 +1979,8 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     }
 
   } else {
-    auto replica_ptr = replica_;
-    CHECK(replica_ptr);
-    Replica::Info rinfo = replica_ptr->GetInfo();
+    unique_lock lk{replicaof_mu_};
+    Replica::Info rinfo = replica_->GetInfo();
     (*cntx)->StartArray(4);
     (*cntx)->SendBulkString("replica");
     (*cntx)->SendBulkString(rinfo.host);

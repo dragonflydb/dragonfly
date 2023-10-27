@@ -418,7 +418,7 @@ async def test_cancel_replication_immediately(
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
-    COMMANDS_TO_ISSUE = 100
+    COMMANDS_TO_ISSUE = 200
 
     replica = df_local_factory.create()
     master = df_local_factory.create()
@@ -429,7 +429,10 @@ async def test_cancel_replication_immediately(
 
     await seeder.run(target_deviation=0.1)
 
-    replication_commands = []
+    async def ping_status():
+        while True:
+            await c_replica.info()
+            await asyncio.sleep(0.05)
 
     async def replicate():
         try:
@@ -439,12 +442,12 @@ async def test_cancel_replication_immediately(
             assert e.args[0] == "replication cancelled"
             return False
 
-    for i in range(COMMANDS_TO_ISSUE):
-        replication_commands.append(asyncio.create_task(replicate()))
+    ping_job = asyncio.create_task(ping_status())
+    replication_commands = [asyncio.create_task(replicate()) for _ in range(COMMANDS_TO_ISSUE)]
+
     num_successes = 0
     for result in asyncio.as_completed(replication_commands, timeout=30):
-        r = await result
-        num_successes += r
+        num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
     assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
@@ -453,6 +456,8 @@ async def test_cancel_replication_immediately(
     capture = await seeder.capture()
     logging.info(f"number of items captured {len(capture)}")
     assert await seeder.compare(capture, replica.port)
+
+    ping_job.cancel()
     await c_replica.close()
 
 
