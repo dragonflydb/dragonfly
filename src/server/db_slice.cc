@@ -162,7 +162,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
   bool res = mem_budget_ >
              int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available * 1.1);
-  // VLOG(2) << "available: " << new_available << ", res: " << res;
+  VLOG(2) << "available: " << new_available << ", res: " << res;
 
   return res;
 }
