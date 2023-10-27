@@ -41,6 +41,8 @@ class DenseSet {
   struct DenseLinkKey;
 
  public:
+  static thread_local bool has_problem;
+
   // we can assume that high 12 bits of user address space
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
@@ -254,6 +256,10 @@ class DenseSet {
 
   uint32_t time_now() const {
     return time_now_;
+  }
+
+  unsigned capacity_log() const {
+    return capacity_log_;
   }
 
  protected:

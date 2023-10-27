@@ -15,6 +15,7 @@
 #include "glog/logging.h"
 
 extern "C" {
+#include "redis/sds.h"
 #include "redis/zmalloc.h"
 }
 
@@ -381,6 +382,8 @@ auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
   return nullptr;
 }
 
+thread_local bool DenseSet::has_problem = false;
+
 // Assumes that the object does not exist in the set.
 void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   if (entries_.empty()) {
@@ -388,9 +391,14 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
     entries_.resize(kMinSize);
   }
 
+  uint64_t hc = hashcode;
   uint32_t bucket_id = BucketId(hashcode);
+  unsigned cp_log = capacity_log_;
 
   DCHECK_LT(bucket_id, entries_.size());
+
+  size_t es_prev = entries_.size();
+  size_t prev_sz = size_;
 
   // Try insert into flat surface first. Also handle the grow case
   // if utilization is too high.
@@ -430,9 +438,36 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   if (has_ttl)
     to_insert.SetTtl(true);
 
+  auto print_dbg = [&]() {
+    LOG(ERROR) << "prevsz: " << prev_sz << " curr_size " << size_ << ", entries prevlen " << es_prev
+               << "/" << cp_log << ",  current: " << entries_.size() << "/" << capacity_log_
+               << ", prev hc: " << hc << ", hc: " << hashcode;
+    IteratorBase it(this, false);
+    uint32_t bid = 0;
+    uint32_t pos = 0;
+
+    while (it.owner_) {
+      if (it.curr_list_ != entries_.begin() + bid) {
+        bid = it.curr_list_ - entries_.begin();
+        pos = 0;
+      }
+
+      void* obj = it.curr_entry_->GetObject();
+      sds key = (sds)obj;
+      LOG(ERROR) << "pos: " << bid << "/" << pos << ", "
+                 << " displ: " << it.curr_entry_->IsDisplaced() << " "
+                 << string_view{key, sdslen(key)} << ", designated bid " << BucketId(obj, 0);
+      it.Advance();
+    }
+  };
+
   if (BucketId(hashcode) != bucket_id) {
-    LOG(ERROR) << "Wrong bucket id " << bucket_id << ", correct one " << BucketId(hashcode);
+    LOG(ERROR) << "Wrong bucket id " << bucket_id << ", correct one " << BucketId(hashcode)
+               << " for obj " << obj;
+    print_dbg();
+    has_problem = true;
   }
+
   while (!entries_[bucket_id].IsEmpty() && entries_[bucket_id].IsDisplaced()) {
     DensePtr unlinked = PopPtrFront(entries_.begin() + bucket_id);
     void* dbg_obj = unlinked.GetObject();
@@ -443,7 +478,10 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
     to_insert = unlinked;
     bucket_id -= unlinked.GetDisplacedDirection();
     if (bucket_id != dbg_id) {
-      LOG(ERROR) << "Wrong bucket id " << bucket_id << ", correct one " << dbg_id;
+      LOG(ERROR) << "Wrong bucket id " << bucket_id << ", correct one " << dbg_id << " for obj "
+                 << obj;
+      print_dbg();
+      has_problem = true;
     }
   }
 

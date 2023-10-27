@@ -679,15 +679,30 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+    unsigned prev_log = sm->capacity_log();
+    unsigned prev_bc = sm->BucketCount();
+
     sm->Reserve(values.size() / 2);
+    unsigned after_log = sm->capacity_log();
+    unsigned after_bc = sm->BucketCount();
     bool added;
 
     for (size_t i = 0; i < values.size(); i += 2) {
+      string_view field = ToSV(values[i]);
+      string_view value = ToSV(values[i + 1]);
       if (op_sp.skip_if_exists)
-        added = sm->AddOrSkip(ToSV(values[i]), ToSV(values[i + 1]), op_sp.ttl);
+        added = sm->AddOrSkip(field, value, op_sp.ttl);
       else
-        added = sm->AddOrUpdate(ToSV(values[i]), ToSV(values[i + 1]), op_sp.ttl);
+        added = sm->AddOrUpdate(field, value, op_sp.ttl);
 
+      if (DenseSet::has_problem) {
+        LOG(ERROR) << "Problem adding " << field << "/" << value << " when updating " << key << " "
+                   << values.size() << " " << op_sp.skip_if_exists << " " << values.size();
+        LOG(ERROR) << "Prev bc/log " << prev_bc << "/" << prev_log << ", after " << after_bc << "/"
+                   << after_log;
+
+        DenseSet::has_problem = false;
+      }
       created += unsigned(added);
     }
   }

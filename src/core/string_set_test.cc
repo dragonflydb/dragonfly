@@ -423,6 +423,7 @@ TEST_F(StringSetTest, Grow) {
 
   for (size_t j = 0; j < 20; ++j) {
     for (size_t i = 0; i < 4098; ++i) {
+      ss_->Reserve(generator() % 256);
       auto str = random_string(generator, 3);
       ss_->Add(str);
     }
