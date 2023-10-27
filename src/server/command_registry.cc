@@ -119,8 +119,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 
   absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
   const bool is_sub_command = maybe_subcommand.size() == 2;
-  std::string_view c_name = maybe_subcommand.front();
-  auto it = cmd_rename_map_.find(c_name);
+  auto it = cmd_rename_map_.find(maybe_subcommand.front());
   if (it != cmd_rename_map_.end()) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.

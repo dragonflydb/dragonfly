@@ -1585,12 +1585,11 @@ static std::string FullAclCommandFromArgs(CmdArgList args, std::string_view name
 std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
   const std::string_view command = facade::ToSV(args[0]);
   std::string_view acl = "ACL";
-  acl = registry_.RenamedOrOriginal(acl);
-  if (command == acl) {
+  if (command == registry_.RenamedOrOriginal(acl)) {
     if (args.size() == 1) {
       return {registry_.Find(ArgS(args, 0)), args};
     }
-    return {registry_.Find(FullAclCommandFromArgs(args, acl)), args.subspan(2)};
+    return {registry_.Find(FullAclCommandFromArgs(args, command)), args.subspan(2)};
   }
 
   const CommandId* res = registry_.Find(ArgS(args, 0));
