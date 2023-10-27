@@ -169,6 +169,7 @@ MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), norep
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
+  has_replied_ = true;
   if (noreply_)
     return;
 
