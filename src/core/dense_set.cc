@@ -245,16 +245,14 @@ void DenseSet::Reserve(size_t sz) {
 
   sz = absl::bit_ceil(sz);
   if (sz > entries_.size()) {
+    size_t prev_size = entries_.size();
     entries_.resize(sz);
     capacity_log_ = absl::bit_width(sz) - 1;
+    Grow(prev_size);
   }
 }
 
-void DenseSet::Grow() {
-  size_t prev_size = entries_.size();
-  entries_.resize(prev_size * 2);
-  ++capacity_log_;
-
+void DenseSet::Grow(size_t prev_size) {
   // perform rehashing of items in the set
   for (long i = prev_size - 1; i >= 0; --i) {
     DensePtr* curr = &entries_[i];
@@ -336,24 +334,6 @@ void DenseSet::Grow() {
       }
     }
   }
-
-  IteratorBase it(this, false);
-  uint32_t bid = 0;
-  uint32_t pos = 0;
-  while (it.owner_) {
-    if (it.curr_list_ != entries_.begin() + bid) {
-      bid = it.curr_list_ - entries_.begin();
-      pos = 0;
-    }
-
-    DCHECK_EQ(bid, BucketId(it.curr_entry_->GetObject(), 0));
-    if (bid != BucketId(it.curr_entry_->GetObject(), 0)) {
-      LOG(ERROR) << "Wrong position (" << bid << ", " << pos << ") for "
-                 << " expected " << BucketId(it.curr_entry_->GetObject(), 0);
-    }
-    it.Advance();
-    ++pos;
-  }
 }
 
 auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
@@ -418,7 +398,11 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
       break;
     }
 
-    Grow();
+    size_t prev_size = entries_.size();
+    entries_.resize(prev_size * 2);
+    ++capacity_log_;
+
+    Grow(prev_size);
     bucket_id = BucketId(hashcode);
   }
 

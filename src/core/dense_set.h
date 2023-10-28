@@ -345,7 +345,7 @@ class DenseSet {
   // return if bucket has no item which is not displaced and right/left bucket has no displaced item
   // belong to given bid
   bool NoItemBelongsBucket(uint32_t bid) const;
-  void Grow();
+  void Grow(size_t prev_size);
 
   // ============ Pseudo Linked List Functions for interacting with Chains ==================
   size_t PushFront(ChainVectorIterator, void* obj, bool has_ttl);

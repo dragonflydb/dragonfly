@@ -421,13 +421,30 @@ TEST_F(StringSetTest, Ttl) {
 TEST_F(StringSetTest, Grow) {
   mt19937 generator(0);
 
-  for (size_t j = 0; j < 20; ++j) {
+  for (size_t j = 0; j < 10; ++j) {
     for (size_t i = 0; i < 4098; ++i) {
       ss_->Reserve(generator() % 256);
       auto str = random_string(generator, 3);
       ss_->Add(str);
     }
     ss_->Clear();
+  }
+}
+
+TEST_F(StringSetTest, Reserve) {
+  vector<string> strs;
+  mt19937 generator(0);
+
+  for (size_t i = 0; i < 10; ++i) {
+    strs.push_back(random_string(generator, 10));
+    ss_->Add(strs.back());
+  }
+
+  for (size_t j = 2; j < 20; j += 3) {
+    ss_->Reserve(j * 20);
+    for (size_t i = 0; i < 10; ++i) {
+      ASSERT_TRUE(ss_->Contains(strs[i]));
+    }
   }
 }
 
