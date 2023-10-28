@@ -12,7 +12,7 @@
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
 #include <sys/resource.h>
-#include <thread>
+
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -1408,10 +1408,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   string info;
 
-  append("number_of_threads", std::thread::hardware_concurrency());
-  append("shard_set_size", shard_set->size());
-  append("proactor_pool_size", service_.proactor_pool().size());
-
   auto should_enter = [&](string_view name, bool hidden = false) {
     if ((!hidden && section.empty()) || section == "ALL" || section == name) {
       auto normalized_name = string{name.substr(0, 1)} + absl::AsciiStrToLower(name.substr(1));
@@ -1433,7 +1429,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
-
+    append("thread_count", service_.proactor_pool().size());
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
     append("redis_mode", "standalone");
