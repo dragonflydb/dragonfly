@@ -12,7 +12,7 @@
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
 #include <sys/resource.h>
-
+#include <thread>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -1407,6 +1407,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   string info;
+
+  append("number_of_threads", std::thread::hardware_concurrency());
+  append("shard_set_size", shard_set->size());
+  append("proactor_pool_size", service_.proactor_pool().size());
 
   auto should_enter = [&](string_view name, bool hidden = false) {
     if ((!hidden && section.empty()) || section == "ALL" || section == name) {
