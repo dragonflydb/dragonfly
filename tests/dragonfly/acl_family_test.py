@@ -441,6 +441,7 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
 
 
 @pytest.mark.asyncio
+@dfly_args({"proactor_threads": 1})
 async def test_set_len_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res
