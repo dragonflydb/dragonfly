@@ -294,7 +294,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   // Validation. Check reverse mapping was built correctly.
   if (needs_reverse_mapping) {
     for (size_t i = 0; i < args_.size(); ++i) {
-      DCHECK_EQ(args_[i], ArgS(args, reverse_index_[i]));
+      DCHECK_EQ(args_[i], ArgS(args, reverse_index_[i])) << args;
     }
   }
 
@@ -393,7 +393,10 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
     unique_shard_id_ = 0;
 
   unique_shard_cnt_ = 0;
+
   args_.clear();
+  reverse_index_.clear();
+
   cid_ = cid;
   cb_ptr_ = nullptr;
 
