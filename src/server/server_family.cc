@@ -1429,14 +1429,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
-    append("thread_count", service_.proactor_pool().size());
+    
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
     append("redis_mode", "standalone");
     append("arch_bits", 64);
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
-
+    append("thread_count", service_.proactor_pool().size());
     size_t uptime = m.uptime;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
