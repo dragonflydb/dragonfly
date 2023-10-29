@@ -62,7 +62,7 @@ pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t t
 }  // namespace
 
 StringMap::~StringMap() {
-  Clear();
+  ClearInternal();
 }
 
 bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
@@ -274,6 +274,18 @@ void StringMap::ObjDelete(void* obj, bool has_ttl) const {
 detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
   sds f = (sds)obj;
   return detail::SdsPair(f, GetValue(f));
+}
+
+bool StringMap::iterator::ReallocIfNeeded(float ratio) {
+  // Unwrap all links to correctly call SetObject()
+  auto* ptr = curr_entry_;
+  while (ptr->IsLink())
+    ptr = ptr->AsLink();
+
+  auto* obj = ptr->GetObject();
+  auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
+  ptr->SetObject(new_obj);
+  return realloced;
 }
 
 }  // namespace dfly
