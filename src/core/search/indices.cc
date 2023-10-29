@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
 #define UNI_ALGO_DISABLE_NFKC_NFKD
@@ -59,15 +60,19 @@ NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
 void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  double num;
-  if (absl::SimpleAtod(doc->GetString(field), &num))
-    entries_.emplace(num, id);
+  for (auto str : doc->GetStrings(field)) {
+    double num;
+    if (absl::SimpleAtod(str, &num))
+      entries_.emplace(num, id);
+  }
 }
 
 void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  int64_t num;
-  if (absl::SimpleAtoi(doc->GetString(field), &num))
-    entries_.erase({num, id});
+  for (auto str : doc->GetStrings(field)) {
+    double num;
+    if (absl::SimpleAtod(str, &num))
+      entries_.erase({num, id});
+  }
 }
 
 vector<DocId> NumericIndex::Range(double l, double r) const {
@@ -79,6 +84,7 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
     out.push_back(it->second);
 
   sort(out.begin(), out.end());
+  out.erase(unique(out.begin(), out.end()), out.end());
   return out;
 }
 
@@ -104,17 +110,27 @@ CompressedSortedSet* BaseStringIndex::GetOrCreate(string_view word) {
 }
 
 void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  for (const auto& word : Tokenize(doc->GetString(field)))
-    GetOrCreate(word)->Insert(id);
+  absl::flat_hash_set<std::string> tokens;
+  for (string_view str : doc->GetStrings(field))
+    tokens.merge(Tokenize(str));
+
+  for (string_view token : tokens)
+    GetOrCreate(token)->Insert(id);
 }
 
 void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  for (const auto& word : Tokenize(doc->GetString(field))) {
-    if (auto it = entries_.find(word); it != entries_.end()) {
-      it->second.Remove(id);
-      if (it->second.Size() == 0)
-        entries_.erase(it);
-    }
+  absl::flat_hash_set<std::string> tokens;
+  for (string_view str : doc->GetStrings(field))
+    tokens.merge(Tokenize(str));
+
+  for (const auto& token : tokens) {
+    auto it = entries_.find(token);
+    if (it == entries_.end())
+      continue;
+
+    it->second.Remove(id);
+    if (it->second.Size() == 0)
+      entries_.erase(it);
   }
 }
 

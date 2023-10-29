@@ -181,7 +181,7 @@ TEST_F(SearchFamilyTest, Json) {
   EXPECT_THAT(Run({"ft.search", "i1", "@a:small @b:secret"}), kNoResults);
 }
 
-TEST_F(SearchFamilyTest, AttributesJsonPaths) {
+TEST_F(SearchFamilyTest, JsonAttributesPaths) {
   Run({"json.set", "k1", ".", R"(   {"nested": {"value": "no"}} )"});
   Run({"json.set", "k2", ".", R"(   {"nested": {"value": "yes"}} )"});
   Run({"json.set", "k3", ".", R"(   {"nested": {"value": "maybe"}} )"});
@@ -191,6 +191,65 @@ TEST_F(SearchFamilyTest, AttributesJsonPaths) {
       "OK");
 
   EXPECT_THAT(Run({"ft.search", "i1", "yes"}), AreDocIds("k2"));
+}
+
+TEST_F(SearchFamilyTest, JsonArrayValues) {
+  string_view D1 = R"(
+{
+  "name": "Alex",
+  "plays" : [
+    {"game": "Pacman", "score": 10},
+    {"game": "Tetris", "score": 15}
+  ],
+  "areas": ["EU-west", "EU-central"]
+}
+)";
+  string_view D2 = R"(
+{
+  "name": "Bob",
+  "plays" : [
+    {"game": "Pacman", "score": 15},
+    {"game": "Mario", "score": 7}
+  ],
+  "areas": "US-central"
+}
+)";
+  string_view D3 = R"(
+{
+  "name": "Caren",
+  "plays" : [
+    {"game": "Mario", "score": 9},
+    {"game": "Doom", "score": 20}
+  ],
+  "areas": ["EU-central", "EU-east"]
+}
+)";
+
+  Run({"json.set", "k1", ".", D1});
+  Run({"json.set", "k2", ".", D2});
+  Run({"json.set", "k3", ".", D3});
+
+  auto resp = Run({"ft.create", "i1", "on", "json", "schema", "$.name", "text", "$.plays[*].game",
+                   "as", "games", "tag", "$.plays[*].score", "as", "scores", "numeric",
+                   "$.areas[*]", "as", "areas", "tag"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("k1", "k2", "k3"));
+
+  // Find players by games
+  EXPECT_THAT(Run({"ft.search", "i1", "@games:{Tetris | Mario | Doom}"}),
+              AreDocIds("k1", "k2", "k3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@games:{Pacman}"}), AreDocIds("k1", "k2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@games:{Mario}"}), AreDocIds("k2", "k3"));
+
+  // Find players by scores
+  EXPECT_THAT(Run({"ft.search", "i1", "@scores:[15 15]"}), AreDocIds("k1", "k2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@scores:[0 (10]"}), AreDocIds("k2", "k3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@scores:[(15 20]"}), AreDocIds("k3"));
+
+  // Find platers by areas
+  EXPECT_THAT(Run({"ft.search", "i1", "@areas:{\"EU-central\"}"}), AreDocIds("k1", "k3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@areas:{\"US-central\"}"}), AreDocIds("k2"));
 }
 
 TEST_F(SearchFamilyTest, Tags) {
