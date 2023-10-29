@@ -17,7 +17,6 @@
 #include <chrono>
 #include <filesystem>
 #include <optional>
-
 #include "facade/error.h"
 #include "slowlog.h"
 
