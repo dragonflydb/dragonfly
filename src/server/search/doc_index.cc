@@ -227,11 +227,12 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 
 io::Result<SearchResult, facade::ErrorReply> ShardDocIndex::Search(
     const OpArgs& op_args, const SearchParams& params, search::SearchAlgorithm* search_algo) const {
-  auto search_results = search_algo->Search(&indices_);
+  size_t requested_count = params.limit_offset + params.limit_total;
+
+  auto search_results = search_algo->Search(&indices_, requested_count);
   if (!search_results.error.empty())
     return nonstd::make_unexpected(facade::ErrorReply(std::move(search_results.error)));
 
-  size_t requested_count = params.limit_offset + params.limit_total;
   size_t return_count = min(requested_count, search_results.ids.size());
 
   // Probabilistic optimization: If we are about 99% sure that all shards in total fetch more
@@ -255,7 +256,7 @@ io::Result<SearchResult, facade::ErrorReply> ShardDocIndex::Search(
 
   Serialize(op_args, params, absl::MakeSpan(out));
 
-  return SearchResult{write_epoch_, search_results.ids.size(), std::move(out),
+  return SearchResult{write_epoch_, search_results.total, std::move(out),
                       std::move(search_results.profile)};
 }
 
