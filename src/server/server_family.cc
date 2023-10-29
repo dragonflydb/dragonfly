@@ -17,6 +17,7 @@
 #include <chrono>
 #include <filesystem>
 #include <optional>
+
 #include "facade/error.h"
 #include "slowlog.h"
 
@@ -1428,7 +1429,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
-    
+
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
     append("redis_mode", "standalone");
