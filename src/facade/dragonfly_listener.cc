@@ -350,8 +350,12 @@ ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
     // i.e. when a different CPU is assigned to handle the RX traffic.
     // On some distributions (WSL1, for example), SO_INCOMING_CPU is not supported.
     if (0 == getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len)) {
-      CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, &napi_id, &len));
-      VLOG(1) << "CPU/NAPI for connection " << fd << " is " << cpu << "/" << napi_id;
+      VLOG(1) << "CPU for connection " << fd << " is " << cpu;
+      // Avoid CHECKINGing success, it sometimes fail on WSL
+      // https://github.com/dragonflydb/dragonfly/issues/2090
+      if (0 == getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, &napi_id, &len)) {
+        VLOG(1) << "NAPI for connection " << fd << " is " << napi_id;
+      }
 
       if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
         const vector<unsigned>& ids = pool()->MapCpuToThreads(cpu);
