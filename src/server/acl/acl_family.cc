@@ -618,6 +618,15 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   }
   registry_->Init();
   config_registry.RegisterMutable("aclfile");
+  config_registry.RegisterMutable("acllog_max_len", [this](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<size_t>();
+    if (res.has_value()) {
+      pool_->AwaitFiberOnAll([&res](auto index, auto* context) {
+        ServerState::tlocal()->acl_log.SetTotalEntries(res.value());
+      });
+    }
+    return res.has_value();
+  });
 }
 
 }  // namespace dfly::acl
