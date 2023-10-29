@@ -107,8 +107,7 @@ class DbSlice {
     std::pair<int64_t, int64_t> Calculate(int64_t now_msec) const;
   };
 
-  DbSlice(uint32_t index, bool caching_mode, uint32_t max_evict_per_hb,
-          uint32_t max_segment_to_consider, EngineShard* owner);
+  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).

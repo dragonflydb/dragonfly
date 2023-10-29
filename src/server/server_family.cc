@@ -1482,8 +1482,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("small_string_bytes", m.small_string_bytes);
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
-    append("max_eviction_per_heartbeat", GetFlag(FLAGS_max_eviction_per_heartbeat));
-    append("max_segment_to_consider", GetFlag(FLAGS_max_segment_to_consider));
     append("pipeline_cache_bytes", m.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.conn_stats.dispatch_queue_bytes);
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);

@@ -4,10 +4,13 @@
 
 #include "server/db_slice.h"
 
+#include <absl/strings/match.h>
+
 extern "C" {
 #include "redis/object.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "generic_family.h"
 #include "server/engine_shard_set.h"
@@ -15,10 +18,19 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 
+ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
+          "The maximum number of key-value pairs that will be deleted in each eviction "
+          "when heartbeat based eviction is triggered under memory pressure.");
+
+ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
+          "The maximum number of dashtable segments to scan in each eviction "
+          "when heartbeat based eviction is triggered under memory pressure.");
+
 namespace dfly {
 
 using namespace std;
 using namespace util;
+using absl::GetFlag;
 using facade::OpStatus;
 
 namespace {
@@ -253,12 +265,11 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 #undef ADD
 
-DbSlice::DbSlice(uint32_t index, bool caching_mode, uint32_t max_eviction_per_hb,
-                 uint32_t max_segment_to_consider, EngineShard* owner)
+DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
     : shard_id_(index),
       caching_mode_(caching_mode),
-      max_eviction_per_hb_(max_eviction_per_hb),
-      max_segment_to_consider_(max_segment_to_consider),
+      max_eviction_per_hb_(GetFlag(FLAGS_max_eviction_per_heartbeat)),
+      max_segment_to_consider_(GetFlag(FLAGS_max_segment_to_consider)),
       owner_(owner) {
   db_arr_.emplace_back();
   CreateDb(0);
