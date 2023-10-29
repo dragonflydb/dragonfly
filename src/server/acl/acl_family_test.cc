@@ -4,6 +4,8 @@
 
 #include "server/acl/acl_family.h"
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/internal/flag.h"
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -14,10 +16,19 @@
 
 using namespace testing;
 
+ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
+
 namespace dfly {
 
 class AclFamilyTest : public BaseFamilyTest {
  protected:
+};
+
+class AclFamilyTestRename : public BaseFamilyTest {
+  void SetUp() override {
+    absl::SetFlag(&FLAGS_rename_command, {"ACL=ROCKS"});
+    ResetService();
+  }
 };
 
 TEST_F(AclFamilyTest, AclSetUser) {
@@ -37,6 +48,14 @@ TEST_F(AclFamilyTest, AclSetUser) {
   auto vec = resp.GetVec();
   EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL",
                                         "user vlad off nopass +@NONE"));
+
+  resp = Run({"ACL", "SETUSER", "vlad", "+ACL"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "LIST"});
+  vec = resp.GetVec();
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                                        "user vlad off nopass +@NONE +ACL"));
 }
 
 TEST_F(AclFamilyTest, AclDelUser) {
@@ -319,6 +338,17 @@ TEST_F(AclFamilyTest, AclGenPass) {
   // and the pattern continues
   resp = Run({"ACL", "GENPASS", "9"});
   EXPECT_THAT(resp.GetString().length(), 3);
+}
+
+TEST_F(AclFamilyTestRename, AclRename) {
+  auto resp = Run({"ACL", "SETUSER", "billy"});
+  EXPECT_THAT(resp, ErrArg("ERR unknown command `ACL`"));
+
+  resp = Run({"ROCKS", "SETUSER", "billy", "ON", ">mypass"});
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  resp = Run({"ROCKS", "DELUSER", "billy"});
+  EXPECT_THAT(resp.GetString(), "OK");
 }
 
 }  // namespace dfly

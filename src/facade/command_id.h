@@ -93,7 +93,7 @@ class CommandId {
   static uint32_t OptCount(uint32_t mask);
 
  protected:
-  std::string_view name_;
+  std::string name_;
 
   uint32_t opt_mask_;
   int8_t arity_;

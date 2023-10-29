@@ -598,7 +598,6 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
                    .HFUNC(DryRun);
   *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kGenPass}.HFUNC(
       GenPass);
-
   cmd_registry_ = registry;
 }
 
