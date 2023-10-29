@@ -683,10 +683,12 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     bool added;
 
     for (size_t i = 0; i < values.size(); i += 2) {
+      string_view field = ToSV(values[i]);
+      string_view value = ToSV(values[i + 1]);
       if (op_sp.skip_if_exists)
-        added = sm->AddOrSkip(ToSV(values[i]), ToSV(values[i + 1]), op_sp.ttl);
+        added = sm->AddOrSkip(field, value, op_sp.ttl);
       else
-        added = sm->AddOrUpdate(ToSV(values[i]), ToSV(values[i + 1]), op_sp.ttl);
+        added = sm->AddOrUpdate(field, value, op_sp.ttl);
 
       created += unsigned(added);
     }

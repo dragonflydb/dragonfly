@@ -299,8 +299,10 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
     return make_unexpected(ec);
 
   ec = SaveValue(pv);
-  if (ec)
+  if (ec) {
+    LOG(ERROR) << "Problems saving value for key " << key << " in dbid=" << dbid;
     return make_unexpected(ec);
+  }
 
   return rdb_type;
 }
