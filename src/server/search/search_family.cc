@@ -377,6 +377,7 @@ struct MultishardSearch {
   MultishardSearch(ConnectionContext* cntx, std::string_view index_name,
                    search::SearchAlgorithm* search_algo, SearchParams params)
       : cntx_{cntx},
+        rb_{static_cast<RedisReplyBuilder*>(cntx->reply_builder())},
         index_name_{index_name},
         search_algo_{search_algo},
         params_{std::move(params)} {
@@ -386,42 +387,51 @@ struct MultishardSearch {
   }
 
   void RunAndReply() {
-    params_.enable_cutoff = true;
-    params_.num_shards = shard_set->size();
+    // First, run search with probabilistic optimizations enabled.
+    // If the result set was collected successfuly, reply.
+    {
+      params_.enable_cutoff = true;
 
-    if (auto err = RunSearch(); err)
-      return (*cntx_)->SendError(std::move(*err));
+      if (auto err = RunSearch(); err)
+        return rb_->SendError(std::move(*err));
 
-    auto incomplete_shards = BuildOrder();
-    if (incomplete_shards.empty())
-      return Reply();
+      auto incomplete_shards = BuildOrder();
+      if (incomplete_shards.empty())
+        return Reply();
+    }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(reply_size);
-  rb->SendLong(total_count);
-    params_.enable_cutoff = false;
+    // VLOG(0) << "Failed completness check, refilling";
 
-    //VLOG(0) << "Failed completness check, refilling";
+    // Otherwise, some results made it into the result set but were not serialized.
+    // Try refilling the requested values. If no reordering occured, reply immediately, otherwise
+    // try building a new order and reply if it is valid.
+    {
+      params_.enable_cutoff = false;
 
-    auto refill_res = RunRefill();
-    if (!refill_res.has_value())
-      return (*cntx_)->SendError(std::move(refill_res.error()));
+      auto refill_res = RunRefill();
+      if (!refill_res.has_value())
+        return rb_->SendError(std::move(refill_res.error()));
 
-    if (bool no_reordering = refill_res.value(); no_reordering)
-      return Reply();
+      if (bool no_reordering = refill_res.value(); no_reordering)
+        return Reply();
 
-    //VLOG(0) << "Failed refill, rebuilding";
+      if (auto incomplete_shards = BuildOrder(); incomplete_shards.empty())
+        return Reply();
+    }
 
-    if (auto incomplete_shards = BuildOrder(); incomplete_shards.empty())
-      return Reply();
+    VLOG(0) << "Failed refill and rebuild, re-searching";
 
-    //VLOG(0) << "Failed rebuild, re-searching";
+    // At this step all optimizations failed. Run search without any cutoffs.
+    {
+      DCHECK(!params_.enable_cutoff);
 
-    if (auto err = RunSearch(); err)
-      return (*cntx_)->SendError(std::move(*err));
-    incomplete_shards = BuildOrder();
-    DCHECK(incomplete_shards.empty());
-    Reply();
+      if (auto err = RunSearch(); err)
+        return rb_->SendError(std::move(*err));
+
+      auto incomplete_shards = BuildOrder();
+      DCHECK(incomplete_shards.empty());
+      Reply();
+    }
   }
 
   struct ProfileInfo {
@@ -474,28 +484,26 @@ struct MultishardSearch {
     bool ids_only = params_.IdsOnly();
     size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
 
-    VLOG(0) << "Reply size " << reply_size << " total count " << total_count;
-
-    (*cntx_)->StartArray(reply_size);
-    (*cntx_)->SendLong(total_count);
+    rb_->StartArray(reply_size);
+    rb_->SendLong(total_count);
 
     for (size_t i = params_.limit_offset; i < ordered_docs_.size(); i++) {
       auto& value = get<DocResult::SerializedValue>(ordered_docs_[i]->value);
       if (ids_only) {
-        (*cntx_)->SendBulkString(value.key);
+        rb_->SendBulkString(value.key);
         continue;
       }
 
       if (agg_info && !agg_info->alias.empty())
         value.values[agg_info->alias] = absl::StrCat(get<float>(ordered_docs_[i]->score));
 
-      if (ids_only)
-        rb->SendBulkString(serialized_doc.key);
       SendSerializedDoc(value, cntx_);
     }
   }
 
-  template <typename F> optional<facade::ErrorReply> RunHandler(F&& f) {
+  // Run function f on all search indices, return first error
+  std::optional<facade::ErrorReply> RunHandler(
+      std::function<std::optional<ErrorReply>(EngineShard*, ShardDocIndex*)> f) {
     hops_++;
     AggregateValue<optional<facade::ErrorReply>> err;
     cntx_->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
@@ -545,6 +553,7 @@ struct MultishardSearch {
     return failed_refills == 0;
   }
 
+  // Build order from results collected from shards
   absl::flat_hash_set<ShardId> BuildOrder() {
     ordered_docs_.clear();
     if (auto agg = search_algo_->HasAggregation(); agg) {
@@ -608,6 +617,7 @@ struct MultishardSearch {
 
  private:
   ConnectionContext* cntx_;
+  RedisReplyBuilder* rb_;
   std::string_view index_name_;
   search::SearchAlgorithm* search_algo_;
   SearchParams params_;
@@ -879,15 +889,15 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
     mss.RunAndReply();
   }
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+
   auto reply = crb.Take();
   if (auto err = CapturingReplyBuilder::GetError(reply); err)
-    return (*cntx)->SendError(err->first, err->second);
+    return rb->SendError(err->first, err->second);
 
   auto took = absl::Now() - start;
-
   auto profile = mss.GetProfileInfo();
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(profile.profiles.size() + 1);
 
   // General stats

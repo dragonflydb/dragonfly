@@ -25,37 +25,35 @@ using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*v
 std::optional<search::SchemaField::FieldType> ParseSearchFieldType(std::string_view name);
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
+// Represents results returned from a shard doc index that are then aggregated in the coordinator.
 struct DocResult {
+  // Fully serialized value ready to be sent back.
   struct SerializedValue {
     std::string key;
     SearchDocData values;
   };
 
+  // Reference to a document that matched the query, but it's serialization was the document was
+  // considered unlikely to be contained in the reply.
   struct DocReference {
     ShardId shard_id;
     search::DocId doc_id;
     bool requested;
   };
 
-  std::variant<SerializedValue, DocReference> value;
-  search::ResultScore score;
-
   bool operator<(const DocResult& other) const;
   bool operator>=(const DocResult& other) const;
+
+ public:
+  std::variant<SerializedValue, DocReference> value;
+  search::ResultScore score;
 };
 
 struct SearchResult {
-  size_t write_epoch = 0;  // Write epoch of the index during on the result was created
+  size_t write_epoch = 0;  // Write epoch of the index on which the result was created
 
   size_t total_hits = 0;        // total number of hits in shard
   std::vector<DocResult> docs;  // serialized documents of first hits
-
-  // After combining results from multiple shards and accumulating more documents than initially
-  // requested, only a subset of all documents will be sent back to the client,
-  // so it doesn't make sense to serialize strictly all documents in every shard ahead.
-  // Instead, only documents up to a probablistic bound are serialized, the
-  // leftover ids and scores are stored in the cutoff tail for use in the "unlikely" scenario.
-  // size_t num_cutoff = 0;
 
   std::optional<search::AlgorithmProfile> profile;
 };
@@ -64,25 +62,24 @@ struct SearchParams {
   using FieldReturnList =
       std::vector<std::pair<std::string /*identifier*/, std::string /*short name*/>>;
 
-  // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
-  // the whole result set
-  size_t limit_offset = 0;
-  size_t limit_total = 10;
-
-  // Total number of shards, used in probabilistic queries
-  size_t num_shards = 0;
-  bool enable_cutoff = false;
-
-  // Set but empty means no fields should be returned
-  std::optional<FieldReturnList> return_fields;
-  std::optional<search::SortOption> sort_option;
-  search::QueryParams query_params;
-
   bool IdsOnly() const {
     return return_fields && return_fields->empty();
   }
 
   bool ShouldReturnField(std::string_view field) const;
+
+ public:
+  // Parameters for "LIMIT offset total": select total amount documents with a specific offset.
+  size_t limit_offset = 0;
+  size_t limit_total = 10;
+
+  // Pprobabilistic optimizations that avoid serializing documents unlikely to be returned.
+  bool enable_cutoff = false;
+
+  std::optional<FieldReturnList> return_fields;  // Set but empty means no fields should be returned
+
+  std::optional<search::SortOption> sort_option;
+  search::QueryParams query_params;
 };
 
 // Stores basic info about a document index.
@@ -139,6 +136,8 @@ class ShardDocIndex {
                                                       const SearchParams& params,
                                                       search::SearchAlgorithm* search_algo) const;
 
+  // Resolve requested doc references from the result. If no writes occured, the remaining
+  // entries are serialized and true is returned, otherwise a full new query is performed.
   bool Refill(const OpArgs& op_args, const SearchParams& params,
               search::SearchAlgorithm* search_algo, SearchResult* result) const;
 
@@ -158,14 +157,17 @@ class ShardDocIndex {
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
+  // Serialize prefix of requested doc references.
   void Serialize(const OpArgs& op_args, const SearchParams& params,
                  absl::Span<DocResult> docs) const;
 
  private:
   std::shared_ptr<const DocIndex> base_;
-  size_t write_epoch_;
   search::FieldIndices indices_;
   DocKeyIndex key_index_;
+
+  // Incremented during each Add/Remove. Used to track if changes occured since last read.
+  size_t write_epoch_;
 };
 
 // Stores shard doc indices by name on a specific shard.

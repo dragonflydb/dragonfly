@@ -52,24 +52,26 @@ const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTy
     {"NUMERIC"sv, search::SchemaField::NUMERIC},
     {"VECTOR"sv, search::SchemaField::VECTOR}};
 
-size_t GetProbabilisticBound(size_t shards, size_t hits, size_t requested, bool is_aggregation) {
-  auto intlog2 = [](size_t x) {
-    size_t l = 0;
-    while (x >>= 1)
-      ++l;
-    return l;
-  };
-  size_t avg_shard_min = hits * intlog2(hits) / (12 + shards / 10);
+size_t GetProbabilisticBound(size_t hits, size_t requested, optional<search::AggregationInfo> agg) {
+  auto intlog2 = [](size_t x) { return int(log2(x)); };  // TODO: replace with loop or builting_clz
+  size_t shards = shard_set->size();
+
+  // Estimate how much every shard has with at least 99% prob
+  size_t avg_shard_min = hits * intlog2(hits) / (12 + shard_set->size() / 10);
   avg_shard_min -= min(avg_shard_min, min(hits, size_t(5)));
 
-  // VLOG(0) << "PROB BOUND " << hits << " " << shards << " " << requested << " => " <<
-  // avg_shard_min
-  //         << " diffb " << requested / shards + 1 << " & " << requested;
+  // If it turns out that we might have not enough results to cover the request, don't skip any
+  if (avg_shard_min * shards < requested)
+    return requested;
 
-  if (!is_aggregation && avg_shard_min * shards >= requested)
-    return requested / shards + 1;
+  // If all shards have at least avg min, keep the bare minimum needed to cover the request
+  size_t limit = requested / shards + 1;
 
-  return min(hits, requested);
+  // Aggregations like SORTBY and KNN reorder the result and thus introduce some variance
+  if (agg.has_value())
+    limit += max(requested / 4 + 1, 3UL);
+
+  return limit;
 }
 
 }  // namespace
@@ -192,7 +194,7 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
-    : base_{std::move(index)}, write_epoch_{0}, indices_{{}, nullptr}, key_index_{} {
+    : base_{std::move(index)}, indices_{{}, nullptr}, key_index_{}, write_epoch_{0} {
 }
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
@@ -230,23 +232,25 @@ io::Result<SearchResult, facade::ErrorReply> ShardDocIndex::Search(
     return nonstd::make_unexpected(facade::ErrorReply(std::move(search_results.error)));
 
   size_t requested_count = params.limit_offset + params.limit_total;
-  size_t serialize_count = min(requested_count, search_results.ids.size());
+  size_t return_count = min(requested_count, search_results.ids.size());
 
-  size_t cuttoff_bound = serialize_count;
-  if (params.enable_cutoff && !params.IdsOnly())
-    cuttoff_bound =
-        GetProbabilisticBound(params.num_shards, search_results.ids.size(), requested_count,
-                              search_algo->HasAggregation().has_value());
+  // Probabilistic optimization: If we are about 99% sure that all shards in total fetch more
+  // results than needed to statisfy the search request, we can avoid serializing some of the last
+  // result hits as they likely won't be needed. The `cutoff_bound` indicates how much entries it's
+  // reasonable to serialize directly, for the rest only id's are stored. In the 1% case they are
+  // either serialized on another hop or the query is fully repeated without this optimization.
+  size_t cuttoff_bound = return_count;
+  if (params.enable_cutoff && !params.IdsOnly()) {
+    cuttoff_bound = GetProbabilisticBound(search_results.pre_aggregation_total, requested_count,
+                                          search_algo->HasAggregation());
+  }
 
-  VLOG(0) << "Requested " << requested_count << " got " << search_results.ids.size() << " cutoff "
-          << cuttoff_bound;
-
-  vector<DocResult> out(serialize_count);
+  vector<DocResult> out(return_count);
   auto shard_id = EngineShard::tlocal()->shard_id();
+  auto& scores = search_results.scores;
   for (size_t i = 0; i < out.size(); i++) {
     out[i].value = DocResult::DocReference{shard_id, search_results.ids[i], i < cuttoff_bound};
-    out[i].score =
-        search_results.scores.empty() ? search::ResultScore{} : std::move(search_results.scores[i]);
+    out[i].score = scores.empty() ? search::ResultScore{} : std::move(scores[i]);
   }
 
   Serialize(op_args, params, absl::MakeSpan(out));
@@ -257,14 +261,18 @@ io::Result<SearchResult, facade::ErrorReply> ShardDocIndex::Search(
 
 bool ShardDocIndex::Refill(const OpArgs& op_args, const SearchParams& params,
                            search::SearchAlgorithm* search_algo, SearchResult* result) const {
+  // If no writes occured, serialize remaining entries without breaking correctness
   if (result->write_epoch == write_epoch_) {
     Serialize(op_args, params, absl::MakeSpan(result->docs));
     return true;
   }
 
+  // We're already on the cold path and we don't wanna gamble any more
   DCHECK(!params.enable_cutoff);
+
   auto new_result = Search(op_args, params, search_algo);
-  CHECK(new_result.has_value());
+  CHECK(new_result.has_value());  // Query should be valid since it passed first step
+
   *result = std::move(new_result.value());
   return false;
 }

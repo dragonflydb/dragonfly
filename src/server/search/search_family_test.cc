@@ -616,9 +616,9 @@ TEST_F(SearchFamilyTest, FtProfile) {
   }
 }
 
-vector<vector<string>> FillShard(ShardId sid, string_view prefix, size_t num) {
+vector<vector<string>> FillShard(ShardId sid, string_view prefix, size_t num, size_t idx = 0) {
   vector<vector<string>> out;
-  size_t entries = 0, idx = 0;
+  size_t entries = 0;
   while (entries < num) {
     auto key = absl::StrCat(prefix, idx++);
     if (Shard(key, shard_set->size()) == sid) {
@@ -758,10 +758,24 @@ TEST_F(SearchFamilyTest, MultiShardRefillRepeat) {
   fb.Join();
 }
 
-// must have changed
+TEST_F(SearchFamilyTest, MultiShardAggregation) {
+  // Place 50 keys on shards 0 and 1, but values on shard 1 have a larger value
+  for (auto cmd : FillShard(0, "doc", 50, 0))
+    Run(absl::MakeSpan(cmd));
 
-// s0   -> refill
-// s1   -> re-search -> delete some ->
+  for (auto cmd : FillShard(1, "doc", 50, 100))
+    Run(absl::MakeSpan(cmd));
+
+  Run({"ft.create", "i1", "schema", "idx", "numeric", "sortable"});
+
+  // The distribution is completely unbalanced, so getting the largest vlaues should require two
+  // hops
+  auto resp = Run(
+      {"ft.profile", "i1", "SEARCH", "QUERY", "*", "LIMIT", "0", "20", "SORTBY", "idx", "DESC"});
+  auto stats = resp.GetVec()[0].GetVec();
+  EXPECT_EQ(stats[8], "hops");
+  EXPECT_THAT(stats[9], IntArg(2));
+}
 
 TEST_F(SearchFamilyTest, SimpleExpiry) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "expires-in", "numeric"}), "OK");
