@@ -33,8 +33,8 @@ struct DocResult {
     SearchDocData values;
   };
 
-  // Reference to a document that matched the query, but it's serialization was the document was
-  // considered unlikely to be contained in the reply.
+  // Reference to a document that matched the query, but it's serialization was skipped as the
+  // document was considered unlikely to be contained in the reply.
   struct DocReference {
     ShardId shard_id;
     search::DocId doc_id;

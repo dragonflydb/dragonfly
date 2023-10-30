@@ -53,7 +53,16 @@ const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTy
     {"VECTOR"sv, search::SchemaField::VECTOR}};
 
 size_t GetProbabilisticBound(size_t hits, size_t requested, optional<search::AggregationInfo> agg) {
-  auto intlog2 = [](size_t x) { return int(log2(x)); };  // TODO: replace with loop or builting_clz
+  auto intlog2 = [](size_t x) {
+    size_t l = 0;
+    while (x >>= 1)
+      ++l;
+    return l;
+  };
+
+  if (hits == 0 || requested == 0)
+    return 0;
+
   size_t shards = shard_set->size();
 
   // Estimate how much every shard has with at least 99% prob
@@ -228,7 +237,6 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 io::Result<SearchResult, facade::ErrorReply> ShardDocIndex::Search(
     const OpArgs& op_args, const SearchParams& params, search::SearchAlgorithm* search_algo) const {
   size_t requested_count = params.limit_offset + params.limit_total;
-
   auto search_results = search_algo->Search(&indices_, requested_count);
   if (!search_results.error.empty())
     return nonstd::make_unexpected(facade::ErrorReply(std::move(search_results.error)));
@@ -240,7 +248,7 @@ io::Result<SearchResult, facade::ErrorReply> ShardDocIndex::Search(
   // result hits as they likely won't be needed. The `cutoff_bound` indicates how much entries it's
   // reasonable to serialize directly, for the rest only id's are stored. In the 1% case they are
   // either serialized on another hop or the query is fully repeated without this optimization.
-  size_t cuttoff_bound = return_count;
+  size_t cuttoff_bound = requested_count;
   if (params.enable_cutoff && !params.IdsOnly()) {
     cuttoff_bound = GetProbabilisticBound(search_results.pre_aggregation_total, requested_count,
                                           search_algo->HasAggregation());
