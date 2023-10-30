@@ -1152,8 +1152,9 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
 
         // check if the key is locked by looking up transaction table.
         auto& lt = db_table->trans_locks;
-        std::string key_str = evict_it->first.ToString();
-        if (lt.find(KeyLockArgs::GetLockKey(key_str)) != lt.end())
+        string tmp;
+        string_view key = evict_it->first.GetSlice(&tmp);
+        if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
           continue;
 
         PerformDeletion(evict_it, shard_owner(), db_table.get());
