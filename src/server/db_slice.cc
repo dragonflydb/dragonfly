@@ -483,7 +483,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
     events_.garbage_collected = db.prime.garbage_collected();
     events_.stash_unloaded = db.prime.stash_unloaded();
-
+    events_.evicted_keys += evp.evicted();
     events_.garbage_checked += evp.checked();
 
     it.SetVersion(NextVersion());

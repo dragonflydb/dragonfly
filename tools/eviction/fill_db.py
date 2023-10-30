@@ -1,4 +1,35 @@
 #!/usr/bin/env python3
+
+"""
+This script implements facilities for assessing cache eviction.
+Two major functions have been implemented that allow users to
+  1. Populate Dragonfly with a specified key and value length distributions.
+  2. Measuring the cache hit rate of Dragonfly with workloads that access keys using Zipfian distribution.
+
+Usage:
+To perform database population, simply run:
+
+./fill_db.py -f
+
+This will automatically populate the database to the point where about 2X of maxmemory (specified by Dragonfly)
+of KV pairs will be inserted. By default, we always stop at 2X maxmemory, and this can be changed using the -r
+option, for instance
+
+./fill_db.py -f -r 0.25  # population stops at 4x maxmemory
+
+To accelerate the population, we can use multiple processes running this script in parallel. A convenient script
+has been provided in this directory:
+./run_fill_db.sh 10  # use 10 processes to fill in parallel
+
+After database has been populated, we can start measuring cache hit rate using the -m option:
+./fill_db.py -m
+Note that the measurement must be done after the population as this mode relies on reading back the complete key
+space inserted during the population phase. By default, we perform 100000 set operations for calculating cache hit rate.
+This number can be changed using the -c option:
+./fill_db.py -m -c 2000
+"""
+
+
 import redis
 import string
 from random import choice

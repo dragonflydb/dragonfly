@@ -110,8 +110,6 @@ ABSL_FLAG(bool, s3_sign_payload, true,
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
-ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
-ABSL_DECLARE_FLAG(uint32_t, max_segment_to_consider);
 ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
@@ -1480,8 +1478,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
-    append("maxmemory", max_memory_limit);
-    append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     append("pipeline_cache_bytes", m.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.conn_stats.dispatch_queue_bytes);
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
