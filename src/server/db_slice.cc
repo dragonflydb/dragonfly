@@ -18,6 +18,9 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 
+ABSL_FLAG(bool, enable_heartbeat_eviction, true,
+          "Enable eviction during heartbeat when memory is under pressure.");
+
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
           "The maximum number of key-value pairs that will be deleted in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
@@ -1119,7 +1122,7 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 }
 
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
-  if (!caching_mode_)
+  if ((!caching_mode_) || !GetFlag(FLAGS_enable_heartbeat_eviction))
     return;
 
   auto time_start = absl::GetCurrentTimeNanos();
@@ -1130,13 +1133,14 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
 
   size_t used_memory_after;
   size_t evicted = 0;
-
+  string tmp;
+  int32_t starting_segment_id = rand() % num_segments;
   size_t used_memory_before = owner_->UsedMemory();
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
     for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
       // pick a random segment to start with in each eviction,
       // as segment_id does not imply any recency, and random selection should be fair enough
-      int32_t segment_id = rand() % num_segments;
+      int32_t segment_id = starting_segment_id;
       for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider_;
            ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
         const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
@@ -1152,7 +1156,6 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
 
         // check if the key is locked by looking up transaction table.
         auto& lt = db_table->trans_locks;
-        string tmp;
         string_view key = evict_it->first.GetSlice(&tmp);
         if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
           continue;
