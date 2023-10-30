@@ -60,18 +60,18 @@ struct GeoPoint {
   double dist;
   double score;
   std::string member;
-  GeoPoint() : longitude(0.0), latitude(0.0), dist(0.0), score(0.0), member(""){};
+  GeoPoint() : longitude(0.0), latitude(0.0), dist(0.0), score(0.0){};
   GeoPoint(double _longitude, double _latitude, double _dist, double _score,
            const std::string& _member)
       : longitude(_longitude), latitude(_latitude), dist(_dist), score(_score), member(_member){};
 };
 using GeoArray = std::vector<GeoPoint>;
 
+enum class Sorting { kUnsorted, kAsc, kDesc };
 struct GeoSearchOpts {
   double conversion = 0;
   uint64_t count = 0;
-  bool asc = 0;
-  bool desc = 0;
+  Sorting sorting = Sorting::kUnsorted;
   bool any = 0;
   bool withdist = 0;
   bool withcoord = 0;
@@ -2648,9 +2648,9 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
 
 namespace {
 // Search all eight neighbors + self geohash box
-int MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHashRadius& n,
-                          const GeoShape& shape_ref, GeoArray* ga, unsigned long limit) {
-  vector<GeoHashBits> neighbors(9);
+bool MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHashRadius& n,
+                           const GeoShape& shape_ref, GeoArray* ga, unsigned long limit) {
+  array<GeoHashBits, 9> neighbors;
   unsigned int last_processed = 0;
   GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
 
@@ -2703,77 +2703,74 @@ int MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHas
       cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result_arrays.status() == OpStatus::WRONG_TYPE) {
     (*cntx)->SendError(kWrongTypeErr);
-    return -1;
+    return false;
   }
 
   // filter potential result list
-  unsigned long count = 0;
   double xy[2];
   double distance;
   for (auto& arr : *result_arrays) {
     for (auto& p : arr) {
       if (geoWithinShape(shape, p.second, xy, &distance) == 0) {
         ga->emplace_back(xy[0], xy[1], distance, p.second, p.first);
-        count++;
         if (limit > 0 && ga->size() >= limit)
           break;
       }
     }
   }
+  return true;
+}
 
-  return count;
+void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
+  if (sorting == Sorting::kUnsorted)
+    return;
+
+  auto comparator = [&](const GeoPoint& a, const GeoPoint& b) {
+    if (sorting == Sorting::kAsc) {
+      return a.dist < b.dist;
+    } else {
+      DCHECK(sorting == Sorting::kDesc);
+      return a.dist > b.dist;
+    }
+  };
+
+  if (count > 0) {
+    std::partial_sort(ga->begin(), ga->begin() + count, ga->end(), comparator);
+    ga->resize(count);
+  } else {
+    std::sort(ga->begin(), ga->end(), comparator);
+  }
 }
 
 void GeoSearchGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, string_view key,
                       const GeoSearchOpts& geo_ops) {
-  double conversion = geo_ops.conversion;
-  uint64_t count = geo_ops.count;
-  bool asc = geo_ops.asc;
-  bool desc = geo_ops.desc;
-  bool any = geo_ops.any;
-  bool withdist = geo_ops.withdist;
-  bool withcoord = geo_ops.withcoord;
-  bool withhash = geo_ops.withhash;
-
   // query
   GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
   GeoHashRadius georadius = geohashCalculateAreasByShapeWGS84(shape);
   GeoArray ga;
-  MembersOfAllNeighbors(cntx, key, georadius, shape_ref, &ga, any ? count : 0);
+  if (!MembersOfAllNeighbors(cntx, key, georadius, shape_ref, &ga,
+                             geo_ops.any ? geo_ops.count : 0)) {
+    return;
+  }
 
   // if no matching results, the user gets an empty reply.
   if (ga.empty()) {
     (*cntx)->SendNull();
+    return;
   }
 
   // sort and trim by count
-  if (asc) {
-    auto asc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist < b.dist; };
-    if (count > 0) {
-      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), asc_comparator);
-      ga.resize(count);
-    } else {
-      std::sort(ga.begin(), ga.end(), asc_comparator);
-    }
-  } else if (desc) {
-    auto desc_comparator = [](const GeoPoint& a, const GeoPoint& b) { return a.dist > b.dist; };
-    if (count > 0) {
-      std::partial_sort(ga.begin(), ga.begin() + count, ga.end(), desc_comparator);
-      ga.resize(count);
-    } else {
-      std::sort(ga.begin(), ga.end(), desc_comparator);
-    }
-  }
+  SortIfNeeded(&ga, geo_ops.sorting, geo_ops.count);
 
   // generate reply array withdist, withcoords, withhash
   int record_size = 1;
-  if (withdist) {
+  if (geo_ops.withdist) {
     record_size++;
   }
-  if (withhash) {
+  if (geo_ops.withhash) {
     record_size++;
   }
-  if (withcoord) {
+  if (geo_ops.withcoord) {
     record_size++;
   }
   (*cntx)->StartArray(ga.size());
@@ -2781,13 +2778,13 @@ void GeoSearchGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, string
     // [member, dist, x, y, hash]
     (*cntx)->StartArray(record_size);
     (*cntx)->SendBulkString(p.member);
-    if (withdist) {
-      (*cntx)->SendDouble(p.dist / conversion);
+    if (geo_ops.withdist) {
+      (*cntx)->SendDouble(p.dist / geo_ops.conversion);
     }
-    if (withhash) {
+    if (geo_ops.withhash) {
       (*cntx)->SendDouble(p.score);
     }
-    if (withcoord) {
+    if (geo_ops.withcoord) {
       (*cntx)->StartArray(2);
       (*cntx)->SendDouble(p.longitude);
       (*cntx)->SendDouble(p.latitude);
@@ -2898,16 +2895,16 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         return (*cntx)->SendError(kSyntaxErr);
       }
     } else if (cur_arg == "ASC") {
-      if (geo_ops.desc) {
+      if (geo_ops.sorting != Sorting::kUnsorted) {
         return (*cntx)->SendError(kAscDescErr);
       } else {
-        geo_ops.asc = true;
+        geo_ops.sorting = Sorting::kAsc;
       }
     } else if (cur_arg == "DESC") {
-      if (geo_ops.asc) {
+      if (geo_ops.sorting != Sorting::kUnsorted) {
         return (*cntx)->SendError(kAscDescErr);
       } else {
-        geo_ops.desc = true;
+        geo_ops.sorting = Sorting::kDesc;
       }
     } else if (cur_arg == "COUNT") {
       if (i + 1 < args.size()) {
