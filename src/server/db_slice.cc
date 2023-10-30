@@ -1125,6 +1125,9 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
   if ((!caching_mode_) || !expire_allowed_ || !GetFlag(FLAGS_enable_heartbeat_eviction))
     return;
 
+  max_eviction_per_hb_ = GetFlag(FLAGS_max_eviction_per_heartbeat);
+  max_segment_to_consider_ = GetFlag(FLAGS_max_segment_to_consider);
+
   auto time_start = absl::GetCurrentTimeNanos();
   auto& db_table = db_arr_[db_ind];
   int32_t num_segments = db_table->prime.GetSegmentCount();
