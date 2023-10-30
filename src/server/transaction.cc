@@ -1417,7 +1417,7 @@ void Transaction::CancelBlocking() {
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
-  if (cid->opt_mask() & CO::GLOBAL_TRANS)
+  if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
     return KeyIndex::Empty();
 
   KeyIndex key_index;

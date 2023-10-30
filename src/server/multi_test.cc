@@ -777,6 +777,14 @@ TEST_F(MultiTest, TestSquashing) {
 
   done.store(true);
   f1.Join();
+
+  // Test some more unusual commands
+  Run({"multi"});
+  Run({"mget", "x1", "x2", "x3"});
+  Run({"mget", "x4"});
+  Run({"mget", "x5", "x6", "x7", "x8"});
+  Run({"ft.search", "i1", "*"});
+  Run({"exec"});
 }
 
 TEST_F(MultiTest, MultiLeavesTxQueue) {
