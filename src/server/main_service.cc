@@ -695,6 +695,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
+  config_registry.Register("max_eviction_per_heartbeat");
+  config_registry.Register("max_segment_to_consider");
 
   acl::UserRegistry* reg = &user_registry_;
   pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
