@@ -9,6 +9,7 @@ import psutil
 import itertools
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
+import signal
 
 
 START_DELAY = 0.8

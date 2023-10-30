@@ -120,6 +120,7 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
 }
 
 void CapturingReplyBuilder::SendDirect(Payload&& val) {
+  has_replied_ = !holds_alternative<monostate>(val);
   bool is_err = holds_alternative<Error>(val) || holds_alternative<OpStatus>(val);
   ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
   if (reply_mode_ >= min_mode) {

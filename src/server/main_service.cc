@@ -1052,25 +1052,26 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 class ReplyGuard {
  public:
   ReplyGuard(ConnectionContext* cntx, std::string_view cid_name) {
-    auto* builder = cntx->reply_builder();
     const bool is_script = bool(cntx->conn_state.script_info);
     const bool is_one_of =
-        absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY", "EXEC", "EVALSHA"})
-            .contains(cid_name);
-    const bool should_dcheck = !is_one_of && !is_script;
+        absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY"}).contains(cid_name);
+    auto* maybe_mcache = dynamic_cast<MCReplyBuilder*>(cntx->reply_builder());
+    const bool is_no_reply_memcache = maybe_mcache && maybe_mcache->NoReply();
+    const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
-      builder->ExpectReply();
+      builder_ = cntx->reply_builder();
+      builder_->ExpectReply();
     }
   }
 
   ~ReplyGuard() {
-    if (builder) {
-      DCHECK(builder->HasReplied());
+    if (builder_) {
+      DCHECK(builder_->HasReplied());
     }
   }
 
  private:
-  RedisReplyBuilder* builder = nullptr;
+  SinkReplyBuilder* builder_ = nullptr;
 };
 
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx,
