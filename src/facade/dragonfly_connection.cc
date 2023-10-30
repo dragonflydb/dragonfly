@@ -48,7 +48,7 @@ ABSL_FLAG(uint64_t, pipeline_queue_limit, 1ULL << 27,  // 128MB
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
-ABSL_FLAG(uint64_t, pipeline_squash, 5,
+ABSL_FLAG(uint64_t, pipeline_squash, 10,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
 
 // When changing this constant, also update `test_large_cmd` test in connection_test.py.
