@@ -1551,13 +1551,13 @@ async def test_df_crash_on_replicaof_flag(df_local_factory):
     replica.start()
 
     c_master = aioredis.Redis(port=master.port)
-    c_replica = aioredis.Redis(port=replica.port)
+    c_replica = aioredis.Redis(port=replica.port, decode_responses=True)
 
     await wait_available_async(c_master)
     await wait_available_async(c_replica)
 
-    res = await c_replica.execute_command("BGSAVE")
-    assert True == res
+    res = await c_replica.execute_command("SAVE DF myfile")
+    assert "OK" == res
 
     res = await c_replica.execute_command("DBSIZE")
     assert res == 0

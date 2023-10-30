@@ -96,7 +96,7 @@ io::ReadonlyFileOrError FileSnapshotStorage::OpenReadFile(const std::string& pat
 io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(std::string_view dir,
                                                                     std::string_view dbfilename) {
   if (dbfilename.empty())
-    return "";
+    return {};
 
   fs::path data_folder;
   if (dir.empty()) {
