@@ -66,7 +66,17 @@ void ExtendDfsFilenameWithShard(int shard, string_view extension, fs::path* file
 }  // namespace
 
 GenericError ValidateFilename(const fs::path& filename, bool new_version) {
-  bool is_cloud_path = IsCloudPath(filename.string());
+  if (filename.empty()) {
+    return {};
+  }
+
+  string filename_str = filename.string();
+  if (filename_str.front() == '"') {
+    return {
+        "filename should not start with '\"', could it be that you put quotes in the flagfile?"};
+  }
+
+  bool is_cloud_path = IsCloudPath(filename_str);
 
   if (!filename.parent_path().empty() && !is_cloud_path) {
     return {absl::StrCat("filename may not contain directory separators (Got \"", filename.c_str(),
@@ -319,6 +329,9 @@ GenericError SaveStagesController::BuildFullPath() {
   }
 
   fs::path filename = basename_.empty() ? GetFlag(FLAGS_dbfilename) : basename_;
+  if (filename.empty())
+    return {"filename is not specified"};
+
   if (auto err = ValidateFilename(filename, use_dfs_format_); err)
     return err;
 

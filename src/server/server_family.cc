@@ -1297,6 +1297,9 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   return mem_cmd.Run(args);
 }
 
+// SAVE [DF|RDB] [basename]
+// Allows saving the snapshot of the dataset on disk, potentially overriding the format
+// and the snapshot name.
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   string err_detail;
   bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
