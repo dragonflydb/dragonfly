@@ -159,12 +159,22 @@ void DenseSet::ClearInternal() {
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     while (!it->IsEmpty()) {
       bool has_ttl = it->HasTtl();
+      bool is_displ = it->IsDisplaced();
       void* obj = PopDataFront(it);
+      int32_t delta = int32_t(BucketId(obj, 0)) - int32_t(it - entries_.begin());
+      if (is_displ) {
+        DCHECK(delta < 2 || delta > -2);
+      } else {
+        DCHECK_EQ(delta, 0);
+      }
       ObjDelete(obj, has_ttl);
     }
   }
 
   entries_.clear();
+  num_used_buckets_ = 0;
+  num_chain_entries_ = 0;
+  size_ = 0;
 }
 
 bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
@@ -234,16 +244,14 @@ void DenseSet::Reserve(size_t sz) {
 
   sz = absl::bit_ceil(sz);
   if (sz > entries_.size()) {
+    size_t prev_size = entries_.size();
     entries_.resize(sz);
     capacity_log_ = absl::bit_width(sz) - 1;
+    Grow(prev_size);
   }
 }
 
-void DenseSet::Grow() {
-  size_t prev_size = entries_.size();
-  entries_.resize(prev_size * 2);
-  ++capacity_log_;
-
+void DenseSet::Grow(size_t prev_size) {
   // perform rehashing of items in the set
   for (long i = prev_size - 1; i >= 0; --i) {
     DensePtr* curr = &entries_[i];
@@ -299,6 +307,7 @@ void DenseSet::Grow() {
           }
 
           DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
+          DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
           PushFront(dest, dptr);
 
           dest->ClearDisplaced();
@@ -371,7 +380,11 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
       break;
     }
 
-    Grow();
+    size_t prev_size = entries_.size();
+    entries_.resize(prev_size * 2);
+    ++capacity_log_;
+
+    Grow(prev_size);
     bucket_id = BucketId(hashcode);
   }
 
@@ -403,6 +416,7 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
     ++num_chain_entries_;
   }
 
+  DCHECK_EQ(BucketId(to_insert.GetObject(), 0), bucket_id);
   ChainVectorIterator list = entries_.begin() + bucket_id;
   PushFront(list, to_insert);
   obj_malloc_used_ += ObjectAllocSize(obj);

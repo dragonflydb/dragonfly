@@ -1578,19 +1578,20 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
   return false;
 }
 
-static std::string FullAclCommandFromArgs(CmdArgList args) {
+static std::string FullAclCommandFromArgs(CmdArgList args, std::string_view name) {
   ToUpper(&args[1]);
-  // Guranteed SSO no dynamic allocations here
-  return std::string("ACL ") + std::string(args[1].begin(), args[1].end());
+  auto res = absl::StrCat(name, " ", ArgS(args, 1));
+  return res;
 }
 
 std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
   const std::string_view command = facade::ToSV(args[0]);
-  if (command == "ACL") {
+  std::string_view acl = "ACL";
+  if (command == registry_.RenamedOrOriginal(acl)) {
     if (args.size() == 1) {
       return {registry_.Find(ArgS(args, 0)), args};
     }
-    return {registry_.Find(FullAclCommandFromArgs(args)), args.subspan(2)};
+    return {registry_.Find(FullAclCommandFromArgs(args, command)), args.subspan(2)};
   }
 
   const CommandId* res = registry_.Find(ArgS(args, 0));

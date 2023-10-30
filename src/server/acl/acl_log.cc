@@ -55,4 +55,12 @@ AclLog::LogType AclLog::GetLog(size_t number_of_entries) const {
   return {start, end};
 }
 
+void AclLog::SetTotalEntries(size_t total_entries) {
+  if (log_.size() > total_entries) {
+    log_.erase(std::next(log_.begin(), total_entries), log_.end());
+  }
+
+  total_entries_allowed_ = total_entries;
+}
+
 }  // namespace dfly::acl

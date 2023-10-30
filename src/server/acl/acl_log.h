@@ -42,9 +42,11 @@ class AclLog {
 
   LogType GetLog(size_t number_of_entries) const;
 
+  void SetTotalEntries(size_t total_entries);
+
  private:
   LogType log_;
-  const size_t total_entries_allowed_;
+  size_t total_entries_allowed_;
 };
 
 }  // namespace dfly::acl

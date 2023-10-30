@@ -20,3 +20,5 @@ pytest-json-report==1.5.0
 psutil==5.9.5
 boto3==1.28.55
 redis-om==0.2.1
+pytest-emoji==0.2.0
+pytest-icdiff==0.8

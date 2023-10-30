@@ -193,6 +193,31 @@ async def test_basic(async_client: aioredis.Redis, index_type):
     await i1.dropindex()
 
 
+@dfly_args({"proactor_threads": 4})
+async def test_big_json(async_client: aioredis.Redis):
+    i1 = async_client.ft("i1")
+    gen_arr = lambda base: {"blob": [base + str(i) for i in range(100)]}
+
+    await async_client.json().set("k1", "$", gen_arr("alex"))
+    await async_client.json().set("k2", "$", gen_arr("bob"))
+
+    await i1.create_index(
+        [TextField(name="$.blob", as_name="items")],
+        definition=IndexDefinition(index_type=IndexType.JSON),
+    )
+
+    res = await i1.search("alex55")
+    assert res.docs[0].id == "k1"
+
+    res = await i1.search("bob77")
+    assert res.docs[0].id == "k2"
+
+    res = await i1.search("alex11 | bob22")
+    assert res.total == 2
+
+    await i1.dropindex()
+
+
 async def knn_query(idx, query, vector):
     params = {"vec": np.array(vector, dtype=np.float32).tobytes()}
     result = await idx.search(query, params)
