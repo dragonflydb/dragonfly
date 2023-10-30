@@ -458,11 +458,11 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
-template <typename F>
-void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients, F f) {
+void SetMaxClients(std::vector<facade::Listener*>& listeners, uint32_t maxclients) {
   for (auto* listener : listeners) {
     if (!listener->IsPrivilegedInterface()) {
-      f(listener, maxclients);
+      listener->socket()->proactor()->Await(
+          [listener, maxclients]() { listener->SetMaxClients(maxclients); });
     }
   }
 }
@@ -484,15 +484,11 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
 
-  SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients),
-                [](auto* listener, auto maxclients) { listener->SetMaxClients(maxclients); });
+  SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
   config_registry.RegisterMutable("maxclients", [this](const absl::CommandLineFlag& flag) {
     auto res = flag.TryGet<uint32_t>();
     if (res.has_value())
-      SetMaxClients(listeners_, res.value(), [](auto* listener, auto maxclients) {
-        listener->socket()->proactor()->Await(
-            [listener, maxclients]() { listener->SetMaxClients(maxclients); });
-      });
+      SetMaxClients(listeners_, res.value());
     return res.has_value();
   });
 

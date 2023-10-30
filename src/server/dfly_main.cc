@@ -439,8 +439,6 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
   }
 
-  service.Init(acceptor, listeners, opts);
-
   if (!tcp_disabled) {
     error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
 
@@ -457,6 +455,8 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   if (mc_port > 0 && !tcp_disabled) {
     acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
   }
+
+  service.Init(acceptor, listeners, opts);
 
   VersionMonitor version_monitor;
   version_monitor.Run(pool);
