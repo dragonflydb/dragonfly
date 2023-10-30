@@ -165,6 +165,8 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SetNoreply(bool noreply) {
     noreply_ = noreply;
   }
+
+  bool NoReply() const;
 };
 
 class RedisReplyBuilder : public SinkReplyBuilder {

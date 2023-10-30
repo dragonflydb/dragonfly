@@ -169,7 +169,6 @@ MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), norep
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
-  has_replied_ = true;
   if (noreply_)
     return;
 
@@ -213,6 +212,10 @@ void MCReplyBuilder::SendError(string_view str, std::string_view type) {
 
 void MCReplyBuilder::SendProtocolError(std::string_view str) {
   SendSimpleString(absl::StrCat("CLIENT_ERROR ", str));
+}
+
+bool MCReplyBuilder::NoReply() const {
+  return noreply_;
 }
 
 void MCReplyBuilder::SendClientError(string_view str) {
