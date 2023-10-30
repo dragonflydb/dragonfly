@@ -214,6 +214,10 @@ void MCReplyBuilder::SendProtocolError(std::string_view str) {
   SendSimpleString(absl::StrCat("CLIENT_ERROR ", str));
 }
 
+bool MCReplyBuilder::NoReply() const {
+  return noreply_;
+}
+
 void MCReplyBuilder::SendClientError(string_view str) {
   iovec v[] = {IoVec("CLIENT_ERROR "), IoVec(str), IoVec(kCRLF)};
   Send(v, ABSL_ARRAYSIZE(v));
