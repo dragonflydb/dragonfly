@@ -1122,7 +1122,7 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 }
 
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
-  if ((!caching_mode_) || !GetFlag(FLAGS_enable_heartbeat_eviction))
+  if ((!caching_mode_) || !expire_allowed_ || !GetFlag(FLAGS_enable_heartbeat_eviction))
     return;
 
   auto time_start = absl::GetCurrentTimeNanos();
@@ -1159,6 +1159,10 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
         string_view key = evict_it->first.GetSlice(&tmp);
         if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
           continue;
+
+        if (auto journal = EngineShard::tlocal()->journal(); journal) {
+          RecordExpiry(db_ind, key);
+        }
 
         PerformDeletion(evict_it, shard_owner(), db_table.get());
         ++evicted;

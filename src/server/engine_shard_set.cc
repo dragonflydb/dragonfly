@@ -608,7 +608,7 @@ void EngineShard::Heartbeat() {
     }
 
     // if our budget is below the limit
-    if (db_slice_.memory_budget() < redline) {
+    if ((db_slice_.memory_budget() < redline) && !IsReplica()) {
       db_slice_.FreeMemWithEvictionStep(i, redline - db_slice_.memory_budget());
     }
   }
