@@ -421,14 +421,20 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
       LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
     }
   } else if (!snapshot_cron_exp.empty()) {
+    if (absl::StartsWith(snapshot_cron_exp, "\"")) {
+      LOG(WARNING) << "Invalid snapshot cron expression `" << snapshot_cron_exp
+                   << "`, could it be that you put quotes in the flagfile?";
+      return nullopt;
+    }
     raw_cron_expr = "0 " + snapshot_cron_exp;
   }
 
   if (!raw_cron_expr.empty()) {
     try {
+      VLOG(1) << "creating cron from: `" << raw_cron_expr << "`";
       return std::optional<cron::cronexpr>(cron::make_cron(raw_cron_expr));
     } catch (const cron::bad_cronexpr& ex) {
-      LOG(WARNING) << "Invalid cron expression: " << ex.what();
+      LOG(WARNING) << "Invalid cron expression: " << raw_cron_expr;
     }
   }
   return std::nullopt;
@@ -1291,6 +1297,9 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   return mem_cmd.Run(args);
 }
 
+// SAVE [DF|RDB] [basename]
+// Allows saving the snapshot of the dataset on disk, potentially overriding the format
+// and the snapshot name.
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   string err_detail;
   bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);

@@ -49,12 +49,13 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
-  // See header top for atomic/non-atomic difference
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
       sinfo.local_tx = new Transaction{cntx_->transaction, sid};
     } else {
+      // Non-atomic squashing does not use the transactional framework for fan out, so local
+      // transactions have to be fully standalone, check locks and release them immediately.
       sinfo.local_tx = new Transaction{base_cid_};
       sinfo.local_tx->StartMultiNonAtomic();
     }
