@@ -4,8 +4,6 @@
 
 #include "server/db_slice.h"
 
-#include <absl/strings/match.h>
-
 extern "C" {
 #include "redis/object.h"
 }
