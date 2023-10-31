@@ -131,7 +131,9 @@ There are also some Dragonfly-specific arguments:
 ./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
 
-Arguments can be also provided from a configuration file by running `dragonfly --flagfile <filename>`. The file should list one flag per line, with equal signs instead of spaces for key-value flags.
+Arguments can be also provided via:
+ * `--flagfile <filename>`: The file should list one flag per line, with equal signs instead of spaces for key-value flags. No quotes are needed for flag values.
+ * Setting environment variables. Set `DFLY_x`, where `x` is the exact name of the flag, case sensitive.
 
 For more options like logs management or TLS support, run `dragonfly --help`.
 
