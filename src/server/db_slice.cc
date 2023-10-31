@@ -1122,6 +1122,7 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 }
 
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
+  DCHECK(!owner_->IsReplica());
   if ((!caching_mode_) || !expire_allowed_ || !GetFlag(FLAGS_enable_heartbeat_eviction))
     return;
 
@@ -1163,7 +1164,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
         if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
           continue;
 
-        if (auto journal = EngineShard::tlocal()->journal(); journal) {
+        if (auto journal = owner_->journal(); journal) {
           RecordExpiry(db_ind, key);
         }
 
