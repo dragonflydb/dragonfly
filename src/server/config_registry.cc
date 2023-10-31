@@ -25,7 +25,6 @@ auto ConfigRegistry::Set(std::string_view config_name, std::string_view value) -
     return SetResult::READONLY;
 
   auto cb = it->second.cb;
-  lk.unlock();
 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(config_name);
   CHECK(flag);
