@@ -1001,7 +1001,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   string_view tmp_key;
 
   // Replicate expiry
-  if (auto journal = EngineShard::tlocal()->journal(); journal) {
+  if (auto journal = owner_->journal(); journal) {
     tmp_key = it->first.GetSlice(&tmp_key_buf);
     RecordExpiry(cntx.db_index, tmp_key);
   }
