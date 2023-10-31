@@ -361,8 +361,6 @@ class DbSlice {
  private:
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
-  uint32_t max_eviction_per_hb_;
-  uint32_t max_segment_to_consider_;
 
   EngineShard* owner_;
 

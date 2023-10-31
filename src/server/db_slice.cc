@@ -267,11 +267,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 #undef ADD
 
 DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
-    : shard_id_(index),
-      caching_mode_(caching_mode),
-      max_eviction_per_hb_(GetFlag(FLAGS_max_eviction_per_heartbeat)),
-      max_segment_to_consider_(GetFlag(FLAGS_max_segment_to_consider)),
-      owner_(owner) {
+    : shard_id_(index), caching_mode_(caching_mode), owner_(owner) {
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
@@ -1124,8 +1120,8 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
   if ((!caching_mode_) || !expire_allowed_ || !GetFlag(FLAGS_enable_heartbeat_eviction))
     return;
 
-  max_eviction_per_hb_ = GetFlag(FLAGS_max_eviction_per_heartbeat);
-  max_segment_to_consider_ = GetFlag(FLAGS_max_segment_to_consider);
+  auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
+  auto max_segment_to_consider = GetFlag(FLAGS_max_segment_to_consider);
 
   auto time_start = absl::GetCurrentTimeNanos();
   auto& db_table = db_arr_[db_ind];
@@ -1143,7 +1139,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
       // pick a random segment to start with in each eviction,
       // as segment_id does not imply any recency, and random selection should be fair enough
       int32_t segment_id = starting_segment_id;
-      for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider_;
+      for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
            ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
         const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
         if (bucket.IsEmpty())
@@ -1171,7 +1167,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
 
         used_memory_after = owner_->UsedMemory();
         // returns when whichever condition is met first
-        if ((evicted == max_eviction_per_hb_) ||
+        if ((evicted == max_eviction_per_hb) ||
             (used_memory_before - used_memory_after >= increase_goal_bytes))
           goto finish;
       }
@@ -1184,7 +1180,7 @@ finish:
   DVLOG(2) << "Memory usage before eviction: " << used_memory_before;
   DVLOG(2) << "Memory usage after eviction: " << used_memory_after;
   DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted << "/"
-           << max_eviction_per_hb_;
+           << max_eviction_per_hb;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
 }
 
