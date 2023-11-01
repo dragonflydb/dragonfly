@@ -1134,48 +1134,61 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
   string tmp;
   int32_t starting_segment_id = rand() % num_segments;
   size_t used_memory_before = owner_->UsedMemory();
-  FiberAtomicGuard guard;
-  for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
-    for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
-      // pick a random segment to start with in each eviction,
-      // as segment_id does not imply any recency, and random selection should be fair enough
-      int32_t segment_id = starting_segment_id;
-      for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
-           ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
-        const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
-        if (bucket.IsEmpty())
-          continue;
+  vector<string> keys_to_journal;
 
-        if (!bucket.IsBusy(slot_id))
-          continue;
+  {
+    FiberAtomicGuard guard;
+    for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
+      for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
+        // pick a random segment to start with in each eviction,
+        // as segment_id does not imply any recency, and random selection should be fair enough
+        int32_t segment_id = starting_segment_id;
+        for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
+             ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
+          const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
+          if (bucket.IsEmpty())
+            continue;
 
-        auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
-        if (evict_it->first.IsSticky())
-          continue;
+          if (!bucket.IsBusy(slot_id))
+            continue;
 
-        // check if the key is locked by looking up transaction table.
-        auto& lt = db_table->trans_locks;
-        string_view key = evict_it->first.GetSlice(&tmp);
-        if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
-          continue;
+          auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
+          if (evict_it->first.IsSticky())
+            continue;
 
-        if (auto journal = owner_->journal(); journal) {
-          RecordExpiry(db_ind, key);
+          // check if the key is locked by looking up transaction table.
+          auto& lt = db_table->trans_locks;
+          string_view key = evict_it->first.GetSlice(&tmp);
+          if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+            continue;
+
+          if (auto journal = owner_->journal(); journal) {
+            keys_to_journal.push_back(tmp);
+          }
+
+          PerformDeletion(evict_it, shard_owner(), db_table.get());
+          ++evicted;
+
+          used_memory_after = owner_->UsedMemory();
+          // returns when whichever condition is met first
+          if ((evicted == max_eviction_per_hb) ||
+              (used_memory_before - used_memory_after >= increase_goal_bytes))
+            goto finish;
         }
-
-        PerformDeletion(evict_it, shard_owner(), db_table.get());
-        ++evicted;
-
-        used_memory_after = owner_->UsedMemory();
-        // returns when whichever condition is met first
-        if ((evicted == max_eviction_per_hb) ||
-            (used_memory_before - used_memory_after >= increase_goal_bytes))
-          goto finish;
       }
     }
   }
 
 finish:
+  // send the deletion to the replicas.
+  // fiber preemption could happen in this phase.
+  vector<string_view> args(keys_to_journal.begin(), keys_to_journal.end());
+  ArgSlice delete_args(&args[0], args.size());
+  auto journal = owner_->journal();
+  CHECK(journal);
+  journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, make_pair("DEL", ArgSlice{delete_args}),
+                       false);
+
   auto time_finish = absl::GetCurrentTimeNanos();
   events_.evicted_keys += evicted;
   DVLOG(2) << "Memory usage before eviction: " << used_memory_before;
