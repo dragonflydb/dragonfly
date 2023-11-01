@@ -1184,10 +1184,10 @@ finish:
   // fiber preemption could happen in this phase.
   vector<string_view> args(keys_to_journal.begin(), keys_to_journal.end());
   ArgSlice delete_args(&args[0], args.size());
-  auto journal = owner_->journal();
-  CHECK(journal);
-  journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, make_pair("DEL", ArgSlice{delete_args}),
-                       false);
+  if (auto journal = owner_->journal(); journal) {
+    journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1,
+                         make_pair("DEL", ArgSlice{delete_args}), false);
+  }
 
   auto time_finish = absl::GetCurrentTimeNanos();
   events_.evicted_keys += evicted;
