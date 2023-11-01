@@ -48,6 +48,8 @@ class ZSetFamily {
   struct ZRangeSpec {
     std::variant<IndexInterval, ScoreInterval, LexInterval, TopNScored> interval;
     RangeParams params;
+    ZRangeSpec() = default;
+    ZRangeSpec(const ScoreInterval& si, const RangeParams& rp) : interval(si), params(rp){};
   };
 
  private:
@@ -98,6 +100,7 @@ class ZSetFamily {
   static void GeoHash(CmdArgList args, ConnectionContext* cntx);
   static void GeoPos(CmdArgList args, ConnectionContext* cntx);
   static void GeoDist(CmdArgList args, ConnectionContext* cntx);
+  static void GeoSearch(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly
