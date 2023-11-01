@@ -174,8 +174,9 @@ bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
     return true;
   }
   if (absl::StartsWith(in, "\"")) {
-    LOG(WARNING) << "Invalid snapshot cron expression '" << in
-                 << "', could it be that you put quotes in the flagfile?";
+    *err = absl::StrCat("Invalid snapshot cron expression '", in,
+                        "', could it be that you put quotes in the flagfile?");
+    LOG(WARNING) << *err;
     return false;
   }
 
@@ -185,7 +186,7 @@ bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
     flag->value = cron::make_cron(raw_cron_expr);
     return true;
   } catch (const cron::bad_cronexpr& ex) {
-    *err = std::string("Invalid cron expression: ") + ex.what();
+    *err = absl::StrCat("Invalid cron expression: ", raw_cron_expr, ", with error: ", ex.what());
     LOG(WARNING) << *err;
   }
   return false;
@@ -610,7 +611,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   };
   config_registry.RegisterMutable(
       "snapshot_cron", [this, create_snapshot_schedule_fb](const absl::CommandLineFlag& flag) {
-        JoinSnapshotShedule();
+        JoinSnapshotSchedule();
         create_snapshot_schedule_fb();
         return true;
       });
@@ -618,7 +619,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   create_snapshot_schedule_fb();
 }
 
-void ServerFamily::JoinSnapshotShedule() {
+void ServerFamily::JoinSnapshotSchedule() {
   schedule_done_.Notify();
   snapshot_schedule_fb_.JoinIfNeeded();
   schedule_done_.Reset();
@@ -630,7 +631,7 @@ void ServerFamily::Shutdown() {
   if (load_result_.valid())
     load_result_.wait();
 
-  JoinSnapshotShedule();
+  JoinSnapshotSchedule();
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {

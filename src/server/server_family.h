@@ -189,7 +189,7 @@ class ServerFamily {
   void Replicate(std::string_view host, std::string_view port);
 
  private:
-  void JoinSnapshotShedule();
+  void JoinSnapshotSchedule();
 
   uint32_t shard_count() const {
     return shard_set->size();
