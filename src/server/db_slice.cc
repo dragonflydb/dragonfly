@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "generic_family.h"
 #include "server/engine_shard_set.h"
@@ -15,10 +16,22 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 
+ABSL_FLAG(bool, enable_heartbeat_eviction, true,
+          "Enable eviction during heartbeat when memory is under pressure.");
+
+ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
+          "The maximum number of key-value pairs that will be deleted in each eviction "
+          "when heartbeat based eviction is triggered under memory pressure.");
+
+ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
+          "The maximum number of dashtable segments to scan in each eviction "
+          "when heartbeat based eviction is triggered under memory pressure.");
+
 namespace dfly {
 
 using namespace std;
 using namespace util;
+using absl::GetFlag;
 using facade::OpStatus;
 
 namespace {
@@ -982,7 +995,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   string_view tmp_key;
 
   // Replicate expiry
-  if (auto journal = EngineShard::tlocal()->journal(); journal) {
+  if (auto journal = owner_->journal(); journal) {
     tmp_key = it->first.GetSlice(&tmp_key_buf);
     RecordExpiry(cntx.db_index, tmp_key);
   }
@@ -1096,10 +1109,92 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   return result;
 }
 
-// TODO: Design a better background evicting heuristic.
+int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const {
+  // wraps around if we reached the end
+  return db_arr_[db_ind]->prime.NextSeg((size_t)segment_id) %
+         db_arr_[db_ind]->prime.GetSegmentCount();
+}
+
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
-  if (!caching_mode_)
+  DCHECK(!owner_->IsReplica());
+  if ((!caching_mode_) || !expire_allowed_ || !GetFlag(FLAGS_enable_heartbeat_eviction))
     return;
+
+  auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
+  auto max_segment_to_consider = GetFlag(FLAGS_max_segment_to_consider);
+
+  auto time_start = absl::GetCurrentTimeNanos();
+  auto& db_table = db_arr_[db_ind];
+  int32_t num_segments = db_table->prime.GetSegmentCount();
+  int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
+  int32_t num_slots = PrimeTable::Segment_t::kNumSlots;
+
+  size_t used_memory_after;
+  size_t evicted = 0;
+  string tmp;
+  int32_t starting_segment_id = rand() % num_segments;
+  size_t used_memory_before = owner_->UsedMemory();
+  vector<string> keys_to_journal;
+
+  {
+    FiberAtomicGuard guard;
+    for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
+      for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
+        // pick a random segment to start with in each eviction,
+        // as segment_id does not imply any recency, and random selection should be fair enough
+        int32_t segment_id = starting_segment_id;
+        for (size_t num_seg_visited = 0; num_seg_visited < max_segment_to_consider;
+             ++num_seg_visited, segment_id = GetNextSegmentForEviction(segment_id, db_ind)) {
+          const auto& bucket = db_table->prime.GetSegment(segment_id)->GetBucket(bucket_id);
+          if (bucket.IsEmpty())
+            continue;
+
+          if (!bucket.IsBusy(slot_id))
+            continue;
+
+          auto evict_it = db_table->prime.GetIterator(segment_id, bucket_id, slot_id);
+          if (evict_it->first.IsSticky())
+            continue;
+
+          // check if the key is locked by looking up transaction table.
+          auto& lt = db_table->trans_locks;
+          string_view key = evict_it->first.GetSlice(&tmp);
+          if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+            continue;
+
+          if (auto journal = owner_->journal(); journal) {
+            keys_to_journal.push_back(tmp);
+          }
+
+          PerformDeletion(evict_it, shard_owner(), db_table.get());
+          ++evicted;
+
+          used_memory_after = owner_->UsedMemory();
+          // returns when whichever condition is met first
+          if ((evicted == max_eviction_per_hb) ||
+              (used_memory_before - used_memory_after >= increase_goal_bytes))
+            goto finish;
+        }
+      }
+    }
+  }
+
+finish:
+  // send the deletion to the replicas.
+  // fiber preemption could happen in this phase.
+  vector<string_view> args(keys_to_journal.begin(), keys_to_journal.end());
+  ArgSlice delete_args(&args[0], args.size());
+  if (auto journal = owner_->journal(); journal) {
+    journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, make_pair("DEL", delete_args), false);
+  }
+
+  auto time_finish = absl::GetCurrentTimeNanos();
+  events_.evicted_keys += evicted;
+  DVLOG(2) << "Memory usage before eviction: " << used_memory_before;
+  DVLOG(2) << "Memory usage after eviction: " << used_memory_after;
+  DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted << "/"
+           << max_eviction_per_hb;
+  DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
 }
 
 void DbSlice::CreateDb(DbIndex db_ind) {

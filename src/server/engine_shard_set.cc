@@ -32,7 +32,6 @@ ABSL_FLAG(uint32_t, hz, 100,
 ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
-
 // memory defragmented related flags
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "

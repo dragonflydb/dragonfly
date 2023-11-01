@@ -179,6 +179,15 @@ class DashTable : public detail::DashTableBase {
     return segment_[segment_id];
   }
 
+  size_t GetSegmentCount() const {
+    return segment_.size();
+  }
+
+  size_t NextSeg(size_t sid) const {
+    size_t delta = (1u << (global_depth_ - segment_[sid]->local_depth()));
+    return sid + delta;
+  }
+
   template <typename U> uint64_t DoHash(const U& k) const {
     return policy_.HashFn(k);
   }
@@ -281,11 +290,6 @@ class DashTable : public detail::DashTableBase {
   // the same object. IterateDistinct goes over all distinct segments in the table.
   template <typename Cb> void IterateDistinct(Cb&& cb);
 
-  size_t NextSeg(size_t sid) const {
-    size_t delta = (1u << (global_depth_ - segment_[sid]->local_depth()));
-    return sid + delta;
-  }
-
   auto EqPred() const {
     return [p = &policy_](const auto& a, const auto& b) -> bool { return p->Equal(a, b); };
   }
@@ -326,14 +330,18 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   template <bool TIsConst = IsConst, bool TIsSingleB,
             typename std::enable_if<TIsConst>::type* = nullptr>
   Iterator(const Iterator<!TIsConst, TIsSingleB>& other) noexcept
-      : owner_(other.owner_), seg_id_(other.seg_id_), bucket_id_(other.bucket_id_),
+      : owner_(other.owner_),
+        seg_id_(other.seg_id_),
+        bucket_id_(other.bucket_id_),
         slot_id_(other.slot_id_) {
   }
 
   // Copy constructor from iterator to bucket_iterator and vice versa.
   template <bool TIsSingle>
   Iterator(const Iterator<IsConst, TIsSingle>& other) noexcept
-      : owner_(other.owner_), seg_id_(other.seg_id_), bucket_id_(other.bucket_id_),
+      : owner_(other.owner_),
+        seg_id_(other.seg_id_),
+        bucket_id_(other.bucket_id_),
         slot_id_(IsSingleBucket ? 0 : other.slot_id_) {
     // if this - is a bucket_iterator - we reset slot_id to the first occupied space.
     if constexpr (IsSingleBucket) {
