@@ -1134,6 +1134,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
   string tmp;
   int32_t starting_segment_id = rand() % num_segments;
   size_t used_memory_before = owner_->UsedMemory();
+  FiberAtomicGuard guard;
   for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
     for (int32_t bucket_id = num_buckets - 1; bucket_id >= 0; --bucket_id) {
       // pick a random segment to start with in each eviction,
