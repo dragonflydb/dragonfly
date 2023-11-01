@@ -604,18 +604,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     }
   }
 
-  const auto create_snapshot_shedule_fb = [this] {
+  const auto create_snapshot_schedule_fb = [this] {
     snapshot_schedule_fb_ =
         service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
   };
   config_registry.RegisterMutable(
-      "snapshot_cron", [this, create_snapshot_shedule_fb](const absl::CommandLineFlag& flag) {
+      "snapshot_cron", [this, create_snapshot_schedule_fb](const absl::CommandLineFlag& flag) {
         JoinSnapshotShedule();
-        create_snapshot_shedule_fb();
+        create_snapshot_schedule_fb();
         return true;
       });
 
-  create_snapshot_shedule_fb();
+  create_snapshot_schedule_fb();
 }
 
 void ServerFamily::JoinSnapshotShedule() {
