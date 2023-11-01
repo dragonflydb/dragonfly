@@ -192,8 +192,10 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
                                       const SearchParams::FieldReturnList& fields) const {
   SearchDocData out{};
   for (const auto& [ident, name] : fields) {
-    if (auto* path = GetPath(ident); path)
-      out[name] = path->evaluate(json_).to_string();
+    if (auto* path = GetPath(ident); path) {
+      if (auto res = path->evaluate(json_); !res.empty())
+        out[name] = res[0].to_string();
+    }
   }
   return out;
 }
