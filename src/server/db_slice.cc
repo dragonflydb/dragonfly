@@ -1185,8 +1185,7 @@ finish:
   vector<string_view> args(keys_to_journal.begin(), keys_to_journal.end());
   ArgSlice delete_args(&args[0], args.size());
   if (auto journal = owner_->journal(); journal) {
-    journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1,
-                         make_pair("DEL", ArgSlice{delete_args}), false);
+    journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, make_pair("DEL", delete_args), false);
   }
 
   auto time_finish = absl::GetCurrentTimeNanos();
