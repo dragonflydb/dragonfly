@@ -542,7 +542,6 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
 
   vector<string> res;
   bool keyval = (mask == (FIELDS | VALUES));
-  unsigned index = 0;
 
   if (pv.Encoding() == kEncodingListPack) {
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
@@ -551,6 +550,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
     uint8_t* fptr = lpFirst(lp);
     uint8_t intbuf[LP_INTBUF_SIZE];
 
+    unsigned index = 0;
     while (fptr) {
       if (mask & FIELDS) {
         res[index++] = LpGetView(fptr, intbuf);
@@ -565,14 +565,15 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
     DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-    res.resize(sm->Size() * (keyval ? 2 : 1));
+    // Some items could have expired, yet accounted for in Size(), so reserve() might overshoot
+    res.reserve(sm->Size() * (keyval ? 2 : 1));
     for (const auto& k_v : *sm) {
       if (mask & FIELDS) {
-        res[index++].assign(k_v.first, sdslen(k_v.first));
+        res.emplace_back(k_v.first, sdslen(k_v.first));
       }
 
       if (mask & VALUES) {
-        res[index++].assign(k_v.second, sdslen(k_v.second));
+        res.emplace_back(k_v.second, sdslen(k_v.second));
       }
     }
   }

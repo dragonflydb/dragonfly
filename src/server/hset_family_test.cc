@@ -332,4 +332,11 @@ TEST_F(HSetFamilyTest, Issue1140) {
   EXPECT_EQ("Bar", Run({"HGET", "CaseKey", "Foo"}));
 }
 
+TEST_F(HSetFamilyTest, Issue2102) {
+  // Set key with element that will expire after 1s
+  EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", "k1", "v1"}), 1);
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
+}
+
 }  // namespace dfly
