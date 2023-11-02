@@ -125,6 +125,8 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
     return {buf_};
   }
 
+  buf_.clear();
+
   // First, grow buffer and compute string sizes
   vector<size_t> sizes;
   for (auto element : path_res.array_range()) {

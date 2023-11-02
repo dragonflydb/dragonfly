@@ -366,6 +366,8 @@ void SearchFamily::FtDropIndex(CmdArgList args, ConnectionContext* cntx) {
   });
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
+  if (num_deleted == 0u)
+    return (*cntx)->SendError("-Unknown Index name");
   return (*cntx)->SendOk();
 }
 
