@@ -57,11 +57,13 @@ bool CommandId::IsTransactional() const {
 }
 
 void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
-  ServerState* ss = ServerState::tlocal();
   int64_t before = absl::GetCurrentTimeNanos();
   handler_(args, cntx);
   int64_t after = absl::GetCurrentTimeNanos();
+
+  ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
   int64_t execution_time_micro_s = (after - before) / 1000;
+
   const auto* conn = cntx->conn();
   auto& ent = command_stats_[ss->thread_index()];
   // TODO: we should probably discard more commands here,
