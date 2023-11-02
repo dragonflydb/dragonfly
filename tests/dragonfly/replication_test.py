@@ -923,6 +923,8 @@ async def test_role_command(df_local_factory, n_keys=20):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
+    # It may take a bit more time to actually propagate the role change
+    # See https://github.com/dragonflydb/dragonfly/pull/2111
     await asyncio.sleep(1)
 
     assert await c_master.execute_command("role") == [
