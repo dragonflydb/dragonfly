@@ -558,15 +558,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   RdbSaver* saver = flow->saver.get();
 
   if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
-    auto scripts = sf_->script_mgr()->GetAll();
-    StringVec script_bodies;
-    for (auto& [sha, data] : scripts) {
-      // Always send original body (with header & without auto async calls) that determines the sha,
-      // It's stored only if it's different from the post-processed version.
-      string& body = data.orig_body.empty() ? data.body : data.orig_body;
-      script_bodies.push_back(std::move(body));
-    }
-    ec = saver->SaveHeader({script_bodies, {}});
+    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service()));
   } else {
     ec = saver->SaveHeader({});
   }

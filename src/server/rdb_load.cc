@@ -43,9 +43,11 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
+#include "server/search/doc_index.h"
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/transaction.h"
 #include "strings/human_readable.h"
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
@@ -209,6 +211,18 @@ bool resizeStringSet(robj* set, size_t size, bool use_set2) {
   } else {
     return dictTryExpand((dict*)set->ptr, size) != DICT_OK;
   }
+}
+
+void RunOnceAsCommand(Service* service, const CommandId* cid,
+                      std::function<void(Transaction*, EngineShard*)> func) {
+  DCHECK(cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL));
+
+  boost::intrusive_ptr<Transaction> trans{new Transaction{cid}};
+  trans->InitByArgs(0, {});
+  trans->ScheduleSingleHop([func](auto* trans, auto* es) {
+    func(trans, es);
+    return OpStatus::OK;
+  });
 }
 
 }  // namespace
@@ -2224,7 +2238,7 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "redis-bits") {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
-    LoadSearchIndexDefFromAux(move(auxval));
+    LoadSearchIndexDefFromAux(std::move(auxval));
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
@@ -2372,6 +2386,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
 
+  // Avoid deleting local crb
   absl::Cleanup cntx_clean = [&cntx] { cntx.Inject(nullptr); };
 
   uint32_t consumed = 0;
@@ -2379,7 +2394,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::RedisParser parser;
 
   def += "\r\n";  // RESP terminator
-  absl::Span<uint8_t> buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
+  io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
   auto res = parser.Parse(buffer, &consumed, &resp_vec);
 
   if (res != facade::RedisParser::Result::OK) {
@@ -2387,9 +2402,9 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
     return;
   }
 
+  // Prepend FT.CREATE to index definiton
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-
   string ft_create = "FT.CREATE";
   arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
 
@@ -2399,6 +2414,28 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   if (auto err = facade::CapturingReplyBuilder::GetError(response); err) {
     LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
   }
+}
+
+void RdbLoader::PerformPreLoad(Service* service) {
+  const CommandId* cmd = service->FindCmd("FT.DROPINDEX");
+  if (cmd == nullptr)
+    return;  // MacOS
+
+  RunOnceAsCommand(service, cmd, [](auto* trans, auto* es) {
+    for (const auto& name : es->search_indices()->GetIndexNames())
+      es->search_indices()->DropIndex(name);
+  });
+}
+
+void RdbLoader::PerformPostLoad(Service* service) {
+  const CommandId* cmd = service->FindCmd("FT.CREATE");
+  if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
+    return;
+
+  // Rebuild all search indices as only their definitions are extracted from the snapshot
+  RunOnceAsCommand(service, cmd, [](auto* trans, auto* es) {
+    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
+  });
 }
 
 }  // namespace dfly

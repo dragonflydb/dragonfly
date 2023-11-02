@@ -137,6 +137,10 @@ class ServerFamily {
     return script_mgr_.get();
   }
 
+  const ScriptMgr* script_mgr() const {
+    return script_mgr_.get();
+  }
+
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.

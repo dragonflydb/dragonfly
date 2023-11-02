@@ -1714,3 +1714,51 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
     master.stop()
     replica.stop()
     assert master.is_in_logs("Partial sync requested from stale LSN")
+
+
+async def test_search(df_local_factory):
+    master = df_local_factory.create(proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=4)
+
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # First, create an index on replica
+    await c_replica.execute_command("FT.CREATE", "idx-r", "SCHEMA", "f1", "numeric")
+    for i in range(1, 10):
+        await c_replica.hset(f"k{i}", mapping={"f1": i})
+    assert (await c_replica.ft("idx-r").search("@f1:[5 9]")).total == 5
+
+    # Second, create an index on master
+    await c_master.execute_command("FT.CREATE", "idx-m", "SCHEMA", "f2", "numeric")
+    for i in range(1, 10):
+        await c_master.hset(f"k{i}", mapping={"f2": i * 2})
+    assert (await c_master.ft("idx-m").search("@f2:[6 10]")).total == 3
+
+    # Replicate
+    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
+    await wait_available_async(c_replica)
+
+    # Check master index was picked up and original index was deleted
+    assert (await c_replica.execute_command("FT._LIST")) == [b"idx-m"]
+
+    # Check query from master runs on replica
+    assert (await c_replica.ft("idx-m").search("@f2:[6 10]")).total == 3
+
+    # Set a new key
+    c_master.hmset("kNEW", mapping={"f2": 100})
+    await assert_lag_condition(master, c_master, lambda lag: lag == 0)
+
+    assert (await c_replica.ft("idx-m").search("@f2:[100 100]")).docs[0].key == "kNEW"
+
+    # Create a new aux index on master
+    await c_master.execute_command("FT.CREATE", "idx-m2", "SCHEMA", "f2", "numeric", "sortable")
+    await assert_lag_condition(master, c_master, lambda lag: lag == 0)
+
+    from redis.commands.search.query import Query
+
+    assert (await c_replica.ft("idx-m").search(Query("*").sort_by("f2").page(0, 1))).docs[
+        0
+    ].key == "k0"

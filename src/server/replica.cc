@@ -489,6 +489,7 @@ error_code Replica::InitiateDflySync() {
 
     if (num_full_flows == num_df_flows_) {
       JournalExecutor{&service_}.FlushAll();
+      RdbLoader::PerformPreLoad(&service_);
     } else if (num_full_flows == 0) {
       sync_type = "partial";
     } else {
@@ -516,15 +517,17 @@ error_code Replica::InitiateDflySync() {
   if (cntx_.IsCancelled())
     return cntx_.GetError();
 
+  RdbLoader::PerformPostLoad(&service_);
+
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
     return cntx_.ReportError(ec);
   }
 
   // Joining flows and resetting state is done by cleanup.
-
   double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time)) / 1000;
   LOG(INFO) << sync_type << " sync finished in " << strings::HumanReadableElapsedTime(seconds);
+
   return cntx_.GetError();
 }
 
