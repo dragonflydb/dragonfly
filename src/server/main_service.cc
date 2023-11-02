@@ -549,6 +549,95 @@ void TxTable(const http::QueryArgs& args, HttpContext* send) {
   send->Invoke(std::move(resp));
 }
 
+void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFamily* cluster) {
+  http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
+  resp.body() = R"(
+<html>
+  <head>
+    <style>
+.title_text {
+    color: #09bc8d;
+    font-weight: bold;
+    min-width: 150px;
+    display: inline-block;
+    margin-bottom: 6px;
+}
+
+.value_text {
+  color: #d60f96;
+}
+
+.master {
+    border: 1px solid gray;
+    margin-bottom: 10px;
+    padding: 10px;
+    border-radius: 8px;
+}
+
+.master h3 {
+    padding-left: 20px;
+}
+    </style>
+  </head>
+  <body>
+    <h1>Cluster Info</h1>
+)";
+
+  auto print_kv = [&](string_view k, string_view v) {
+    resp.body() += absl::StrCat("<div><span class='title_text'>", k,
+                                "</span><span class='value_text'>", v, "</span></div>\n");
+  };
+
+  auto print_kb = [&](string_view k, bool v) { print_kv(k, v ? "True" : "False"); };
+
+  print_kv("Mode", ClusterConfig::IsEmulated()  ? "Emulated"
+                   : ClusterConfig::IsEnabled() ? "Enabled"
+                                                : "Disabled");
+
+  if (ClusterConfig::IsEnabledOrEmulated) {
+    print_kb("Lock on hashtags", KeyLockArgs::IsLockHashTagEnabled());
+  }
+
+  if (ClusterConfig::IsEnabled()) {
+    if (cluster->cluster_config() == nullptr) {
+      resp.body() += "<h2>Not yet configured.</h2>\n";
+    } else {
+      auto config = cluster->cluster_config()->GetConfig();
+      for (const auto& shard : config) {
+        resp.body() += "<div class='master'>\n";
+        resp.body() += "<h3>Master</h3>\n";
+        print_kv("ID", shard.master.id);
+        print_kv("IP", shard.master.ip);
+        print_kv("Port", absl::StrCat(shard.master.port));
+
+        resp.body() += "<h3>Replicas</h3>\n";
+        if (shard.replicas.empty()) {
+          resp.body() += "<p>None</p>\n";
+        } else {
+          for (const auto& replica : shard.replicas) {
+            resp.body() += "<h4>Replica</h4>\n";
+            print_kv("ID", replica.id);
+            print_kv("IP", replica.ip);
+            print_kv("Port", absl::StrCat(replica.port));
+          }
+        }
+
+        resp.body() += "<h3>Slots</h3>\n";
+        for (const auto& slot : shard.slot_ranges) {
+          resp.body() +=
+              absl::StrCat("<div>[<span class='value_text'>", slot.start,
+                           "</span>-<span class='value_text'>", slot.end, "</span>]</div>");
+        }
+
+        resp.body() += "</div>\n";
+      }
+    }
+  }
+
+  resp.body() += "  </body>\n</html>\n";
+  send->Invoke(std::move(resp));
+}
+
 enum class ExecEvalState {
   NONE = 0,
   ALL = 1,
@@ -2201,6 +2290,9 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
   base->RegisterCb("/topkeys", Topkeys);
+  base->RegisterCb("/clusterz", [this](const http::QueryArgs& args, HttpContext* send) {
+    return ClusterHtmlPage(args, send, &cluster_family_);
+  });
 }
 
 void Service::OnClose(facade::ConnectionContext* cntx) {
