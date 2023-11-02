@@ -953,8 +953,8 @@ async def test_role_command(df_local_factory, n_keys=20):
     await c_replica.connection_pool.disconnect()
 
 
-def parse_lag(replication_info: bytes):
-    lags = re.findall(b"lag=([0-9]+)\r\n", replication_info)
+def parse_lag(replication_info: str):
+    lags = re.findall("lag=([0-9]+)\r\n", replication_info)
     assert len(lags) == 1
     return int(lags[0])
 
@@ -1172,7 +1172,7 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
     _, _, *results = await asyncio.gather(
         delayed_takeover(), block_during_takeover(), *[counter(f"key{i}") for i in range(16)]
     )
-    assert await c1.execute_command("role") == [b"master", []]
+    assert await c1.execute_command("role") == ["master", []]
 
     for key, client_value in results:
         replicated_value = await c1.get(key)
@@ -1212,7 +1212,7 @@ async def test_take_over_seeder(
     await c_replica.execute_command(f"REPLTAKEOVER 5")
     seeder.stop()
 
-    assert await c_replica.execute_command("role") == [b"master", []]
+    assert await c_replica.execute_command("role") == ["master", []]
 
     # Need to wait a bit to give time to write the shutdown snapshot
     await asyncio.sleep(1)
@@ -1258,14 +1258,14 @@ async def test_take_over_timeout(df_local_factory, df_seeder_factory):
     await fill_task
 
     assert await c_master.execute_command("role") == [
-        b"master",
-        [[b"127.0.0.1", bytes(str(replica.port), "ascii"), b"stable_sync"]],
+        "master",
+        [["127.0.0.1", str(replica.port), "stable_sync"]],
     ]
     assert await c_replica.execute_command("role") == [
-        b"replica",
-        b"localhost",
-        bytes(str(master.port), "ascii"),
-        b"stable_sync",
+        "replica",
+        "localhost",
+        str(master.port),
+        "stable_sync",
     ]
 
     await disconnect_clients(c_master, c_replica)
@@ -1311,7 +1311,7 @@ async def test_no_tls_on_admin_port(
     replica.start()
     c_replica = replica.admin_client(password="XXX")
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
-    assert b"OK" == res
+    assert "OK" == res
     await check_all_replicas_finished([c_replica], c_master)
 
     # 3. Verify that replica dbsize == debug populate key size -- replication works
@@ -1411,7 +1411,7 @@ async def test_replicaof_flag(df_local_factory):
     # set up master
     master.start()
     c_master = master.client()
-    await c_master.set("KEY", b"VALUE")
+    await c_master.set("KEY", "VALUE")
     db_size = await c_master.dbsize()
     assert 1 == db_size
 
@@ -1433,7 +1433,7 @@ async def test_replicaof_flag(df_local_factory):
     assert 1 == dbsize
 
     val = await c_replica.get("KEY")
-    assert b"VALUE" == val
+    assert "VALUE" == val
 
 
 @pytest.mark.asyncio
@@ -1465,7 +1465,7 @@ async def test_replicaof_flag_replication_waits(df_local_factory):
 
     master.start()
     c_master = master.client()
-    await c_master.set("KEY", b"VALUE")
+    await c_master.set("KEY", "VALUE")
     db_size = await c_master.dbsize()
     assert 1 == db_size
 
@@ -1477,7 +1477,7 @@ async def test_replicaof_flag_replication_waits(df_local_factory):
     assert 1 == dbsize
 
     val = await c_replica.get("KEY")
-    assert b"VALUE" == val
+    assert "VALUE" == val
 
 
 @pytest.mark.asyncio
@@ -1492,7 +1492,7 @@ async def test_replicaof_flag_disconnect(df_local_factory):
     c_master = master.client()
     await wait_available_async(c_master)
 
-    await c_master.set("KEY", b"VALUE")
+    await c_master.set("KEY", "VALUE")
     db_size = await c_master.dbsize()
     assert 1 == db_size
 
@@ -1513,12 +1513,12 @@ async def test_replicaof_flag_disconnect(df_local_factory):
     assert 1 == dbsize
 
     val = await c_replica.get("KEY")
-    assert b"VALUE" == val
+    assert "VALUE" == val
 
     await c_replica.replicaof("no", "one")  # disconnect
 
     role = await c_replica.role()
-    assert role[0] == b"master"
+    assert role[0] == "master"
 
 
 @pytest.mark.asyncio
@@ -1548,7 +1548,7 @@ async def test_df_crash_on_memcached_error(df_local_factory):
     memcached_client = pymemcache.Client(f"localhost:{replica.mc_port}")
 
     with pytest.raises(pymemcache.exceptions.MemcacheServerError):
-        memcached_client.set(b"key", b"data", noreply=False)
+        memcached_client.set("key", "data", noreply=False)
 
     await c_master.close()
 
@@ -1564,7 +1564,7 @@ async def test_df_crash_on_replicaof_flag(df_local_factory):
     replica.start()
 
     c_master = master.client()
-    c_replica = replica.client(decode_responses=True)
+    c_replica = replica.client()
 
     await wait_available_async(c_master)
     await wait_available_async(c_replica)
