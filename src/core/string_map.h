@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string_view>
 
 #include "core/dense_set.h"
@@ -74,9 +75,15 @@ class StringMap : public DenseSet {
       return *this;
     }
 
+    // Advances at most `n` steps, but stops at end.
     iterator& operator+=(unsigned int n) {
-      for (unsigned int i = 0; i < n; ++i)
+      for (unsigned int i = 0; i < n; ++i) {
+        if (curr_entry_ == nullptr) {
+          break;
+        }
+
         Advance();
+      }
       return *this;
     }
 
@@ -126,7 +133,7 @@ class StringMap : public DenseSet {
 
   // Returns a random key value pair.
   // Returns key only if value is a nullptr.
-  std::pair<sds, sds> RandomPair();
+  std::optional<std::pair<sds, sds>> RandomPair();
 
   // Randomly selects count of key value pairs. The selections are unique.
   // if count is larger than the total number of key value pairs, returns
@@ -143,6 +150,8 @@ class StringMap : public DenseSet {
   // Reallocate key and/or value if their pages are underutilized.
   // Returns new pointer (stays same if key utilization is enough) and if reallocation happened.
   std::pair<sds, bool> ReallocIfNeeded(void* obj, float ratio);
+
+  void CollectExpired();
 
   uint64_t Hash(const void* obj, uint32_t cookie) const final;
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const final;
