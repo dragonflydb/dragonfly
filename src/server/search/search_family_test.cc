@@ -211,7 +211,7 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
     {"game": "Pacman", "score": 15},
     {"game": "Mario", "score": 7}
   ],
-  "areas": "US-central"
+  "areas": ["US-central"]
 }
 )";
   string_view D3 = R"(
@@ -229,10 +229,17 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
   Run({"json.set", "k2", ".", D2});
   Run({"json.set", "k3", ".", D3});
 
-  auto resp = Run({"ft.create", "i1", "on", "json", "schema", "$.name", "text", "$.plays[*].game",
-                   "as", "games", "tag", "$.plays[*].score", "as", "scores", "numeric",
-                   "$.areas[*]", "as", "areas", "tag"});
-  EXPECT_EQ(resp, "OK");
+  Run({"ft.create", "i1",
+       "on",        "json",
+       "schema",    "$.name",
+       "as",        "name",
+       "text",      "$.plays[*].game",
+       "as",        "games",
+       "tag",       "$.plays[*].score",
+       "as",        "scores",
+       "numeric",   "$.areas[*]",
+       "as",        "areas",
+       "tag"});
 
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("k1", "k2", "k3"));
 
@@ -248,8 +255,18 @@ TEST_F(SearchFamilyTest, JsonArrayValues) {
   EXPECT_THAT(Run({"ft.search", "i1", "@scores:[(15 20]"}), AreDocIds("k3"));
 
   // Find platers by areas
-  EXPECT_THAT(Run({"ft.search", "i1", "@areas:{\"EU-central\"}"}), AreDocIds("k1", "k3"));
-  EXPECT_THAT(Run({"ft.search", "i1", "@areas:{\"US-central\"}"}), AreDocIds("k2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@areas:{'EU-central'}"}), AreDocIds("k1", "k3"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@areas:{'US-central'}"}), AreDocIds("k2"));
+
+  // Test complicated RETURN expression
+  auto res = Run(
+      {"ft.search", "i1", "@name:bob", "return", "1", "max($.plays[*].score)", "as", "max-score"});
+  EXPECT_THAT(res.GetVec()[2], RespArray(ElementsAre("max-score", "15")));
+
+  // Test invalid json path expression omits that field
+  res = Run({"ft.search", "i1", "@name:alex", "return", "1", "::??INVALID??::", "as", "retval"});
+  EXPECT_EQ(res.GetVec()[1], "k1");
+  EXPECT_THAT(res.GetVec()[2], RespArray(ElementsAre()));
 }
 
 TEST_F(SearchFamilyTest, Tags) {

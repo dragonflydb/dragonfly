@@ -366,9 +366,9 @@ void SearchFamily::FtDropIndex(CmdArgList args, ConnectionContext* cntx) {
   });
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
-  if (num_deleted == shard_set->size())
-    return (*cntx)->SendOk();
-  (*cntx)->SendError("Unknown Index name");
+  if (num_deleted == 0u)
+    return (*cntx)->SendError("-Unknown Index name");
+  return (*cntx)->SendOk();
 }
 
 void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
@@ -389,7 +389,7 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
 
   if (num_notfound > 0u)
-    return (*cntx)->SendError("Unknown index name");
+    return (*cntx)->SendError("Unknown Index name");
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());

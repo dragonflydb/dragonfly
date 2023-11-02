@@ -33,9 +33,9 @@
 
 blank [ \t\r]
 dq    \"
+sq    \'
 esc_chars ['"\?\\abfnrtv]
 esc_seq \\{esc_chars}
-str_char ([^"]|{esc_seq})
 term_char [_]|\w
 
 
@@ -65,10 +65,11 @@ term_char [_]|\w
 "KNN"          return Parser::make_KNN (loc());
 "AS"           return Parser::make_AS (loc());
 
-[0-9]+                   return make_UINT32(matched_view(), loc());
+[0-9]{1,9}                     return make_UINT32(matched_view(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)  return make_DOUBLE(matched_view(), loc());
 
-{dq}{str_char}*{dq}  return make_StringLit(matched_view(1, 1), loc());
+{dq}([^"]|{esc_seq})*{dq}  return make_StringLit(matched_view(1, 1), loc());
+{sq}([^']|{esc_seq})*{sq}  return make_StringLit(matched_view(1, 1), loc());
 
 "$"{term_char}+ return ParseParam(str(), loc());
 "@"{term_char}+ return Parser::make_FIELD(str(), loc());

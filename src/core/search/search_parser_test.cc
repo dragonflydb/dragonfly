@@ -103,9 +103,6 @@ TEST_F(SearchParserTest, Scanner) {
   absl::SimpleAtod("33.3", &d);
   SetInput("33.3");
   NEXT_EQ(TOK_DOUBLE, double, d);
-
-  SetInput("18446744073709551616");
-  NEXT_ERROR();
 }
 
 TEST_F(SearchParserTest, Parse) {
@@ -128,6 +125,21 @@ TEST_F(SearchParserTest, ParseParams) {
   SetInput("$name $k");
   NEXT_EQ(TOK_TERM, string, "alex");
   NEXT_EQ(TOK_UINT32, uint32_t, 10);
+}
+
+TEST_F(SearchParserTest, Quotes) {
+  SetInput(" \"fir  st\"  'sec@o@nd' \":third:\" 'four\\\"th' ");
+  NEXT_EQ(TOK_TERM, string, "fir  st");
+  NEXT_EQ(TOK_TERM, string, "sec@o@nd");
+  NEXT_EQ(TOK_TERM, string, ":third:");
+  NEXT_EQ(TOK_TERM, string, "four\"th");
+}
+
+TEST_F(SearchParserTest, Numeric) {
+  SetInput("11 123123123123 '22'");
+  NEXT_EQ(TOK_UINT32, uint32_t, 11);
+  NEXT_EQ(TOK_DOUBLE, double, 123123123123.0);
+  NEXT_EQ(TOK_TERM, string, "22");
 }
 
 }  // namespace dfly::search

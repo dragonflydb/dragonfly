@@ -110,7 +110,11 @@ struct JsonAccessor::JsonPathContainer : public jsoncons::jsonpath::jsonpath_exp
 };
 
 BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) const {
-  auto path_res = GetPath(active_field)->evaluate(json_);
+  auto* path = GetPath(active_field);
+  if (!path)
+    return {};
+
+  auto path_res = path->evaluate(json_);
   DCHECK(path_res.is_array());  // json path always returns arrays
 
   if (path_res.empty())
@@ -120,6 +124,8 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
     buf_ = path_res[0].as_string();
     return {buf_};
   }
+
+  buf_.clear();
 
   // First, grow buffer and compute string sizes
   vector<size_t> sizes;
@@ -141,7 +147,11 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
 }
 
 BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const {
-  auto res = GetPath(active_field)->evaluate(json_);
+  auto* path = GetPath(active_field);
+  if (!path)
+    return {};
+
+  auto res = path->evaluate(json_);
   DCHECK(res.is_array());
   if (res.empty())
     return {nullptr, 0};
@@ -163,7 +173,10 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
 
   error_code ec;
   auto path_expr = jsoncons::jsonpath::make_expression<JsonType>(field, ec);
-  DCHECK(!ec) << "missing validation on ft.create step";
+  if (ec) {
+    LOG(WARNING) << "Invalid Json path: " << field << ' ' << ec.message();
+    return nullptr;
+  }
 
   JsonPathContainer path_container{move(path_expr)};
   auto ptr = make_unique<JsonPathContainer>(move(path_container));
@@ -180,8 +193,12 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
                                       const SearchParams::FieldReturnList& fields) const {
   SearchDocData out{};
-  for (const auto& [ident, name] : fields)
-    out[name] = GetPath(ident)->evaluate(json_).to_string();
+  for (const auto& [ident, name] : fields) {
+    if (auto* path = GetPath(ident); path) {
+      if (auto res = path->evaluate(json_); !res.empty())
+        out[name] = res[0].to_string();
+    }
+  }
   return out;
 }
 
