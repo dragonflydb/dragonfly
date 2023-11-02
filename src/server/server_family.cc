@@ -174,9 +174,8 @@ bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
     return true;
   }
   if (absl::StartsWith(in, "\"")) {
-    *err = absl::StrCat("Invalid snapshot cron expression '", in,
-                        "', could it be that you put quotes in the flagfile?");
-    LOG(WARNING) << *err;
+    *err = absl::StrCat("Could it be that you put quotes in the flagfile?");
+
     return false;
   }
 
@@ -186,8 +185,7 @@ bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
     flag->value = cron::make_cron(raw_cron_expr);
     return true;
   } catch (const cron::bad_cronexpr& ex) {
-    *err = absl::StrCat("Invalid cron expression: ", raw_cron_expr, ", with error: ", ex.what());
-    LOG(WARNING) << *err;
+    *err = ex.what();
   }
   return false;
 }
@@ -453,18 +451,20 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
     return std::move(cron_expr.value);
   }
 
-  if (std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time); spec) {
-    // Setting snapshot to HH:mm everyday, as specified by `save_schedule` flag
-    string raw_cron_expr = absl::StrCat(CronExprFlag::kCronPrefix, spec.value().minute_spec, " ",
-                                        spec.value().hour_spec, " * * *");
-    try {
-      VLOG(1) << "creating cron from: `" << raw_cron_expr << "`";
-      return cron::make_cron(raw_cron_expr);
-    } catch (const cron::bad_cronexpr& ex) {
-      LOG(WARNING) << "Invalid cron expression: " << raw_cron_expr;
+  if (!save_time.empty()) {
+    if (std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time); spec) {
+      // Setting snapshot to HH:mm everyday, as specified by `save_schedule` flag
+      string raw_cron_expr = absl::StrCat(CronExprFlag::kCronPrefix, spec.value().minute_spec, " ",
+                                          spec.value().hour_spec, " * * *");
+      try {
+        VLOG(1) << "creating cron from: `" << raw_cron_expr << "`";
+        return cron::make_cron(raw_cron_expr);
+      } catch (const cron::bad_cronexpr& ex) {
+        LOG(WARNING) << "Invalid cron expression: " << raw_cron_expr;
+      }
+    } else {
+      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
     }
-  } else {
-    LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
   }
   return std::nullopt;
 }
