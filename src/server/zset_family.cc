@@ -3105,7 +3105,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
       << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
-      << CI{"GEORADIUSBYMEMBER", CO::READONLY, -4, 3, 3, 1, acl::kGeoRadiusByMember}.HFUNC(
+      << CI{"GEORADIUSBYMEMBER", CO::READONLY, -4, 1, 1, 1, acl::kGeoRadiusByMember}.HFUNC(
              GeoRadiusByMember);
 }
 
