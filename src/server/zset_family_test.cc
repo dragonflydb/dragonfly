@@ -851,8 +851,7 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
                             "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
                             "53.3498", "Dublin"}));
 
-  auto resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "WITHCOORD",
-              "WITHDIST"});
+  auto resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "WITHCOORD", "WITHDIST"});
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
