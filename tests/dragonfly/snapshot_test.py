@@ -140,11 +140,13 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
             df_args["nodf_snapshot_format"] = None
         with df_local_factory.create(**df_args) as df_server:
             async with df_server.client() as client:
+                await wait_available_async(client)
                 await client.set("TEST", hash(dbfilename))
                 await client.execute_command("SAVE " + save_type)
 
         with df_local_factory.create(**df_args) as df_server:
             async with df_server.client() as client:
+                await wait_available_async(client)
                 response = await client.get("TEST")
                 assert response.decode("utf-8") == str(hash(dbfilename))
 
