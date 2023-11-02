@@ -148,7 +148,7 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
             async with df_server.client() as client:
                 await wait_available_async(client)
                 response = await client.get("TEST")
-                assert response.decode("utf-8") == str(hash(dbfilename))
+                assert response == str(hash(dbfilename))
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "save_schedule": "*:*"})
