@@ -70,7 +70,7 @@ Please squash all commits for a change into a single commit (this can be done us
 
 ## Use Conventional Commits
 
-This repo uses [Conventional Commmits](https://www.conventionalcommits.org/en/v1.0.0/)
+This repo uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
 
 The Conventional Commits specification is a lightweight convention on top of commit messages.
 It provides an easy set of rules for creating an explicit commit history;
