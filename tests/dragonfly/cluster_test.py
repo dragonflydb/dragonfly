@@ -4,23 +4,27 @@ import redis
 from redis import asyncio as aioredis
 import asyncio
 
+from .instance import DflyInstanceFactory
 from .utility import *
 from .replication_test import check_all_replicas_finished
+
 from . import dfly_args
 
 BASE_PORT = 30001
 
 
 async def push_config(config, admin_connections):
-    print("Pushing config ", config)
-    await asyncio.gather(
+    logging.debug("Pushing config %s", config)
+    res = await asyncio.gather(
         *(c_admin.execute_command("DFLYCLUSTER", "CONFIG", config) for c_admin in admin_connections)
     )
+    assert all([r == "OK" for r in res])
 
 
 async def get_node_id(admin_connection):
     id = await admin_connection.execute_command("DFLYCLUSTER MYID")
-    return id.decode()
+    assert isinstance(id, str)
+    return id
 
 
 @dfly_args({})
@@ -168,7 +172,7 @@ Also add keys to each of them that are *not* moved, and see that they are unaffe
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_slot_ownership_changes(df_local_factory):
+async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFactory):
     # Start and configure cluster with 2 nodes
     nodes = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
@@ -177,8 +181,8 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
 
     df_local_factory.start_all(nodes)
 
-    c_nodes = [aioredis.Redis(port=node.port) for node in nodes]
-    c_nodes_admin = [aioredis.Redis(port=node.admin_port) for node in nodes]
+    c_nodes = [node.client() for node in nodes]
+    c_nodes_admin = [node.admin_client() for node in nodes]
 
     node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes_admin))
 
@@ -233,7 +237,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     assert await c_nodes[0].execute_command("DBSIZE") == 2
 
     # Make sure that node0 owns "KEY0"
-    assert (await c_nodes[0].get("KEY0")).decode() == "value"
+    assert (await c_nodes[0].get("KEY0")) == "value"
 
     # Make sure that "KEY1" is not owned by node1
     try:
@@ -255,7 +259,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     # node0 should have removed "KEY1" as it no longer owns it
     assert await c_nodes[0].execute_command("DBSIZE") == 1
     # node0 should still own "KEY0" though
-    assert (await c_nodes[0].get("KEY0")).decode() == "value"
+    assert (await c_nodes[0].get("KEY0")) == "value"
     # node1 should still have "KEY2"
     assert await c_nodes[1].execute_command("DBSIZE") == 1
 
@@ -291,7 +295,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     await push_config(config, c_nodes_admin)
 
     assert await c_nodes[0].execute_command("DBSIZE") == 1
-    assert (await c_nodes[0].get("KEY0")).decode() == "value"
+    assert (await c_nodes[0].get("KEY0")) == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 0
 
 
@@ -337,7 +341,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
         await c_master.set("key", "value")
         await c_replica.execute_command("REPLICAOF", "localhost", master.port)
         await check_all_replicas_finished([c_replica], c_master)
-        assert (await c_replica.get("key")).decode() == "value"
+        assert (await c_replica.get("key")) == "value"
         assert await c_replica.execute_command("dbsize") == 1
 
         # Tell the replica that it and the master no longer own any data, but don't tell that to the
@@ -405,18 +409,18 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_flush_slots_after_config_change(df_local_factory):
+async def test_cluster_flush_slots_after_config_change(df_local_factory: DflyInstanceFactory):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
     master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
     replica = df_local_factory.create(port=BASE_PORT + 1, admin_port=BASE_PORT + 1001)
     df_local_factory.start_all([master, replica])
 
-    c_master = aioredis.Redis(port=master.port)
-    c_master_admin = aioredis.Redis(port=master.admin_port)
+    c_master = master.client()
+    c_master_admin = master.admin_client()
     master_id = await get_node_id(c_master_admin)
 
-    c_replica = aioredis.Redis(port=replica.port)
-    c_replica_admin = aioredis.Redis(port=replica.admin_port)
+    c_replica = replica.client()
+    c_replica_admin = replica.admin_client()
     replica_id = await get_node_id(c_replica_admin)
 
     config = f"""
@@ -512,7 +516,7 @@ async def test_cluster_flush_slots_after_config_change(df_local_factory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_native_client(df_local_factory):
+async def test_cluster_native_client(df_local_factory: DflyInstanceFactory):
     # Start and configure cluster with 3 masters and 3 replicas
     masters = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
@@ -520,7 +524,7 @@ async def test_cluster_native_client(df_local_factory):
     ]
     df_local_factory.start_all(masters)
     c_masters = [aioredis.Redis(port=master.port) for master in masters]
-    c_masters_admin = [aioredis.Redis(port=master.admin_port) for master in masters]
+    c_masters_admin = [master.admin_client() for master in masters]
     master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters_admin))
 
     replicas = [
@@ -528,8 +532,8 @@ async def test_cluster_native_client(df_local_factory):
         for i in range(3)
     ]
     df_local_factory.start_all(replicas)
-    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
-    c_replicas_admin = [aioredis.Redis(port=replica.admin_port) for replica in replicas]
+    c_replicas = [replica.client() for replica in replicas]
+    c_replicas_admin = [replica.admin_client() for replica in replicas]
     replica_ids = await asyncio.gather(*(get_node_id(c) for c in c_replicas_admin))
 
     config = f"""
