@@ -138,11 +138,13 @@ class StringMap : public DenseSet {
   // Randomly selects count of key value pairs. The selections are unique.
   // if count is larger than the total number of key value pairs, returns
   // every pair.
+  // Executes at O(n) (i.e. slow for large sets).
   void RandomPairsUnique(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
                          bool with_value);
 
   // Randomly selects count of key value pairs. The select key value pairs
   // are allowed to have duplications.
+  // Executes at O(n) (i.e. slow for large sets).
   void RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
                    bool with_value);
 
