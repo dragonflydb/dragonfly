@@ -33,14 +33,3 @@ def test_mixed_reply(memcached_connection):
     memcached_connection.add(b"key", b"final", noreply=True)
 
     assert memcached_connection.get(b"key") == b"data"
-
-
-@dfly_args({"memcached_port": 11211})
-def test_multi_get(memcached_connection):
-    arr = [f"mykey{i}" for i in range(100)]
-    for elem in arr:
-        memcached_connection.set(elem, "myvalue", noreply=True)
-
-    res = memcached_connection.get_multi(arr)
-    assert len(res) == 100
-    assert any(elem in res for elem in arr)

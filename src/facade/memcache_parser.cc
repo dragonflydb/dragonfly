@@ -126,7 +126,8 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
 
   // cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]\r\n
   // get <key>*\r\n
-  absl::InlinedVector<std::string_view, 32> tokens = absl::StrSplit(tokens_expression, ' ');
+  absl::InlinedVector<std::string_view, 32> tokens =
+      absl::StrSplit(tokens_expression, ' ', absl::SkipWhitespace());
 
   const size_t num_tokens = tokens.size();
 

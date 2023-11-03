@@ -128,4 +128,14 @@ TEST_F(MCParserNoreplyTest, Other) {
   RunTest("flush_all\r\n", false);
 }
 
+TEST_F(MCParserNoreplyTest, LargeGetRequest) {
+  std::string large_request = "get";
+  for (size_t i = 0; i < 100; ++i) {
+    absl::StrAppend(&large_request, " mykey", i, ",");
+  }
+  large_request.pop_back();
+  absl::StrAppend(&large_request, "\r\n");
+  RunTest(large_request, false);
+}
+
 }  // namespace facade
