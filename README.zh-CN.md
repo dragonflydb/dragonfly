@@ -199,7 +199,7 @@ Dragonfly始于一项实验，旨在探索如果在2022年重新设计内存数�
 - 一种新颖的缓存驱逐算法，具有比其他缓存策略（如LRU和LFU）更高的命中率，同时**零内存开销**。
 - 一种新颖的无fork快照算法。
 
-在我们为Dragonfly打下基础并满意其[性能](#benchmarks)后，我们开始实现Redis和Memcached功能。
+在我们为Dragonfly打下基础并满意其[性能](#基准测试)后，我们开始实现Redis和Memcached功能。
 目前，我们已经实现了约185个Redis命令（大致相当于Redis 5.0 API）和13个Memcached命令。
 
 最后，<br>
