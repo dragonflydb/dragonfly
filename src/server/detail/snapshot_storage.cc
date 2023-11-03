@@ -27,7 +27,11 @@ namespace detail {
 
 namespace {
 
-const std::string kTimestampRegex = "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})";
+constexpr std::string_view kTimestampRegex =
+    "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})";
+constexpr std::string_view kYearRegex = "([0-9]{4})";
+constexpr std::string_view kMonthRegex = "([0-9]{2})";
+constexpr std::string_view kDayRegex = "([0-9]{2})";
 
 }  // namespace
 
@@ -116,14 +120,16 @@ io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(std::string_
   if (fs::exists(fl_path))
     return fl_path.generic_string();
 
-  SubstituteFilenameTsPlaceholder(&fl_path, "*");
+  SubstituteFilenamePlaceholders(&fl_path, "*", "*", "*", "*");
   if (!fl_path.has_extension()) {
     fl_path += "*";
   }
   io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
   if (short_vec) {
-    // io::StatFiles returns a list of sorted files. Because our timestamp format has the same
-    // time order and lexicographic order we iterate from the end to find the latest snapshot.
+    std::sort(short_vec->begin(), short_vec->end(),
+              [](const io::StatShort& l, const io::StatShort& r) {
+                return std::difftime(l.last_modified, r.last_modified) < 0;
+              });
     auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
       return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
     });
@@ -247,7 +253,7 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
     // and adding an extension if needed.
     fs::path fl_path{prefix};
     fl_path.append(dbfilename);
-    SubstituteFilenameTsPlaceholder(&fl_path, kTimestampRegex);
+    SubstituteFilenamePlaceholders(&fl_path, kTimestampRegex, kYearRegex, kMonthRegex, kDayRegex);
     if (!fl_path.has_extension()) {
       fl_path += "(-summary.dfs|.rdb)";
     }
@@ -256,16 +262,18 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
     // Sort the keys in reverse so the first. Since the timestamp format
     // has lexicographic order, the matching snapshot file will be the latest
     // snapshot.
-    io::Result<std::vector<std::string>, GenericError> keys = ListObjects(bucket_name, prefix);
+    io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
     if (!keys) {
       return nonstd::make_unexpected(keys.error());
     }
 
-    std::sort(std::rbegin(*keys), std::rend(*keys));
-    for (const std::string& key : *keys) {
+    std::sort(std::rbegin(*keys), std::rend(*keys), [](const SnapStat& l, const SnapStat& r) {
+      return l.last_modified < r.last_modified;
+    });
+    for (const SnapStat& key : *keys) {
       std::smatch m;
-      if (std::regex_match(key, m, re)) {
-        return std::string(kS3Prefix) + bucket_name + "/" + key;
+      if (std::regex_match(key.name, m, re)) {
+        return std::string(kS3Prefix) + bucket_name + "/" + key.name;
       }
     }
 
@@ -299,16 +307,15 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPat
       // Limit prefix to objects in the same 'directory' as load_path.
       const size_t pos = obj_path.find_last_of('/');
       const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos);
-      const io::Result<std::vector<std::string>, GenericError> keys =
-          ListObjects(bucket_name, prefix);
+      const io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
       if (!keys) {
         return nonstd::make_unexpected(keys.error());
       }
 
-      for (const std::string& key : *keys) {
+      for (const SnapStat& key : *keys) {
         std::smatch m;
-        if (std::regex_match(key, m, re)) {
-          paths.push_back(std::string(kS3Prefix) + bucket_name + "/" + key);
+        if (std::regex_match(key.name, m, re)) {
+          paths.push_back(std::string(kS3Prefix) + bucket_name + "/" + key.name);
         }
       }
 
@@ -325,12 +332,12 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPat
   return std::vector<std::string>{{load_path}};
 }
 
-io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObjects(
-    std::string_view bucket_name, std::string_view prefix) {
+io::Result<std::vector<AwsS3SnapshotStorage::SnapStat>, GenericError>
+AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view prefix) {
   // Each list objects request has a 1000 object limit, so page through the
   // objects if needed.
   std::string continuation_token;
-  std::vector<std::string> keys;
+  std::vector<SnapStat> keys;
   do {
     Aws::S3::Model::ListObjectsV2Request request;
     request.SetBucket(std::string(bucket_name));
@@ -343,7 +350,7 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::ListObj
     if (outcome.IsSuccess()) {
       continuation_token = outcome.GetResult().GetNextContinuationToken();
       for (const auto& object : outcome.GetResult().GetContents()) {
-        keys.push_back(object.GetKey());
+        keys.emplace_back(object.GetKey(), object.GetLastModified().CurrentTimeMillis());
       }
     } else if (outcome.GetError().GetExceptionName() == "PermanentRedirect") {
       return nonstd::make_unexpected(
@@ -380,8 +387,10 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   return res;
 }
 
-void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement) {
-  *filename = absl::StrReplaceAll(filename->string(), {{"{timestamp}", replacement}});
+void SubstituteFilenamePlaceholders(fs::path* filename, std::string_view ts, std::string_view year,
+                                    std::string_view month, std::string_view day) {
+  *filename = absl::StrReplaceAll(
+      filename->string(), {{"{Y}", year}, {"{m}", month}, {"{d}", day}, {"{timestamp}", ts}});
 }
 
 }  // namespace detail

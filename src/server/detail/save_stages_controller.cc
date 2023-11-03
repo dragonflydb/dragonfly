@@ -36,10 +36,6 @@ bool IsCloudPath(string_view path) {
   return absl::StartsWith(path, kS3Prefix);
 }
 
-string FormatTs(absl::Time now) {
-  return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
-}
-
 // Create a directory and all its parents if they don't exist.
 error_code CreateDirs(fs::path dir_path) {
   error_code ec;
@@ -320,6 +316,13 @@ void SaveStagesController::FinalizeFileMovement() {
   }
 }
 
+namespace {
+constexpr std::string_view kTSFormat = "%Y-%m-%dT%H:%M:%S";
+constexpr std::string_view kYearFormat = "%Y";
+constexpr std::string_view kMonthFormat = "%m";
+constexpr std::string_view kDayFormat = "%d";
+}  // namespace
+
 // Build full path: get dir, try creating dirs, get filename with placeholder
 GenericError SaveStagesController::BuildFullPath() {
   fs::path dir_path = GetFlag(FLAGS_dir);
@@ -335,7 +338,8 @@ GenericError SaveStagesController::BuildFullPath() {
   if (auto err = ValidateFilename(filename, use_dfs_format_); err)
     return err;
 
-  SubstituteFilenameTsPlaceholder(&filename, FormatTs(start_time_));
+  SubstituteFilenamePlaceholders(&filename, kTSFormat, kYearFormat, kMonthFormat, kDayFormat);
+  filename = absl::FormatTime(filename.string(), start_time_, absl::LocalTimeZone());
   full_path_ = dir_path / filename;
   is_cloud_ = IsCloudPath(full_path_.string());
   return {};
