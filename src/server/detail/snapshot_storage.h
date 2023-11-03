@@ -88,6 +88,9 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
  private:
   struct SnapStat {
+    SnapStat(std::string file_name, int64_t ts)
+        : name(std::move(file_name)), last_modified(std::move(ts)) {
+    }
     std::string name;
     int64_t last_modified;
   };
