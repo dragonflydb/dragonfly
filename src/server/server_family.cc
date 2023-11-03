@@ -71,6 +71,14 @@ struct ReplicaOfFlag {
 static bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err);
 static std::string AbslUnparseFlag(const ReplicaOfFlag& flag);
 
+struct CronExprFlag {
+  static constexpr std::string_view kCronPrefix = "0 "sv;
+  std::optional<cron::cronexpr> value;
+};
+
+static bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err);
+static std::string AbslUnparseFlag(const CronExprFlag& flag);
+
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump-{timestamp}", "the filename to save/load the DB");
 ABSL_FLAG(string, requirepass, "",
@@ -78,9 +86,8 @@ ABSL_FLAG(string, requirepass, "",
           "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(uint32_t, maxclients, 64000, "Maximum number of concurrent clients allowed.");
 
-ABSL_FLAG(string, save_schedule, "",
-          "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
-ABSL_FLAG(string, snapshot_cron, "",
+ABSL_FLAG(string, save_schedule, "", "the flag is deprecated, please use snapshot_cron instead");
+ABSL_FLAG(CronExprFlag, snapshot_cron, {},
           "cron expression for the time to save a snapshot, crontab style");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
@@ -159,6 +166,37 @@ bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 
 std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
   return (flag.has_value()) ? absl::StrCat(flag.host, ":", flag.port) : "";
+}
+
+bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
+  if (in.empty()) {
+    flag->value = std::nullopt;
+    return true;
+  }
+  if (absl::StartsWith(in, "\"")) {
+    *err = absl::StrCat("Could it be that you put quotes in the flagfile?");
+
+    return false;
+  }
+
+  std::string raw_cron_expr = absl::StrCat(CronExprFlag::kCronPrefix, in);
+  try {
+    VLOG(1) << "creating cron from: '" << raw_cron_expr << "'";
+    flag->value = cron::make_cron(raw_cron_expr);
+    return true;
+  } catch (const cron::bad_cronexpr& ex) {
+    *err = ex.what();
+  }
+  return false;
+}
+
+std::string AbslUnparseFlag(const CronExprFlag& flag) {
+  if (flag.value) {
+    auto str_expr = to_cronstr(*flag.value);
+    DCHECK(absl::StartsWith(str_expr, CronExprFlag::kCronPrefix));
+    return str_expr.substr(CronExprFlag::kCronPrefix.size());
+  }
+  return "";
 }
 
 void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
@@ -403,38 +441,29 @@ bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
 
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   string save_time = GetFlag(FLAGS_save_schedule);
-  string snapshot_cron_exp = GetFlag(FLAGS_snapshot_cron);
+  auto cron_expr = GetFlag(FLAGS_snapshot_cron);
 
-  if (!snapshot_cron_exp.empty() && !save_time.empty()) {
-    LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
-    exit(1);
+  if (cron_expr.value) {
+    if (!save_time.empty()) {
+      LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
+      exit(1);
+    }
+    return std::move(cron_expr.value);
   }
 
-  string raw_cron_expr;
   if (!save_time.empty()) {
-    std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
-
-    if (spec) {
+    if (std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time); spec) {
       // Setting snapshot to HH:mm everyday, as specified by `save_schedule` flag
-      raw_cron_expr = "0 " + spec.value().minute_spec + " " + spec.value().hour_spec + " * * *";
+      string raw_cron_expr = absl::StrCat(CronExprFlag::kCronPrefix, spec.value().minute_spec, " ",
+                                          spec.value().hour_spec, " * * *");
+      try {
+        VLOG(1) << "creating cron from: `" << raw_cron_expr << "`";
+        return cron::make_cron(raw_cron_expr);
+      } catch (const cron::bad_cronexpr& ex) {
+        LOG(WARNING) << "Invalid cron expression: " << raw_cron_expr;
+      }
     } else {
       LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
-    }
-  } else if (!snapshot_cron_exp.empty()) {
-    if (absl::StartsWith(snapshot_cron_exp, "\"")) {
-      LOG(WARNING) << "Invalid snapshot cron expression `" << snapshot_cron_exp
-                   << "`, could it be that you put quotes in the flagfile?";
-      return nullopt;
-    }
-    raw_cron_expr = "0 " + snapshot_cron_exp;
-  }
-
-  if (!raw_cron_expr.empty()) {
-    try {
-      VLOG(1) << "creating cron from: `" << raw_cron_expr << "`";
-      return std::optional<cron::cronexpr>(cron::make_cron(raw_cron_expr));
-    } catch (const cron::bad_cronexpr& ex) {
-      LOG(WARNING) << "Invalid cron expression: " << raw_cron_expr;
     }
   }
   return std::nullopt;
@@ -576,8 +605,24 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     }
   }
 
-  snapshot_schedule_fb_ =
-      service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
+  const auto create_snapshot_schedule_fb = [this] {
+    snapshot_schedule_fb_ =
+        service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
+  };
+  config_registry.RegisterMutable(
+      "snapshot_cron", [this, create_snapshot_schedule_fb](const absl::CommandLineFlag& flag) {
+        JoinSnapshotSchedule();
+        create_snapshot_schedule_fb();
+        return true;
+      });
+
+  create_snapshot_schedule_fb();
+}
+
+void ServerFamily::JoinSnapshotSchedule() {
+  schedule_done_.Notify();
+  snapshot_schedule_fb_.JoinIfNeeded();
+  schedule_done_.Reset();
 }
 
 void ServerFamily::Shutdown() {
@@ -586,10 +631,7 @@ void ServerFamily::Shutdown() {
   if (load_result_.valid())
     load_result_.wait();
 
-  schedule_done_.Notify();
-  if (snapshot_schedule_fb_.IsJoinable()) {
-    snapshot_schedule_fb_.Join();
-  }
+  JoinSnapshotSchedule();
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {

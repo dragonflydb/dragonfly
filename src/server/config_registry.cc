@@ -28,9 +28,10 @@ auto ConfigRegistry::Set(std::string_view config_name, std::string_view value) -
 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(config_name);
   CHECK(flag);
-  string error;
-  if (!flag->ParseFrom(value, &error))
+  if (string error; !flag->ParseFrom(value, &error)) {
+    LOG(WARNING) << error;
     return SetResult::INVALID;
+  }
 
   bool success = !cb || cb(*flag);
   return success ? SetResult::OK : SetResult::INVALID;
