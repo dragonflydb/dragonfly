@@ -1,52 +1,12 @@
 {
-  "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "Prometheus",
-      "description": "",
-      "type": "datasource",
-      "pluginId": "prometheus",
-      "pluginName": "Prometheus"
-    }
-  ],
-  "__elements": [],
-  "__requires": [
-    {
-      "type": "panel",
-      "id": "gauge",
-      "name": "Gauge",
-      "version": ""
-    },
-    {
-      "type": "grafana",
-      "id": "grafana",
-      "name": "Grafana",
-      "version": "8.3.3"
-    },
-    {
-      "type": "panel",
-      "id": "graph",
-      "name": "Graph (old)",
-      "version": ""
-    },
-    {
-      "type": "datasource",
-      "id": "prometheus",
-      "name": "Prometheus",
-      "version": "1.0.0"
-    },
-    {
-      "type": "panel",
-      "id": "stat",
-      "name": "Stat",
-      "version": ""
-    }
-  ],
   "annotations": {
     "list": [
       {
         "builtIn": 1,
-        "datasource": "-- Grafana --",
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
         "enable": true,
         "hide": true,
         "iconColor": "rgba(0, 211, 255, 1)",
@@ -66,12 +26,27 @@
   "fiscalYearStartMonth": 0,
   "gnetId": 11692,
   "graphTooltip": 0,
-  "id": null,
-  "iteration": 1654258777569,
   "links": [],
   "liveNow": false,
   "panels": [
     {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 17,
+      "panels": [],
+      "title": "Basic metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -111,7 +86,7 @@
         "h": 7,
         "w": 4,
         "x": 0,
-        "y": 0
+        "y": 1
       },
       "id": 9,
       "links": [],
@@ -130,7 +105,7 @@
         },
         "textMode": "auto"
       },
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "targets": [
         {
           "datasource": {
@@ -138,7 +113,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "exemplar": true,
-          "expr": "max(max_over_time(dragonfly_uptime_in_seconds{instance=~\"$instance\"}[$__interval]))",
+          "expr":
+              "max(max_over_time(dragonfly_uptime_in_seconds{instance=~\"$instance\"}[$__interval]))",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -152,6 +128,10 @@
       "type": "stat"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -191,7 +171,7 @@
         "h": 7,
         "w": 2,
         "x": 4,
-        "y": 0
+        "y": 1
       },
       "hideTimeOverride": true,
       "id": 12,
@@ -211,7 +191,7 @@
         },
         "textMode": "auto"
       },
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "targets": [
         {
           "datasource": {
@@ -234,6 +214,10 @@
       "type": "stat"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -278,13 +262,15 @@
         "h": 7,
         "w": 6,
         "x": 6,
-        "y": 0
+        "y": 1
       },
       "hideTimeOverride": true,
       "id": 11,
       "links": [],
       "maxDataPoints": 100,
       "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
         "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
@@ -296,7 +282,7 @@
         "showThresholdLabels": false,
         "showThresholdMarkers": true
       },
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "targets": [
         {
           "datasource": {
@@ -304,7 +290,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "exemplar": true,
-          "expr": "100 * (dragonfly_memory_used_bytes{instance=~\"$instance\"}  / dragonfly_memory_max_bytes{instance=~\"$instance\"} )",
+          "expr":
+              "100 * (dragonfly_memory_used_bytes{instance=~\"$instance\"}  / dragonfly_memory_max_bytes{instance=~\"$instance\"} )",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -323,6 +310,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "editable": true,
       "error": false,
       "fieldConfig": {
@@ -338,11 +329,10 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 0
+        "y": 1
       },
       "hiddenSeries": false,
       "id": 2,
-      "isNew": true,
       "legend": {
         "avg": false,
         "current": false,
@@ -360,7 +350,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -424,6 +414,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "editable": true,
       "error": false,
       "fieldConfig": {
@@ -439,11 +433,10 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 7
+        "y": 8
       },
       "hiddenSeries": false,
       "id": 7,
-      "isNew": true,
       "legend": {
         "avg": false,
         "current": false,
@@ -463,7 +456,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -541,6 +534,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "editable": true,
       "error": false,
       "fieldConfig": {
@@ -556,11 +553,10 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 7
+        "y": 8
       },
       "hiddenSeries": false,
       "id": 10,
-      "isNew": true,
       "legend": {
         "avg": false,
         "current": false,
@@ -578,7 +574,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -652,6 +648,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "editable": true,
       "error": false,
       "fieldConfig": {
@@ -667,11 +667,10 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 15
       },
       "hiddenSeries": false,
       "id": 5,
-      "isNew": true,
       "legend": {
         "alignAsTable": true,
         "avg": false,
@@ -691,7 +690,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -752,6 +751,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "editable": true,
       "error": false,
       "fieldConfig": {
@@ -767,11 +770,10 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 15
       },
       "hiddenSeries": false,
       "id": 13,
-      "isNew": true,
       "legend": {
         "avg": false,
         "current": false,
@@ -789,7 +791,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -804,7 +806,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "exemplar": true,
-          "expr": "sum (dragonfly_db_keys{instance=~\"$instance\"}) - sum (dragonfly_db_keys_expiring{instance=~\"$instance\"}) ",
+          "expr":
+              "sum (dragonfly_db_keys{instance=~\"$instance\"}) - sum (dragonfly_db_keys_expiring{instance=~\"$instance\"}) ",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -869,6 +872,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "editable": true,
       "error": false,
       "fieldConfig": {
@@ -884,11 +891,10 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 22
       },
       "hiddenSeries": false,
       "id": 8,
-      "isNew": true,
       "legend": {
         "avg": false,
         "current": false,
@@ -906,7 +912,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -926,7 +932,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "exemplar": true,
-          "expr": "sum(rate(dragonfly_expired_keys_total{instance=~\"$instance\"}[5m])) by (instance)",
+          "expr":
+              "sum(rate(dragonfly_expired_keys_total{instance=~\"$instance\"}[5m])) by (instance)",
           "format": "time_series",
           "hide": false,
           "interval": "",
@@ -943,7 +950,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "exemplar": true,
-          "expr": "sum(rate(dragonfly_evicted_keys_total{instance=~\"$instance\"}[5m])) by (instance)",
+          "expr":
+              "sum(rate(dragonfly_evicted_keys_total{instance=~\"$instance\"}[5m])) by (instance)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -988,6 +996,10 @@
       "bars": false,
       "dashLength": 10,
       "dashes": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "fieldConfig": {
         "defaults": {
           "links": []
@@ -1000,7 +1012,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 21
+        "y": 22
       },
       "hiddenSeries": false,
       "id": 16,
@@ -1021,7 +1033,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "8.3.3",
+      "pluginVersion": "10.2.0",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -1073,11 +1085,125 @@
       "yaxis": {
         "align": false
       }
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 19,
+      "panels": [],
+      "title": "Advanced metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "µs"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "id": 18,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          },
+          "disableTextWrap": false,
+          "editorMode": "code",
+          "expr":
+              "rate(dragonfly_fiber_switch_delay_seconds_total[$__rate_interval])*1000000/rate(dragonfly_fiber_switch_total[$__rate_interval])",
+          "fullMetaSearch": false,
+          "includeNullMetadata": false,
+          "instant": false,
+          "legendFormat": "__auto",
+          "range": true,
+          "refId": "A",
+          "useBackend": false
+        }
+      ],
+      "title": "FiberSwitchDelay",
+      "transformations": [],
+      "type": "timeseries"
     }
   ],
-  "refresh": false,
-  "schemaVersion": 34,
-  "style": "dark",
+  "refresh": "",
+  "schemaVersion": 38,
   "tags": [
     "prometheus",
     "dragonfly"
@@ -1107,7 +1233,7 @@
         "datasource": {
           "uid": "$DS_PROMETHEUS"
         },
-        "definition": "label_values(dragonfly_up, namespace)",
+        "definition": "label_values(dragonfly_version, namespace)",
         "hide": 0,
         "includeAll": false,
         "label": "Namespace",
@@ -1115,7 +1241,7 @@
         "name": "namespace",
         "options": [],
         "query": {
-          "query": "label_values(dragonfly_up, namespace)",
+          "query": "label_values(dragonfly_version, namespace)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -1132,7 +1258,7 @@
         "datasource": {
           "uid": "$DS_PROMETHEUS"
         },
-        "definition": "label_values(dragonfly_up{namespace=\"$namespace\"}, pod)",
+        "definition": "label_values(dragonfly_version{namespace=\"$namespace\"}, pod)",
         "hide": 0,
         "includeAll": false,
         "label": "Pod Name",
@@ -1140,7 +1266,7 @@
         "name": "pod_name",
         "options": [],
         "query": {
-          "query": "label_values(dragonfly_up{namespace=\"$namespace\"}, pod)",
+          "query": "label_values(dragonfly_version{namespace=\"$namespace\"}, pod)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -1157,14 +1283,16 @@
         "datasource": {
           "uid": "$DS_PROMETHEUS"
         },
-        "definition": "label_values(dragonfly_up{namespace=\"$namespace\", pod=\"$pod_name\"}, instance)",
+        "definition":
+            "label_values(dragonfly_version{namespace=\"$namespace\", pod=\"$pod_name\"}, instance)",
         "hide": 0,
         "includeAll": false,
         "multi": false,
         "name": "instance",
         "options": [],
         "query": {
-          "query": "label_values(dragonfly_up{namespace=\"$namespace\", pod=\"$pod_name\"}, instance)",
+          "query":
+              "label_values(dragonfly_version{namespace=\"$namespace\", pod=\"$pod_name\"}, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
