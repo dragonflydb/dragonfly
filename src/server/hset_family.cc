@@ -1067,10 +1067,14 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     StringVec str_vec;
 
     if (pv.Encoding() == kEncodingStrMap2) {
-      StringMap* string_map = (StringMap*)pv.RObjPtr();
+      StringMap* string_map = GetStringMap(pv, db_context);
+
       if (args.size() == 1) {
-        auto [key, value] = string_map->RandomPair();
-        str_vec.emplace_back(key, sdslen(key));
+        auto opt_pair = string_map->RandomPair();
+        if (opt_pair.has_value()) {
+          auto [key, value] = *opt_pair;
+          str_vec.emplace_back(key, sdslen(key));
+        }
       } else {
         size_t actual_count =
             (count >= 0) ? std::min(size_t(count), string_map->Size()) : abs(count);
@@ -1086,6 +1090,11 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
             str_vec.emplace_back(vals[i], sdslen(vals[i]));
           }
         }
+      }
+
+      if (string_map->Empty()) {
+        db_slice.Del(db_context.db_index, *it_res);
+        return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
