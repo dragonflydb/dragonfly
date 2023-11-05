@@ -118,6 +118,15 @@ TEST_F(StringMapTest, Ttl) {
   EXPECT_TRUE(it == sm_->end());
 }
 
+TEST_F(StringMapTest, IterateExpired) {
+  EXPECT_TRUE(sm_->AddOrUpdate("k1", "v1", 1));
+  EXPECT_TRUE(sm_->AddOrUpdate("k2", "v2", 1));
+  sm_->set_time(1);
+  auto it = sm_->begin();
+  it += 1;
+  EXPECT_EQ(it, sm_->end());
+}
+
 unsigned total_wasted_memory = 0;
 
 TEST_F(StringMapTest, ReallocIfNeeded) {

@@ -339,4 +339,22 @@ TEST_F(HSetFamilyTest, Issue2102) {
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
 }
 
+TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);
+  }
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HRANDFIELD", "key"}), ArgType(RespExpr::NIL));
+}
+
+TEST_F(HSetFamilyTest, RandomField1NotExpired) {
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);
+  }
+  EXPECT_EQ(CheckedInt({"HSET", "key", "keep", "v"}), 1);
+
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HRANDFIELD", "key"}), "keep");
+}
+
 }  // namespace dfly
