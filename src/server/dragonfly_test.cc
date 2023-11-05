@@ -428,20 +428,25 @@ TEST_F(DflyEngineTest, StickyEviction) {
     ASSERT_EQ("OK", Run({"set", key, tmp_val}));
   }
 
-  for (ssize_t i = 0; i < 5000; ++i) {
+  bool done = false;
+  for (ssize_t i = 0; !done && i < 5000; ++i) {
     string key = StrCat("key", i);
-    auto set_resp = Run({"set", key, tmp_val});
-    auto stick_resp = Run({"stick", key});
+    while (true) {
+      if (Run({"set", key, tmp_val}) != "OK") {
+        failed = i;
+        done = true;
+        break;
+      }
 
-    if (set_resp != "OK") {
-      failed = i;
-      break;
+      // Eviction could have happened right after set, before stick. If so, try again
+      if (Run({"stick", key}).GetInt() == 1) {
+        break;
+      }
     }
-    ASSERT_THAT(stick_resp, IntArg(1)) << i;
   }
 
   ASSERT_GE(failed, 0);
-  // Make sure neither of the sticky values was evicted
+  // Make sure none of the sticky values was evicted
   for (ssize_t i = 0; i < failed; ++i) {
     ASSERT_THAT(Run({"exists", StrCat("key", i)}), IntArg(1));
   }
