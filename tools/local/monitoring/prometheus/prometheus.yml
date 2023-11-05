@@ -29,14 +29,14 @@ scrape_configs:
   # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
 
   - job_name: dragonfly
-    scrape_interval: 5s
+    scrape_interval: 1s
     static_configs:
       - targets: ['host.docker.internal:6379']
 
   - job_name: 'prometheus'
 
     # Override the global default and scrape targets from this job every 5 seconds.
-    scrape_interval: 5s
+    scrape_interval: 1s
 
     static_configs:
          - targets: ['localhost:9090']
@@ -45,7 +45,7 @@ scrape_configs:
   - job_name: 'node-exporter'
 
     # Override the global default and scrape targets from this job every 5 seconds.
-    scrape_interval: 5s
+    scrape_interval: 1s
     static_configs:
       - targets: ['node-exporter:9100']
         labels:

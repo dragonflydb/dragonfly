@@ -850,7 +850,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricValue("role", 1, {"role"}, {m.is_master ? "master" : "replica"}, &resp->body());
   AppendMetricWithoutLabels("master", "1 if master 0 if replica", m.is_master ? 1 : 0,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::COUNTER, &resp->body());
 
   // Clients metrics
   AppendMetricWithoutLabels("connected_clients", "", m.conn_stats.num_conns, MetricType::GAUGE,
@@ -923,7 +923,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                        &command_metrics);
     for (const auto& [name, stat] : m.cmd_stats_map) {
       const auto calls = stat.first;
-      const auto duration_seconds = stat.second * 0.001;
+      const double duration_seconds = stat.second * 0.001;
       AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
       AppendMetricValue("commands_duration_seconds_total", duration_seconds, {"cmd"}, {name},
                         &command_metrics);
@@ -943,6 +943,18 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     }
     absl::StrAppend(&resp->body(), replication_lag_metrics);
   }
+
+  AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
+                            &resp->body());
+  double delay_seconds = m.fiber_switch_delay_ns * 1e-9;
+  AppendMetricWithoutLabels("fiber_switch_delay_seconds_total", "", delay_seconds,
+                            MetricType::COUNTER, &resp->body());
+
+  AppendMetricWithoutLabels("fiber_longrun_total", "", m.fiber_longrun_cnt, MetricType::COUNTER,
+                            &resp->body());
+  double longrun_seconds = m.fiber_longrun_ns * 1e-9;
+  AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
+                            &resp->body());
 
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
@@ -1401,6 +1413,11 @@ Metrics ServerFamily::GetMetrics() const {
     ServerState* ss = ServerState::tlocal();
 
     lock_guard lk(mu);
+
+    result.fiber_switch_cnt += fb2::FiberSwitchEpoch();
+    result.fiber_switch_delay_ns += fb2::FiberSwitchDelay();
+    result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
+    result.fiber_longrun_ns += fb2::FiberLongRunSum();
 
     result.coordinator_stats += ss->stats;
     result.conn_stats += ss->connection_stats;
