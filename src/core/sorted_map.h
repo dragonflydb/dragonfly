@@ -232,7 +232,7 @@ class SortedMap {
     bool Delete(sds ele);
 
     size_t Size() const {
-      return score_map->Size();
+      return score_map->UpperBoundSize();
     }
 
     size_t MallocSize() const;

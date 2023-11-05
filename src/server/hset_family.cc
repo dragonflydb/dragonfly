@@ -119,7 +119,7 @@ size_t HMapLength(const DbContext& db_cntx, const CompactObj& co) {
   void* ptr = co.RObjPtr();
   if (co.Encoding() == kEncodingStrMap2) {
     StringMap* sm = GetStringMap(co, db_cntx);
-    return sm->Size();
+    return sm->UpperBoundSize();
   }
 
   DCHECK_EQ(kEncodingListPack, co.Encoding());
@@ -379,7 +379,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
       bool res = sm->Erase(ToSV(s));
       if (res) {
         ++deleted;
-        if (sm->Size() == 0) {
+        if (sm->UpperBoundSize() == 0) {
           key_remove = true;
           break;
         }
@@ -565,8 +565,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
     DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-    // Some items could have expired, yet accounted for in Size(), so reserve() might overshoot
-    res.reserve(sm->Size() * (keyval ? 2 : 1));
+    res.reserve(sm->UpperBoundSize() * (keyval ? 2 : 1));
     for (const auto& k_v : *sm) {
       if (mask & FIELDS) {
         res.emplace_back(k_v.first, sdslen(k_v.first));
@@ -1077,7 +1076,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
         }
       } else {
         size_t actual_count =
-            (count >= 0) ? std::min(size_t(count), string_map->Size()) : abs(count);
+            (count >= 0) ? std::min(size_t(count), string_map->UpperBoundSize()) : abs(count);
         std::vector<sds> keys, vals;
         if (count >= 0) {
           string_map->RandomPairsUnique(actual_count, keys, vals, with_values);
