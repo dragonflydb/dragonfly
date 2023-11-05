@@ -98,7 +98,6 @@ jobs:
           ${SCCACHE_PATH} --show-stats | tee $GITHUB_STEP_SUMMARY
 
       - name: C++ Unit Tests
-        if: ${{ false }}
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
