@@ -263,7 +263,7 @@ void BaseFamilyTest::ShutdownService() {
   }
 
   // Don't save files during shutdown
-  DelSerializedFiles();
+  CleanupSnapshots();
   absl::SetFlag(&FLAGS_dbfilename, "");
 
   service_->Shutdown();
@@ -281,11 +281,11 @@ void BaseFamilyTest::InitWithDbFilename() {
   ShutdownService();
 
   absl::SetFlag(&FLAGS_dbfilename, "rdbtestdump");
-  DelSerializedFiles();
+  CleanupSnapshots();
   ResetService();
 }
 
-void BaseFamilyTest::DelSerializedFiles() {
+void BaseFamilyTest::CleanupSnapshots() {
   string dbfilename = absl::GetFlag(FLAGS_dbfilename);
   if (dbfilename.empty())
     return;

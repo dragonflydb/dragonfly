@@ -95,7 +95,7 @@ class BaseFamilyTest : public ::testing::Test {
   void ShutdownService();
 
   void InitWithDbFilename();
-  void DelSerializedFiles();
+  void CleanupSnapshots();
 
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
