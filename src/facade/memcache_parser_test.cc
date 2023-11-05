@@ -131,11 +131,19 @@ TEST_F(MCParserNoreplyTest, Other) {
 TEST_F(MCParserNoreplyTest, LargeGetRequest) {
   std::string large_request = "get";
   for (size_t i = 0; i < 100; ++i) {
-    absl::StrAppend(&large_request, " mykey", i, ",");
+    absl::StrAppend(&large_request, " mykey", i, " ");
   }
-  large_request.pop_back();
   absl::StrAppend(&large_request, "\r\n");
+
   RunTest(large_request, false);
+
+  EXPECT_EQ(cmd_.type, MemcacheParser::CmdType::GET);
+  EXPECT_EQ(cmd_.key, "mykey0");
+  const auto& keys = cmd_.keys_ext;
+  EXPECT_TRUE(std::all_of(keys.begin(), keys.end(), [](const auto& elem) {
+    static size_t i = 1;
+    return elem == absl::StrCat("mykey", i++);
+  }));
 }
 
 }  // namespace facade
