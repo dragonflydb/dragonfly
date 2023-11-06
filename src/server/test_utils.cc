@@ -19,6 +19,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
+#include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "util/fibers/pool.h"
 
@@ -257,7 +258,13 @@ void BaseFamilyTest::ResetService() {
 }
 
 void BaseFamilyTest::ShutdownService() {
-  DCHECK(service_);
+  if (service_ == nullptr) {
+    return;
+  }
+
+  // Don't save files during shutdown
+  CleanupSnapshots();
+  absl::SetFlag(&FLAGS_dbfilename, "");
 
   service_->Shutdown();
   service_.reset();
@@ -268,6 +275,26 @@ void BaseFamilyTest::ShutdownService() {
   watchdog_fiber_.Join();
 
   pp_->Stop();
+}
+
+void BaseFamilyTest::InitWithDbFilename() {
+  ShutdownService();
+
+  absl::SetFlag(&FLAGS_dbfilename, "rdbtestdump");
+  CleanupSnapshots();
+  ResetService();
+}
+
+void BaseFamilyTest::CleanupSnapshots() {
+  string dbfilename = absl::GetFlag(FLAGS_dbfilename);
+  if (dbfilename.empty())
+    return;
+
+  auto rdb_files = io::StatFiles(absl::StrCat(dbfilename, "*"));
+  CHECK(rdb_files);
+  for (const auto& fl : *rdb_files) {
+    unlink(fl.name.c_str());
+  }
 }
 
 unsigned BaseFamilyTest::NumLocked() {

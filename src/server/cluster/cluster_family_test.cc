@@ -680,6 +680,8 @@ TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
+  InitWithDbFilename();
+
   Run({"debug", "populate", "50000"});
 
   EXPECT_EQ(Run({"save", "df"}), "OK");
