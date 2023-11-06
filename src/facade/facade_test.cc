@@ -13,8 +13,7 @@ namespace facade {
 using namespace testing;
 using namespace std;
 
-bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listener) const {
-  RespExpr e_copy = e;
+bool RespMatcher::MatchAndExplain(RespExpr e, MatchResultListener* listener) const {
   if (e.type != type_) {
     if (e.type == RespExpr::STRING && type_ == RespExpr::DOUBLE) {
       // Doubles are encoded as strings, unless RESP3 is selected. So parse string and try to
@@ -24,8 +23,8 @@ bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listen
         *listener << "\nCan't parse as double: " << e.GetString();
         return false;
       }
-      e_copy.type = RespExpr::DOUBLE;
-      e_copy.u = d;
+      e.type = RespExpr::DOUBLE;
+      e.u = d;
     } else {
       *listener << "\nWrong type: " << RespExpr::TypeName(e.type);
       return false;
@@ -33,7 +32,7 @@ bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listen
   }
 
   if (type_ == RespExpr::STRING || type_ == RespExpr::ERROR) {
-    RespExpr::Buffer ebuf = e_copy.GetBuf();
+    RespExpr::Buffer ebuf = e.GetBuf();
     std::string_view actual{reinterpret_cast<char*>(ebuf.data()), ebuf.size()};
 
     if (type_ == RespExpr::ERROR && !absl::StrContains(actual, exp_str_)) {
@@ -45,19 +44,19 @@ bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listen
       return false;
     }
   } else if (type_ == RespExpr::INT64) {
-    auto actual = get<int64_t>(e_copy.u);
+    auto actual = get<int64_t>(e.u);
     if (exp_int_ != actual) {
       *listener << "\nActual : " << actual << " expected: " << exp_int_;
       return false;
     }
   } else if (type_ == RespExpr::DOUBLE) {
-    auto actual = get<double>(e_copy.u);
+    auto actual = get<double>(e.u);
     if (abs(exp_double_ - actual) > 0.0001) {
       *listener << "\nActual : " << actual << " expected: " << exp_double_;
       return false;
     }
   } else if (type_ == RespExpr::ARRAY) {
-    size_t len = get<RespVec*>(e_copy.u)->size();
+    size_t len = get<RespVec*>(e.u)->size();
     if (len != size_t(exp_int_)) {
       *listener << "Actual length " << len << ", expected: " << exp_int_;
       return false;
