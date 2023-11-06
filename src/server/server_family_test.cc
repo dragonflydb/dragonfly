@@ -185,25 +185,19 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
 
 TEST_F(ServerFamilyTest, ClientPause) {
   auto start = absl::Now();
-
-  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    Run("pause", {"CLIENT", "PAUSE", "50"});
-  });
+  Run({"CLIENT", "PAUSE", "50"});
 
   Run({"get", "key"});
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
-  fb0.Join();
 
   start = absl::Now();
-  auto fb1 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    Run("pause", {"CLIENT", "PAUSE", "50", "WRITE"});
-  });
+
+  Run({"CLIENT", "PAUSE", "50", "WRITE"});
 
   Run({"get", "key"});
   EXPECT_LT((absl::Now() - start), absl::Milliseconds(10));
   Run({"set", "key", "value2"});
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
-  fb1.Join();
 }
 
 }  // namespace dfly
