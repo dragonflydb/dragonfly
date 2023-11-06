@@ -99,8 +99,9 @@ class DflyRenameCommandTest : public DflyEngineTest {
  protected:
   DflyRenameCommandTest() : DflyEngineTest() {
     // rename flushall to myflushall, flushdb command will not be able to execute
-    absl::SetFlag(&FLAGS_rename_command,
-                  std::vector<std::string>({"flushall=myflushall", "flushdb="}));
+    absl::SetFlag(
+        &FLAGS_rename_command,
+        std::vector<std::string>({"flushall=myflushall", "flushdb=", "ping=abcdefghijklmnop"}));
   }
 
   void TearDown() {
@@ -113,16 +114,20 @@ TEST_F(DflyRenameCommandTest, RenameCommand) {
   Run({"set", "a", "1"});
   ASSERT_EQ(1, CheckedInt({"dbsize"}));
   // flushall should not execute anything and should return error, as it was renamed.
-  RespExpr resp = Run({"flushall"});
-  ASSERT_THAT(resp, ErrArg("unknown command `FLUSHALL`"));
+  ASSERT_THAT(Run({"flushall"}), ErrArg("unknown command `FLUSHALL`"));
+
   ASSERT_EQ(1, CheckedInt({"dbsize"}));
-  resp = Run({"myflushall"});
-  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(Run({"myflushall"}), "OK");
+
   ASSERT_EQ(0, CheckedInt({"dbsize"}));
-  resp = Run({"flushdb", "0"});
-  ASSERT_THAT(resp, ErrArg("unknown command `FLUSHDB`"));
-  resp = Run({""});
-  ASSERT_THAT(resp, ErrArg("unknown command ``"));
+
+  ASSERT_THAT(Run({"flushdb", "0"}), ErrArg("unknown command `FLUSHDB`"));
+
+  ASSERT_THAT(Run({""}), ErrArg("unknown command ``"));
+
+  ASSERT_THAT(Run({"ping"}), ErrArg("unknown command `PING`"));
+  ASSERT_THAT(Run({"abcdefghijklmnop"}), "PONG");
 }
 
 TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {

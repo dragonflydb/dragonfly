@@ -117,7 +117,7 @@ void CommandRegistry::Init(unsigned int thread_count) {
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
-  auto k = cmd.name();
+  string k = string(cmd.name());
 
   absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
   const bool is_sub_command = maybe_subcommand.size() == 2;
