@@ -1067,7 +1067,19 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
-  etl.AwaitPauseState(/*is_write=*/cid->opt_mask() & CO::WRITE);
+  string_view cmd_name(cid->name());
+  bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
+                  cmd_name == "EVALSHA";
+  if (cmd_name == "EXEC") {
+    // Check if one of the commands under exec is write command
+    for (auto& cmd : dfly_cntx->conn_state.exec_info.body) {
+      if (cmd.Cid()->opt_mask() & CO::WRITE) {
+        is_write = true;
+        break;
+      }
+    }
+  }
+  etl.AwaitPauseState(is_write);
 
   etl.RecordCmd();
 
@@ -1411,6 +1423,10 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
 facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
   return ServerState::tl_connection_stats();
+}
+
+void Service::AwaitOnPauseDispatch() {
+  ServerState::tlocal()->AwaitOnPauseDispatch();
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {

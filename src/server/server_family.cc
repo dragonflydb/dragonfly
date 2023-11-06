@@ -1294,9 +1294,34 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(err->MakeReply());
   }
 
-  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-    ServerState::tlocal()->SetPauseState(pause_state, true);
+  // Pause dispatch commands before updating client puase state, and enable dispatch after updating
+  // pause state. This will unsure that when we after changing the state all running commands will
+  // read the new pause state, and we will not pause client in the middle of a transaction.
+  service_.proactor_pool().Await([](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseDispatch(true);
   });
+
+  // TODO handle blocking commands
+  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  if (!AwaitDispatches(kDispatchTimeout, [self = cntx->conn()](util::Connection* conn) {
+        // Wait until the only command dispatching is the client pause command.
+        return conn != self;
+      })) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << kDispatchTimeout;
+    service_.proactor_pool().Await([](util::ProactorBase* pb) {
+      ServerState& etl = *ServerState::tlocal();
+      etl.SetPauseDispatch(false);
+    });
+    return (*cntx)->SendError("Failed to pause all running clients");
+  }
+
+  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseState(pause_state, true);
+    etl.SetPauseDispatch(false);
+  });
+
   // We should not expire/evict keys while clients are puased.
   shard_set->RunBriefInParallel(
       [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });

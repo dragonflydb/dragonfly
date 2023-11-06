@@ -1782,21 +1782,26 @@ async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
 
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
-    # block the seeder for 2 seconds
+    # block the seeder for 4 seconds
     await c_master.execute_command("client pause 4000 write")
+    stats = await c_master.info("CommandStats")
     info = await c_master.info("Stats")
     await asyncio.sleep(0.5)
-    info_after_sleep = await c_master.info("Stats")
-    assert (
-        info["total_commands_processed"] + 1 == info_after_sleep["total_commands_processed"]
-    )  # info command executed
+    stats_after_sleep = await c_master.info("CommandStats")
+    # Check no commands are executed except info and replconf called from replica
+    for cmd, cmd_stats in stats_after_sleep.items():
+        if "cmdstat_INFO" != cmd and "cmdstat_REPLCONF" != cmd_stats:
+            assert stats[cmd] == cmd_stats
+
     await asyncio.sleep(6)
     seeder.stop()
     await fill_task
-    info_after_pause_finish = await c_master.info("Stats")
-    assert (
-        info["total_commands_processed"] + 1 < info_after_pause_finish["total_commands_processed"]
-    )
+    stats_after_pause_finish = await c_master.info("CommandStats")
+    more_exeuted = False
+    for cmd, cmd_stats in stats_after_pause_finish.items():
+        if "cmdstat_INFO" != cmd and "cmdstat_REPLCONF" != cmd_stats and stats[cmd] != cmd_stats:
+            more_exeuted = True
+    assert more_exeuted
 
     capture = await seeder.capture(port=master.port)
     assert await seeder.compare(capture, port=replica.port)
