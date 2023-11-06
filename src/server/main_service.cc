@@ -1145,7 +1145,8 @@ class ReplyGuard {
     const bool is_one_of =
         absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY"}).contains(cid_name);
     auto* maybe_mcache = dynamic_cast<MCReplyBuilder*>(cntx->reply_builder());
-    const bool is_no_reply_memcache = maybe_mcache && maybe_mcache->NoReply();
+    const bool is_no_reply_memcache =
+        maybe_mcache && (maybe_mcache->NoReply() || cid_name == "QUIT");
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
       builder_ = cntx->reply_builder();
