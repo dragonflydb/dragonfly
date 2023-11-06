@@ -4,9 +4,13 @@
 #include "facade/memcache_parser.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_split.h>
+#include <absl/types/span.h>
 
+#include "base/logging.h"
 #include "base/stl_util.h"
 
 namespace facade {
@@ -32,7 +36,10 @@ MP::CmdType From(string_view token) {
   return it->second;
 }
 
-MP::Result ParseStore(const std::string_view* tokens, unsigned num_tokens, MP::Command* res) {
+using TokensView = absl::Span<std::string_view>;
+
+MP::Result ParseStore(TokensView tokens, MP::Command* res) {
+  const size_t num_tokens = tokens.size();
   unsigned opt_pos = 3;
   if (res->type == MP::CAS) {
     if (num_tokens <= opt_pos)
@@ -63,8 +70,9 @@ MP::Result ParseStore(const std::string_view* tokens, unsigned num_tokens, MP::C
   return MP::OK;
 }
 
-MP::Result ParseValueless(const std::string_view* tokens, unsigned num_tokens, MP::Command* res) {
-  unsigned key_pos = 0;
+MP::Result ParseValueless(TokensView tokens, MP::Command* res) {
+  const size_t num_tokens = tokens.size();
+  size_t key_pos = 0;
   if (res->type == MP::GAT || res->type == MP::GATS) {
     if (!absl::SimpleAtoi(tokens[0], &res->expire_ts)) {
       return MP::BAD_INT;
@@ -103,51 +111,28 @@ MP::Result ParseValueless(const std::string_view* tokens, unsigned num_tokens, M
 
 auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   cmd->no_reply = false;  // re-initialize
-  auto pos = str.find('\n');
+  auto pos = str.find("\r\n");
   *consumed = 0;
   if (pos == string_view::npos) {
-    // TODO: it's over simplified since we may process GET/GAT command that is not limited to
-    // 300 characters.
-    return str.size() > 300 ? PARSE_ERROR : INPUT_PENDING;
+    return INPUT_PENDING;
   }
 
   if (pos == 0) {
     return PARSE_ERROR;
   }
-  *consumed = pos + 1;
+  *consumed = pos + 2;
+
+  std::string_view tokens_expression = str.substr(0, pos);
 
   // cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]\r\n
   // get <key>*\r\n
-  string_view tokens[8];
-  unsigned num_tokens = 0;
-  uint32_t cur = 0;
+  absl::InlinedVector<std::string_view, 32> tokens =
+      absl::StrSplit(tokens_expression, ' ', absl::SkipWhitespace());
 
-  while (cur < pos && str[cur] == ' ')
-    ++cur;
-
-  uint32_t s = cur;
-  for (; cur <= pos; ++cur) {
-    if (absl::ascii_isspace(str[cur])) {
-      if (cur != s) {
-        tokens[num_tokens++] = str.substr(s, cur - s);
-        if (num_tokens == ABSL_ARRAYSIZE(tokens)) {
-          ++cur;
-          s = cur;
-          break;
-        }
-      }
-      s = cur + 1;
-    }
-  }
+  const size_t num_tokens = tokens.size();
 
   if (num_tokens == 0)
     return PARSE_ERROR;
-
-  while (cur < pos - 1) {
-    if (str[cur] != ' ')
-      return PARSE_ERROR;
-    ++cur;
-  }
 
   cmd->type = From(tokens[0]);
   if (cmd->type == INVALID) {
@@ -159,19 +144,21 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
       return MP::PARSE_ERROR;
     }
 
-    // memcpy(single_key_, tokens[0].data(), tokens[0].size());  // we copy the key
     cmd->key = string_view{tokens[1].data(), tokens[1].size()};
 
-    return ParseStore(tokens + 2, num_tokens - 2, cmd);
+    TokensView tokens_view{tokens.begin() + 2, num_tokens - 2};
+    return ParseStore(tokens_view, cmd);
   }
 
   if (num_tokens == 1) {
-    if (base::_in(cmd->type, {MP::STATS, MP::FLUSHALL, MP::QUIT, MP::VERSION}))
+    if (base::_in(cmd->type, {MP::STATS, MP::FLUSHALL, MP::QUIT, MP::VERSION})) {
       return MP::OK;
+    }
     return MP::PARSE_ERROR;
   }
 
-  return ParseValueless(tokens + 1, num_tokens - 1, cmd);
+  TokensView tokens_view{tokens.begin() + 1, num_tokens - 1};
+  return ParseValueless(tokens_view, cmd);
 };
 
 }  // namespace facade
