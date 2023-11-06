@@ -122,8 +122,14 @@ class LinuxWriteWrapper : public io::Sink {
   off_t offset_ = 0;
 };
 
-void SubstituteFilenamePlaceholders(fs::path* filename, std::string_view ts, std::string_view year,
-                                    std::string_view month, std::string_view day);
+struct FilenameSubstitutions {
+  std::string_view ts;
+  std::string_view year;
+  std::string_view month;
+  std::string_view day;
+};
+
+void SubstituteFilenamePlaceholders(fs::path* filename, const FilenameSubstitutions& fns);
 
 }  // namespace detail
 }  // namespace dfly

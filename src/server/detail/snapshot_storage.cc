@@ -25,16 +25,6 @@
 namespace dfly {
 namespace detail {
 
-namespace {
-
-constexpr std::string_view kTimestampRegex =
-    "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})";
-constexpr std::string_view kYearRegex = "([0-9]{4})";
-constexpr std::string_view kMonthRegex = "([0-9]{2})";
-constexpr std::string_view kDayRegex = "([0-9]{2})";
-
-}  // namespace
-
 std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_view path) {
   std::string_view clean = absl::StripPrefix(path, kS3Prefix);
 
@@ -120,7 +110,7 @@ io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(std::string_
   if (fs::exists(fl_path))
     return fl_path.generic_string();
 
-  SubstituteFilenamePlaceholders(&fl_path, "*", "*", "*", "*");
+  SubstituteFilenamePlaceholders(&fl_path, {"*", "*", "*", "*"});
   if (!fl_path.has_extension()) {
     fl_path += "*";
   }
@@ -253,7 +243,11 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
     // and adding an extension if needed.
     fs::path fl_path{prefix};
     fl_path.append(dbfilename);
-    SubstituteFilenamePlaceholders(&fl_path, kTimestampRegex, kYearRegex, kMonthRegex, kDayRegex);
+    SubstituteFilenamePlaceholders(&fl_path,
+                                   {.ts = "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
+                                    .year = "([0-9]{4})",
+                                    .month = "([0-9]{2})",
+                                    .day = "([0-9]{2})"});
     if (!fl_path.has_extension()) {
       fl_path += "(-summary.dfs|.rdb)";
     }
@@ -270,6 +264,7 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
     std::sort(std::rbegin(*keys), std::rend(*keys), [](const SnapStat& l, const SnapStat& r) {
       return l.last_modified < r.last_modified;
     });
+
     for (const SnapStat& key : *keys) {
       std::smatch m;
       if (std::regex_match(key.name, m, re)) {
@@ -350,7 +345,7 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
     if (outcome.IsSuccess()) {
       continuation_token = outcome.GetResult().GetNextContinuationToken();
       for (const auto& object : outcome.GetResult().GetContents()) {
-        keys.emplace_back(object.GetKey(), object.GetLastModified().CurrentTimeMillis());
+        keys.emplace_back(object.GetKey(), object.GetLastModified().Millis());
       }
     } else if (outcome.GetError().GetExceptionName() == "PermanentRedirect") {
       return nonstd::make_unexpected(
@@ -387,10 +382,10 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   return res;
 }
 
-void SubstituteFilenamePlaceholders(fs::path* filename, std::string_view ts, std::string_view year,
-                                    std::string_view month, std::string_view day) {
+void SubstituteFilenamePlaceholders(fs::path* filename, const FilenameSubstitutions& fns) {
   *filename = absl::StrReplaceAll(
-      filename->string(), {{"{Y}", year}, {"{m}", month}, {"{d}", day}, {"{timestamp}", ts}});
+      filename->string(),
+      {{"{Y}", fns.year}, {"{m}", fns.month}, {"{d}", fns.day}, {"{timestamp}", fns.ts}});
 }
 
 }  // namespace detail
