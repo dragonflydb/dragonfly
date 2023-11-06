@@ -671,4 +671,17 @@ bool DenseSet::ExpireIfNeededInternal(DensePtr* prev, DensePtr* node) const {
   return deleted;
 }
 
+void DenseSet::CollectExpired() {
+  // Simply iterating over all items will remove expired
+  auto it = IteratorBase(this, false);
+  while (it.curr_entry_ != nullptr) {
+    it.Advance();
+  }
+}
+
+size_t DenseSet::SizeSlow() {
+  CollectExpired();
+  return size_;
+}
+
 }  // namespace dfly

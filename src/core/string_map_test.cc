@@ -105,7 +105,7 @@ TEST_F(StringMapTest, Ttl) {
   EXPECT_FALSE(sm_->AddOrUpdate("bla", "val2", 1));
   sm_->set_time(1);
   EXPECT_TRUE(sm_->AddOrUpdate("bla", "val2", 1));
-  EXPECT_EQ(1u, sm_->Size());
+  EXPECT_EQ(1u, sm_->UpperBoundSize());
 
   EXPECT_FALSE(sm_->AddOrSkip("bla", "val3", 2));
 
@@ -168,7 +168,7 @@ TEST_F(StringMapTest, ReallocIfNeeded) {
   // Check we waste significanlty less now
   EXPECT_GT(wasted_before, wasted_after * 2);
 
-  EXPECT_EQ(sm_->Size(), 1000);
+  EXPECT_EQ(sm_->UpperBoundSize(), 1000);
   for (size_t i = 0; i < 1000; i++)
     EXPECT_EQ(sm_->Find(build_str(i * 10))->second, build_str(i * 10 + 1));
 }
