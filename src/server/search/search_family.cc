@@ -418,10 +418,20 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendSimpleString("attributes");
   (*cntx)->StartArray(schema.fields.size());
   for (const auto& [field_ident, field_info] : schema.fields) {
-    string_view reply[6] = {"identifier", string_view{field_ident},
-                            "attribute",  field_info.short_name,
-                            "type"sv,     SearchFieldTypeToString(field_info.type)};
-    (*cntx)->SendSimpleStrArr(reply);
+    vector<string> info;
+
+    string_view base[] = {"identifier"sv, string_view{field_ident},
+                          "attribute",    field_info.short_name,
+                          "type"sv,       SearchFieldTypeToString(field_info.type)};
+    info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
+
+    if (field_info.flags & search::SchemaField::NOINDEX)
+      info.push_back("NOINDEX");
+
+    if (field_info.flags & search::SchemaField::SORTABLE)
+      info.push_back("SORTABLE");
+
+    (*cntx)->SendSimpleStrArr(info);
   }
 
   (*cntx)->SendSimpleString("num_docs");

@@ -100,9 +100,9 @@ def contains_test_data(itype, res, td_indices):
 
 @dfly_args({"proactor_threads": 4})
 async def test_management(async_client: aioredis.Redis):
-    SCHEMA_1 = [TextField("f1"), NumericField("f2")]
+    SCHEMA_1 = [TextField("f1"), NumericField("f2", sortable=True)]
     SCHEMA_2 = [
-        NumericField("f3"),
+        NumericField("f3", no_index=True, sortable=True),
         TagField("f4"),
         VectorField(
             "f5",
@@ -133,14 +133,14 @@ async def test_management(async_client: aioredis.Redis):
     assert i1info["num_docs"] == 10
     assert sorted(i1info["attributes"]) == [
         ["identifier", "f1", "attribute", "f1", "type", "TEXT"],
-        ["identifier", "f2", "attribute", "f2", "type", "NUMERIC"],
+        ["identifier", "f2", "attribute", "f2", "type", "NUMERIC", "SORTABLE"],
     ]
 
     i2info = await i2.info()
     assert i2info["index_definition"] == ["key_type", "HASH", "prefix", "p2"]
     assert i2info["num_docs"] == 15
     assert sorted(i2info["attributes"]) == [
-        ["identifier", "f3", "attribute", "f3", "type", "NUMERIC"],
+        ["identifier", "f3", "attribute", "f3", "type", "NUMERIC", "NOINDEX", "SORTABLE"],
         ["identifier", "f4", "attribute", "f4", "type", "TAG"],
         ["identifier", "f5", "attribute", "f5", "type", "VECTOR"],
     ]
