@@ -371,6 +371,7 @@ void RebuildAllSearchIndices(Service* service) {
     // On MacOS we don't include search so FT.CREATE won't exist.
     return;
   }
+
   boost::intrusive_ptr<Transaction> trans{new Transaction{cmd}};
   trans->InitByArgs(0, {});
   trans->ScheduleSingleHop([](auto* trans, auto* es) {

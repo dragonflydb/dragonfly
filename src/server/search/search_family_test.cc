@@ -89,10 +89,11 @@ TEST_F(SearchFamilyTest, InfoIndex) {
 
   auto info = Run({"ft.info", "idx-1"});
   EXPECT_THAT(
-      info, RespArray(ElementsAre(_, _, "fields",
-                                  RespArray(ElementsAre(RespArray(ElementsAre(
-                                      "identifier", "name", "attribute", "name", "type", "TEXT")))),
-                                  "num_docs", IntArg(15))));
+      info, RespArray(ElementsAre(
+                _, _, _, RespArray(ElementsAre("key_type", "HASH", "prefix", "doc-")), "attributes",
+                RespArray(ElementsAre(RespArray(
+                    ElementsAre("identifier", "name", "attribute", "name", "type", "TEXT")))),
+                "num_docs", IntArg(15))));
 }
 
 TEST_F(SearchFamilyTest, Stats) {

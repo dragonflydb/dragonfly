@@ -398,14 +398,24 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   for (const auto& info : infos)
     total_num_docs += info.num_docs;
 
-  const auto& schema = infos.front().base_index.schema;
+  const auto& info = infos.front();
+  const auto& schema = info.base_index.schema;
 
-  (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
+  (*cntx)->StartCollection(4, RedisReplyBuilder::MAP);
 
   (*cntx)->SendSimpleString("index_name");
   (*cntx)->SendSimpleString(idx_name);
 
-  (*cntx)->SendSimpleString("fields");
+  (*cntx)->SendSimpleString("index_definition");
+  {
+    (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
+    (*cntx)->SendSimpleString("key_type");
+    (*cntx)->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
+    (*cntx)->SendSimpleString("prefix");
+    (*cntx)->SendSimpleString(info.base_index.prefix);
+  }
+
+  (*cntx)->SendSimpleString("attributes");
   (*cntx)->StartArray(schema.fields.size());
   for (const auto& [field_ident, field_info] : schema.fields) {
     string_view reply[6] = {"identifier", string_view{field_ident},

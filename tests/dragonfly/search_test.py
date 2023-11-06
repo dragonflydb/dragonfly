@@ -129,15 +129,17 @@ async def test_management(async_client: aioredis.Redis):
     assert sorted(await async_client.execute_command("FT._LIST")) == ["i1", "i2"]
 
     i1info = await i1.info()
+    assert i1info["index_definition"] == ["key_type", "HASH", "prefix", "p1"]
     assert i1info["num_docs"] == 10
-    assert sorted(i1info["fields"]) == [
+    assert sorted(i1info["attributes"]) == [
         ["identifier", "f1", "attribute", "f1", "type", "TEXT"],
         ["identifier", "f2", "attribute", "f2", "type", "NUMERIC"],
     ]
 
     i2info = await i2.info()
+    assert i2info["index_definition"] == ["key_type", "HASH", "prefix", "p2"]
     assert i2info["num_docs"] == 15
-    assert sorted(i2info["fields"]) == [
+    assert sorted(i2info["attributes"]) == [
         ["identifier", "f3", "attribute", "f3", "type", "NUMERIC"],
         ["identifier", "f4", "attribute", "f4", "type", "TAG"],
         ["identifier", "f5", "attribute", "f5", "type", "VECTOR"],
@@ -329,6 +331,7 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type, algo_type)
     await i3.dropindex()
 
 
+@dfly_args({"proactor_threads": 4})
 async def test_knn_score_return(async_client: aioredis.Redis):
     i1 = async_client.ft("i1")
     vector_field = VectorField(
@@ -438,12 +441,15 @@ async def test_index_persistence(df_server):
 
     def build_fields_set(info):
         fields = set()
-        for field in info["fields"]:
+        for field in info["attributes"]:
             fields.add(tuple(field))
         return fields
 
     assert build_fields_set(info_1) == build_fields_set(info_1_new)
     assert build_fields_set(info_2) == build_fields_set(info_2_new)
+
+    assert info_1["index_definition"] == info_1_new["index_definition"]
+    assert info_2["index_definition"] == info_2_new["index_definition"]
 
     assert info_1["num_docs"] == info_1_new["num_docs"]
     assert info_2["num_docs"] == info_2_new["num_docs"]
