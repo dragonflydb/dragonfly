@@ -6,19 +6,34 @@
 
 #include <absl/strings/match.h>
 
+#include "base/logging.h"
+
 namespace facade {
 
 using namespace testing;
 using namespace std;
 
 bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listener) const {
+  RespExpr e_copy = e;
   if (e.type != type_) {
-    *listener << "\nWrong type: " << RespExpr::TypeName(e.type);
-    return false;
+    if (e.type == RespExpr::STRING && type_ == RespExpr::DOUBLE) {
+      // Doubles are encoded as strings, unless RESP3 is selected. So parse string and try to
+      // compare it.
+      double d = 0;
+      if (!absl::SimpleAtod(e.GetString(), &d)) {
+        *listener << "\nCan't parse as double: " << e.GetString();
+        return false;
+      }
+      e_copy.type = RespExpr::DOUBLE;
+      e_copy.u = d;
+    } else {
+      *listener << "\nWrong type: " << RespExpr::TypeName(e.type);
+      return false;
+    }
   }
 
   if (type_ == RespExpr::STRING || type_ == RespExpr::ERROR) {
-    RespExpr::Buffer ebuf = e.GetBuf();
+    RespExpr::Buffer ebuf = e_copy.GetBuf();
     std::string_view actual{reinterpret_cast<char*>(ebuf.data()), ebuf.size()};
 
     if (type_ == RespExpr::ERROR && !absl::StrContains(actual, exp_str_)) {
@@ -30,19 +45,19 @@ bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listen
       return false;
     }
   } else if (type_ == RespExpr::INT64) {
-    auto actual = get<int64_t>(e.u);
+    auto actual = get<int64_t>(e_copy.u);
     if (exp_int_ != actual) {
       *listener << "\nActual : " << actual << " expected: " << exp_int_;
       return false;
     }
   } else if (type_ == RespExpr::DOUBLE) {
-    auto actual = get<double>(e.u);
-    if (exp_double_ != actual) {
+    auto actual = get<double>(e_copy.u);
+    if (abs(exp_double_ - actual) > 0.0001) {
       *listener << "\nActual : " << actual << " expected: " << exp_double_;
       return false;
     }
   } else if (type_ == RespExpr::ARRAY) {
-    size_t len = get<RespVec*>(e.u)->size();
+    size_t len = get<RespVec*>(e_copy.u)->size();
     if (len != size_t(exp_int_)) {
       *listener << "Actual length " << len << ", expected: " << exp_int_;
       return false;

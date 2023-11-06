@@ -790,56 +790,51 @@ TEST_F(ZSetFamilyTest, GeoSearch) {
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre("Berlin", "0.00017343178521311378", "3673983950397063",
-                                RespArray(ElementsAre("13.405002057552338", "52.51999907056681")))),
-          RespArray(
-              ElementsAre("Dublin", "487.5619030644293", "3678981558208417",
-                          RespArray(ElementsAre("6.260299980640411", "53.34980087538425")))))));
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378), "3673983950397063",
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))),
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293), "3678981558208417",
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))))));
 
   resp = Run({"GEOSEARCH", "Europe", "FROMLONLAT", "13.4050", "52.5200", "BYBOX", "1000", "1000",
               "KM", "WITHCOORD", "WITHDIST"});
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre("Vienna", "523.6926930553866",
-                                RespArray(ElementsAre("16.373799741268158", "48.20820011474228")))),
-          RespArray(ElementsAre("Berlin", "0.00017343178521311378",
-                                RespArray(ElementsAre("13.405002057552338", "52.51999907056681")))),
-          RespArray(
-              ElementsAre("Dublin", "487.5619030644293",
-                          RespArray(ElementsAre("6.260299980640411", "53.34980087538425")))))));
+          RespArray(ElementsAre("Vienna", DoubleArg(523.6926930553866),
+                                RespArray(ElementsAre(DoubleArg(16.3738), DoubleArg(48.2082))))),
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))),
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))))));
 
   resp = Run({"GEOSEARCH", "Europe", "FROMLONLAT", "13.4050", "52.5200", "BYRADIUS", "500", "KM",
               "COUNT", "3", "WITHCOORD", "WITHDIST"});
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre("Berlin", "0.00017343178521311378",
-                                RespArray(ElementsAre("13.405002057552338", "52.51999907056681")))),
-          RespArray(
-              ElementsAre("Dublin", "487.5619030644293",
-                          RespArray(ElementsAre("6.260299980640411", "53.34980087538425")))))));
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))),
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))))));
 
   resp = Run({"GEOSEARCH", "Europe", "FROMLONLAT", "13.4050", "52.5200", "BYRADIUS", "500", "KM",
               "DESC", "WITHCOORD", "WITHDIST"});
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre("Dublin", "487.5619030644293",
-                                RespArray(ElementsAre("6.260299980640411", "53.34980087538425")))),
-          RespArray(
-              ElementsAre("Berlin", "0.00017343178521311378",
-                          RespArray(ElementsAre("13.405002057552338", "52.51999907056681")))))));
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))),
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))))));
 
   resp = Run({"GEOSEARCH", "Europe", "FROMMEMBER", "Madrid", "BYRADIUS", "700", "KM", "WITHCOORD",
               "WITHDIST"});
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre(
-              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
-          RespArray(
-              ElementsAre("Lisbon", "502.20769462704084",
-                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+          RespArray(ElementsAre("Madrid", "0",
+                                RespArray(ElementsAre(DoubleArg(3.7038), DoubleArg(40.4168))))),
+          RespArray(ElementsAre("Lisbon", DoubleArg(502.20769462704084),
+                                RespArray(ElementsAre(DoubleArg(9.1427), DoubleArg(38.7369))))))));
 }
 }  // namespace dfly
