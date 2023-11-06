@@ -26,7 +26,7 @@ class RespMatcher {
   }
   using is_gtest_matcher = void;
 
-  bool MatchAndExplain(const RespExpr& e, testing::MatchResultListener*) const;
+  bool MatchAndExplain(RespExpr e, testing::MatchResultListener*) const;
 
   void DescribeTo(std::ostream* os) const;
 
