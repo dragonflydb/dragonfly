@@ -90,7 +90,7 @@ TEST_F(StringSetTest, Basic) {
   EXPECT_FALSE(ss_->Add("bar"sv));
   EXPECT_TRUE(ss_->Contains("foo"sv));
   EXPECT_TRUE(ss_->Contains("bar"sv));
-  EXPECT_EQ(2, ss_->Size());
+  EXPECT_EQ(2, ss_->UpperBoundSize());
 }
 
 TEST_F(StringSetTest, StandardAddErase) {
@@ -150,11 +150,11 @@ TEST_F(StringSetTest, Resizing) {
 
   for (size_t i = 0; i < num_strs; ++i) {
     EXPECT_TRUE(ss_->Add(strs[i]));
-    EXPECT_EQ(ss_->Size(), i + 1);
+    EXPECT_EQ(ss_->UpperBoundSize(), i + 1);
 
     // make sure we haven't lost any items after a grow
     // which happens every power of 2
-    if (i != 0 && (ss_->Size() & (ss_->Size() - 1)) == 0) {
+    if (i != 0 && (ss_->UpperBoundSize() & (ss_->UpperBoundSize() - 1)) == 0) {
       for (size_t j = 0; j < i; ++j) {
         EXPECT_TRUE(ss_->Contains(strs[j]));
       }
@@ -343,12 +343,12 @@ TEST_F(StringSetTest, Pop) {
   }
 
   while (!ss_->Empty()) {
-    size_t size = ss_->Size();
+    size_t size = ss_->UpperBoundSize();
     auto str = ss_->Pop();
-    DCHECK(ss_->Size() == to_insert.size() - 1);
+    DCHECK(ss_->UpperBoundSize() == to_insert.size() - 1);
     DCHECK(str.has_value());
     DCHECK(to_insert.count(str.value()));
-    DCHECK_EQ(ss_->Size(), size - 1);
+    DCHECK_EQ(ss_->UpperBoundSize(), size - 1);
     to_insert.erase(str.value());
   }
 
@@ -394,12 +394,12 @@ TEST_F(StringSetTest, Ttl) {
 
   ss_->set_time(1);
   EXPECT_TRUE(ss_->Add("bla"sv, 1));
-  EXPECT_EQ(1u, ss_->Size());
+  EXPECT_EQ(1u, ss_->UpperBoundSize());
 
   for (unsigned i = 0; i < 100; ++i) {
     EXPECT_TRUE(ss_->Add(StrCat("foo", i), 1));
   }
-  EXPECT_EQ(101u, ss_->Size());
+  EXPECT_EQ(101u, ss_->UpperBoundSize());
   it = ss_->Find("foo50");
   EXPECT_STREQ("foo50", *it);
   EXPECT_EQ(2u, it.ExpiryTime());

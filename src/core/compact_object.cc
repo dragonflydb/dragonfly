@@ -286,7 +286,7 @@ size_t RobjWrapper::Size() const {
         }
         case kEncodingStrMap2: {
           StringSet* ss = (StringSet*)inner_obj_;
-          return ss->Size();
+          return ss->UpperBoundSize();
         }
         default:
           LOG(FATAL) << "Unexpected encoding " << encoding_;
@@ -300,7 +300,7 @@ size_t RobjWrapper::Size() const {
 
         case kEncodingStrMap2: {
           StringMap* sm = (StringMap*)inner_obj_;
-          return sm->Size();
+          return sm->UpperBoundSize();
         }
       }
     default:;

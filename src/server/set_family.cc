@@ -260,7 +260,7 @@ uint32_t SetTypeLen(const DbContext& db_context, const SetType& set) {
   if (IsDenseEncoding(set)) {
     StringSet* ss = (StringSet*)set.first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
-    return ss->Size();
+    return ss->UpperBoundSize();
   }
 
   DCHECK_EQ(set.second, kEncodingStrMap);

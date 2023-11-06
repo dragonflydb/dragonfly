@@ -105,12 +105,6 @@ void StringMap::Clear() {
   ClearInternal();
 }
 
-void StringMap::CollectExpired() {
-  // Simply iterating over all items will remove expired
-  for (auto it = begin(); it != end(); ++it) {
-  }
-}
-
 optional<pair<sds, sds>> StringMap::RandomPair() {
   // Iteration may remove elements, and so we need to loop if we happen to reach the end
   while (true) {
@@ -121,7 +115,7 @@ optional<pair<sds, sds>> StringMap::RandomPair() {
       break;
     }
 
-    it += rand() % Size();
+    it += rand() % UpperBoundSize();
     if (it != end()) {
       return std::make_pair(it->first, it->second);
     }
@@ -131,9 +125,7 @@ optional<pair<sds, sds>> StringMap::RandomPair() {
 
 void StringMap::RandomPairsUnique(unsigned int count, std::vector<sds>& keys,
                                   std::vector<sds>& vals, bool with_value) {
-  CollectExpired();
-
-  unsigned int total_size = Size();
+  unsigned int total_size = SizeSlow();
   unsigned int index = 0;
   if (count > total_size)
     count = total_size;
@@ -162,11 +154,9 @@ void StringMap::RandomPairsUnique(unsigned int count, std::vector<sds>& keys,
 
 void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vector<sds>& vals,
                             bool with_value) {
-  CollectExpired();
-
   using RandomPick = std::pair<unsigned int, unsigned int>;
   std::vector<RandomPick> picks;
-  unsigned int total_size = Size();
+  unsigned int total_size = SizeSlow();
 
   for (unsigned int i = 0; i < count; ++i) {
     RandomPick pick{rand() % total_size, i};
