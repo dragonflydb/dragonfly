@@ -72,8 +72,6 @@ class MemcacheParser {
   }
 
   Result Parse(std::string_view str, uint32_t* consumed, Command* res);
-
- private:
 };
 
 }  // namespace facade
