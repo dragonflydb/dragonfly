@@ -966,6 +966,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   bool is_write_cmd = cid->opt_mask() & CO::WRITE;
   bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
+  // Check if the command is allowed to execute under this global state
   bool allowed_by_state = true;
   switch (etl.gstate()) {
     case GlobalState::LOADING:
@@ -999,9 +1000,6 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   if (dfly_cntx.monitor && (cmd_name != "RESET" && cmd_name != "QUIT"))
     return ErrorReply{"Replica can't interact with the keyspace"};
 
-  if (under_script && (cid->opt_mask() & CO::NOSCRIPT))
-    return ErrorReply{"This Redis command is not allowed from script"};
-
   if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
     return ErrorReply{"-READONLY You can't write against a read only replica."};
 
@@ -1016,6 +1014,19 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   if (ClusterConfig::IsEnabled()) {
     if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
+  }
+
+  if (under_script && (cid->opt_mask() & CO::NOSCRIPT))
+    return ErrorReply{"This Redis command is not allowed from script"};
+
+  if (under_script) {
+    DCHECK(dfly_cntx.transaction);
+    // The following commands access shards arbitrarily without having keys, so they can only be run
+    // non atomically or globally.
+    Transaction::MultiMode mode = dfly_cntx.transaction->GetMultiMode();
+    bool shard_access = (cid->opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
+    if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
+      return ErrorReply("This command requires advanced script flags");
   }
 
   if (under_script && cid->IsTransactional()) {
@@ -1529,6 +1540,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
     ToUpper(&ca.args[0]);
+
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
       auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;

@@ -686,6 +686,29 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
+TEST_F(MultiTest, ScriptBadCommand) {
+  const char* s1 = "redis.call('FLUSHALL')";
+  const char* s2 = "redis.call('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
+  const char* s3 = "redis.acall('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
+  const char* s4 = R"(
+    #!lua flags=disable-atomicity
+    redis.call('FLUSHALL');
+    return "OK";
+  )";
+
+  auto resp = Run({"eval", s1, "0"});  // tx won't be scheduled at all
+  EXPECT_THAT(resp, ErrArg("This command requires advanced script flags"));
+
+  resp = Run({"eval", s2, "1", "works", "false"});  // will be scheduled as lock ahead
+  EXPECT_THAT(resp, ErrArg("This command requires advanced script flags"));
+
+  resp = Run({"eval", s3, "1", "works", "false"});  // also async call will happen
+  EXPECT_THAT(resp, ErrArg("This command requires advanced script flags"));
+
+  resp = Run({"eval", s4, "0"});
+  EXPECT_EQ(resp, "OK");
+}
+
 TEST_F(MultiTest, MultiEvalModeConflict) {
   if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::GLOBAL) {
     GTEST_SKIP() << "Skipped MultiEvalModeConflict test because multi_exec_mode is global";
