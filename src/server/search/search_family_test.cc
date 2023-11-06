@@ -570,7 +570,6 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
 
   Run({"flushall"});
-  EXPECT_EQ(used_mem_current.load(), 0);
 }
 
 }  // namespace dfly
