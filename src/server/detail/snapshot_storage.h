@@ -87,10 +87,17 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
       const std::string& load_path) override;
 
  private:
+  struct SnapStat {
+    SnapStat(std::string file_name, int64_t ts)
+        : name(std::move(file_name)), last_modified(std::move(ts)) {
+    }
+    std::string name;
+    int64_t last_modified;
+  };
   // List the objects in the given bucket with the given prefix. This must
   // run from a proactor.
-  io::Result<std::vector<std::string>, GenericError> ListObjects(std::string_view bucket_name,
-                                                                 std::string_view prefix);
+  io::Result<std::vector<SnapStat>, GenericError> ListObjects(std::string_view bucket_name,
+                                                              std::string_view prefix);
 
   std::shared_ptr<Aws::S3::S3Client> s3_;
 };
@@ -115,7 +122,14 @@ class LinuxWriteWrapper : public io::Sink {
   off_t offset_ = 0;
 };
 
-void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement);
+struct FilenameSubstitutions {
+  std::string_view ts;
+  std::string_view year;
+  std::string_view month;
+  std::string_view day;
+};
+
+void SubstituteFilenamePlaceholders(fs::path* filename, const FilenameSubstitutions& fns);
 
 }  // namespace detail
 }  // namespace dfly
