@@ -837,4 +837,24 @@ TEST_F(ZSetFamilyTest, GeoSearch) {
           RespArray(ElementsAre("Lisbon", DoubleArg(502.20769462704084),
                                 RespArray(ElementsAre(DoubleArg(9.1427), DoubleArg(38.7369))))))));
 }
+
+TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  auto resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(
+              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
+          RespArray(
+              ElementsAre("Lisbon", "502.20769462704084",
+                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+}
+
 }  // namespace dfly

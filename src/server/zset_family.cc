@@ -2858,8 +2858,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         if (!ParseDouble(ArgS(args, i + 1), &shape.t.radius)) {
           return (*cntx)->SendError(kInvalidFloatErr);
         }
-        string_view unit;
-        unit = ArgS(args, i + 2);
+        string_view unit = ArgS(args, i + 2);
         shape.conversion = ExtractUnit(unit);
         geo_ops.conversion = shape.conversion;
         if (shape.conversion == -1) {
@@ -2881,8 +2880,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         if (!ParseDouble(ArgS(args, i + 2), &shape.t.r.height)) {
           return (*cntx)->SendError(kInvalidFloatErr);
         }
-        string_view unit;
-        unit = ArgS(args, i + 3);
+        string_view unit = ArgS(args, i + 3);
         shape.conversion = ExtractUnit(unit);
         geo_ops.conversion = shape.conversion;
         if (shape.conversion == -1) {
@@ -2938,6 +2936,75 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
   GeoSearchGeneric(cntx, shape, key, geo_ops);
 }
 
+void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
+  GeoShape shape = {};
+  GeoSearchOpts geo_ops;
+  // parse arguments
+  string_view key = ArgS(args, 0);
+  // member to latlong, set shape.xy
+  string_view member = ArgS(args, 1);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpScore(t->GetOpArgs(shard), key, member);
+  };
+  OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    return (*cntx)->SendError(kWrongTypeErr);
+  } else if (!result) {
+    return (*cntx)->SendError("Member not found");
+  }
+  ScoreToLongLat(*result, shape.xy);
+
+  if (!ParseDouble(ArgS(args, 2), &shape.t.radius)) {
+    return (*cntx)->SendError(kInvalidFloatErr);
+  }
+  string_view unit = ArgS(args, 3);
+  shape.conversion = ExtractUnit(unit);
+  geo_ops.conversion = shape.conversion;
+  if (shape.conversion == -1) {
+    return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
+  }
+  shape.type = CIRCULAR_TYPE;
+
+  for (size_t i = 4; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+
+    string_view cur_arg = ArgS(args, i);
+    if (cur_arg == "ASC") {
+      if (geo_ops.sorting != Sorting::kUnsorted) {
+        return (*cntx)->SendError(kAscDescErr);
+      } else {
+        geo_ops.sorting = Sorting::kAsc;
+      }
+    } else if (cur_arg == "DESC") {
+      if (geo_ops.sorting != Sorting::kUnsorted) {
+        return (*cntx)->SendError(kAscDescErr);
+      } else {
+        geo_ops.sorting = Sorting::kDesc;
+      }
+    } else if (cur_arg == "COUNT") {
+      if (i + 1 < args.size()) {
+        absl::SimpleAtoi(std::string(ArgS(args, i + 1)), &geo_ops.count);
+        i++;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      if (i + 1 < args.size() && ArgS(args, i + 1) == "ANY") {
+        geo_ops.any = true;
+        i++;
+      }
+    } else if (cur_arg == "WITHCOORD") {
+      geo_ops.withcoord = true;
+    } else if (cur_arg == "WITHDIST") {
+      geo_ops.withdist = true;
+    } else if (cur_arg == "WITHHASH") {
+      geo_ops.withhash = true;
+    } else {
+      return (*cntx)->SendError(kSyntaxErr);
+    }
+  }
+  GeoSearchGeneric(cntx, shape, key, geo_ops);
+}
+
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 namespace acl {
@@ -2975,6 +3042,7 @@ constexpr uint32_t kGeoHash = READ | GEO | SLOW;
 constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
+constexpr uint32_t kGeoRadiusByMember = READ | GEO | SLOW;
 }  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
@@ -3036,7 +3104,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"GEOHASH", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoHash}.HFUNC(GeoHash)
       << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
-      << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch);
+      << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
+      << CI{"GEORADIUSBYMEMBER", CO::READONLY, -4, 1, 1, 1, acl::kGeoRadiusByMember}.HFUNC(
+             GeoRadiusByMember);
 }
 
 }  // namespace dfly
