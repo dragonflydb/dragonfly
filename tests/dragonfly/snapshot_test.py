@@ -148,7 +148,7 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
             async with df_server.client() as client:
                 await wait_available_async(client)
                 response = await client.get("TEST")
-                assert response.decode("utf-8") == str(hash(dbfilename))
+                assert response == str(hash(dbfilename))
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "save_schedule": "*:*"})
@@ -192,6 +192,29 @@ class TestCronPeriodicSnapshot(SnapshotTestBase):
         await super().wait_for_save("test-cron-summary.dfs")
 
         assert super().get_main_file("test-cron-summary.dfs")
+
+
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-set-snapshot_cron"})
+class TestSetsnapshot_cron(SnapshotTestBase):
+    """Test set snapshot_cron flag"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        super().setup(tmp_dir)
+
+    @pytest.mark.asyncio
+    @pytest.mark.slow
+    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
+        seeder = df_seeder_factory.create(
+            port=df_server.port, keys=10, multi_transaction_probability=0
+        )
+        await seeder.run(target_deviation=0.5)
+
+        await async_client.execute_command("CONFIG", "SET", "snapshot_cron", "* * * * *")
+
+        await super().wait_for_save("test-set-snapshot_cron-summary.dfs")
+
+        assert super().get_main_file("test-set-snapshot_cron-summary.dfs")
 
 
 @dfly_args({**BASIC_ARGS})

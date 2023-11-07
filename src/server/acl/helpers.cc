@@ -79,11 +79,13 @@ std::string PrettyPrintSha(std::string_view pass, bool all) {
   return absl::BytesToHexString(pass.substr(0, 15)).substr(0, 15);
 };
 
-std::optional<std::string> MaybeParsePassword(std::string_view command) {
+std::optional<std::string> MaybeParsePassword(std::string_view command, bool hashed) {
   if (command == "nopass") {
     return std::string(command);
   }
-  if (command[0] != '>') {
+
+  char symbol = hashed ? '#' : '>';
+  if (command[0] != symbol) {
     return {};
   }
 
@@ -163,7 +165,7 @@ std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
 MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
                                              std::string_view file_contents) {
   // This is fine, a very large file will top at 1-2 mb. And that's for 5000+ users with 400
-  // characters of ACL infor...
+  // characters per line
   std::vector<std::string_view> commands = absl::StrSplit(file_contents, "\n");
   std::vector<std::vector<std::string_view>> materialized;
   materialized.reserve(commands.size());
@@ -172,11 +174,12 @@ MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames
     if (command.empty())
       continue;
     std::vector<std::string_view> cmds = absl::StrSplit(command, ' ');
-    if (cmds[0] != "ACL" || cmds[1] != "SETUSER" || cmds.size() < 3) {
+    if (cmds[0] != "USER" || cmds.size() < 4) {
       return {};
     }
-    usernames->push_back(std::string(cmds[2]));
-    cmds.erase(cmds.begin(), cmds.begin() + 3);
+
+    usernames->push_back(std::string(cmds[1]));
+    cmds.erase(cmds.begin(), cmds.begin() + 2);
     materialized.push_back(cmds);
   }
   return materialized;
@@ -191,7 +194,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
   User::UpdateRequest req;
 
   for (auto& arg : args) {
-    if (auto pass = MaybeParsePassword(facade::ToSV(arg)); pass) {
+    if (auto pass = MaybeParsePassword(facade::ToSV(arg), hashed); pass) {
       if (req.password) {
         return ErrorReply("Only one password is allowed");
       }
@@ -199,10 +202,18 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
       req.is_hashed = hashed;
       continue;
     }
+    std::string buffer;
+    std::string_view command;
     if constexpr (std::is_same_v<T, facade::CmdArgList>) {
       ToUpper(&arg);
+      command = facade::ToSV(arg);
+    } else {
+      // Guaranteed SSO because commands are small
+      buffer = arg;
+      absl::Span<char> view{buffer.data(), buffer.size()};
+      ToUpper(&view);
+      command = buffer;
     }
-    const auto command = facade::ToSV(arg);
 
     if (auto status = MaybeParseStatus(command); status) {
       if (req.is_active) {

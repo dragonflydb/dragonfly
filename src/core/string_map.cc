@@ -105,15 +105,27 @@ void StringMap::Clear() {
   ClearInternal();
 }
 
-std::pair<sds, sds> StringMap::RandomPair() {
-  auto it = begin();
-  it += rand() % Size();
-  return std::make_pair(it->first, it->second);
+optional<pair<sds, sds>> StringMap::RandomPair() {
+  // Iteration may remove elements, and so we need to loop if we happen to reach the end
+  while (true) {
+    auto it = begin();
+
+    // It may be that begin() will invalidate all elements, getting us to an Empty() state
+    if (Empty()) {
+      break;
+    }
+
+    it += rand() % UpperBoundSize();
+    if (it != end()) {
+      return std::make_pair(it->first, it->second);
+    }
+  }
+  return nullopt;
 }
 
 void StringMap::RandomPairsUnique(unsigned int count, std::vector<sds>& keys,
                                   std::vector<sds>& vals, bool with_value) {
-  unsigned int total_size = Size();
+  unsigned int total_size = SizeSlow();
   unsigned int index = 0;
   if (count > total_size)
     count = total_size;
@@ -144,7 +156,7 @@ void StringMap::RandomPairs(unsigned int count, std::vector<sds>& keys, std::vec
                             bool with_value) {
   using RandomPick = std::pair<unsigned int, unsigned int>;
   std::vector<RandomPick> picks;
-  unsigned int total_size = Size();
+  unsigned int total_size = SizeSlow();
 
   for (unsigned int i = 0; i < count; ++i) {
     RandomPick pick{rand() % total_size, i};

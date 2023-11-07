@@ -23,7 +23,7 @@ std::string AclCommandToString(const std::vector<uint64_t>& acl_category);
 
 std::string PrettyPrintSha(std::string_view pass, bool all = false);
 
-std::optional<std::string> MaybeParsePassword(std::string_view command);
+std::optional<std::string> MaybeParsePassword(std::string_view command, bool hashed = false);
 
 std::optional<bool> MaybeParseStatus(std::string_view command);
 

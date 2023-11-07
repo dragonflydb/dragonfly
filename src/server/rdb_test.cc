@@ -18,7 +18,6 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
-#include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "server/rdb_load.h"
 #include "server/test_utils.h"
@@ -33,33 +32,18 @@ using absl::StrCat;
 ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int, compression_mode);
-ABSL_DECLARE_FLAG(string, dbfilename);
 
 namespace dfly {
 
 class RdbTest : public BaseFamilyTest {
  protected:
-  void TearDown();
   void SetUp();
 
   io::FileSource GetSource(string name);
 };
 
 void RdbTest::SetUp() {
-  SetFlag(&FLAGS_dbfilename, "rdbtestdump");
-  BaseFamilyTest::SetUp();
-}
-
-void RdbTest::TearDown() {
-  // Disable save on shutdown
-  SetFlag(&FLAGS_dbfilename, "");
-
-  auto rdb_files = io::StatFiles("rdbtestdump*");
-  CHECK(rdb_files);
-  for (const auto& fl : *rdb_files) {
-    unlink(fl.name.c_str());
-  }
-  BaseFamilyTest::TearDown();
+  InitWithDbFilename();
 }
 
 inline const uint8_t* to_byte(const void* s) {

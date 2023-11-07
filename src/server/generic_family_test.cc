@@ -633,41 +633,44 @@ TEST_F(GenericFamilyTest, Restore) {
 }
 
 TEST_F(GenericFamilyTest, Info) {
+  InitWithDbFilename();  // Needed for `save`
+
   auto get_rdb_changes_since_last_save = [](const string& str) -> size_t {
     const string matcher = "rdb_changes_since_last_save:";
     const auto pos = str.find(matcher) + matcher.size();
     const auto sub = str.substr(pos, 1);
     return atoi(sub.c_str());
   };
-  auto resp = Run({"set", "k", "1"});
-  resp = Run({"info", "persistence"});
+
+  EXPECT_EQ(Run({"set", "k", "1"}), "OK");
+  auto resp = Run({"info", "persistence"});
   EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
 
-  resp = Run({"set", "k", "1"});
+  EXPECT_EQ(Run({"set", "k", "1"}), "OK");
   resp = Run({"info", "persistence"});
   EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
 
-  resp = Run({"set", "k2", "2"});
+  EXPECT_EQ(Run({"set", "k2", "2"}), "OK");
   resp = Run({"info", "persistence"});
   EXPECT_EQ(3, get_rdb_changes_since_last_save(resp.GetString()));
 
-  resp = Run({"save"});
+  EXPECT_EQ(Run({"save"}), "OK");
   resp = Run({"info", "persistence"});
   EXPECT_EQ(0, get_rdb_changes_since_last_save(resp.GetString()));
 
-  resp = Run({"set", "k2", "2"});
+  EXPECT_EQ(Run({"set", "k2", "2"}), "OK");
   resp = Run({"info", "persistence"});
   EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
 
-  resp = Run({"bgsave"});
+  EXPECT_EQ(Run({"bgsave"}), "OK");
   resp = Run({"info", "persistence"});
   EXPECT_EQ(0, get_rdb_changes_since_last_save(resp.GetString()));
 
-  resp = Run({"set", "k3", "3"});
+  EXPECT_EQ(Run({"set", "k3", "3"}), "OK");
   resp = Run({"info", "persistence"});
   EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
 
-  resp = Run({"del", "k3"});
+  EXPECT_THAT(Run({"del", "k3"}), IntArg(1));
   resp = Run({"info", "persistence"});
   EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
 }

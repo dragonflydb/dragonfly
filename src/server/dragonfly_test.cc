@@ -99,8 +99,9 @@ class DflyRenameCommandTest : public DflyEngineTest {
  protected:
   DflyRenameCommandTest() : DflyEngineTest() {
     // rename flushall to myflushall, flushdb command will not be able to execute
-    absl::SetFlag(&FLAGS_rename_command,
-                  std::vector<std::string>({"flushall=myflushall", "flushdb="}));
+    absl::SetFlag(
+        &FLAGS_rename_command,
+        std::vector<std::string>({"flushall=myflushall", "flushdb=", "ping=abcdefghijklmnop"}));
   }
 
   void TearDown() {
@@ -113,16 +114,20 @@ TEST_F(DflyRenameCommandTest, RenameCommand) {
   Run({"set", "a", "1"});
   ASSERT_EQ(1, CheckedInt({"dbsize"}));
   // flushall should not execute anything and should return error, as it was renamed.
-  RespExpr resp = Run({"flushall"});
-  ASSERT_THAT(resp, ErrArg("unknown command `FLUSHALL`"));
+  ASSERT_THAT(Run({"flushall"}), ErrArg("unknown command `FLUSHALL`"));
+
   ASSERT_EQ(1, CheckedInt({"dbsize"}));
-  resp = Run({"myflushall"});
-  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(Run({"myflushall"}), "OK");
+
   ASSERT_EQ(0, CheckedInt({"dbsize"}));
-  resp = Run({"flushdb", "0"});
-  ASSERT_THAT(resp, ErrArg("unknown command `FLUSHDB`"));
-  resp = Run({""});
-  ASSERT_THAT(resp, ErrArg("unknown command ``"));
+
+  ASSERT_THAT(Run({"flushdb", "0"}), ErrArg("unknown command `FLUSHDB`"));
+
+  ASSERT_THAT(Run({""}), ErrArg("unknown command ``"));
+
+  ASSERT_THAT(Run({"ping"}), ErrArg("unknown command `PING`"));
+  ASSERT_THAT(Run({"abcdefghijklmnop"}), "PONG");
 }
 
 TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
@@ -428,20 +433,25 @@ TEST_F(DflyEngineTest, StickyEviction) {
     ASSERT_EQ("OK", Run({"set", key, tmp_val}));
   }
 
-  for (ssize_t i = 0; i < 5000; ++i) {
+  bool done = false;
+  for (ssize_t i = 0; !done && i < 5000; ++i) {
     string key = StrCat("key", i);
-    auto set_resp = Run({"set", key, tmp_val});
-    auto stick_resp = Run({"stick", key});
+    while (true) {
+      if (Run({"set", key, tmp_val}) != "OK") {
+        failed = i;
+        done = true;
+        break;
+      }
 
-    if (set_resp != "OK") {
-      failed = i;
-      break;
+      // Eviction could have happened right after set, before stick. If so, try again
+      if (Run({"stick", key}).GetInt() == 1) {
+        break;
+      }
     }
-    ASSERT_THAT(stick_resp, IntArg(1)) << i;
   }
 
   ASSERT_GE(failed, 0);
-  // Make sure neither of the sticky values was evicted
+  // Make sure none of the sticky values was evicted
   for (ssize_t i = 0; i < failed; ++i) {
     ASSERT_THAT(Run({"exists", StrCat("key", i)}), IntArg(1));
   }

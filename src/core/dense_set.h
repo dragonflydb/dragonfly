@@ -210,9 +210,14 @@ class DenseSet {
   explicit DenseSet(MemoryResource* mr = PMR_NS::get_default_resource());
   virtual ~DenseSet();
 
-  size_t Size() const {
+  // Returns the number of elements in the map. Note that it might be that some of these elements
+  // have expired and can't be accessed.
+  size_t UpperBoundSize() const {
     return size_;
   }
+
+  // Returns an accurate size, post-expiration. O(n).
+  size_t SizeSlow();
 
   bool Empty() const {
     return size_ == 0;
@@ -260,6 +265,8 @@ class DenseSet {
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
   virtual uint32_t ObjExpireTime(const void* obj) const = 0;
   virtual void ObjDelete(void* obj, bool has_ttl) const = 0;
+
+  void CollectExpired();
 
   bool EraseInternal(void* obj, uint32_t cookie) {
     auto [prev, found] = Find(obj, BucketId(obj, cookie), cookie);

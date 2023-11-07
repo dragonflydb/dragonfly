@@ -180,6 +180,8 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
 
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
+
+  VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
 }
 
 void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {

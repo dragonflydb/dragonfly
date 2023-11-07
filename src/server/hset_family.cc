@@ -119,7 +119,7 @@ size_t HMapLength(const DbContext& db_cntx, const CompactObj& co) {
   void* ptr = co.RObjPtr();
   if (co.Encoding() == kEncodingStrMap2) {
     StringMap* sm = GetStringMap(co, db_cntx);
-    return sm->Size();
+    return sm->UpperBoundSize();
   }
 
   DCHECK_EQ(kEncodingListPack, co.Encoding());
@@ -379,7 +379,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
       bool res = sm->Erase(ToSV(s));
       if (res) {
         ++deleted;
-        if (sm->Size() == 0) {
+        if (sm->UpperBoundSize() == 0) {
           key_remove = true;
           break;
         }
@@ -565,8 +565,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
     DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
-    // Some items could have expired, yet accounted for in Size(), so reserve() might overshoot
-    res.reserve(sm->Size() * (keyval ? 2 : 1));
+    res.reserve(sm->UpperBoundSize() * (keyval ? 2 : 1));
     for (const auto& k_v : *sm) {
       if (mask & FIELDS) {
         res.emplace_back(k_v.first, sdslen(k_v.first));
@@ -1067,13 +1066,17 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     StringVec str_vec;
 
     if (pv.Encoding() == kEncodingStrMap2) {
-      StringMap* string_map = (StringMap*)pv.RObjPtr();
+      StringMap* string_map = GetStringMap(pv, db_context);
+
       if (args.size() == 1) {
-        auto [key, value] = string_map->RandomPair();
-        str_vec.emplace_back(key, sdslen(key));
+        auto opt_pair = string_map->RandomPair();
+        if (opt_pair.has_value()) {
+          auto [key, value] = *opt_pair;
+          str_vec.emplace_back(key, sdslen(key));
+        }
       } else {
         size_t actual_count =
-            (count >= 0) ? std::min(size_t(count), string_map->Size()) : abs(count);
+            (count >= 0) ? std::min(size_t(count), string_map->UpperBoundSize()) : abs(count);
         std::vector<sds> keys, vals;
         if (count >= 0) {
           string_map->RandomPairsUnique(actual_count, keys, vals, with_values);
@@ -1086,6 +1089,11 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
             str_vec.emplace_back(vals[i], sdslen(vals[i]));
           }
         }
+      }
+
+      if (string_map->Empty()) {
+        db_slice.Del(db_context.db_index, *it_res);
+        return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();

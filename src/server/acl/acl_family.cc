@@ -168,10 +168,10 @@ std::string AclFamily::RegistryToString() const {
   auto& registry = registry_with_read_lock.registry;
   std::string result;
   for (auto& [username, user] : registry) {
-    std::string command = "ACL SETUSER ";
+    std::string command = "USER ";
     const std::string_view pass = user.Password();
     const std::string password =
-        pass == "nopass" ? "nopass " : absl::StrCat(">", PrettyPrintSha(pass, true), " ");
+        pass == "nopass" ? "nopass " : absl::StrCat("#", PrettyPrintSha(pass, true), " ");
     const std::string acl_cat = AclCatToString(user.AclCategory());
     const std::string acl_commands = AclCommandToString(user.AclCommandsRef());
     const std::string maybe_space = acl_commands.empty() ? "" : " ";

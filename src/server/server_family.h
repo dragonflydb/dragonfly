@@ -86,6 +86,12 @@ struct Metrics {
   size_t small_string_bytes = 0;
   uint32_t traverse_ttl_per_sec = 0;
   uint32_t delete_ttl_per_sec = 0;
+  uint64_t fiber_switch_cnt = 0;
+  uint64_t fiber_switch_delay_ns = 0;
+
+  // Statistics about fibers running for a long time (more than 1ms).
+  uint64_t fiber_longrun_cnt = 0;
+  uint64_t fiber_longrun_ns = 0;
 
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;  // command call frequencies
 
@@ -189,6 +195,8 @@ class ServerFamily {
   void Replicate(std::string_view host, std::string_view port);
 
  private:
+  void JoinSnapshotSchedule();
+
   uint32_t shard_count() const {
     return shard_set->size();
   }

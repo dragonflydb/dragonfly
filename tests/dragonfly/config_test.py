@@ -9,7 +9,7 @@ async def test_maxclients(df_factory):
     # Needs some authentication
     with df_factory.create(port=1111, maxclients=1, admin_port=1112) as server:
         async with server.client() as client1:
-            assert [b"maxclients", b"1"] == await client1.execute_command("CONFIG GET maxclients")
+            assert ["maxclients", "1"] == await client1.execute_command("CONFIG GET maxclients")
 
             with pytest.raises(redis.exceptions.ConnectionError):
                 async with server.client() as client2:
@@ -20,6 +20,6 @@ async def test_maxclients(df_factory):
                 await admin_client.get("test")
 
             await client1.execute_command("CONFIG SET maxclients 3")
-            assert [b"maxclients", b"3"] == await client1.execute_command("CONFIG GET maxclients")
+            assert ["maxclients", "3"] == await client1.execute_command("CONFIG GET maxclients")
             async with server.client() as client2:
                 await client2.get("test")

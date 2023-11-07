@@ -642,7 +642,7 @@ optional<unsigned> SortedMap::DfImpl::GetRank(sds ele, bool reverse) const {
 
   optional rank = score_tree->GetRank(obj);
   DCHECK(rank);
-  return reverse ? score_map->Size() - *rank - 1 : *rank;
+  return reverse ? score_map->UpperBoundSize() - *rank - 1 : *rank;
 }
 
 SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsigned offset,
@@ -904,8 +904,8 @@ size_t SortedMap::DfImpl::DeleteRangeByLex(const zlexrangespec& range) {
 }
 
 SortedMap::ScoredArray SortedMap::DfImpl::PopTopScores(unsigned count, bool reverse) {
-  DCHECK_EQ(score_map->Size(), score_tree->Size());
-  size_t sz = score_map->Size();
+  DCHECK_EQ(score_map->UpperBoundSize(), score_tree->Size());
+  size_t sz = score_map->UpperBoundSize();
 
   ScoredArray res;
 
@@ -913,7 +913,7 @@ SortedMap::ScoredArray SortedMap::DfImpl::PopTopScores(unsigned count, bool reve
     return res;
 
   if (count >= sz)
-    count = score_map->Size();
+    count = score_map->UpperBoundSize();
 
   res.reserve(count);
   unsigned rank = 0;

@@ -408,7 +408,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   } else if (obj.Encoding() == kEncodingStrMap2) {
     StringSet* set = (StringSet*)obj.RObjPtr();
 
-    RETURN_ON_ERR(SaveLen(set->Size()));
+    RETURN_ON_ERR(SaveLen(set->SizeSlow()));
 
     for (sds ele : *set) {
       RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
@@ -430,7 +430,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   if (pv.Encoding() == kEncodingStrMap2) {
     StringMap* string_map = (StringMap*)pv.RObjPtr();
 
-    RETURN_ON_ERR(SaveLen(string_map->Size()));
+    RETURN_ON_ERR(SaveLen(string_map->SizeSlow()));
 
     for (const auto& k_v : *string_map) {
       RETURN_ON_ERR(SaveString(string_view{k_v.first, sdslen(k_v.first)}));

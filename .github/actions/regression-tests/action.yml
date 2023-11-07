@@ -37,7 +37,11 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        timeout 20m pytest -m "${{inputs.filter}}" --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?; if [[ $code -ne 0 ]]; then echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"; exit 1; fi
+        timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
+        if [[ $code -ne 0 ]]; then
+          echo "TIMEDOUT=1">> "$GITHUB_OUTPUT";
+          exit 1
+        fi
 
     - name: Run PyTests replication test
       id: second
@@ -50,7 +54,13 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
         run_pytest_with_args() {
-          timeout 20m pytest -m "${{inputs.filter}}" --json-report --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO --df alsologtostderr $1 $2 || code=$?; if [[ $code -ne 0 ]]; then echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"; exit 1; fi
+          timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report \
+            --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO \
+            --df alsologtostderr $1 $2 || code=$?
+          if [[ $code -ne 0 ]]; then
+            echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"
+            exit 1
+          fi
         }
 
         (run_pytest_with_args --df enable_multi_shard_sync=true)
