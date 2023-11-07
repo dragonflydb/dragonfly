@@ -697,13 +697,13 @@ TEST_F(MultiTest, ScriptBadCommand) {
   )";
 
   auto resp = Run({"eval", s1, "0"});  // tx won't be scheduled at all
-  EXPECT_THAT(resp, ErrArg("This command requires advanced script flags"));
+  EXPECT_THAT(resp, ErrArg("This Redis command is not allowed from script"));
 
   resp = Run({"eval", s2, "1", "works", "false"});  // will be scheduled as lock ahead
-  EXPECT_THAT(resp, ErrArg("This command requires advanced script flags"));
+  EXPECT_THAT(resp, ErrArg("This Redis command is not allowed from script"));
 
   resp = Run({"eval", s3, "1", "works", "false"});  // also async call will happen
-  EXPECT_THAT(resp, ErrArg("This command requires advanced script flags"));
+  EXPECT_THAT(resp, ErrArg("This Redis command is not allowed from script"));
 
   resp = Run({"eval", s4, "0"});
   EXPECT_EQ(resp, "OK");

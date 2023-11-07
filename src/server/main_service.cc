@@ -1026,7 +1026,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     Transaction::MultiMode mode = dfly_cntx.transaction->GetMultiMode();
     bool shard_access = (cid->opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
-      return ErrorReply("This command requires advanced script flags");
+      return ErrorReply("This Redis command is not allowed from script");
   }
 
   if (under_script && cid->IsTransactional()) {
