@@ -73,14 +73,16 @@ static std::string AbslUnparseFlag(const ReplicaOfFlag& flag);
 
 struct CronExprFlag {
   static constexpr std::string_view kCronPrefix = "0 "sv;
-  std::optional<cron::cronexpr> value;
+  std::optional<cron::cronexpr> cron_expr;
 };
 
 static bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err);
 static std::string AbslUnparseFlag(const CronExprFlag& flag);
 
 ABSL_FLAG(string, dir, "", "working directory");
-ABSL_FLAG(string, dbfilename, "dump-{timestamp}", "the filename to save/load the DB");
+ABSL_FLAG(string, dbfilename, "dump-{timestamp}",
+          "the filename to save/load the DB, instead of/with {timestamp} can be used {Y}, {m}, and "
+          "{d} macros");
 ABSL_FLAG(string, requirepass, "",
           "password for AUTH authentication. "
           "If empty can also be set with DFLY_PASSWORD environment variable.");
@@ -170,7 +172,7 @@ std::string AbslUnparseFlag(const ReplicaOfFlag& flag) {
 
 bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
   if (in.empty()) {
-    flag->value = std::nullopt;
+    flag->cron_expr = std::nullopt;
     return true;
   }
   if (absl::StartsWith(in, "\"")) {
@@ -182,7 +184,7 @@ bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
   std::string raw_cron_expr = absl::StrCat(CronExprFlag::kCronPrefix, in);
   try {
     VLOG(1) << "creating cron from: '" << raw_cron_expr << "'";
-    flag->value = cron::make_cron(raw_cron_expr);
+    flag->cron_expr = cron::make_cron(raw_cron_expr);
     return true;
   } catch (const cron::bad_cronexpr& ex) {
     *err = ex.what();
@@ -191,8 +193,8 @@ bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* err) {
 }
 
 std::string AbslUnparseFlag(const CronExprFlag& flag) {
-  if (flag.value) {
-    auto str_expr = to_cronstr(*flag.value);
+  if (flag.cron_expr) {
+    auto str_expr = to_cronstr(*flag.cron_expr);
     DCHECK(absl::StartsWith(str_expr, CronExprFlag::kCronPrefix));
     return str_expr.substr(CronExprFlag::kCronPrefix.size());
   }
@@ -371,6 +373,7 @@ void RebuildAllSearchIndices(Service* service) {
     // On MacOS we don't include search so FT.CREATE won't exist.
     return;
   }
+
   boost::intrusive_ptr<Transaction> trans{new Transaction{cmd}};
   trans->InitByArgs(0, {});
   trans->ScheduleSingleHop([](auto* trans, auto* es) {
@@ -443,12 +446,12 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   string save_time = GetFlag(FLAGS_save_schedule);
   auto cron_expr = GetFlag(FLAGS_snapshot_cron);
 
-  if (cron_expr.value) {
+  if (cron_expr.cron_expr) {
     if (!save_time.empty()) {
       LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
       exit(1);
     }
-    return std::move(cron_expr.value);
+    return std::move(cron_expr.cron_expr);
   }
 
   if (!save_time.empty()) {
