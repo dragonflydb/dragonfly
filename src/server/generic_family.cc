@@ -1552,8 +1552,7 @@ constexpr uint32_t kTime = FAST;
 constexpr uint32_t kType = KEYSPACE | READ | FAST;
 constexpr uint32_t kDump = KEYSPACE | READ | SLOW;
 constexpr uint32_t kUnlink = KEYSPACE | WRITE | FAST;
-// TODO investigate what stick is
-constexpr uint32_t kStick = SLOW;
+constexpr uint32_t kStick = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSort = WRITE | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
 constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
