@@ -855,6 +855,23 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
           RespArray(
               ElementsAre("Lisbon", "502.20769462704084",
                           RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+
+  GTEST_SKIP() << "skipping store test";
+  EXPECT_EQ(
+      2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "store_key"}));
+
+  resp = Run({"ZRANGE", "store_key", "0", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
+
+  resp = Run({"ZRANGE", "store_key", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("Madrid", "3471766229222696", "Lisbon", "3473121093062745")));
+
+  EXPECT_EQ(2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STOREDIST",
+                           "store_dist_key"}));
+
+  resp = Run({"ZRANGE", "store_dist_key", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "0", "Lisbon", "502.20769462704084")));
 }
 
 }  // namespace dfly
