@@ -71,6 +71,7 @@ class ZSetFamily {
   static void ZRange(CmdArgList args, ConnectionContext* cntx);
   static void ZRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRem(CmdArgList args, ConnectionContext* cntx);
+  static void ZRandMember(CmdArgList args, ConnectionContext* cntx);
   static void ZScore(CmdArgList args, ConnectionContext* cntx);
   static void ZMScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByLex(CmdArgList args, ConnectionContext* cntx);

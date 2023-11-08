@@ -1344,6 +1344,56 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void SRandMember(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  int count = 1;
+  if (args.size() == 2) {
+    string_view arg = ArgS(args, 1);
+    if (!absl::SimpleAtoi(arg, &count)) {
+      (*cntx)->SendError(kInvalidIntErr);
+      return;
+    }
+  } else if (args.size() > 2) {
+    return (*cntx)->SendError(absl::StrCat("unsupported option ", ArgS(args, 2)));
+  }
+  const unsigned ucount = std::abs(count);
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
+    StringVec result;
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    if (!find_res) {
+      return find_res.status();
+    }
+
+    PrimeValue& pv = find_res.value()->second;
+    if (IsDenseEncoding(pv)) {
+      StringSet* ss = (StringSet*)pv.RObjPtr();
+      ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+    }
+
+    container_utils::IterateSet(find_res.value()->second,
+                                [&result, ucount](container_utils::ContainerEntry ce) {
+                                  result.push_back(ce.ToString());
+                                  return result.size() != ucount;
+                                });
+    return result;
+  };
+
+  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
+
+  if (result || result.status() == OpStatus::KEY_NOTFOUND) {
+    if (count < 0 && result && !result->empty()) {
+      for (int i = ucount - result->size(); i > 0; --i) {
+        // we can return duplicate elements, so first is OK
+        result->push_back(result->front());
+      }
+    }
+    (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
 void SInter(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
@@ -1628,6 +1678,7 @@ constexpr uint32_t kSMove = WRITE | SET | FAST;
 constexpr uint32_t kSRem = WRITE | SET | FAST;
 constexpr uint32_t kSCard = READ | SET | FAST;
 constexpr uint32_t kSPop = WRITE | SET | SLOW;
+constexpr uint32_t kSRandMember = READ | SET | SLOW;
 constexpr uint32_t kSUnion = READ | SET | SLOW;
 constexpr uint32_t kSUnionStore = WRITE | SET | SLOW;
 constexpr uint32_t kSScan = READ | SET | SLOW;
@@ -1656,6 +1707,8 @@ void SetFamily::Register(CommandRegistry* registry) {
       << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1, 1, acl::kSRem}.HFUNC(SRem)
       << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kSCard}.HFUNC(SCard)
       << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, acl::kSPop}.HFUNC(SPop)
+      << CI{"SRANDMEMBER", CO::READONLY | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, acl::kSRandMember}.HFUNC(
+             SRandMember)
       << CI{"SUNION", CO::READONLY, -2, 1, -1, 1, acl::kSUnion}.HFUNC(SUnion)
       << CI{"SUNIONSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
             acl::kSUnionStore}
