@@ -287,6 +287,17 @@ def with_ca_tls_server_args(with_tls_server_args, with_tls_ca_cert_args):
 
 
 @pytest.fixture(scope="session")
+def with_ca_dir_tls_server_args(with_tls_server_args, with_tls_ca_cert_args):
+    args = deepcopy(with_tls_server_args)
+    ca_cert = with_tls_ca_cert_args["ca_cert"]
+    ca_dir = os.path.dirname(ca_cert)
+    command = f"c_rehash {ca_dir}"
+    subprocess.run(command, shell=True)
+    args["tls_ca_cert_dir"] = ca_dir
+    return args, ca_cert
+
+
+@pytest.fixture(scope="session")
 def with_tls_client_args(tmp_dir, with_tls_ca_cert_args):
     tls_client_key = os.path.join(tmp_dir, "client-key.pem")
     tls_client_req = os.path.join(tmp_dir, "client-req.pem")
