@@ -94,7 +94,7 @@ Dragonfly supports common Redis arguments where applicable. For example, you can
 
 Dragonfly currently supports the following Redis-specific arguments:
  * `port`: Redis connection port (`default: 6379`).
- * `bind`: Use `localhost` to only allow localhost connections or a public IP address to allow connections **to that IP** address (i.e. from outside too).
+ * `bind`: Use `localhost` to only allow localhost connections or a public IP address to allow connections **to that IP** address (i.e. from outside too). Use `0.0.0.0` to allow all IPv4.
  * `requirepass`: The password for AUTH authentication (`default: ""`).
  * `maxmemory`: Limit on maximum memory (in human-readable bytes) used by the database (`default: 0`). A `maxmemory` value of `0` means the program will automatically determine its maximum memory usage.
  * `dir`: Dragonfly Docker uses the `/data` folder for snapshotting by default, the CLI uses `""`. You can use the `-v` Docker option to map it to your host folder.
