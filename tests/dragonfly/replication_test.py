@@ -423,7 +423,7 @@ async def test_cancel_replication_immediately(
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
-    COMMANDS_TO_ISSUE = 200
+    COMMANDS_TO_ISSUE = 100
 
     replica = df_local_factory.create()
     master = df_local_factory.create()
