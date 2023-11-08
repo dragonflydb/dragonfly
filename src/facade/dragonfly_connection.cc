@@ -10,6 +10,7 @@
 
 #include <variant>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -724,11 +725,29 @@ auto Connection::ParseMemcache() -> ParserStatus {
       break;
     }
 
+    auto parse_value = [&consumed, &cmd](std::string_view str) -> std::optional<std::string_view> {
+      std::string_view value = str.substr(consumed, cmd.bytes_len);
+      const absl::flat_hash_set<char> any_of{' ', '\r', '\n'};
+      if (any_of.contains(value.back())) {
+        return {};
+      }
+      auto sub_value = str.substr(consumed);
+      if (sub_value.size() > cmd.bytes_len && !any_of.contains(sub_value[cmd.bytes_len + 1])) {
+        return {};
+      }
+      return str.substr(consumed, cmd.bytes_len);
+    };
+
     size_t total_len = consumed;
     if (MemcacheParser::IsStoreCmd(cmd.type)) {
       total_len += cmd.bytes_len + 2;
       if (io_buf_.InputLen() >= total_len) {
-        value = str.substr(consumed, cmd.bytes_len);
+        auto maybe_value = parse_value(str);
+        if (!maybe_value) {
+          builder->SendClientError("bad data chunk");
+          return OK;
+        }
+        value = *maybe_value;
         // TODO: dispatch.
       } else {
         return NEED_MORE;
