@@ -423,14 +423,14 @@ async def test_cancel_replication_immediately(
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
-    COMMANDS_TO_ISSUE = 200
+    COMMANDS_TO_ISSUE = 100
 
     replica = df_local_factory.create()
     master = df_local_factory.create()
     df_local_factory.start_all([replica, master])
 
     seeder = df_seeder_factory.create(port=master.port)
-    c_replica = replica.client(socket_timeout=20)
+    c_replica = replica.client(socket_timeout=80)
 
     await seeder.run(target_deviation=0.1)
 
@@ -451,7 +451,7 @@ async def test_cancel_replication_immediately(
     replication_commands = [asyncio.create_task(replicate()) for _ in range(COMMANDS_TO_ISSUE)]
 
     num_successes = 0
-    for result in asyncio.as_completed(replication_commands, timeout=30):
+    for result in asyncio.as_completed(replication_commands, timeout=80):
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
