@@ -1111,7 +1111,7 @@ void Connection::ShutdownThreadLocal() {
 }
 
 bool Connection::IsCurrentlyDispatching() const {
-  if (!cc_ || cc_->conn_closing)
+  if (!cc_)
     return false;
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
@@ -1132,6 +1132,9 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
 void Connection::AwaitCurrentDispatches(fb2::BlockingCounter bc) {
   if (!IsCurrentlyDispatching())
     return;
+
+  // TODO: what about a closing connection?
+  // still send and check upon destruction?
 
   bc.Add(1);
   SendAsync({CheckpointMessage{bc}});

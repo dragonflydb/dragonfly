@@ -508,6 +508,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   bool success = server_family_->AwaitCurrentDispatches(absl::Seconds(1), cntx->conn());
   // TODO... and what to do?
+  (void)success;
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
