@@ -32,9 +32,9 @@ enum CommandOpt : uint32_t {
 
   ADMIN = 1U << 7,  // implies NOSCRIPT,
   NOSCRIPT = 1U << 8,
-  BLOCKING = 1U << 9,  // implies REVERSE_MAPPING
-  HIDDEN = 1U << 10,   // does not show in COMMAND command output
-
+  BLOCKING = 1U << 9,         // implies REVERSE_MAPPING
+  HIDDEN = 1U << 10,          // does not show in COMMAND command output
+  STORE_LAST_KEY = 1U << 11,  // The command my have a store key as the last argument.
   GLOBAL_TRANS = 1U << 12,
 
   NO_AUTOJOURNAL = 1U << 15,  // Skip automatically logging command to journal inside transaction.

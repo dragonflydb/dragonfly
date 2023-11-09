@@ -856,7 +856,6 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
               ElementsAre("Lisbon", "502.20769462704084",
                           RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
 
-  GTEST_SKIP() << "skipping store test";
   EXPECT_EQ(
       2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "store_key"}));
 

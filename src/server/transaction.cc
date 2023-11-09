@@ -241,7 +241,6 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
 
   if ((key_index.HasSingleKey() && !IsAtomicMulti()) || is_stub) {
-    DCHECK_GT(key_index.step, 0u);
     // We don't have to split the arguments by shards, so we can copy them directly.
     StoreKeysInArgs(key_index, needs_reverse_mapping);
 
@@ -260,8 +259,8 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   }
 
   shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
-  CHECK(key_index.step == 1 || key_index.step == 2);
-  DCHECK(key_index.step == 1 || (args.size() % 2) == 0);
+  DCHECK(key_index.step == 1 || key_index.step == 2);
+  DCHECK(key_index.step != 2 || (args.size() % 2) == 0);
 
   // Safe, because flow below is not preemptive.
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
@@ -1476,14 +1475,27 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   }
 
   if (cid->first_key_pos() > 0) {
+    key_index.step = cid->key_arg_step();
     key_index.start = cid->first_key_pos() - 1;
     int last = cid->last_key_pos();
+
     if (num_custom_keys >= 0) {
       key_index.end = key_index.start + num_custom_keys;
     } else {
       key_index.end = last > 0 ? last : (int(args.size()) + last + 1);
     }
-    key_index.step = cid->key_arg_step();
+
+    if (cid->opt_mask() & CO::STORE_LAST_KEY) {
+      string_view name{cid->name()};
+
+      if (name == "GEORADIUSBYMEMBER" && args.size() >= 5) {
+        // key member radius .. STORE destkey
+        string_view opt = ArgS(args, args.size() - 2);
+        if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
+          key_index.bonus = args.size() - 1;
+        }
+      }
+    }
 
     return key_index;
   }

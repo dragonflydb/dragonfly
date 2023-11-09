@@ -189,6 +189,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "blocking";
     case HIDDEN:
       return "hidden";
+    case STORE_LAST_KEY:
+      return "store-last-key";
     case GLOBAL_TRANS:
       return "global-trans";
     case VARIADIC_KEYS:
