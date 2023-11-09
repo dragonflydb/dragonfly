@@ -571,32 +571,21 @@ constexpr uint32_t kGenPass = acl::SLOW;
 
 void AclFamily::Register(dfly::CommandRegistry* registry) {
   using CI = dfly::CommandId;
-
+  const uint32_t kAclMask = CO::ADMIN | CO::NOSCRIPT | CO::LOADING;
   registry->StartFamily();
-  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
-  *registry << CI{"ACL LIST", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kList}.HFUNC(
-      List);
-  *registry << CI{"ACL SETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kSetUser}
-                   .HFUNC(SetUser);
-  *registry << CI{"ACL DELUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 2, 0, 0, 0, acl::kDelUser}
-                   .HFUNC(DelUser);
-  *registry << CI{"ACL WHOAMI", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kWhoAmI}
-                   .HFUNC(WhoAmI);
-  *registry << CI{"ACL SAVE", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kSave}.HFUNC(
-      Save);
-  *registry << CI{"ACL LOAD", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kLoad}.HFUNC(
-      Load);
-  *registry << CI{"ACL LOG", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 0, 0, 0, 0, acl::kLog}.HFUNC(
-      Log);
-  *registry << CI{"ACL USERS", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0, acl::kUsers}
-                   .HFUNC(Users);
-  *registry << CI{"ACL CAT", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kCat}.HFUNC(
-      Cat);
-  *registry << CI{"ACL GETUSER", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 2, 0, 0, 0, acl::kGetUser}
-                   .HFUNC(GetUser);
-  *registry << CI{"ACL DRYRUN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 3, 0, 0, 0, acl::kDryRun}
-                   .HFUNC(DryRun);
-  *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kGenPass}.HFUNC(
+  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
+  *registry << CI{"ACL LIST", kAclMask, 1, 0, 0, acl::kList}.HFUNC(List);
+  *registry << CI{"ACL SETUSER", kAclMask, -2, 0, 0, acl::kSetUser}.HFUNC(SetUser);
+  *registry << CI{"ACL DELUSER", kAclMask, 2, 0, 0, acl::kDelUser}.HFUNC(DelUser);
+  *registry << CI{"ACL WHOAMI", kAclMask, 1, 0, 0, acl::kWhoAmI}.HFUNC(WhoAmI);
+  *registry << CI{"ACL SAVE", kAclMask, 1, 0, 0, acl::kSave}.HFUNC(Save);
+  *registry << CI{"ACL LOAD", kAclMask, 1, 0, 0, acl::kLoad}.HFUNC(Load);
+  *registry << CI{"ACL LOG", kAclMask, 0, 0, 0, acl::kLog}.HFUNC(Log);
+  *registry << CI{"ACL USERS", kAclMask, 1, 0, 0, acl::kUsers}.HFUNC(Users);
+  *registry << CI{"ACL CAT", kAclMask, -1, 0, 0, acl::kCat}.HFUNC(Cat);
+  *registry << CI{"ACL GETUSER", kAclMask, 2, 0, 0, acl::kGetUser}.HFUNC(GetUser);
+  *registry << CI{"ACL DRYRUN", kAclMask, 3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
+  *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
       GenPass);
   cmd_registry_ = registry;
 }

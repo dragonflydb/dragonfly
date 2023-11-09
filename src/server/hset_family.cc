@@ -1170,25 +1170,24 @@ constexpr uint32_t kHVals = READ | HASH | SLOW;
 void HSetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
-      << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1, 1, acl::kHDel}.HFUNC(HDel)
-      << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kHLen}.HFUNC(HLen)
-      << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kHExists}.HFUNC(HExists)
-      << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1, 1, acl::kHGet}.HFUNC(HGet)
-      << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1, 1, acl::kHGetAll}.HFUNC(HGetAll)
-      << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1, 1, acl::kHMGet}.HFUNC(HMGet)
-      << CI{"HMSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kHMSet}.HFUNC(HSet)
-      << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHIncrBy}.HFUNC(HIncrBy)
-      << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHIncrByFloat}
-             .HFUNC(HIncrByFloat)
-      << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1, acl::kHKeys}.HFUNC(HKeys)
-      << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1, 1, acl::kHRandField}.HFUNC(HRandField)
-      << CI{"HSCAN", CO::READONLY, -3, 1, 1, 1, acl::kHScan}.HFUNC(HScan)
-      << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1, acl::kHSet}.HFUNC(HSet)
-      << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, 1, acl::kHSetEx}.SetHandler(
-             HSetEx)
-      << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1, acl::kHSetNx}.HFUNC(HSetNx)
-      << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kHStrLen}.HFUNC(HStrLen)
-      << CI{"HVALS", CO::READONLY, 2, 1, 1, 1, acl::kHVals}.HFUNC(HVals);
+      << CI{"HDEL", CO::FAST | CO::WRITE, -3, 1, 1, acl::kHDel}.HFUNC(HDel)
+      << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1, acl::kHLen}.HFUNC(HLen)
+      << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1, acl::kHExists}.HFUNC(HExists)
+      << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1, acl::kHGet}.HFUNC(HGet)
+      << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1, acl::kHGetAll}.HFUNC(HGetAll)
+      << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1, acl::kHMGet}.HFUNC(HMGet)
+      << CI{"HMSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kHMSet}.HFUNC(HSet)
+      << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::kHIncrBy}.HFUNC(HIncrBy)
+      << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::kHIncrByFloat}.HFUNC(
+             HIncrByFloat)
+      << CI{"HKEYS", CO::READONLY, 2, 1, 1, acl::kHKeys}.HFUNC(HKeys)
+      << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1, acl::kHRandField}.HFUNC(HRandField)
+      << CI{"HSCAN", CO::READONLY, -3, 1, 1, acl::kHScan}.HFUNC(HScan)
+      << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kHSet}.HFUNC(HSet)
+      << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, acl::kHSetEx}.SetHandler(HSetEx)
+      << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::kHSetNx}.HFUNC(HSetNx)
+      << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, acl::kHStrLen}.HFUNC(HStrLen)
+      << CI{"HVALS", CO::READONLY, 2, 1, 1, acl::kHVals}.HFUNC(HVals);
 }
 
 StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
