@@ -92,6 +92,10 @@ class CommandId {
 
   static uint32_t OptCount(uint32_t mask);
 
+  bool IsSubCommand() const {
+    return is_subcommand;
+  }
+
  protected:
   std::string name_;
 
@@ -108,6 +112,7 @@ class CommandId {
 
   // Whether the command can only be used by admin connections.
   bool restricted_ = false;
+  bool is_subcommand = false;
 };
 
 }  // namespace facade

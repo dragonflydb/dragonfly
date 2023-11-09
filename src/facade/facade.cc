@@ -151,6 +151,7 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
       last_key_(last_key),
       step_key_(step),
       acl_categories_(acl_categories) {
+  is_subcommand = name_.find(' ') != std::string::npos;
 }
 
 uint32_t CommandId::OptCount(uint32_t mask) {

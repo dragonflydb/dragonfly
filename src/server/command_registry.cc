@@ -119,14 +119,24 @@ void CommandRegistry::Init(unsigned int thread_count) {
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   string k = string(cmd.name());
 
+  const bool is_sub_command = cmd.IsSubCommand();
+
   absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
-  const bool is_sub_command = maybe_subcommand.size() == 2;
   auto it = cmd_rename_map_.find(maybe_subcommand.front());
   if (it != cmd_rename_map_.end()) {
     if (it->second.empty()) {
       return *this;  // Incase of empty string we want to remove the command from registry.
     }
     k = is_sub_command ? absl::StrCat(it->second, " ", maybe_subcommand[1]) : it->second;
+  }
+
+  if (is_sub_command) {
+    for (string name : GetFlag(FLAGS_restricted_commands)) {
+      auto upper_name = AsciiStrToUpper(name);
+      if (cmd.name().starts_with(upper_name)) {
+        restricted_cmds_.emplace(cmd.name());
+      }
+    }
   }
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {

@@ -445,7 +445,7 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
 
 
 @pytest.mark.asyncio
-@dfly_args({"proactor_threads": 1})
+@dfly_args({"proactor_threads": 1, "admin_port": 1112})
 async def test_set_len_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res
@@ -472,3 +472,17 @@ async def test_set_len_acl_log(async_client):
 
     res = await async_client.execute_command("ACL LOG")
     assert 10 == len(res)
+
+
+@pytest.mark.asyncio
+@dfly_args({"restricted_commands": "ACL", "admin_port": 1112})
+async def test_restricted_commands(df_local_factory):
+    df = df_local_factory.create()
+    df.start()
+
+    client = df.client()
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command("ACL SETUSER adi ON >mypass +@all")
+
+    admin_client = aioredis.Redis(port=df.admin_port)
+    await admin_client.execute_command("ACL SETUSER adi ON >mypass +@all")
