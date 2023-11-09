@@ -21,6 +21,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/sorted_map.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -2280,33 +2281,26 @@ void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
+  if (args.size() > 3)
+    return (*cntx)->SendError(WrongNumArgsError("SRANDMEMBER"));
 
   ZRangeSpec range_spec;
   range_spec.interval = IndexInterval(0, -1);
-  int count = 1;
 
-  switch (args.size()) {
-    case 3: {
-      ToUpper(&args[2]);
-      string_view arg = ArgS(args, 2);
-      range_spec.params.with_scores = arg == "WITHSCORES";
-      if (!range_spec.params.with_scores) {
-        return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", arg));
-      }
-      [[fallthrough]];
-    }
-    case 2:
-      if (string_view arg = ArgS(args, 1); !absl::SimpleAtoi(arg, &count)) {
-        cntx->reply_builder()->SendError(kInvalidIntErr);
-        return;
-      }
-      break;
-    case 1:
-      break;
-    default:
-      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", ArgS(args, 3)));
-  }
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  bool is_count = parser.HasNext();
+  int count = is_count ? parser.Next().Int<int>() : 1;
+
+  range_spec.params.with_scores = static_cast<bool>(parser.Check("WITHSCORES").IgnoreCase());
+
+  if (parser.HasNext())
+    return (*cntx)->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
+
   bool sign = count < 0;
   range_spec.params.limit = std::abs(count);
 
@@ -2315,13 +2309,24 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(cb);
-  if (sign && result && !result->empty()) {
-    for (int i = range_spec.params.limit - result->size(); i > 0; --i) {
-      // we can return duplicate elements, so first is OK
-      result->push_back(result->front());
+
+  if (result) {
+    if (sign && !result->empty()) {
+      for (auto i = result->size(); i < range_spec.params.limit; ++i) {
+        // we can return duplicate elements, so first is OK
+        result->push_back(result->front());
+      }
     }
+    (*cntx)->SendScoredArray(result.value(), range_spec.params.with_scores);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    if (is_count) {
+      (*cntx)->SendScoredArray(ScoredArray(), range_spec.params.with_scores);
+    } else {
+      (*cntx)->SendNull();
+    }
+  } else {
+    (*cntx)->SendError(result.status());
   }
-  OutputScoredArrayResult(result, range_spec.params, cntx);
 }
 
 void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {

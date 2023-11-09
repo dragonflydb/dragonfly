@@ -15,6 +15,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/string_set.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -1345,17 +1346,18 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SRandMember(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  int count = 1;
-  if (args.size() == 2) {
-    string_view arg = ArgS(args, 1);
-    if (!absl::SimpleAtoi(arg, &count)) {
-      (*cntx)->SendError(kInvalidIntErr);
-      return;
-    }
-  } else if (args.size() > 2) {
-    return (*cntx)->SendError(absl::StrCat("unsupported option ", ArgS(args, 2)));
-  }
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  bool is_count = parser.HasNext();
+  int count = is_count ? parser.Next().Int<int>() : 1;
+
+  if (parser.HasNext())
+    return (*cntx)->SendError(WrongNumArgsError("SRANDMEMBER"));
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
+
   const unsigned ucount = std::abs(count);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
@@ -1373,22 +1375,31 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
 
     container_utils::IterateSet(find_res.value()->second,
                                 [&result, ucount](container_utils::ContainerEntry ce) {
-                                  result.push_back(ce.ToString());
-                                  return result.size() != ucount;
+                                  if (result.size() < ucount) {
+                                    result.push_back(ce.ToString());
+                                    return true;
+                                  }
+                                  return false;
                                 });
     return result;
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
 
-  if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    if (count < 0 && result && !result->empty()) {
-      for (int i = ucount - result->size(); i > 0; --i) {
+  if (result) {
+    if (count < 0 && !result->empty()) {
+      for (auto i = result->size(); i < ucount; ++i) {
         // we can return duplicate elements, so first is OK
         result->push_back(result->front());
       }
     }
     (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    if (is_count) {
+      (*cntx)->SendStringArr(StringVec(), RedisReplyBuilder::SET);
+    } else {
+      (*cntx)->SendNull();
+    }
   } else {
     (*cntx)->SendError(result.status());
   }
