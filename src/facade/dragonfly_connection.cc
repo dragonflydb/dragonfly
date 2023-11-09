@@ -148,6 +148,7 @@ struct Connection::DispatchOperations {
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
+  void operator()(CheckpointMessage msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -208,9 +209,17 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const MigrationRequestMessage& msg) {
       return 0;
     }
+    size_t operator()(const CheckpointMessage& msg) {
+      return 0;  // no access to internal type, memory usage negligible
+    }
   };
 
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
+}
+
+bool Connection::MessageHandle::IsIntrusive() const {
+  return holds_alternative<AclUpdateMessage>(handle) ||
+         holds_alternative<CheckpointMessage>(handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -261,6 +270,10 @@ void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg
 
 void Connection::DispatchOperations::operator()(const MigrationRequestMessage& msg) {
   // no-op
+}
+
+void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
+  msg.bc.Dec();
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -1098,7 +1111,7 @@ void Connection::ShutdownThreadLocal() {
 }
 
 bool Connection::IsCurrentlyDispatching() const {
-  if (!cc_)
+  if (!cc_ || cc_->conn_closing)
     return false;
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
@@ -1114,6 +1127,14 @@ void Connection::SendMonitorMessageAsync(string msg) {
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({std::move(msg)});
+}
+
+void Connection::AwaitCurrentDispatches(fb2::BlockingCounter bc) {
+  if (!IsCurrentlyDispatching())
+    return;
+
+  bc.Add(1);
+  SendAsync({CheckpointMessage{bc}});
 }
 
 void Connection::LaunchDispatchFiberIfNeeded() {
@@ -1133,32 +1154,21 @@ void Connection::SendAsync(MessageHandle msg) {
 
   LaunchDispatchFiberIfNeeded();
 
-  auto place_in_dispatch_q = [this](MessageHandle msg) {
-    auto it = dispatch_q_.begin();
-    const auto end = dispatch_q_.end();
-    while (it < end && std::holds_alternative<AclUpdateMessage>(it->handle))
-      ++it;
-    dispatch_q_.insert(it, std::move(msg));
-  };
-
   size_t used_mem = msg.UsedMemory();
   queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
-
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
-  if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
-    // We need to reorder the queue, since multiple updates might happen before we
-    // pop the message, invalidating the correct order since we always push at the front
-    place_in_dispatch_q(std::move(msg));
+  if (msg.IsIntrusive()) {
+    auto it = dispatch_q_.begin();
+    while (it < dispatch_q_.end() && it->IsIntrusive())
+      ++it;
+    dispatch_q_.insert(it, std::move(msg));
   } else {
     dispatch_q_.push_back(std::move(msg));
   }
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.
-  // This might only happen if we started receving messages while `SUBSCRIBE`
-  // is still updating thread local data (see channel_store). We need to make sure its
-  // ack is sent before all other messages.
   if (dispatch_q_.size() == 1 && !cc_->sync_dispatch) {
     evc_.notify();
   }
