@@ -2434,7 +2434,7 @@ void Service::RegisterCommands() {
   registry_.Init(pp_.size());
 
   using CI = CommandId;
-  if (VLOG_IS_ON(1)) {
+  if (VLOG_IS_ON(2)) {
     LOG(INFO) << "Multi-key commands are: ";
     registry_.Traverse([](std::string_view key, const CI& cid) {
       if (cid.is_multi_key()) {

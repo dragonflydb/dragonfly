@@ -291,6 +291,8 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   std::string_view sync_type = "FULL";
   if (seqid.has_value()) {
     if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
+      // This does not guarantee the lsn will still be present when DFLY SYNC runs,
+      // replication will be retried if it gets evicted by then.
       flow.start_partial_sync_at = *seqid;
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
               << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
@@ -413,8 +415,10 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   absl::Time start = absl::Now();
   AggregateStatus status;
 
-  // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
-  // after this function exits but before the actual shutdown.
+  // We need to wait for all dispatches to finish to not interrupt any ongoing transactions.
+  // TODO: Currently we just wait for a moment during which no dispatches are going on
+  // (guaranteeing that all previous finished), however such a moment might take a while to
+  // catch under heavy load - our goal is different!
   sf_->CancelBlockingCommands();
   if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->conn()](util::Connection* conn) {
         // The only command that is currently dispatching should be the takeover command -
@@ -440,7 +444,10 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
       shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
       while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
         if (absl::Now() - start > timeout_dur) {
-          LOG(WARNING) << "Couldn't synchronize with replica for takeover in time.";
+          LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: "
+                       << replica_ptr->address << ":" << replica_ptr->listening_port
+                       << ", last acked: " << flow->last_acked_lsn << ", expecting "
+                       << shard->journal()->GetLsn();
           status = OpStatus::TIMED_OUT;
           return;
         }
