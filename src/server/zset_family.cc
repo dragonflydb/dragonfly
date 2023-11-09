@@ -2282,7 +2282,7 @@ void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 3)
-    return (*cntx)->SendError(WrongNumArgsError("SRANDMEMBER"));
+    return (*cntx)->SendError(WrongNumArgsError("ZRANDMEMBER"));
 
   ZRangeSpec range_spec;
   range_spec.interval = IndexInterval(0, -1);

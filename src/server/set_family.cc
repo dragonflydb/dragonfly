@@ -1718,8 +1718,7 @@ void SetFamily::Register(CommandRegistry* registry) {
       << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1, 1, acl::kSRem}.HFUNC(SRem)
       << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kSCard}.HFUNC(SCard)
       << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, acl::kSPop}.HFUNC(SPop)
-      << CI{"SRANDMEMBER", CO::READONLY | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, acl::kSRandMember}.HFUNC(
-             SRandMember)
+      << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1, 1, acl::kSRandMember}.HFUNC(SRandMember)
       << CI{"SUNION", CO::READONLY, -2, 1, -1, 1, acl::kSUnion}.HFUNC(SUnion)
       << CI{"SUNIONSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
             acl::kSUnionStore}
