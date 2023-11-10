@@ -1029,10 +1029,13 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     queue_backpressure_->ec.notify();
   }
 
-  cc_->conn_closing = true;
+  if (builder->GetError())
+    cc_->conn_closing = true;
 
   // Recycle messages even from disconnecting client to keep properly track of memory stats
   for (auto& msg : dispatch_q_) {
+    if (msg.IsIntrusive())
+      visit(dispatch_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
   dispatch_q_.clear();
@@ -1133,9 +1136,6 @@ void Connection::AwaitCurrentDispatches(fb2::BlockingCounter bc) {
   if (!IsCurrentlyDispatching())
     return;
 
-  // TODO: what about a closing connection?
-  // still send and check upon destruction?
-
   bc.Add(1);
   SendAsync({CheckpointMessage{bc}});
 }
@@ -1152,7 +1152,7 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK(owner());
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
-  if (cc_->conn_closing)
+  if (cc_->conn_closing && !msg.IsIntrusive())
     return;
 
   LaunchDispatchFiberIfNeeded();
