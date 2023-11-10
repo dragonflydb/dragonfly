@@ -982,7 +982,7 @@ ShardId Transaction::GetUniqueShard() const {
 KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;
-  res.key_step = cid_->key_arg_step();
+  res.key_step = cid_->opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1;
   res.args = GetShardArgs(sid);
   DCHECK(!res.args.empty() || (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL));
 
@@ -1483,7 +1483,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     } else {
       key_index.end = last > 0 ? last : (int(args.size()) + last + 1);
     }
-    key_index.step = cid->key_arg_step();
+    key_index.step = cid->opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1;
 
     return key_index;
   }
