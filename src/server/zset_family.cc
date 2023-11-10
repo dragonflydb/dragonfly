@@ -21,6 +21,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/sorted_map.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/error.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -2279,6 +2280,55 @@ void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 3)
+    return (*cntx)->SendError(WrongNumArgsError("ZRANDMEMBER"));
+
+  ZRangeSpec range_spec;
+  range_spec.interval = IndexInterval(0, -1);
+
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  bool is_count = parser.HasNext();
+  int count = is_count ? parser.Next().Int<int>() : 1;
+
+  range_spec.params.with_scores = static_cast<bool>(parser.Check("WITHSCORES").IgnoreCase());
+
+  if (parser.HasNext())
+    return (*cntx)->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
+
+  bool sign = count < 0;
+  range_spec.params.limit = std::abs(count);
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRange(range_spec, t->GetOpArgs(shard), key);
+  };
+
+  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(cb);
+
+  if (result) {
+    if (sign && !result->empty()) {
+      for (auto i = result->size(); i < range_spec.params.limit; ++i) {
+        // we can return duplicate elements, so first is OK
+        result->push_back(result->front());
+      }
+    }
+    (*cntx)->SendScoredArray(result.value(), range_spec.params.with_scores);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    if (is_count) {
+      (*cntx)->SendScoredArray(ScoredArray(), range_spec.params.with_scores);
+    } else {
+      (*cntx)->SendNull();
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
 void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view member = ArgS(args, 1);
@@ -3022,6 +3072,7 @@ constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZPopMin = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZRem = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZRange = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZRandMember = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZRank = READ | SORTEDSET | FAST;
 constexpr uint32_t kZRangeByLex = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZRangeByScore = READ | SORTEDSET | SLOW;
@@ -3079,6 +3130,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1, acl::kZPopMin}.HFUNC(ZPopMin)
       << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1, acl::kZRem}.HFUNC(ZRem)
       << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1, acl::kZRange}.HFUNC(ZRange)
+      << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1, 1, acl::kZRandMember}.HFUNC(ZRandMember)
       << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1, acl::kZRange}.HFUNC(ZRank)
       << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, 1, acl::kZRangeByLex}.HFUNC(ZRangeByLex)
       << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1, acl::kZRangeByScore}.HFUNC(ZRangeByScore)

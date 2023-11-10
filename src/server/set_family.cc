@@ -15,6 +15,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/string_set.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -1344,6 +1345,66 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void SRandMember(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  bool is_count = parser.HasNext();
+  int count = is_count ? parser.Next().Int<int>() : 1;
+
+  if (parser.HasNext())
+    return (*cntx)->SendError(WrongNumArgsError("SRANDMEMBER"));
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
+
+  const unsigned ucount = std::abs(count);
+
+  const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
+    StringVec result;
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    if (!find_res) {
+      return find_res.status();
+    }
+
+    PrimeValue& pv = find_res.value()->second;
+    if (IsDenseEncoding(pv)) {
+      StringSet* ss = (StringSet*)pv.RObjPtr();
+      ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
+    }
+
+    container_utils::IterateSet(find_res.value()->second,
+                                [&result, ucount](container_utils::ContainerEntry ce) {
+                                  if (result.size() < ucount) {
+                                    result.push_back(ce.ToString());
+                                    return true;
+                                  }
+                                  return false;
+                                });
+    return result;
+  };
+
+  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
+
+  if (result) {
+    if (count < 0 && !result->empty()) {
+      for (auto i = result->size(); i < ucount; ++i) {
+        // we can return duplicate elements, so first is OK
+        result->push_back(result->front());
+      }
+    }
+    (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    if (is_count) {
+      (*cntx)->SendStringArr(StringVec(), RedisReplyBuilder::SET);
+    } else {
+      (*cntx)->SendNull();
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
 void SInter(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
@@ -1628,6 +1689,7 @@ constexpr uint32_t kSMove = WRITE | SET | FAST;
 constexpr uint32_t kSRem = WRITE | SET | FAST;
 constexpr uint32_t kSCard = READ | SET | FAST;
 constexpr uint32_t kSPop = WRITE | SET | SLOW;
+constexpr uint32_t kSRandMember = READ | SET | SLOW;
 constexpr uint32_t kSUnion = READ | SET | SLOW;
 constexpr uint32_t kSUnionStore = WRITE | SET | SLOW;
 constexpr uint32_t kSScan = READ | SET | SLOW;
@@ -1656,6 +1718,7 @@ void SetFamily::Register(CommandRegistry* registry) {
       << CI{"SREM", CO::WRITE | CO::FAST, -3, 1, 1, 1, acl::kSRem}.HFUNC(SRem)
       << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kSCard}.HFUNC(SCard)
       << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1, acl::kSPop}.HFUNC(SPop)
+      << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1, 1, acl::kSRandMember}.HFUNC(SRandMember)
       << CI{"SUNION", CO::READONLY, -2, 1, -1, 1, acl::kSUnion}.HFUNC(SUnion)
       << CI{"SUNIONSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1, 1,
             acl::kSUnionStore}

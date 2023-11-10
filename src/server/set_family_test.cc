@@ -157,6 +157,39 @@ TEST_F(SetFamilyTest, SPop) {
   EXPECT_THAT(resp.GetVec(), IsSubsetOf({"a", "b", "c"}));
 }
 
+TEST_F(SetFamilyTest, SRandMember) {
+  auto resp = Run({"sadd", "x", "1", "2", "3"});
+  resp = Run({"SRandMember", "x"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, "1");
+
+  resp = Run({"SRandMember", "x", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("1", "2"));
+
+  resp = Run({"SRandMember", "x", "0"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  resp = Run({"SRandMember", "k"});
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"SRandMember", "k", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  resp = Run({"SRandMember", "x", "-5"});
+  ASSERT_THAT(resp, ArrLen(5));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "2", "3", "1", "1"));
+
+  resp = Run({"SRandMember", "x", "5"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("1", "2", "3"));
+
+  resp = Run({"SRandMember", "x", "5", "3"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
 TEST_F(SetFamilyTest, SMIsMember) {
   Run({"sadd", "foo", "a"});
   Run({"sadd", "foo", "b"});

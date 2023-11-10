@@ -76,6 +76,56 @@ TEST_F(ZSetFamilyTest, ZRem) {
   EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), "a");
 }
 
+TEST_F(ZSetFamilyTest, ZRandMember) {
+  auto resp = Run({
+      "zadd",
+      "x",
+      "1",
+      "a",
+      "2",
+      "b",
+      "3",
+      "c",
+  });
+  resp = Run({"ZRandMember", "x"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, "a");
+
+  resp = Run({"ZRandMember", "x", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b"));
+
+  resp = Run({"ZRandMember", "x", "0"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  resp = Run({"ZRandMember", "k"});
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"ZRandMember", "k", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_EQ(resp.GetVec().size(), 0);
+
+  resp = Run({"ZRandMember", "x", "-5"});
+  ASSERT_THAT(resp, ArrLen(5));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b", "c", "a", "a"));
+
+  resp = Run({"ZRandMember", "x", "5"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b", "c"));
+
+  resp = Run({"ZRandMember", "x", "-5", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(10));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3", "a", "1", "a", "1"));
+
+  resp = Run({"ZRandMember", "x", "3", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(6));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "1", "b", "2", "c", "3"));
+
+  resp = Run({"ZRandMember", "x", "3", "WITHSCORES", "test"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+}
+
 TEST_F(ZSetFamilyTest, ZMScore) {
   Run({"zadd", "zms", "3.14", "a"});
   Run({"zadd", "zms", "42", "another"});
