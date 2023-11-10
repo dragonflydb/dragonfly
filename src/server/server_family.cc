@@ -367,21 +367,6 @@ bool IsReplicatingNoOne(string_view host, string_view port) {
   return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
 }
 
-void RebuildAllSearchIndices(Service* service) {
-  const CommandId* cmd = service->FindCmd("FT.CREATE");
-  if (cmd == nullptr) {
-    // On MacOS we don't include search so FT.CREATE won't exist.
-    return;
-  }
-
-  boost::intrusive_ptr<Transaction> trans{new Transaction{cmd}};
-  trans->InitByArgs(0, {});
-  trans->ScheduleSingleHop([](auto* trans, auto* es) {
-    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
-    return OpStatus::OK;
-  });
-}
-
 template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
 }

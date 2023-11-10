@@ -236,6 +236,8 @@ class RdbLoader : protected RdbLoaderBase {
   void FinishLoad(absl::Time start_time, size_t* keys_loaded);
 
   void FlushShardAsync(ShardId sid);
+  void FlushAllShards();
+
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
   void LoadScriptFromAux(std::string&& value);

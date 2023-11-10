@@ -1155,8 +1155,6 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
   }
 #endif
 
-  VLOG(0) << "GetGlobData collected: " << search_indices.size() << " indices";
-
   return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices)};
 }
 

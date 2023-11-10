@@ -1927,8 +1927,11 @@ error_code RdbLoader::Load(io::Source* src) {
       VLOG(1) << "Read RDB_OPCODE_FULLSYNC_END";
       RETURN_ON_ERR(EnsureRead(8));
       mem_buf_->ConsumeInput(8);  // ignore 8 bytes
-      if (full_sync_cut_cb)
+
+      if (full_sync_cut_cb) {
+        FlushAllShards();  // Flush as the handler awakes post load handlers
         full_sync_cut_cb();
+      }
       continue;
     }
 
@@ -1999,10 +2002,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_JOURNAL_BLOB) {
-      // We should flush all changes on the current db before applying incremental changes.
-      for (unsigned i = 0; i < shard_set->size(); ++i) {
-        FlushShardAsync(i);
-      }
+      FlushAllShards();  // Always flush before applying incremental on top
       RETURN_ON_ERR(HandleJournalBlob(service_));
       continue;
     }
@@ -2272,6 +2272,11 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   shard_set->Add(sid, std::move(cb));
 }
 
+void RdbLoader::FlushAllShards() {
+  for (ShardId i = 0; i < shard_set->size(); i++)
+    FlushShardAsync(i);
+}
+
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv);
   std::visit(visitor, opaque.obj);
@@ -2383,6 +2388,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::CapturingReplyBuilder crb{};
   ConnectionContext cntx{nullptr, nullptr, &crb};
+  cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
 
