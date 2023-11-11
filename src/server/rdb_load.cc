@@ -217,6 +217,10 @@ void RunOnceAsCommand(Service* service, const CommandId* cid,
                       std::function<void(Transaction*, EngineShard*)> func) {
   DCHECK(cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL));
 
+  if (!ProactorBase::IsProactorThread())
+    return shard_set->pool()->at(0)->Await(
+        [service, cid, func]() { return RunOnceAsCommand(service, cid, func); });
+
   boost::intrusive_ptr<Transaction> trans{new Transaction{cid}};
   trans->InitByArgs(0, {});
   trans->ScheduleSingleHop([func](auto* trans, auto* es) {
