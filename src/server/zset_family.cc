@@ -1058,15 +1058,14 @@ struct SetOpArgs {
   bool with_scores = false;
 };
 
-void HandleOpStatus(ConnectionContext* cntx, OpResult<SetOpArgs> op_args_res) {
-  switch (op_args_res.status()) {
+void HandleOpStatus(ConnectionContext* cntx, OpStatus op_status) {
+  switch (op_status) {
     case OpStatus::INVALID_FLOAT:
       return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
     default:
-      return (*cntx)->SendError(op_args_res.status());
+      return (*cntx)->SendError(op_status);
   }
 }
-
 
 OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
   if (agg == "SUM") {
@@ -1171,7 +1170,7 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
 void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) {
   OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, store);
   if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res);
+    return HandleOpStatus(cntx, op_args_res.status());
   }
   const auto& op_args = *op_args_res;
   if (op_args.num_keys == 0) {
@@ -1974,7 +1973,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, true);
 
   if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res);
+    return HandleOpStatus(cntx, op_args_res.status());
   }
   const auto& op_args = *op_args_res;
   if (op_args.num_keys == 0) {
@@ -2034,7 +2033,7 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, false);
 
   if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res);
+    return HandleOpStatus(cntx, op_args_res.status());
   }
   const auto& op_args = *op_args_res;
   if (op_args.num_keys == 0) {
@@ -2075,7 +2074,6 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
 
   (*cntx)->SendScoredArray(scoredArray, op_args_res->with_scores);
 }
-
 
 void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
   unsigned num_keys;
