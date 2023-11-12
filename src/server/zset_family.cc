@@ -2030,6 +2030,59 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendLong(smvec.size());
 }
 
+void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
+  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, false);
+
+  if (!op_args_res) {
+    switch (op_args_res.status()) {
+      case OpStatus::INVALID_FLOAT:
+        return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
+      default:
+        return (*cntx)->SendError(op_args_res.status());
+    }
+  }
+  const auto& op_args = *op_args_res;
+  if (op_args.num_keys == 0) {
+    return SendAtLeastOneKeyError(cntx);
+  }
+
+  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpInter(shard, t, "", op_args.agg_type, op_args.weights, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->Schedule();
+  cntx->transaction->Execute(std::move(cb), false);
+
+  ScoredMap result;
+  for (auto& op_res : maps) {
+    if (op_res.status() == OpStatus::SKIPPED)
+      continue;
+
+    if (!op_res)
+      return (*cntx)->SendError(op_res.status());
+
+    if (result.empty()) {
+      result.swap(op_res.value());
+    } else {
+      InterScoredMap(&result, &op_res.value(), op_args.agg_type);
+    }
+
+    if (result.empty())
+      break;
+  }
+
+  std::vector<std::pair<std::string, double>> scoredArray;
+  for (const auto& elem : result) {
+    scoredArray.emplace_back(elem.first, elem.second);
+  }
+
+  (*cntx)->SendScoredArray(scoredArray, op_args_res->with_scores);
+}
+
+
 void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
   unsigned num_keys;
   if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys)) {
@@ -3066,6 +3119,7 @@ constexpr uint32_t kZCount = READ | SORTEDSET | FAST;
 constexpr uint32_t kZDiff = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZIncrBy = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZInterStore = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kZInter = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZInterCard = WRITE | SORTEDSET | SLOW;
 constexpr uint32_t kZLexCount = READ | SORTEDSET | FAST;
 constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
@@ -3112,6 +3166,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZDiff}.HFUNC(ZDiff)
       << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, acl::kZIncrBy}.HFUNC(ZIncrBy)
       << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, acl::kZInterStore}.HFUNC(ZInterStore)
+      << CI{"ZINTER", kStoreMask, -3, 2, 2, acl::kZInter}.HFUNC(ZInter)
       << CI{"ZINTERCARD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2,
             acl::kZInterCard}
              .HFUNC(ZInterCard)
