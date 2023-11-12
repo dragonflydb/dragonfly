@@ -215,6 +215,7 @@ class Connection : public util::Connection {
     dfly::EventCount ec;
     std::atomic_size_t bytes = 0;
     size_t limit = 0;
+    size_t pipeline_cache_limit = 0;
   };
 
  private:
@@ -239,6 +240,9 @@ class Connection : public util::Connection {
 
   void SendAsync(MessageHandle msg);
 
+  // Updates memory stats and pooling, must be called for all used messages
+  void RecycleMessage(MessageHandle msg);
+
   // Create new pipeline request, re-use from pool when possible.
   PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
 
@@ -257,6 +261,9 @@ class Connection : public util::Connection {
   bool ShouldEndDispatchFiber(const MessageHandle& msg);
 
   void LaunchDispatchFiberIfNeeded();
+
+  // Squashes pipelined commands from the dispatch queue to spread load over all threads
+  void SquashPipeline(facade::SinkReplyBuilder*);
 
  private:
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
