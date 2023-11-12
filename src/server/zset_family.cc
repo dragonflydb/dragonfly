@@ -2058,14 +2058,14 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
     if (!op_res)
       return (*cntx)->SendError(op_res.status());
 
+    if (op_res->empty())
+      break;
+
     if (result.empty()) {
       result.swap(op_res.value());
     } else {
       InterScoredMap(&result, &op_res.value(), op_args.agg_type);
     }
-
-    if (result.empty())
-      break;
   }
 
   std::vector<std::pair<std::string, double>> scoredArray;
