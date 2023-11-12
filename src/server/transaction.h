@@ -320,6 +320,9 @@ class Transaction {
                          bool multi_commands, bool allow_await) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
+  // Utility to run a single hop on a no-key command
+  static void RunOnceAsCommand(const CommandId* cid, RunnableType cb);
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {

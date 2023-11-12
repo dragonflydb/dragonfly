@@ -213,22 +213,6 @@ bool resizeStringSet(robj* set, size_t size, bool use_set2) {
   }
 }
 
-void RunOnceAsCommand(Service* service, const CommandId* cid,
-                      std::function<void(Transaction*, EngineShard*)> func) {
-  DCHECK(cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL));
-
-  if (!ProactorBase::IsProactorThread())
-    return shard_set->pool()->at(0)->Await(
-        [service, cid, func]() { return RunOnceAsCommand(service, cid, func); });
-
-  boost::intrusive_ptr<Transaction> trans{new Transaction{cid}};
-  trans->InitByArgs(0, {});
-  trans->ScheduleSingleHop([func](auto* trans, auto* es) {
-    func(trans, es);
-    return OpStatus::OK;
-  });
-}
-
 }  // namespace
 
 class DecompressImpl {
@@ -2431,9 +2415,10 @@ void RdbLoader::PerformPreLoad(Service* service) {
   if (cmd == nullptr)
     return;  // MacOS
 
-  RunOnceAsCommand(service, cmd, [](auto* trans, auto* es) {
+  Transaction::RunOnceAsCommand(cmd, [](auto* trans, auto* es) {
     for (const auto& name : es->search_indices()->GetIndexNames())
       es->search_indices()->DropIndex(name);
+    return OpStatus::OK;
   });
 }
 
@@ -2443,8 +2428,9 @@ void RdbLoader::PerformPostLoad(Service* service) {
     return;
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
-  RunOnceAsCommand(service, cmd, [](auto* trans, auto* es) {
+  Transaction::RunOnceAsCommand(cmd, [](auto* trans, auto* es) {
     es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
+    return OpStatus::OK;
   });
 }
 

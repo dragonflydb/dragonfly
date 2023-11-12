@@ -1409,6 +1409,22 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {}, false);
 }
 
+void Transaction::RunOnceAsCommand(const CommandId* cid, RunnableType cb) {
+  if (!ProactorBase::IsProactorThread())
+    return shard_set->pool()->at(0)->Await([cid, cb] { return RunOnceAsCommand(cid, cb); });
+
+  DCHECK(cid);
+  DCHECK(cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL));
+  DCHECK(ProactorBase::IsProactorThread());
+
+  boost::intrusive_ptr<Transaction> trans{new Transaction{cid}};
+  trans->InitByArgs(0, {});
+  trans->ScheduleSingleHop([cb](auto* trans, auto* es) {
+    cb(trans, es);
+    return OpStatus::OK;
+  });
+}
+
 void Transaction::CancelBlocking() {
   if (coordinator_state_ & COORD_BLOCKED) {
     coordinator_state_ |= COORD_CANCELLED;
