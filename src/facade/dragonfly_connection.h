@@ -187,6 +187,10 @@ class Connection : public util::Connection {
     return name_;
   }
 
+  base::IoBuf::MemoryUsage GetMemoryUsage() const {
+    return io_buf_.GetMemoryUsage();
+  }
+
   ConnectionContext* cntx();
 
   // Requests that at some point, this connection will be migrated to `dest` thread.

@@ -178,6 +178,10 @@ class ServerFamily {
     return dfly_cmd_.get();
   }
 
+  const std::vector<facade::Listener*>& GetListeners() const {
+    return listeners_;
+  }
+
   bool HasReplica() const;
   std::optional<Replica::Info> GetReplicaInfo() const;
   std::string GetReplicaMasterId() const;
