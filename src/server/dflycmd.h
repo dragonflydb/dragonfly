@@ -38,9 +38,9 @@ struct FlowInfo {
 
   facade::Connection* conn;
 
-  Fiber full_sync_fb;               // Full sync fiber.
-  std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.
-  std::unique_ptr<JournalStreamer> streamer;
+  Fiber full_sync_fb;                         // Full sync fiber.
+  std::unique_ptr<RdbSaver> saver;            // Saver for full sync phase.
+  std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
 
   DflyVersion version;
