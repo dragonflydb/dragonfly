@@ -2050,11 +2050,10 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] = OpInter(shard, t, "", op_args.agg_type, op_args.weights, false);
-    return OpStatus::OK;
+    return maps[shard->shard_id()];
   };
 
-  cntx->transaction->Schedule();
-  cntx->transaction->Execute(std::move(cb), false);
+  cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   ScoredMap result;
   for (auto& op_res : maps) {
