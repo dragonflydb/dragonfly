@@ -1152,6 +1152,8 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK(owner());
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
+  // We still deliver control messages even to closing connections, as messages
+  // like checkpoints always expect to be handled.
   if (cc_->conn_closing && !msg.IsIntrusive())
     return;
 

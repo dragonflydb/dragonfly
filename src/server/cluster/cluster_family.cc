@@ -506,10 +506,6 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
   DCHECK(tl_cluster_config != nullptr);
 
-  bool success = server_family_->AwaitCurrentDispatches(absl::Seconds(1), cntx->conn());
-  // TODO... and what to do?
-  (void)success;
-
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = GetDeletedSlots(is_first_config, before, after);
