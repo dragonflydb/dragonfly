@@ -107,9 +107,9 @@ class Connection : public util::Connection {
   // Migration request message, the dispatch fiber stops to give way for thread migration.
   struct MigrationRequestMessage {};
 
-  // Checkpoint message, decrements counter when processed.
+  // Checkpoint message, used to track when the connection finishes executing the current command.
   struct CheckpointMessage {
-    util::fb2::BlockingCounter bc;
+    util::fb2::BlockingCounter bc;  // Decremented counter when processed
   };
 
   struct MessageDeleter {
