@@ -2069,12 +2069,12 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  std::vector<std::pair<std::string, double>> scoredArray;
+  std::vector<std::pair<std::string, double>> scored_array;
   for (const auto& elem : result) {
-    scoredArray.emplace_back(elem.first, elem.second);
+    scored_array.emplace_back(elem.first, elem.second);
   }
 
-  (*cntx)->SendScoredArray(scoredArray, op_args_res->with_scores);
+  (*cntx)->SendScoredArray(scored_array, op_args_res->with_scores);
 }
 
 void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
