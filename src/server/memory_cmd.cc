@@ -195,66 +195,59 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
 }
 
 void PushMemoryUsageStats(const base::IoBuf::MemoryUsage& mem, string_view prefix, size_t total,
-                          vector<string>* stats) {
-  stats->push_back(absl::StrCat(prefix, ".total_bytes"));
-  stats->push_back(absl::StrCat(total));
-  stats->push_back(absl::StrCat(prefix, ".consumed_bytes"));
-  stats->push_back(absl::StrCat(mem.consumed));
-  stats->push_back(absl::StrCat(prefix, ".pending_input_bytes"));
-  stats->push_back(absl::StrCat(mem.input_length));
-  stats->push_back(absl::StrCat(prefix, ".pending_output_bytes"));
-  stats->push_back(absl::StrCat(mem.append_length));
+                          vector<pair<string, size_t>>* stats) {
+  stats->push_back({absl::StrCat(prefix, ".total_bytes"), total});
+  stats->push_back({absl::StrCat(prefix, ".consumed_bytes"), mem.consumed});
+  stats->push_back({absl::StrCat(prefix, ".pending_input_bytes"), mem.input_length});
+  stats->push_back({absl::StrCat(prefix, ".pending_output_bytes"), mem.append_length});
 }
 
 }  // namespace
 
 void MemoryCmd::Stats() {
-  vector<string> stats;
-  stats.reserve(50);
+  vector<pair<string, size_t>> stats;
+  stats.reserve(25);
   auto server_metrics = owner_->GetMetrics();
 
   // RSS
-  stats.push_back("rss_bytes");
-  stats.push_back(absl::StrCat(rss_mem_current.load()));
-  stats.push_back("rss_peak_bytes");
-  stats.push_back(absl::StrCat(rss_mem_peak.load()));
+  stats.push_back({"rss_bytes", rss_mem_current.load(memory_order_relaxed)});
+  stats.push_back({"rss_peak_bytes", rss_mem_peak.load(memory_order_relaxed)});
 
   // Used by DbShards and DashTable
-  stats.push_back("data_bytes");
-  stats.push_back(absl::StrCat(used_mem_current.load()));
-  stats.push_back("data_peak_bytes");
-  stats.push_back(absl::StrCat(used_mem_peak.load()));
+  stats.push_back({"data_bytes", used_mem_current.load(memory_order_relaxed)});
+  stats.push_back({"data_peak_bytes", used_mem_peak.load(memory_order_relaxed)});
 
   ConnectionMemoryUsage connection_memory = GetConnectionMemoryUsage(owner_);
 
   // Connection stats, excluding replication connections
-  stats.push_back("connections.count");
-  stats.push_back(absl::StrCat(connection_memory.connection_count));
+  stats.push_back({"connections.count", connection_memory.connection_count});
   PushMemoryUsageStats(
       connection_memory.connections_memory, "connections",
       connection_memory.connections_memory.GetTotalSize() + connection_memory.pipelined_bytes,
       &stats);
-  stats.push_back("connections.pipeline_bytes");
-  stats.push_back(absl::StrCat(connection_memory.pipelined_bytes));
+  stats.push_back({"connections.pipeline_bytes", connection_memory.pipelined_bytes});
 
   // Replication connection stats
-  stats.push_back("replication.connections_count");
-  stats.push_back(absl::StrCat(connection_memory.replication_connection_count));
+  stats.push_back(
+      {"replication.connections_count", connection_memory.replication_connection_count});
   PushMemoryUsageStats(connection_memory.replication_memory, "replication",
                        connection_memory.replication_memory.GetTotalSize(), &stats);
 
   Mutex mu;
-  size_t serialization_memory ABSL_GUARDED_BY(mu);
+  size_t serialization_memory ABSL_GUARDED_BY(mu) = 0;
   shard_set->pool()->AwaitFiberOnAll([&](auto*) {
     lock_guard lock(mu);
     serialization_memory += SliceSnapshot::GetThreadLocalMemoryUsage();
   });
 
   // Serialization stats, including both replication-related serialization and saving to RDB files.
-  stats.push_back("serialization");
-  stats.push_back(absl::StrCat(serialization_memory));
+  stats.push_back({"serialization", serialization_memory});
 
-  return (*cntx_)->SendSimpleStrArr(stats);
+  (*cntx_)->StartCollection(stats.size(), RedisReplyBuilder::MAP);
+  for (const auto& [k, v] : stats) {
+    (*cntx_)->SendBulkString(k);
+    (*cntx_)->SendLong(v);
+  }
 }
 
 void MemoryCmd::Usage(std::string_view key) {
