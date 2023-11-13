@@ -1125,7 +1125,6 @@ take_over_cases = [
 async def test_take_over_counters(df_local_factory, master_threads, replica_threads):
     master = df_local_factory.create(
         proactor_threads=master_threads,
-        #  vmodule="journal_slice=2,dflycmd=2,main_service=1",
         logtostderr=True,
     )
     replica1 = df_local_factory.create(proactor_threads=replica_threads)
@@ -1166,7 +1165,7 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
         assert time.time() - start < 10
 
     async def delayed_takeover():
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.3)
         await c1.execute_command(f"REPLTAKEOVER 5")
 
     _, _, *results = await asyncio.gather(
