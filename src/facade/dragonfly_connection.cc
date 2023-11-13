@@ -289,6 +289,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   queue_backpressure_ = &tl_queue_backpressure_;
   if (queue_backpressure_->limit == 0) {
     queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
+    queue_backpressure_->pipeline_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   }
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
@@ -918,6 +919,39 @@ bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
   return false;
 }
 
+void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
+  DCHECK_EQ(dispatch_q_.size(), dispatch_q_cmds_count_);
+
+  vector<CmdArgList> squash_cmds;
+  vector<PipelineMessagePtr> squash_msgs;
+
+  squash_cmds.reserve(dispatch_q_.size());
+  squash_msgs.reserve(dispatch_q_.size());
+
+  while (!dispatch_q_.empty()) {
+    auto& msg = dispatch_q_.front();
+    CHECK(holds_alternative<PipelineMessagePtr>(msg.handle));
+
+    squash_msgs.push_back(std::move(std::get<PipelineMessagePtr>(msg.handle)));
+    squash_cmds.push_back(absl::MakeSpan(squash_msgs.back()->args));
+    dispatch_q_.pop_front();
+  }
+
+  cc_->async_dispatch = true;
+
+  service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
+
+  if (dispatch_q_.empty()) {  // Flush if no new messages appeared
+    builder->FlushBatch();
+    builder->SetBatchMode(false);  // in case the next dispatch is sync
+  }
+
+  cc_->async_dispatch = false;
+
+  for (auto& msg : squash_msgs)
+    RecycleMessage(MessageHandle{std::move(msg)});
+}
+
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
 // into the dispatch queue and DispatchFiber will run those commands asynchronously with
@@ -929,25 +963,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
 
-  uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
-
-  auto recycle = [this, request_cache_limit](MessageHandle msg) {
-    size_t used_mem = msg.UsedMemory();
-    queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
-
-    stats_->dispatch_queue_bytes -= used_mem;
-    stats_->dispatch_queue_entries--;
-
-    // Retain pipeline message in pool.
-    if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
-      dispatch_q_cmds_count_--;
-      if (stats_->pipeline_cmd_cache_bytes < request_cache_limit) {
-        stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
-        pipeline_req_pool_.push_back(move(*pipe));
-      }
-    }
-  };
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   while (!builder->GetError()) {
@@ -979,37 +995,14 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     bool threshold_reached = dispatch_q_cmds_count_ > squashing_threshold;
     bool are_all_plain_cmds = dispatch_q_cmds_count_ == dispatch_q_.size();
     if (squashing_enabled && threshold_reached && are_all_plain_cmds) {
-      vector<CmdArgList> args;
-      args.reserve(dispatch_q_.size());
-      for (auto& msg : dispatch_q_) {
-        CHECK(holds_alternative<PipelineMessagePtr>(msg.handle));
-        auto& pipe_msg = get<PipelineMessagePtr>(msg.handle);
-        args.push_back(absl::MakeSpan(pipe_msg->args));
-      }
-
-      cc_->async_dispatch = true;
-      service_->DispatchManyCommands(absl::MakeSpan(args), cc_.get());
-      cc_->async_dispatch = false;
-
-      // Flush strictly before the dispatch queue is cleared so that no sync dispatch can occur
-      if (dispatch_q_.size() == args.size()) {  // Flush if no new messages appeared
-        builder->FlushBatch();
-        builder->SetBatchMode(false);  // in case the next dispatch is sync
-      }
-
-      DCHECK(!cc_->sync_dispatch);
-      // Dispatch queue could have grown, so handle strictly as many as we executed
-      for (size_t i = 0; i < args.size(); i++) {
-        recycle(move(dispatch_q_.front()));
-        dispatch_q_.pop_front();
-      }
-
+      SquashPipeline(builder);
     } else {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
       if (ShouldEndDispatchFiber(msg)) {
-        recycle(move(msg));
+        RecycleMessage(std::move(msg));
+        DCHECK(dispatch_q_.empty());
         return;
       }
 
@@ -1017,7 +1010,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       std::visit(dispatch_op, msg.handle);
       cc_->async_dispatch = false;
 
-      recycle(move(msg));
+      RecycleMessage(std::move(msg));
     }
 
     queue_backpressure_->ec.notify();
@@ -1027,7 +1020,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   // Recycle messages even from disconnecting client to keep properly track of memory stats
   for (auto& msg : dispatch_q_) {
-    recycle(std::move(msg));
+    RecycleMessage(std::move(msg));
   }
   dispatch_q_.clear();
 }
@@ -1168,6 +1161,23 @@ void Connection::SendAsync(MessageHandle msg) {
   // ack is sent before all other messages.
   if (dispatch_q_.size() == 1 && !cc_->sync_dispatch) {
     evc_.notify();
+  }
+}
+
+void Connection::RecycleMessage(MessageHandle msg) {
+  size_t used_mem = msg.UsedMemory();
+  queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
+
+  stats_->dispatch_queue_bytes -= used_mem;
+  stats_->dispatch_queue_entries--;
+
+  // Retain pipeline message in pool.
+  if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
+    dispatch_q_cmds_count_--;
+    if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
+      stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
+      pipeline_req_pool_.push_back(move(*pipe));
+    }
   }
 }
 
