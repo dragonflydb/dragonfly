@@ -11,7 +11,6 @@
 #include "base/logging.h"
 #include "server/main_service.h"
 #include "server/script_mgr.h"
-#include "server/search/doc_index.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
@@ -236,7 +235,7 @@ void SaveStagesController::SaveDfsSingle(EngineShard* shard) {
   auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
 
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  auto glob_data = shard == nullptr ? GetGlobalData() : RdbSaver::GlobalData{};
+  auto glob_data = shard == nullptr ? RdbSaver::GetGlobalData(service_) : RdbSaver::GlobalData{};
 
   if (auto err = snapshot->Start(mode, filename, glob_data); err) {
     shared_err_ = err;
@@ -258,7 +257,7 @@ void SaveStagesController::SaveRdb() {
   if (!is_cloud_)
     filename += ".tmp";
 
-  if (auto err = snapshot->Start(SaveMode::RDB, filename, GetGlobalData()); err) {
+  if (auto err = snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_)); err) {
     snapshot.reset();
     return;
   }
@@ -373,32 +372,6 @@ void SaveStagesController::RunStage(void (SaveStagesController::*cb)(unsigned)) 
   } else {
     (this->*cb)(0);
   }
-}
-
-RdbSaver::GlobalData SaveStagesController::GetGlobalData() const {
-  StringVec script_bodies, search_indices;
-
-  {
-    auto scripts = service_->script_mgr()->GetAll();
-    script_bodies.reserve(scripts.size());
-    for (auto& [sha, data] : scripts)
-      script_bodies.push_back(move(data.body));
-  }
-
-#ifndef __APPLE__
-  {
-    shard_set->Await(0, [&] {
-      auto* indices = EngineShard::tlocal()->search_indices();
-      for (auto index_name : indices->GetIndexNames()) {
-        auto index_info = indices->GetIndex(index_name)->GetInfo();
-        search_indices.emplace_back(
-            absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
-      }
-    });
-  }
-#endif
-
-  return RdbSaver::GlobalData{move(script_bodies), move(search_indices)};
 }
 
 }  // namespace detail

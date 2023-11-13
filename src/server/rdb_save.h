@@ -28,6 +28,7 @@ namespace dfly {
 uint8_t RdbObjectType(unsigned type, unsigned encoding);
 
 class EngineShard;
+class Service;
 
 class AlignedBuffer : public ::io::Sink {
  public:
@@ -110,6 +111,9 @@ class RdbSaver {
 
   // Get total size of all rdb serializer buffers and items currently placed in channel
   size_t GetTotalBuffersSize() const;
+
+  // Fetch global data to be serialized in summary part of a snapshot / full sync.
+  static GlobalData GetGlobalData(const Service* service);
 
  private:
   class Impl;

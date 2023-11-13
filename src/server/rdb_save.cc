@@ -32,7 +32,9 @@ extern "C" {
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/main_service.h"
 #include "server/rdb_extensions.h"
+#include "server/search/doc_index.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
@@ -1130,6 +1132,32 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
   return total_bytes;
 }
 
+RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
+  StringVec script_bodies, search_indices;
+
+  {
+    auto scripts = service->script_mgr()->GetAll();
+    script_bodies.reserve(scripts.size());
+    for (auto& [sha, data] : scripts)
+      script_bodies.push_back(move(data.body));
+  }
+
+#ifndef __APPLE__
+  {
+    shard_set->Await(0, [&] {
+      auto* indices = EngineShard::tlocal()->search_indices();
+      for (auto index_name : indices->GetIndexNames()) {
+        auto index_info = indices->GetIndex(index_name)->GetInfo();
+        search_indices.emplace_back(
+            absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
+      }
+    });
+  }
+#endif
+
+  return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices)};
+}
+
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
   for (auto& ptr : shard_snapshots_) {
     const RdbTypeFreqMap& src_map = ptr->freq_map();
@@ -1265,7 +1293,7 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     if (!glob_state.search_indices.empty())
       LOG(WARNING) << "Dragonfly search index data is incompatible with the RDB format";
   } else {
-    // Search index definitions are not tied to shards  and are saved in the summary file
+    // Search index definitions are not tied to shards and are saved in the summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
     for (const string& s : glob_state.search_indices)
       RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));

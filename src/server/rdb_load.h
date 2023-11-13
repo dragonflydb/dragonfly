@@ -200,6 +200,13 @@ class RdbLoader : protected RdbLoaderBase {
     full_sync_cut_cb = std::move(cb);
   }
 
+  // Perform pre load procedures after transitioning into the global LOADING state.
+  static void PerformPreLoad(Service* service);
+
+  // Performs post load procedures while still remaining in global LOADING state.
+  // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
+  static void PerformPostLoad(Service* service);
+
  private:
   struct Item {
     std::string key;
@@ -229,9 +236,14 @@ class RdbLoader : protected RdbLoaderBase {
   void FinishLoad(absl::Time start_time, size_t* keys_loaded);
 
   void FlushShardAsync(ShardId sid);
+  void FlushAllShards();
+
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
   void LoadScriptFromAux(std::string&& value);
+
+  // Load index definition from RESP string describing it in FT.CREATE format,
+  // issues an FT.CREATE call, but does not start indexing
   void LoadSearchIndexDefFromAux(std::string&& value);
 
  private:

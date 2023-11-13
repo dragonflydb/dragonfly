@@ -367,21 +367,6 @@ bool IsReplicatingNoOne(string_view host, string_view port) {
   return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
 }
 
-void RebuildAllSearchIndices(Service* service) {
-  const CommandId* cmd = service->FindCmd("FT.CREATE");
-  if (cmd == nullptr) {
-    // On MacOS we don't include search so FT.CREATE won't exist.
-    return;
-  }
-
-  boost::intrusive_ptr<Transaction> trans{new Transaction{cmd}};
-  trans->InitByArgs(0, {});
-  trans->ScheduleSingleHop([](auto* trans, auto* es) {
-    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
-    return OpStatus::OK;
-  });
-}
-
 template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
 }
@@ -693,6 +678,8 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     return {};
   }
 
+  RdbLoader::PerformPreLoad(&service_);
+
   auto& pool = service_.proactor_pool();
 
   vector<Fiber> load_fibers;
@@ -729,11 +716,14 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
+
     if (aggregated_result->first_error) {
       LOG(ERROR) << "Rdb load failed. " << (*aggregated_result->first_error).message();
       exit(1);
     }
-    RebuildAllSearchIndices(&service_);
+
+    RdbLoader::PerformPostLoad(&service_);
+
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     ec_promise.set_value(*(aggregated_result->first_error));

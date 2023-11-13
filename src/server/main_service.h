@@ -113,6 +113,10 @@ class Service : public facade::ServiceInterface {
     return server_family_.script_mgr();
   }
 
+  const ScriptMgr* script_mgr() const {
+    return server_family_.script_mgr();
+  }
+
   ServerFamily& server_family() {
     return server_family_;
   }
