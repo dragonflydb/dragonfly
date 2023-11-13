@@ -136,8 +136,8 @@ void ServerState::AwaitPauseState(bool is_write) {
 }
 
 void ServerState::AwaitOnPauseDispatch() {
-  puase_dispatch_ec_.await([this]() {
-    if (puase_dispatch_) {
+  pause_dispatch_ec_.await([this]() {
+    if (pause_dispatch_) {
       return false;
     }
     return true;
@@ -145,9 +145,9 @@ void ServerState::AwaitOnPauseDispatch() {
 }
 
 void ServerState::SetPauseDispatch(bool pause) {
-  puase_dispatch_ = pause;
-  if (!puase_dispatch_) {
-    puase_dispatch_ec_.notifyAll();
+  pause_dispatch_ = pause;
+  if (!pause_dispatch_) {
+    pause_dispatch_ec_.notifyAll();
   }
 }
 

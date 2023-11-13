@@ -259,8 +259,8 @@ class ServerState {  // public struct - to allow initialization.
   // notified when the break is over.
   int client_pauses_[2] = {};
   EventCount client_pause_ec_;
-  bool puase_dispatch_ = false;
-  EventCount puase_dispatch_ec_;
+  bool pause_dispatch_ = false;
+  EventCount pause_dispatch_ec_;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;
