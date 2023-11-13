@@ -1,6 +1,8 @@
 import pytest
 import pymemcache
 from . import dfly_args
+from .instance import DflyInstance
+import socket
 
 
 @dfly_args({"memcached_port": 11211})
@@ -33,3 +35,17 @@ def test_mixed_reply(memcached_connection):
     memcached_connection.add(b"key", b"final", noreply=True)
 
     assert memcached_connection.get(b"key") == b"data"
+
+
+@dfly_args({"memcached_port": 11211})
+def test_length_in_set_command(df_server: DflyInstance):
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(("127.0.0.1", 11211))
+
+    command = b"set foo 0 0 4\r\nother\r\n"
+    client.sendall(command)
+    response = client.recv(256)
+
+    client.close()
+
+    assert response == b"CLIENT_ERROR bad data chunk\r\n"

@@ -726,12 +726,11 @@ auto Connection::ParseMemcache() -> ParserStatus {
 
     auto parse_value = [](std::string_view str, auto consumed,
                           auto bytes_len) -> std::optional<std::string_view> {
-      std::string_view value = str.substr(consumed, bytes_len);
-      auto protocol_value = str.substr(consumed);
-      auto pos = protocol_value.find("\r\n");
-      DCHECK(pos != std::string::npos);
-      protocol_value = protocol_value.substr(0, pos);
-      return protocol_value.size() == value.size() ? value : std::optional<std::string_view>{};
+      std::string_view value = str.substr(consumed, bytes_len + 2);
+      if (value[bytes_len] == '\r' && value[bytes_len + 1] == '\n') {
+        return value.substr(0, bytes_len);
+      }
+      return {};
     };
 
     size_t total_len = consumed;
