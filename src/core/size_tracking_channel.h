@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "core/fibers.h"
 
 namespace dfly {
@@ -21,14 +23,14 @@ template <typename T, typename Queue = folly::ProducerConsumerQueue<T>> class Si
   // Here and below, we must accept a T instead of building it from variadic args, as we need to
   // know its size in case it is added.
   void Push(T t) noexcept {
-    size_ += t.size();
+    size_.fetch_add(t.size(), std::memory_order_relaxed);
     queue_.Push(std::move(t));
   }
 
   bool TryPush(T t) noexcept {
-    const size_t tmp_size = t.size();
+    const size_t size = t.size();
     if (queue_.TryPush(std::move(t))) {
-      size_ += tmp_size;
+      size_.fetch_add(size, std::memory_order_relaxed);
       return true;
     }
 
@@ -37,7 +39,7 @@ template <typename T, typename Queue = folly::ProducerConsumerQueue<T>> class Si
 
   bool Pop(T& dest) {
     if (queue_.Pop(dest)) {
-      size_ -= dest.size();
+      size_.fetch_sub(dest.size(), std::memory_order_relaxed);
       return true;
     }
 
@@ -50,7 +52,7 @@ template <typename T, typename Queue = folly::ProducerConsumerQueue<T>> class Si
 
   bool TryPop(T& dest) {
     if (queue_.TryPop(dest)) {
-      size_ -= dest.size();
+      size_.fetch_sub(dest.size(), std::memory_order_relaxed);
       return true;
     }
 
@@ -62,12 +64,12 @@ template <typename T, typename Queue = folly::ProducerConsumerQueue<T>> class Si
   }
 
   size_t GetSize() const {
-    return queue_.Capacity() * sizeof(T) + size_;
+    return queue_.Capacity() * sizeof(T) + size_.load(std::memory_order_relaxed);
   }
 
  private:
   SimpleChannel<T, Queue> queue_;
-  size_t size_ = 0;
+  std::atomic<size_t> size_ = 0;
 };
 
 }  // namespace dfly
