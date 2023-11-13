@@ -1132,7 +1132,7 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({std::move(msg)});
 }
 
-void Connection::AwaitCurrentDispatches(fb2::BlockingCounter bc) {
+void Connection::SendCheckpoint(fb2::BlockingCounter bc) {
   if (!IsCurrentlyDispatching())
     return;
 

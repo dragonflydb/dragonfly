@@ -151,7 +151,7 @@ class Connection : public util::Connection {
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
   // decrement it once finished.
-  void AwaitCurrentDispatches(util::fb2::BlockingCounter bc);
+  void SendCheckpoint(util::fb2::BlockingCounter bc);
 
   // Must be called before SendAsync to ensure the connection dispatch queue is not overfilled.
   // Blocks until free space is available.

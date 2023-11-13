@@ -239,7 +239,7 @@ bool Listener::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* 
   util::fb2::BlockingCounter bc{0};
   this->TraverseConnections([bc, issuer](unsigned thread_index, util::Connection* conn) {
     if (conn != issuer)
-      static_cast<Connection*>(conn)->AwaitCurrentDispatches(bc);
+      static_cast<Connection*>(conn)->SendCheckpoint(bc);
   });
 
   auto cancelled = make_shared<bool>(false);
