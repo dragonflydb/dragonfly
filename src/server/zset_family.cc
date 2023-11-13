@@ -2057,8 +2057,10 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
     if (!op_res)
       return (*cntx)->SendError(op_res.status());
 
-    if (op_res->empty())
+    if (op_res->empty()) {
+      result.clear();
       break;
+    }
 
     if (result.empty()) {
       result.swap(op_res.value());
