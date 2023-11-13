@@ -227,18 +227,11 @@ io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
   return io::Bytes(compr_buf_.data(), frame_size);
 }
 
-namespace {
-thread_local absl::flat_hash_set<RdbSerializer*> tl_rdb_serializers;
-}  // namespace
-
 RdbSerializer::RdbSerializer(CompressionMode compression_mode)
     : mem_buf_{4_KB}, tmp_buf_(nullptr), compression_mode_(compression_mode) {
-  tl_rdb_serializers.insert(this);
 }
 
 RdbSerializer::~RdbSerializer() {
-  tl_rdb_serializers.erase(this);
-
   VLOG(2) << "compression mode: " << uint32_t(compression_mode_);
   if (compression_stats_) {
     VLOG(2) << "compression not effective: " << compression_stats_->compression_no_effective;
@@ -246,14 +239,6 @@ RdbSerializer::~RdbSerializer() {
     VLOG(2) << "compression failed: " << compression_stats_->compression_failed;
     VLOG(2) << "compressed blobs:" << compression_stats_->compressed_blobs;
   }
-}
-
-IoBuf::MemoryUsage RdbSerializer::GetThreadLocalMemoryUsage() {
-  IoBuf::MemoryUsage mem;
-  for (RdbSerializer* serializer : tl_rdb_serializers) {
-    mem += serializer->mem_buf_.GetMemoryUsage();
-  }
-  return mem;
 }
 
 std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {

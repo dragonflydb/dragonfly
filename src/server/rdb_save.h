@@ -132,8 +132,6 @@ class RdbSerializer {
 
   ~RdbSerializer();
 
-  static base::IoBuf::MemoryUsage GetThreadLocalMemoryUsage();
-
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
 

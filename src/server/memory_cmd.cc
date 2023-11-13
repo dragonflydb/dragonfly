@@ -11,9 +11,9 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/engine_shard_set.h"
-#include "server/rdb_save.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/snapshot.h"
 
 using namespace std;
 using namespace facade;
@@ -244,15 +244,15 @@ void MemoryCmd::Stats() {
                        connection_memory.replication_memory.GetTotalSize(), &stats);
 
   Mutex mu;
-  base::IoBuf::MemoryUsage serialization_memory ABSL_GUARDED_BY(mu);
+  size_t serialization_memory ABSL_GUARDED_BY(mu);
   shard_set->pool()->AwaitFiberOnAll([&](auto*) {
     lock_guard lock(mu);
-    serialization_memory += RdbSerializer::GetThreadLocalMemoryUsage();
+    serialization_memory += SliceSnapshot::GetThreadLocalMemoryUsage();
   });
 
   // Serialization stats, including both replication-related serialization and saving to RDB files.
-  PushMemoryUsageStats(serialization_memory, "serialization", serialization_memory.GetTotalSize(),
-                       &stats);
+  stats.push_back("serialization");
+  stats.push_back(absl::StrCat(serialization_memory));
 
   return (*cntx_)->SendSimpleStrArr(stats);
 }

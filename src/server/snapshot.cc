@@ -25,12 +25,26 @@ using namespace std;
 using namespace util;
 using namespace chrono_literals;
 
+namespace {
+thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
+}  // namespace
+
 SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode)
     : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
   db_array_ = slice->databases();
+  tl_slice_snapshots.insert(this);
 }
 
 SliceSnapshot::~SliceSnapshot() {
+  tl_slice_snapshots.erase(this);
+}
+
+size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
+  size_t mem = 0;
+  for (SliceSnapshot* snapshot : tl_slice_snapshots) {
+    mem += snapshot->GetTotalBufferCapacity() + snapshot->GetTotalChannelCapacity();
+  }
+  return mem;
 }
 
 void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
@@ -333,6 +347,10 @@ void SliceSnapshot::CloseRecordChannel() {
 
 size_t SliceSnapshot::GetTotalBufferCapacity() const {
   return serializer_->GetTotalBufferCapacity();
+}
+
+size_t SliceSnapshot::GetTotalChannelCapacity() const {
+  return dest_->GetSize();
 }
 
 }  // namespace dfly
