@@ -146,6 +146,4 @@ TEST_F(MCParserNoreplyTest, LargeGetRequest) {
   }));
 }
 
-TEST_F(MCParserTest, SetLength) {
-}
 }  // namespace facade
