@@ -291,6 +291,10 @@ def with_ca_dir_tls_server_args(with_tls_server_args, with_tls_ca_cert_args):
     args = deepcopy(with_tls_server_args)
     ca_cert = with_tls_ca_cert_args["ca_cert"]
     ca_dir = os.path.dirname(ca_cert)
+    # We need this because any program that uses OpenSSL requires directories to be set up like this
+    # in order to find the certificates. This command, creates the necessary symlinks to the files
+    # such that they can be consumed by OpenSSL when loaded from the directory.
+    # For more info see: https://www.openssl.org/docs/man3.0/man1/c_rehash.html
     command = f"c_rehash {ca_dir}"
     subprocess.run(command, shell=True)
     args["tls_ca_cert_dir"] = ca_dir
