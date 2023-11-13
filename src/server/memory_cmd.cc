@@ -7,9 +7,13 @@
 #include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
+#include "base/io_buf.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/engine_shard_set.h"
+#include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/snapshot.h"
 
 using namespace std;
 using namespace facade;
@@ -75,7 +79,7 @@ size_t MemoryUsage(PrimeIterator it) {
 
 }  // namespace
 
-MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : cntx_(cntx) {
+MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : cntx_(cntx), owner_(owner) {
 }
 
 void MemoryCmd::Run(CmdArgList args) {
@@ -84,6 +88,8 @@ void MemoryCmd::Run(CmdArgList args) {
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {
         "MEMORY <subcommand> [<arg> ...]. Subcommands are:",
+        "STATS",
+        "    Shows breakdown of memory.",
         "MALLOC-STATS [BACKING] [thread-id]",
         "    Show malloc stats for a heap residing in specified thread-id. 0 by default.",
         "    If BACKING is specified, show stats for the backing heap.",
@@ -94,6 +100,10 @@ void MemoryCmd::Run(CmdArgList args) {
     };
     return (*cntx_)->SendSimpleStrArr(help_arr);
   };
+
+  if (sub_cmd == "STATS") {
+    return Stats();
+  }
 
   if (sub_cmd == "USAGE" && args.size() > 1) {
     string_view key = ArgS(args, 1);
@@ -141,6 +151,100 @@ void MemoryCmd::Run(CmdArgList args) {
 
   string err = UnknownSubCmd(sub_cmd, "MEMORY");
   return (*cntx_)->SendError(err, kSyntaxErrType);
+}
+
+namespace {
+
+struct ConnectionMemoryUsage {
+  size_t connection_count = 0;
+  size_t pipelined_bytes = 0;
+  base::IoBuf::MemoryUsage connections_memory;
+
+  size_t replication_connection_count = 0;
+  base::IoBuf::MemoryUsage replication_memory;
+};
+
+ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
+  Mutex mu;
+  ConnectionMemoryUsage mem ABSL_GUARDED_BY(mu);
+
+  for (auto* listener : server->GetListeners()) {
+    listener->TraverseConnections([&](unsigned thread_index, util::Connection* conn) {
+      auto* dfly_conn = static_cast<facade::Connection*>(conn);
+      auto* cntx = static_cast<ConnectionContext*>(dfly_conn->cntx());
+      lock_guard lock(mu);
+
+      if (cntx->replication_flow == nullptr) {
+        mem.connection_count++;
+        mem.connections_memory += dfly_conn->GetMemoryUsage();
+      } else {
+        mem.replication_connection_count++;
+        mem.replication_memory += dfly_conn->GetMemoryUsage();
+      }
+
+      if (cntx != nullptr) {
+        mem.pipelined_bytes += cntx->conn_state.exec_info.body.capacity() * sizeof(StoredCmd);
+        for (const auto& pipeline : cntx->conn_state.exec_info.body) {
+          mem.pipelined_bytes += pipeline.UsedHeapMemory();
+        }
+      }
+    });
+  }
+
+  return mem;
+}
+
+void PushMemoryUsageStats(const base::IoBuf::MemoryUsage& mem, string_view prefix, size_t total,
+                          vector<pair<string, size_t>>* stats) {
+  stats->push_back({absl::StrCat(prefix, ".total_bytes"), total});
+  stats->push_back({absl::StrCat(prefix, ".consumed_bytes"), mem.consumed});
+  stats->push_back({absl::StrCat(prefix, ".pending_input_bytes"), mem.input_length});
+  stats->push_back({absl::StrCat(prefix, ".pending_output_bytes"), mem.append_length});
+}
+
+}  // namespace
+
+void MemoryCmd::Stats() {
+  vector<pair<string, size_t>> stats;
+  stats.reserve(25);
+  auto server_metrics = owner_->GetMetrics();
+
+  // RSS
+  stats.push_back({"rss_bytes", rss_mem_current.load(memory_order_relaxed)});
+  stats.push_back({"rss_peak_bytes", rss_mem_peak.load(memory_order_relaxed)});
+
+  // Used by DbShards and DashTable
+  stats.push_back({"data_bytes", used_mem_current.load(memory_order_relaxed)});
+  stats.push_back({"data_peak_bytes", used_mem_peak.load(memory_order_relaxed)});
+
+  ConnectionMemoryUsage connection_memory = GetConnectionMemoryUsage(owner_);
+
+  // Connection stats, excluding replication connections
+  stats.push_back({"connections.count", connection_memory.connection_count});
+  PushMemoryUsageStats(
+      connection_memory.connections_memory, "connections",
+      connection_memory.connections_memory.GetTotalSize() + connection_memory.pipelined_bytes,
+      &stats);
+  stats.push_back({"connections.pipeline_bytes", connection_memory.pipelined_bytes});
+
+  // Replication connection stats
+  stats.push_back(
+      {"replication.connections_count", connection_memory.replication_connection_count});
+  PushMemoryUsageStats(connection_memory.replication_memory, "replication",
+                       connection_memory.replication_memory.GetTotalSize(), &stats);
+
+  atomic<size_t> serialization_memory = 0;
+  shard_set->pool()->AwaitFiberOnAll(
+      [&](auto*) { serialization_memory.fetch_add(SliceSnapshot::GetThreadLocalMemoryUsage()); });
+
+  // Serialization stats, including both replication-related serialization and saving to RDB files.
+  stats.push_back({"serialization", serialization_memory.load()});
+
+  (*cntx_)->StartCollection(stats.size(), RedisReplyBuilder::MAP);
+  for (const auto& [k, v] : stats) {
+    (*cntx_)->SendBulkString(k);
+    (*cntx_)->SendLong(v);
+  }
 }
 
 void MemoryCmd::Usage(std::string_view key) {

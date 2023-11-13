@@ -17,9 +17,11 @@ class MemoryCmd {
   void Run(CmdArgList args);
 
  private:
+  void Stats();
   void Usage(std::string_view key);
 
   ConnectionContext* cntx_;
+  ServerFamily* owner_;
 };
 
 }  // namespace dfly
