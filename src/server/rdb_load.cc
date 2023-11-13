@@ -1796,9 +1796,12 @@ struct RdbLoader::ObjSettings {
 
   bool has_expired = false;
 
+  bool is_sticky = false;
+
   void Reset() {
     expiretime = 0;
     has_expired = false;
+    is_sticky = false;
   }
 
   void SetExpire(int64_t val) {
@@ -1889,6 +1892,13 @@ error_code RdbLoader::Load(io::Source* src) {
        * with RDB v3. Like EXPIRETIME but no with more precision. */
       SET_OR_RETURN(FetchInt<int64_t>(), val);
       settings.SetExpire(val);
+      continue; /* Read next opcode. */
+    }
+
+    if (type == RDB_OPCODE_DF_MASK) {
+      uint32_t mask;
+      SET_OR_RETURN(FetchInt<uint32_t>(), mask);
+      settings.is_sticky = mask & DF_MASK_FLAG_STICKY;
       continue; /* Read next opcode. */
     }
 
@@ -2289,6 +2299,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     try {
       auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+      it->first.SetSticky(item->is_sticky);
       if (!added) {
         LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
       }
@@ -2344,6 +2355,8 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     VLOG(2) << "Expire key: " << item->key;
     return kOk;
   }
+
+  item->is_sticky = settings->is_sticky;
 
   ShardId sid = Shard(item->key, shard_set->size());
   item->expire_ms = settings->expiretime;

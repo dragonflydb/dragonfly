@@ -111,6 +111,7 @@
 /* Range 200-240 is used by Dragonfly specific opcodes */
 
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType). */
+#define RDB_OPCODE_DF_MASK    245  /* Mask for key properties */
 #define RDB_OPCODE_FUNCTION   246   /* engine data */
 #define RDB_OPCODE_FUNCTION2  245   /* function library data */
 #define RDB_OPCODE_FUNCTION_PRE_GA   246   /* old function library data for 7.0 rc1 and rc2 */
@@ -156,5 +157,8 @@
 #define LONG_STR_SIZE      21          /* Bytes needed for long -> str + '\0' */
 
 #define REDIS_VERSION "999.999.999"
+
+// RDB_OPCODE_DF_MASK define 4byte field with next flags
+#define DF_MASK_FLAG_STICKY  (1<<0)
 
 #endif
