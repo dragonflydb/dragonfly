@@ -725,24 +725,21 @@ auto Connection::ParseMemcache() -> ParserStatus {
       break;
     }
 
-    auto parse_value = [&consumed, &cmd](std::string_view str) -> std::optional<std::string_view> {
-      std::string_view value = str.substr(consumed, cmd.bytes_len);
-      const absl::flat_hash_set<char> any_of{' ', '\r', '\n'};
-      if (any_of.contains(value.back())) {
-        return {};
-      }
-      auto sub_value = str.substr(consumed);
-      if (sub_value.size() > cmd.bytes_len && !any_of.contains(sub_value[cmd.bytes_len + 1])) {
-        return {};
-      }
-      return str.substr(consumed, cmd.bytes_len);
+    auto parse_value = [](std::string_view str, auto consumed,
+                          auto bytes_len) -> std::optional<std::string_view> {
+      std::string_view value = str.substr(consumed, bytes_len);
+      auto protocol_value = str.substr(consumed);
+      auto pos = protocol_value.find("\r\n");
+      DCHECK(pos != std::string::npos);
+      protocol_value = protocol_value.substr(0, pos);
+      return protocol_value.size() == value.size() ? value : std::optional<std::string_view>{};
     };
 
     size_t total_len = consumed;
     if (MemcacheParser::IsStoreCmd(cmd.type)) {
       total_len += cmd.bytes_len + 2;
       if (io_buf_.InputLen() >= total_len) {
-        auto maybe_value = parse_value(str);
+        auto maybe_value = parse_value(str, consumed, cmd.bytes_len);
         if (!maybe_value) {
           builder->SendClientError("bad data chunk");
           return OK;
