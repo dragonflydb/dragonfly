@@ -954,7 +954,7 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
 
   service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
 
-  if (dispatch_q_.empty()) {  // Flush if no new messages appeared
+  if (dispatch_q_cmds_count_ == 0) {  // Flush if no new commands appeared
     builder->FlushBatch();
     builder->SetBatchMode(false);  // in case the next dispatch is sync
   }

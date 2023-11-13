@@ -248,6 +248,7 @@ bool Listener::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* 
   util::MakeFiber([bc, cancelled = weak_ptr{cancelled}, start = absl::Now(), timeout]() mutable {
     while (!cancelled.expired()) {
       if (absl::Now() - start > timeout) {
+        VLOG(1) << "AwaitCurrentDispatches timed out";
         *cancelled.lock() = true;  // same thread, no promotion race
         bc.Cancel();
       }
