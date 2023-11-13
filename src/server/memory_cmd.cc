@@ -233,15 +233,12 @@ void MemoryCmd::Stats() {
   PushMemoryUsageStats(connection_memory.replication_memory, "replication",
                        connection_memory.replication_memory.GetTotalSize(), &stats);
 
-  Mutex mu;
-  size_t serialization_memory ABSL_GUARDED_BY(mu) = 0;
-  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
-    lock_guard lock(mu);
-    serialization_memory += SliceSnapshot::GetThreadLocalMemoryUsage();
-  });
+  atomic<size_t> serialization_memory = 0;
+  shard_set->pool()->AwaitFiberOnAll(
+      [&](auto*) { serialization_memory.fetch_add(SliceSnapshot::GetThreadLocalMemoryUsage()); });
 
   // Serialization stats, including both replication-related serialization and saving to RDB files.
-  stats.push_back({"serialization", serialization_memory});
+  stats.push_back({"serialization", serialization_memory.load()});
 
   (*cntx_)->StartCollection(stats.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : stats) {
