@@ -109,7 +109,6 @@
 #define __rdbIsObjectType(t) (((t) >= 0 && (t) <= 7) || ((t) >= 9 && (t) <= 21))
 
 /* Range 200-240 is used by Dragonfly specific opcodes */
-#define RDB_OPCODE_DF_MASK    200  /* Mask for key properties */
 
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType). */
 #define RDB_OPCODE_FUNCTION   246   /* engine data */

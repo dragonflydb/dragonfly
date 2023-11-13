@@ -34,3 +34,5 @@ const uint8_t RDB_OPCODE_JOURNAL_BLOB = 210;
 // We use this opcode to synchronize the journal offsets at the end of the full sync,
 // so it is always sent at the end of the RDB stream.
 const uint8_t RDB_OPCODE_JOURNAL_OFFSET = 211;
+
+const uint8_t RDB_OPCODE_DF_MASK = 220; /* Mask for key properties */
