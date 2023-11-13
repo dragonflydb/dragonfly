@@ -288,8 +288,6 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
   if (serialized == 0)
     return 0;
 
-  stats_.pushed_bytes += serialized;
-
   auto id = rec_id_++;
   DVLOG(2) << "Pushed " << id;
   DbRecord db_rec{.id = id, .value = std::move(sfile.val)};

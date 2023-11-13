@@ -948,10 +948,6 @@ class RdbSaver::Impl {
   // Multi entry compression is available only on df snapshot, this will
   // make snapshot size smaller and opreation faster.
   CompressionMode compression_mode_;
-
-  struct Stats {
-    std::atomic<size_t> pulled_bytes{0};
-  } stats_;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1041,8 +1037,6 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
-      stats_.pulled_bytes.fetch_add(record->value.size(), memory_order_relaxed);
-
       io_error = sink_->Write(io::Buffer(record->value));
       if (io_error) {
         break;
@@ -1050,16 +1044,11 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
     } while ((record = records_popper.TryPop()));
   }  // while (records_popper.Pop())
 
-  size_t pushed_bytes = 0;
   for (auto& ptr : shard_snapshots_) {
     ptr->Join();
-    pushed_bytes += ptr->pushed_bytes();
   }
 
   DCHECK(!record.has_value() || !channel_.TryPop(*record));
-
-  VLOG(1) << "Channel pulled bytes: " << stats_.pulled_bytes.load(memory_order_relaxed)
-          << " pushed bytes: " << pushed_bytes;
 
   return io_error;
 }
@@ -1103,13 +1092,12 @@ void RdbSaver::Impl::Cancel() {
 // This function is called from connection thread when info command is invoked.
 // All accessed variableds must be thread safe, as they are fetched not from the rdb saver thread.
 size_t RdbSaver::Impl::GetTotalBuffersSize() const {
-  std::atomic<size_t> pushed_bytes{0};
+  std::atomic<size_t> channel_bytes{0};
   std::atomic<size_t> serializer_bytes{0};
-  size_t pulled_bytes = stats_.pulled_bytes.load(memory_order_relaxed);
 
-  auto cb = [this, &pushed_bytes, &serializer_bytes](ShardId sid) {
+  auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
-    pushed_bytes.fetch_add(snapshot->pushed_bytes(), memory_order_relaxed);
+    channel_bytes.fetch_add(snapshot->GetTotalChannelCapacity(), memory_order_relaxed);
     serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
   };
 
@@ -1117,17 +1105,11 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
     cb(0);
   } else {
     shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
-    // Note that pushed bytes and pulled bytes values are fetched at different times, as we need to
-    // calc the pushed bytes using RunBriefInParallel.
-    // pulled bytes might be higher untill we return here from RunBriefInParallel.
   }
-  size_t total_bytes = pushed_bytes.load(memory_order_relaxed) +
-                       serializer_bytes.load(memory_order_relaxed) - pulled_bytes;
-  VLOG(2) << "pushed_bytes:" << pushed_bytes.load(memory_order_relaxed)
-          << " serializer_bytes: " << serializer_bytes.load(memory_order_relaxed)
-          << " pulled_bytes: " << pulled_bytes << " total_bytes:" << total_bytes;
 
-  return total_bytes;
+  VLOG(2) << "channel_bytes:" << channel_bytes.load(memory_order_relaxed)
+          << " serializer_bytes: " << serializer_bytes.load(memory_order_relaxed);
+  return channel_bytes.load(memory_order_relaxed) + serializer_bytes.load(memory_order_relaxed);
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
