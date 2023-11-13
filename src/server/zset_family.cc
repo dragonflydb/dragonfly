@@ -2074,6 +2074,11 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
     scored_array.emplace_back(elem.first, elem.second);
   }
 
+  std::sort(scored_array.begin(), scored_array.end(),
+            [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) {
+              return a.second < b.second;
+            });
+
   (*cntx)->SendScoredArray(scored_array, op_args_res->with_scores);
 }
 
