@@ -191,9 +191,7 @@ TEST_F(RdbTest, SaveLoadSticky) {
   RespExpr resp = Run({"save", "df"});
   ASSERT_EQ(resp, "OK");
 
-  auto save_info = service_->server_family().GetLastSaveInfo();
-  Run({"flushdb"});
-  resp = Run({"debug", "load", save_info->file_name});
+  resp = Run({"debug", "reload"});
   ASSERT_EQ(resp, "OK");
   EXPECT_THAT(Run({"get", "a"}), "1");
   EXPECT_THAT(Run({"get", "b"}), "2");
