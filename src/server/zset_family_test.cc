@@ -530,7 +530,7 @@ TEST_F(ZSetFamilyTest, ZInter) {
 
   resp = Run({"zinter", "2", "z1", "z2"});
   EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("one", "two"));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two"));
 }
 
 TEST_F(ZSetFamilyTest, ZInterCard) {
