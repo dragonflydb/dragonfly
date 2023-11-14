@@ -165,32 +165,39 @@ struct ConnectionMemoryUsage {
 };
 
 ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
-  Mutex mu;
-  ConnectionMemoryUsage mem ABSL_GUARDED_BY(mu);
+  vector<ConnectionMemoryUsage> mems(shard_set->pool()->size());
 
   for (auto* listener : server->GetListeners()) {
     listener->TraverseConnections([&](unsigned thread_index, util::Connection* conn) {
       auto* dfly_conn = static_cast<facade::Connection*>(conn);
       auto* cntx = static_cast<ConnectionContext*>(dfly_conn->cntx());
-      lock_guard lock(mu);
 
       if (cntx->replication_flow == nullptr) {
-        mem.connection_count++;
-        mem.connections_memory += dfly_conn->GetMemoryUsage();
+        mems[thread_index].connection_count++;
+        mems[thread_index].connections_memory += dfly_conn->GetMemoryUsage();
       } else {
-        mem.replication_connection_count++;
-        mem.replication_memory += dfly_conn->GetMemoryUsage();
+        mems[thread_index].replication_connection_count++;
+        mems[thread_index].replication_memory += dfly_conn->GetMemoryUsage();
       }
 
       if (cntx != nullptr) {
-        mem.pipelined_bytes += cntx->conn_state.exec_info.body.capacity() * sizeof(StoredCmd);
+        mems[thread_index].pipelined_bytes +=
+            cntx->conn_state.exec_info.body.capacity() * sizeof(StoredCmd);
         for (const auto& pipeline : cntx->conn_state.exec_info.body) {
-          mem.pipelined_bytes += pipeline.UsedHeapMemory();
+          mems[thread_index].pipelined_bytes += pipeline.UsedHeapMemory();
         }
       }
     });
   }
 
+  ConnectionMemoryUsage mem;
+  for (const auto& m : mems) {
+    mem.connection_count += m.connection_count;
+    mem.pipelined_bytes += m.pipelined_bytes;
+    mem.connections_memory += m.connections_memory;
+    mem.replication_connection_count += m.replication_connection_count;
+    mem.replication_memory += m.replication_memory;
+  }
   return mem;
 }
 
