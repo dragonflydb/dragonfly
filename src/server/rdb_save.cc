@@ -274,14 +274,21 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
                                              uint64_t expire_ms, DbIndex dbid) {
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   SelectDb(dbid);
-  uint8_t buf[16];
-  error_code ec;
+
   /* Save the expire time */
   if (expire_ms > 0) {
-    buf[0] = RDB_OPCODE_EXPIRETIME_MS;
+    uint8_t buf[16] = {RDB_OPCODE_EXPIRETIME_MS};
     absl::little_endian::Store64(buf + 1, expire_ms);
-    ec = WriteRaw(Bytes{buf, 9});
-    if (ec)
+    if (auto ec = WriteRaw(Bytes{buf, 9}); ec)
+      return make_unexpected(ec);
+  }
+
+  /* Save the key poperties */
+  uint32_t df_mask_flags = pk.IsSticky() ? DF_MASK_FLAG_STICKY : 0;
+  if (df_mask_flags != 0) {
+    uint8_t buf[8] = {RDB_OPCODE_DF_MASK};
+    absl::little_endian::Store32(buf + 1, df_mask_flags);
+    if (auto ec = WriteRaw(Bytes{buf, 5}); ec)
       return make_unexpected(ec);
   }
 
@@ -292,16 +299,13 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
 
   DVLOG(3) << ((void*)this) << ": Saving key/val start " << key << " in dbid=" << dbid;
 
-  ec = WriteOpcode(rdb_type);
-  if (ec)
+  if (auto ec = WriteOpcode(rdb_type); ec)
     return make_unexpected(ec);
 
-  ec = SaveString(key);
-  if (ec)
+  if (auto ec = SaveString(key); ec)
     return make_unexpected(ec);
 
-  ec = SaveValue(pv);
-  if (ec) {
+  if (auto ec = SaveValue(pv); ec) {
     LOG(ERROR) << "Problems saving value for key " << key << " in dbid=" << dbid;
     return make_unexpected(ec);
   }

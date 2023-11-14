@@ -183,6 +183,23 @@ TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
   ASSERT_EQ(resp, "OK");
 }
 
+TEST_F(RdbTest, SaveLoadSticky) {
+  Run({"set", "a", "1"});
+  Run({"set", "b", "2"});
+  Run({"set", "c", "3"});
+  Run({"stick", "a", "b"});
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"debug", "reload"});
+  ASSERT_EQ(resp, "OK");
+  EXPECT_THAT(Run({"get", "a"}), "1");
+  EXPECT_THAT(Run({"get", "b"}), "2");
+  EXPECT_THAT(Run({"get", "c"}), "3");
+  EXPECT_THAT(Run({"stick", "a", "b"}), IntArg(0));
+  EXPECT_THAT(Run({"stick", "c"}), IntArg(1));
+}
+
 TEST_F(RdbTest, Reload) {
   absl::FlagSaver fs;
 
