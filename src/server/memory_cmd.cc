@@ -165,7 +165,7 @@ struct ConnectionMemoryUsage {
 };
 
 ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
-  vector<ConnectionMemoryUsage> mems(shard_set->size());
+  vector<ConnectionMemoryUsage> mems(shard_set->pool()->size());
 
   for (auto* listener : server->GetListeners()) {
     listener->TraverseConnections([&](unsigned thread_index, util::Connection* conn) {
