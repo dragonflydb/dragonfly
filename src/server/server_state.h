@@ -233,7 +233,11 @@ class ServerState {  // public struct - to allow initialization.
   // Awaits until the pause is over and the command can execute.
   // @is_write controls whether the command is a write command or not.
   void AwaitPauseState(bool is_write);
+
+  // Toggle a boolean indicating whether the server should temporarily pause or allow dispatching
+  // new commands.
   void SetPauseDispatch(bool pause);
+  // Awaits until dispatching new commands is allowed as determinded by SetPauseDispatch function
   void AwaitOnPauseDispatch();
 
   SlowLogShard& GetSlowLog() {

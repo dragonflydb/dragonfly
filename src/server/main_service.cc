@@ -1070,14 +1070,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   string_view cmd_name(cid->name());
   bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
                   cmd_name == "EVALSHA";
-  if (cmd_name == "EXEC") {
-    // Check if one of the commands under exec is write command
-    for (auto& cmd : dfly_cntx->conn_state.exec_info.body) {
-      if (cmd.Cid()->opt_mask() & CO::WRITE) {
-        is_write = true;
-        break;
-      }
-    }
+  if (cmd_name == "EXEC" && dfly_cntx->conn_state.exec_info.is_write) {
+    is_write = true;
   }
   etl.AwaitPauseState(is_write);
 
@@ -1096,7 +1090,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-
+    if (stored_cmd.Cid()->opt_mask() & CO::WRITE) {
+      dfly_cntx->conn_state.exec_info.is_write = true;
+    }
     return cntx->SendSimpleString("QUEUED");
   }
 
