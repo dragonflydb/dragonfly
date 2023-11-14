@@ -1067,25 +1067,27 @@ void HandleOpStatus(ConnectionContext* cntx, OpStatus op_status) {
   }
 }
 
-void mergeScoredMaps(ConnectionContext* cntx, const std::vector<OpResult<ScoredMap>>& maps,
-                     const AggType agg_type, ScoredMap& result) {
-  for (auto op_res : maps) {
+OpResult<ScoredMap> IntersectResults(const vector<OpResult<ScoredMap>>& results, AggType agg_type) {
+  OpResult<ScoredMap> result;
+  for (auto op_res : results) {
     if (op_res.status() == OpStatus::SKIPPED)
       continue;
 
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
+    if (!op_res) {
+      return op_res.status();
+    }
 
     if (op_res->empty()) {
-      return result.clear();
+      return op_res.status();
     }
 
-    if (result.empty()) {
-      result.swap(op_res.value());
+    if (result.value().empty()) {
+      result.value().swap(op_res.value());
     } else {
-      InterScoredMap(&result, &op_res.value(), agg_type);
+      InterScoredMap(&(result.value()), &op_res.value(), agg_type);
     }
   }
+  return result;
 }
 
 OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
@@ -2011,13 +2013,14 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(cb), false);
 
-  ScoredMap result;
-  mergeScoredMaps(cntx, maps, op_args.agg_type, result);
+  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
+  if (!result)
+    return (*cntx)->SendError(result.status());
 
   ShardId dest_shard = Shard(dest_key, maps.size());
   AddResult add_result;
   vector<ScoredMemberView> smvec;
-  for (const auto& elem : result) {
+  for (const auto& elem : result.value()) {
     smvec.emplace_back(elem.second, elem.first);
   }
 
@@ -2055,11 +2058,12 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
-  ScoredMap result;
-  mergeScoredMaps(cntx, maps, op_args.agg_type, result);
+  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
+  if (!result)
+    return (*cntx)->SendError(result.status());
 
   std::vector<std::pair<std::string, double>> scored_array;
-  for (const auto& elem : result) {
+  for (const auto& elem : result.value()) {
     scored_array.emplace_back(elem.first, elem.second);
   }
 
@@ -2095,13 +2099,14 @@ void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->transaction->ScheduleSingleHop(std::move(cb));
 
-  ScoredMap result;
-  mergeScoredMaps(cntx, maps, AggType::NOOP, result);
+  OpResult<ScoredMap> result = IntersectResults(maps, AggType::NOOP);
+  if (!result)
+    return (*cntx)->SendError(result.status());
 
-  if (0 < limit && limit < result.size()) {
+  if (0 < limit && limit < result.value().size()) {
     return (*cntx)->SendLong(limit);
   }
-  (*cntx)->SendLong(result.size());
+  (*cntx)->SendLong(result.value().size());
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, ConnectionContext* cntx) {
