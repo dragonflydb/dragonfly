@@ -1067,6 +1067,27 @@ void HandleOpStatus(ConnectionContext* cntx, OpStatus op_status) {
   }
 }
 
+void mergeScoredMaps(ConnectionContext* cntx, const std::vector<OpResult<ScoredMap>>& maps,
+                     const AggType agg_type, ScoredMap& result) {
+  for (auto op_res : maps) {
+    if (op_res.status() == OpStatus::SKIPPED)
+      continue;
+
+    if (!op_res)
+      return (*cntx)->SendError(op_res.status());
+
+    if (op_res->empty()) {
+      return result.clear();
+    }
+
+    if (result.empty()) {
+      result.swap(op_res.value());
+    } else {
+      InterScoredMap(&result, &op_res.value(), agg_type);
+    }
+  }
+}
+
 OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
   if (agg == "SUM") {
     op_args->agg_type = AggType::SUM;
@@ -1991,22 +2012,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(cb), false);
 
   ScoredMap result;
-  for (auto& op_res : maps) {
-    if (op_res.status() == OpStatus::SKIPPED)
-      continue;
-
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
-
-    if (result.empty()) {
-      result.swap(op_res.value());
-    } else {
-      InterScoredMap(&result, &op_res.value(), op_args.agg_type);
-    }
-
-    if (result.empty())
-      break;
-  }
+  mergeScoredMaps(cntx, maps, op_args.agg_type, result);
 
   ShardId dest_shard = Shard(dest_key, maps.size());
   AddResult add_result;
@@ -2050,24 +2056,7 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   ScoredMap result;
-  for (auto& op_res : maps) {
-    if (op_res.status() == OpStatus::SKIPPED)
-      continue;
-
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
-
-    if (op_res->empty()) {
-      result.clear();
-      break;
-    }
-
-    if (result.empty()) {
-      result.swap(op_res.value());
-    } else {
-      InterScoredMap(&result, &op_res.value(), op_args.agg_type);
-    }
-  }
+  mergeScoredMaps(cntx, maps, op_args.agg_type, result);
 
   std::vector<std::pair<std::string, double>> scored_array;
   for (const auto& elem : result) {
@@ -2107,22 +2096,7 @@ void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   ScoredMap result;
-  for (auto& op_res : maps) {
-    if (op_res.status() == OpStatus::SKIPPED)
-      continue;
-
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
-
-    if (result.empty()) {
-      result.swap(op_res.value());
-    } else {
-      InterScoredMap(&result, &op_res.value(), AggType::NOOP);
-    }
-
-    if (result.empty())
-      break;
-  }
+  mergeScoredMaps(cntx, maps, AggType::NOOP, result);
 
   if (0 < limit && limit < result.size()) {
     return (*cntx)->SendLong(limit);
