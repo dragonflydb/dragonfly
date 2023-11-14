@@ -673,9 +673,9 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
   LOG(INFO) << "Loading " << load_path;
 
-  auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (success) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+  auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state.first != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
     return {};
   }
 
@@ -1953,9 +1953,9 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   }
 
   // First, switch into the loading state
-  if (auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-      success) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+  if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+      new_state.first != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
     (*cntx)->SendError("Invalid state");
     return;
   }

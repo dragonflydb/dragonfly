@@ -367,7 +367,8 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
     // Set LOADING state.
-    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).second);
+    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
+          GlobalState::LOADING);
     absl::Cleanup cleanup = [this]() {
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     };
@@ -457,7 +458,8 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).second);
+  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
+        GlobalState::LOADING);
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
