@@ -1327,6 +1327,8 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
       [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
 
   fb2::Fiber("client_pause", [this, timeout, pause_state]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
+    // ensure this fiber will not left hanging .
     auto step = 10ms;
     auto timeout_ms = timeout * 1ms;
     int64_t steps = timeout_ms.count() / step.count();
