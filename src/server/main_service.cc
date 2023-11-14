@@ -2290,17 +2290,17 @@ VarzValue::Map Service::GetVarzStats() {
   return res;
 }
 
-GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
+std::pair<GlobalState, bool> Service::SwitchState(GlobalState from, GlobalState to) {
   lock_guard lk(mu_);
   if (global_state_ != from)
-    return global_state_;
+    return {global_state_, false};
 
   VLOG(1) << "Switching state from " << GlobalStateName(from) << " to " << GlobalStateName(to);
 
   global_state_ = to;
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
-  return to;
+  return {to, true};
 }
 
 GlobalState Service::GetGlobalState() const {

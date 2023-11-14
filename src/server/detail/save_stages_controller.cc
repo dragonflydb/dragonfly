@@ -340,11 +340,10 @@ GenericError SaveStagesController::BuildFullPath() {
 
 // Switch to saving state if in active state
 GenericError SaveStagesController::SwitchState() {
-  GlobalState new_state = service_->SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-  if (new_state != GlobalState::SAVING && new_state != GlobalState::TAKEN_OVER)
-    return {make_error_code(errc::operation_in_progress),
-            StrCat(GlobalStateName(new_state), " - can not save database")};
-  return {};
+  auto [new_state, success] = service_->SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
+  return success ? GenericError()
+                 : GenericError{make_error_code(errc::operation_in_progress),
+                                StrCat(GlobalStateName(new_state), " - can not save database")};
 }
 
 void SaveStagesController::SaveCb(unsigned index) {

@@ -356,8 +356,8 @@ void DebugCmd::Replica(CmdArgList args) {
 }
 
 void DebugCmd::Load(string_view filename) {
-  GlobalState new_state = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state != GlobalState::LOADING) {
+  auto [new_state, success] = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (!success) {
     LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
     return;
   }
