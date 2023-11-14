@@ -1029,11 +1029,12 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     queue_backpressure_->ec.notify();
   }
 
-  if (builder->GetError())
-    cc_->conn_closing = true;
+  DCHECK(cc_->conn_closing || builder->GetError());
+  cc_->conn_closing = true;
 
   // Recycle messages even from disconnecting client to keep properly track of memory stats
   for (auto& msg : dispatch_q_) {
+    FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
     if (msg.IsIntrusive())
       visit(dispatch_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
