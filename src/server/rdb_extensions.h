@@ -36,3 +36,6 @@ const uint8_t RDB_OPCODE_JOURNAL_BLOB = 210;
 const uint8_t RDB_OPCODE_JOURNAL_OFFSET = 211;
 
 const uint8_t RDB_OPCODE_DF_MASK = 220; /* Mask for key properties */
+
+// RDB_OPCODE_DF_MASK define 4byte field with next flags
+#define DF_MASK_FLAG_STICKY (1 << 0)

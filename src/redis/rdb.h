@@ -157,7 +157,4 @@
 
 #define REDIS_VERSION "999.999.999"
 
-// RDB_OPCODE_DF_MASK define 4byte field with next flags
-#define DF_MASK_FLAG_STICKY  (1<<0)
-
 #endif
