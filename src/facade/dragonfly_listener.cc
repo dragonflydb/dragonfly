@@ -251,7 +251,7 @@ void Listener::PreShutdown() {
   // This shouldn't take a long time: All clients should reject incoming commands
   // at this stage since we're in SHUTDOWN mode.
   // If a command is running for too long we give up and proceed.
-  DispatchTracker tracker{{this}, nullptr};
+  DispatchTracker tracker{{this}};
   tracker.TrackAll();
 
   if (!tracker.Wait(absl::Milliseconds(10))) {
@@ -374,8 +374,10 @@ ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
 }
 
 DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
-                                 facade::Connection* issuer)
-    : listeners_{listeners.begin(), listeners.end()}, issuer_{issuer} {
+                                 facade::Connection* issuer, bool ignore_paused)
+    : listeners_{listeners.begin(), listeners.end()},
+      issuer_{issuer},
+      ignore_paused_{ignore_paused} {
 }
 
 void DispatchTracker::TrackOnThread() {
@@ -394,7 +396,7 @@ void DispatchTracker::TrackAll() {
 
 void DispatchTracker::Handle(unsigned thread_index, util::Connection* conn) {
   if (auto* fconn = static_cast<facade::Connection*>(conn); fconn != issuer_)
-    fconn->SendCheckpoint(bc_);
+    fconn->SendCheckpoint(bc_, ignore_paused_);
 }
 
 }  // namespace facade

@@ -1056,23 +1056,23 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool under_script = bool(dfly_cntx->conn_state.script_info);
   bool under_multi = dfly_cntx->conn_state.exec_info.IsRunning();
+  bool dispatching_in_multi = under_script || under_multi;
 
-  if (VLOG_IS_ON(2) &&
-      cntx->conn()) {  // owner may not exists in case of this being called from replica context
+  if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
     const char* lua = under_script ? "LUA " : "";
     LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << lua << args
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
-  string_view cmd_name(cid->name());
-  bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
-                  cmd_name == "EVALSHA";
-  if (cmd_name == "EXEC" && dfly_cntx->conn_state.exec_info.is_write) {
-    is_write = true;
-  }
+  if (!dispatching_in_multi) {  // Don't interrupt running multi commands
+    bool is_write = (cid->opt_mask() & CO::WRITE);
+    is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
+    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
 
-  if (!under_script && !under_multi)  // Don't interrupt running multi commands
+    cntx->paused = true;
     etl.AwaitPauseState(is_write);
+    cntx->paused = false;
+  }
 
   etl.RecordCmd();
 
@@ -1107,8 +1107,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
-
-  bool dispatching_in_multi = under_script || under_multi;
 
   if (dispatching_in_multi) {
     DCHECK(dfly_cntx->transaction);

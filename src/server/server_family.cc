@@ -1291,14 +1291,15 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // Set global pause state and track commands that are running when the pause state is flipped.
-  DispatchTracker tracker{GetListeners(), cntx->conn()};
+  // Exlude already paused commands from the busy count.
+  DispatchTracker tracker{GetListeners(), cntx->conn(), true /* ignore paused commands */};
   service_.proactor_pool().Await([&tracker, pause_state](util::ProactorBase* pb) {
     tracker.TrackOnThread();
     ServerState::tlocal()->SetPauseState(pause_state, true);
   });
 
   // TODO handle blocking commands
-  // Wait for all interrupted commands to finish running before replying to guarantee
+  // Wait for all busy commands to finish running before replying to guarantee
   // that no more (write) operations will occur.
   const absl::Duration kDispatchTimeout = absl::Seconds(1);
   if (!tracker.Wait(kDispatchTimeout)) {

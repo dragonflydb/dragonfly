@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/base/internal/spinlock.h>
+#include <absl/time/time.h>
 
 #include <memory>
 #include <system_error>
@@ -81,15 +82,18 @@ class Listener : public util::ListenerInterface {
 };
 
 // Dispatch tracker allows tracking the dispatch state of connections and blocking until all
-// detected busy connections finished dispatching.
+// detected busy connections finished dispatching. Ignores issuer if set.
 class DispatchTracker {
  public:
-  DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer = nullptr);
+  DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer = nullptr,
+                  bool ignore_paused = false);
 
   void TrackAll();       // Track busy connection on all threads
   void TrackOnThread();  // Track busy connections on current thread
 
-  bool Wait(absl::Duration);  // Wait until all tracked connections finished dispatching
+  // Wait until all tracked connections finished dispatching.
+  // Returns true on success, false if timeout was reached.
+  bool Wait(absl::Duration);
 
  private:
   void Handle(unsigned thread_index, util::Connection* conn);
@@ -97,6 +101,7 @@ class DispatchTracker {
   std::vector<facade::Listener*> listeners_;
   facade::Connection* issuer_;
   util::fb2::BlockingCounter bc_{0};
+  bool ignore_paused_;
 };
 
 }  // namespace facade

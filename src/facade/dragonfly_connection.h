@@ -156,7 +156,7 @@ class Connection : public util::Connection {
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
   // decrement it once finished.
-  void SendCheckpoint(util::fb2::BlockingCounter bc);
+  void SendCheckpoint(util::fb2::BlockingCounter bc, bool ignore_paused = false);
 
   // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
   // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.

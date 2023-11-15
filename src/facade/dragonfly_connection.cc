@@ -1186,8 +1186,11 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
 }
 
-void Connection::SendCheckpoint(fb2::BlockingCounter bc) {
+void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused) {
   if (!IsCurrentlyDispatching())
+    return;
+
+  if (cc_->paused && !ignore_paused)
     return;
 
   bc.Add(1);

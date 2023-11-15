@@ -133,6 +133,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   async_dispatch = false;
   sync_dispatch = false;
   journal_emulated = false;
+  paused = false;
 
   subscriptions = 0;
 }
