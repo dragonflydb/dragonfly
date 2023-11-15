@@ -864,27 +864,6 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
               ElementsAre("Lisbon", "502.20769462704084",
                           RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
 
-  resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "WITHCOORD", "WITHDIST"});
-  EXPECT_THAT(
-      resp,
-      RespArray(ElementsAre(
-          RespArray(ElementsAre(
-              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
-          RespArray(
-              ElementsAre("Lisbon", "502.20769462704084",
-                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
-  resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "WITHCOORD", "WITHDIST"});
-  EXPECT_THAT(
-      resp,
-      RespArray(ElementsAre(
-          RespArray(ElementsAre(
-              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
-          RespArray(
-              ElementsAre("Lisbon", "502.20769462704084",
-                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
-
-  resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "store_key"});
-  std::cout << "get resp: " << resp.GetString() << "\n";
   EXPECT_EQ(
       2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "store_key"}));
 
