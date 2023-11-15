@@ -121,30 +121,10 @@ void ServerState::SetPauseState(ClientPause state, bool start) {
 
 void ServerState::AwaitPauseState(bool is_write) {
   client_pause_ec_.await([is_write, this]() {
-    if (client_pauses_[int(ClientPause::ALL)]) {
-      return false;
-    }
-    if (is_write && client_pauses_[int(ClientPause::WRITE)]) {
-      return false;
-    }
-    return true;
+    int num_pauses =
+        is_write ? client_pauses_[int(ClientPause::WRITE)] : client_pauses_[int(ClientPause::ALL)];
+    return num_pauses > 0;
   });
-}
-
-void ServerState::AwaitOnPauseDispatch() {
-  pause_dispatch_ec_.await([this]() {
-    if (pause_dispatch_) {
-      return false;
-    }
-    return true;
-  });
-}
-
-void ServerState::SetPauseDispatch(bool pause) {
-  pause_dispatch_ = pause;
-  if (!pause_dispatch_) {
-    pause_dispatch_ec_.notifyAll();
-  }
 }
 
 Interpreter* ServerState::BorrowInterpreter() {

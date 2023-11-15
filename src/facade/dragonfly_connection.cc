@@ -870,7 +870,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
 
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
-    service_->AwaitOnPauseDispatch();
+
     if (redis_parser_) {
       parse_status = ParseRedis(orig_builder);
     } else {

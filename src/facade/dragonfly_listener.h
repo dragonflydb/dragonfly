@@ -22,6 +22,7 @@ typedef struct ssl_ctx_st SSL_CTX;
 namespace facade {
 
 class ServiceInterface;
+class Connection;
 
 class Listener : public util::ListenerInterface {
  public:
@@ -77,6 +78,25 @@ class Listener : public util::ListenerInterface {
 
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
+};
+
+// Dispatch tracker allows tracking the dispatch state of connections and blocking until all
+// detected busy connections finished dispatching.
+class DispatchTracker {
+ public:
+  DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer = nullptr);
+
+  void TrackAll();       // Track busy connection on all threads
+  void TrackOnThread();  // Track busy connections on current thread
+
+  bool Wait(absl::Duration);  // Wait until all tracked connections finished dispatching
+
+ private:
+  void Handle(unsigned thread_index, util::Connection* conn);
+
+  std::vector<facade::Listener*> listeners_;
+  facade::Connection* issuer_;
+  util::fb2::BlockingCounter bc_{0};
 };
 
 }  // namespace facade
