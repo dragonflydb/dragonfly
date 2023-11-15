@@ -1067,6 +1067,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
+  string_view cmd_name(cid->name());
+  bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
+                  cmd_name == "EVALSHA";
+  if (cmd_name == "EXEC" && dfly_cntx->conn_state.exec_info.is_write) {
+    is_write = true;
+  }
+  etl.AwaitPauseState(is_write);
+
   etl.RecordCmd();
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
@@ -1082,7 +1090,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-
+    if (stored_cmd.Cid()->opt_mask() & CO::WRITE) {
+      dfly_cntx->conn_state.exec_info.is_write = true;
+    }
     return cntx->SendSimpleString("QUEUED");
   }
 
@@ -1254,8 +1264,9 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
     const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
+    const bool is_pause = dfly::ServerState::tlocal()->IsPaused();
 
-    if (!is_multi && !is_eval && cid != nullptr) {
+    if (!is_multi && !is_eval && cid != nullptr && !is_pause) {
       stored_cmds.reserve(args_list.size());
       stored_cmds.emplace_back(cid, tail_args);
       continue;
@@ -1408,6 +1419,10 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
 facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
   return ServerState::tl_connection_stats();
+}
+
+void Service::AwaitOnPauseDispatch() {
+  ServerState::tlocal()->AwaitOnPauseDispatch();
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {

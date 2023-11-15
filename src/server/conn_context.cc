@@ -235,6 +235,7 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
 void ConnectionState::ExecInfo::Clear() {
   state = EXEC_INACTIVE;
   body.clear();
+  is_write = false;
   ClearWatched();
 }
 

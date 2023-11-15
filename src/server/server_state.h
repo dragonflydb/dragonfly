@@ -80,6 +80,8 @@ class MonitorsRepo {
   unsigned int global_count_ = 0;  // by global its means that we count the monitor for all threads
 };
 
+enum class ClientPause { WRITE, ALL };
+
 // Present in every server thread. This class differs from EngineShard. The latter manages
 // state around engine shards while the former represents coordinator/connection state.
 // There may be threads that handle engine shards but not IO, there may be threads that handle IO
@@ -220,6 +222,24 @@ class ServerState {  // public struct - to allow initialization.
 
   acl::AclLog acl_log;
 
+  // Starts or ends a `CLIENT PAUSE` command. @state controls whether
+  // this is pausing only writes or every command, @start controls
+  // whether this is starting or ending the pause.
+  void SetPauseState(ClientPause state, bool start);
+
+  // Returns whether any type of commands is paused.
+  bool IsPaused() const;
+
+  // Awaits until the pause is over and the command can execute.
+  // @is_write controls whether the command is a write command or not.
+  void AwaitPauseState(bool is_write);
+
+  // Toggle a boolean indicating whether the server should temporarily pause or allow dispatching
+  // new commands.
+  void SetPauseDispatch(bool pause);
+  // Awaits until dispatching new commands is allowed as determinded by SetPauseDispatch function
+  void AwaitOnPauseDispatch();
+
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
   };
@@ -236,6 +256,15 @@ class ServerState {  // public struct - to allow initialization.
   ChannelStore* channel_store_;
 
   GlobalState gstate_ = GlobalState::ACTIVE;
+
+  // To support concurrent `CLIENT PAUSE commands` correctly, we store the amount
+  // of current CLIENT PAUSE commands that are in effect. Blocked execution fibers
+  // should subscribe to `client_pause_ec_` through `AwaitPauseState` to be
+  // notified when the break is over.
+  int client_pauses_[2] = {};
+  EventCount client_pause_ec_;
+  bool pause_dispatch_ = false;
+  EventCount pause_dispatch_ec_;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;

@@ -30,7 +30,7 @@ class MultiCommandSquasher {
   }
 
  private:
-  // Per-shard exection info.
+  // Per-shard execution info.
   struct ShardExecInfo {
     ShardExecInfo() : had_writes{false}, cmds{}, replies{}, local_tx{nullptr} {
     }
@@ -74,7 +74,7 @@ class MultiCommandSquasher {
   ConnectionContext* cntx_;     // Underlying context
   Service* service_;
 
-  bool atomic_;                // Wheter working in any of the atomic modes
+  bool atomic_;                // Whether working in any of the atomic modes
   const CommandId* base_cid_;  // underlying cid (exec or eval) for executing batch hops
 
   bool verify_commands_ = false;  // Whether commands need to be verified before execution

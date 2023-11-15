@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -1213,41 +1214,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
+  CmdArgList sub_args = args.subspan(1);
 
-  if (sub_cmd == "SETNAME" && args.size() == 2) {
-    cntx->conn()->SetName(string{ArgS(args, 1)});
-    return (*cntx)->SendOk();
-  }
-
-  if (sub_cmd == "GETNAME") {
-    auto name = cntx->conn()->GetName();
-    if (!name.empty()) {
-      return (*cntx)->SendBulkString(name);
-    } else {
-      return (*cntx)->SendNull();
-    }
-  }
-
-  if (sub_cmd == "LIST") {
-    vector<string> client_info;
-    absl::base_internal::SpinLock mu;
-
-    // we can not preempt the connection traversal, so we need to use a spinlock.
-    // alternatively we could lock when mutating the connection list, but it seems not important.
-    auto cb = [&](unsigned thread_index, util::Connection* conn) {
-      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-      string info = dcon->GetClientInfo(thread_index);
-      absl::base_internal::SpinLockHolder l(&mu);
-      client_info.push_back(move(info));
-    };
-
-    for (auto* listener : listeners_) {
-      listener->TraverseConnections(cb);
-    }
-
-    string result = absl::StrJoin(move(client_info), "\n");
-    result.append("\n");
-    return (*cntx)->SendBulkString(result);
+  if (sub_cmd == "SETNAME") {
+    return ClientSetName(sub_args, cntx);
+  } else if (sub_cmd == "GETNAME") {
+    return ClientGetName(sub_args, cntx);
+  } else if (sub_cmd == "LIST") {
+    return ClientList(sub_args, cntx);
+  } else if (sub_cmd == "PAUSE") {
+    return ClientPause(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -1256,6 +1232,121 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
+}
+
+void ServerFamily::ClientSetName(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 1) {
+    cntx->conn()->SetName(string{ArgS(args, 0)});
+    return (*cntx)->SendOk();
+  } else {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+}
+
+void ServerFamily::ClientGetName(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+  auto name = cntx->conn()->GetName();
+  if (!name.empty()) {
+    return (*cntx)->SendBulkString(name);
+  } else {
+    return (*cntx)->SendNull();
+  }
+}
+
+void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+
+  vector<string> client_info;
+  absl::base_internal::SpinLock mu;
+
+  // we can not preempt the connection traversal, so we need to use a spinlock.
+  // alternatively we could lock when mutating the connection list, but it seems not important.
+  auto cb = [&](unsigned thread_index, util::Connection* conn) {
+    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+    string info = dcon->GetClientInfo(thread_index);
+    absl::base_internal::SpinLockHolder l(&mu);
+    client_info.push_back(std::move(info));
+  };
+
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+
+  string result = absl::StrJoin(client_info, "\n");
+  result.append("\n");
+  return (*cntx)->SendBulkString(result);
+}
+
+void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+
+  auto timeout = parser.Next().Int<uint64_t>();
+  enum ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state =
+        parser.ToUpper().Next().Case("WRITE", ClientPause::WRITE).Case("ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return (*cntx)->SendError(err->MakeReply());
+  }
+
+  // Pause dispatch commands before updating client puase state, and enable dispatch after updating
+  // pause state. This will unsure that when we after changing the state all running commands will
+  // read the new pause state, and we will not pause client in the middle of a transaction.
+  service_.proactor_pool().Await([](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseDispatch(true);
+  });
+
+  // TODO handle blocking commands
+  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  if (!AwaitDispatches(kDispatchTimeout, [self = cntx->conn()](util::Connection* conn) {
+        // Wait until the only command dispatching is the client pause command.
+        return conn != self;
+      })) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << kDispatchTimeout;
+    service_.proactor_pool().Await([](util::ProactorBase* pb) {
+      ServerState& etl = *ServerState::tlocal();
+      etl.SetPauseDispatch(false);
+    });
+    return (*cntx)->SendError("Failed to pause all running clients");
+  }
+
+  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseState(pause_state, true);
+    etl.SetPauseDispatch(false);
+  });
+
+  // We should not expire/evict keys while clients are puased.
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+
+  fb2::Fiber("client_pause", [this, timeout, pause_state]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
+    // ensure this fiber will not left hanging .
+    auto step = 10ms;
+    auto timeout_ms = timeout * 1ms;
+    int64_t steps = timeout_ms.count() / step.count();
+    ServerState& etl = *ServerState::tlocal();
+    do {
+      ThisFiber::SleepFor(step);
+    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
+
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      });
+      shard_set->RunBriefInParallel(
+          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    }
+  }).Detach();
+
+  (*cntx)->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
