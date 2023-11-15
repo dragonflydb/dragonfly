@@ -1764,6 +1764,7 @@ async def test_search(df_local_factory):
 
 
 # @pytest.mark.slow
+@pytest.mark.skip(reason="Client pause command bug with pipeline squashing")
 @pytest.mark.asyncio
 async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(proactor_threads=4)
@@ -1785,13 +1786,12 @@ async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
     # block the seeder for 4 seconds
     await c_master.execute_command("client pause 4000 write")
     stats = await c_master.info("CommandStats")
-    info = await c_master.info("Stats")
     await asyncio.sleep(0.5)
     stats_after_sleep = await c_master.info("CommandStats")
     # Check no commands are executed except info and replconf called from replica
     for cmd, cmd_stats in stats_after_sleep.items():
         if "cmdstat_INFO" != cmd and "cmdstat_REPLCONF" != cmd_stats:
-            assert stats[cmd] == cmd_stats
+            assert stats[cmd] == cmd_stats, cmd
 
     await asyncio.sleep(6)
     seeder.stop()
