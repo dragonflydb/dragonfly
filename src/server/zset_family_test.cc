@@ -531,6 +531,13 @@ TEST_F(ZSetFamilyTest, ZInter) {
   resp = Run({"zinter", "2", "z1", "z2"});
   EXPECT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two"));
+
+  EXPECT_EQ(3, CheckedInt({"zadd", "z3", "1", "one", "2", "two", "3", "three"}));
+  EXPECT_EQ(3, CheckedInt({"zadd", "z4", "4", "four", "5", "five", "6", "six"}));
+  EXPECT_EQ(1, CheckedInt({"zadd", "z5", "6", "six"}));
+
+  resp = Run({"zinter", "3", "z3", "z4", "z5"});
+  EXPECT_THAT(resp, ArrLen(0));
 }
 
 TEST_F(ZSetFamilyTest, ZInterCard) {
