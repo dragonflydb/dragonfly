@@ -415,14 +415,11 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   absl::Time start = absl::Now();
   AggregateStatus status;
 
+  sf_->CancelBlockingCommands();
+
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
-  sf_->CancelBlockingCommands();
-  if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->conn()](util::Connection* conn) {
-        // The only command that is currently dispatching should be the takeover command -
-        // so we wait until this is true.
-        return conn != self;
-      })) {
+  if (!sf_->AwaitCurrentDispatches(timeout_dur, cntx->conn())) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
   }

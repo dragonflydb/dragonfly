@@ -196,8 +196,8 @@ class ServerFamily {
 
   void CancelBlockingCommands();
 
-  bool AwaitDispatches(absl::Duration timeout,
-                       const std::function<bool(util::Connection*)>& filter);
+  // Wait until all current dispatches finish, returns true on success, false if timeout was reached
+  bool AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer);
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);

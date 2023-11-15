@@ -34,13 +34,12 @@ class Listener : public util::ListenerInterface {
 
   std::error_code ConfigureServerSocket(int fd) final;
 
+  // Wait until all command dispatches that are currently in progress finish,
+  // ignore commands from issuer connection.
+  bool AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer);
+
   // ReconfigureTLS MUST be called from the same proactor as the listener.
   bool ReconfigureTLS();
-
-  // Wait until all connections that pass the filter have stopped dispatching or until a timeout has
-  // run out. Returns true if the all connections have stopped dispatching.
-  bool AwaitDispatches(absl::Duration timeout,
-                       const std::function<bool(util::Connection*)>& filter);
 
   bool IsPrivilegedInterface() const;
   bool IsMainInterface() const;

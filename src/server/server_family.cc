@@ -1124,17 +1124,20 @@ void ServerFamily::CancelBlockingCommands() {
   }
 }
 
-bool ServerFamily::AwaitDispatches(absl::Duration timeout,
-                                   const std::function<bool(util::Connection*)>& filter) {
-  auto start = absl::Now();
+bool ServerFamily::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer) {
+  vector<Fiber> fibers;
+  bool successful = true;
+
   for (auto* listener : listeners_) {
-    absl::Duration remaining_time = timeout - (absl::Now() - start);
-    if (remaining_time < absl::Nanoseconds(0) ||
-        !listener->AwaitDispatches(remaining_time, filter)) {
-      return false;
-    }
+    fibers.push_back(MakeFiber([listener, timeout, issuer, &successful]() {
+      successful &= listener->AwaitCurrentDispatches(timeout, issuer);
+    }));
   }
-  return true;
+
+  for (auto& fb : fibers)
+    fb.JoinIfNeeded();
+
+  return successful;
 }
 
 string GetPassword() {
