@@ -82,7 +82,10 @@ class Listener : public util::ListenerInterface {
 };
 
 // Dispatch tracker allows tracking the dispatch state of connections and blocking until all
-// detected busy connections finished dispatching. Ignores issuer if set.
+// detected busy connections finished dispatching. Ignores issuer connection.
+//
+// Mostly used to detect when global state changes (takeover, pause, cluster config update) are
+// visible to all commands and no commands are still running according to the old state / config.
 class DispatchTracker {
  public:
   DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer = nullptr,
@@ -93,7 +96,7 @@ class DispatchTracker {
 
   // Wait until all tracked connections finished dispatching.
   // Returns true on success, false if timeout was reached.
-  bool Wait(absl::Duration);
+  bool Wait(absl::Duration timeout);
 
  private:
   void Handle(unsigned thread_index, util::Connection* conn);

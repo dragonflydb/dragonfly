@@ -155,7 +155,7 @@ class Connection : public util::Connection {
   void SendAclUpdateAsync(AclUpdateMessage msg);
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
-  // decrement it once finished.
+  // decrement it once finished. It ignore_paused is true, paused dispatches are ignored.
   void SendCheckpoint(util::fb2::BlockingCounter bc, bool ignore_paused = false);
 
   // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not

@@ -1294,6 +1294,8 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   // Exlude already paused commands from the busy count.
   DispatchTracker tracker{GetListeners(), cntx->conn(), true /* ignore paused commands */};
   service_.proactor_pool().Await([&tracker, pause_state](util::ProactorBase* pb) {
+    // Commands don't suspend before checking the pause state, so
+    // it's impossible to deadlock on waiting for a command that will be paused.
     tracker.TrackOnThread();
     ServerState::tlocal()->SetPauseState(pause_state, true);
   });

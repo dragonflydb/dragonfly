@@ -1059,9 +1059,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   bool dispatching_in_multi = under_script || under_multi;
 
   if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
-    const char* lua = under_script ? "LUA " : "";
-    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << lua << args
-              << " in dbid=" << dfly_cntx->conn_state.db_index;
+    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
+              << args << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
   if (!dispatching_in_multi) {  // Don't interrupt running multi commands
