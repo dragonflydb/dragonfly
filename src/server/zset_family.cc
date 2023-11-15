@@ -2063,6 +2063,7 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(result.status());
 
   std::vector<std::pair<std::string, double>> scored_array;
+  scored_array.reserve(result.value().size());
   for (const auto& elem : result.value()) {
     scored_array.emplace_back(elem.first, elem.second);
   }
