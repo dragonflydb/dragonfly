@@ -2053,10 +2053,10 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] = OpInter(shard, t, "", op_args.agg_type, op_args.weights, false);
-    return maps[shard->shard_id()];
+    return OpStatus::OK;
   };
 
-  cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
   if (!result)
