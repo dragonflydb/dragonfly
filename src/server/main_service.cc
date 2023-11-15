@@ -1067,14 +1067,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
-  string_view cmd_name(cid->name());
-  bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
-                  cmd_name == "EVALSHA";
-  if (cmd_name == "EXEC" && dfly_cntx->conn_state.exec_info.is_write) {
-    is_write = true;
-  }
-  etl.AwaitPauseState(is_write);
-
   etl.RecordCmd();
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
@@ -1195,10 +1187,19 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return true;  // return false only for internal error aborts
   }
 
+  ServerState& etl = *ServerState::tlocal();
+
+  string_view cmd_name(cid->name());
+  bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
+                  cmd_name == "EVALSHA";
+  if (cmd_name == "EXEC" && cntx->conn_state.exec_info.is_write) {
+    is_write = true;
+  }
+  etl.AwaitPauseState(is_write);
+
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
   // enabled on them - see https://redis.io/commands/monitor/
-  ServerState& etl = *ServerState::tlocal();
   const MonitorsRepo& monitors = etl.Monitors();
   if (!monitors.Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
     DispatchMonitor(cntx, cid, tail_args);

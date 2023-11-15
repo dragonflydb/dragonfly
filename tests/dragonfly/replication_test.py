@@ -1763,8 +1763,6 @@ async def test_search(df_local_factory):
     ].id == "k0"
 
 
-# @pytest.mark.slow
-@pytest.mark.skip(reason="Client pause command bug with pipeline squashing")
 @pytest.mark.asyncio
 async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(proactor_threads=4)
