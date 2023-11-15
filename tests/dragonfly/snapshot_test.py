@@ -218,6 +218,32 @@ class TestSetsnapshot_cron(SnapshotTestBase):
 
 
 @dfly_args({**BASIC_ARGS})
+class TestDoubleSave(SnapshotTestBase):
+    """Test set snapshot_cron flag"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        super().setup(tmp_dir)
+
+    @pytest.mark.asyncio
+    @pytest.mark.slow
+    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
+        seeder = df_seeder_factory.create(
+            port=df_server.port, keys=100000, multi_transaction_probability=0
+        )
+        await seeder.run(target_deviation=0.05)
+
+        try:
+            await asyncio.gather(
+                async_client.execute_command("save rdb dump"),
+                async_client.execute_command("save rdb dump"),
+            )
+            assert False, "one of the operation shouldn't pass"
+        except Exception as e:
+            pass
+
+
+@dfly_args({**BASIC_ARGS})
 class TestPathEscapes(SnapshotTestBase):
     """Test that we don't allow path escapes. We just check that df_server.start()
     fails because we don't have a much better way to test that."""
