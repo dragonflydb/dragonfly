@@ -1208,8 +1208,16 @@ async def test_take_over_seeder(
 
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
-    await c_replica.execute_command(f"REPLTAKEOVER 5")
     seeder.stop()
+
+    # Need to wait to synchronize with replica
+    await asyncio.sleep(1)
+
+    c_master = master.client()
+    await c_master.execute_command("SAVE")
+    await disconnect_clients(c_master)
+
+    await c_replica.execute_command(f"REPLTAKEOVER 5")
 
     assert await c_replica.execute_command("role") == ["master", []]
 
