@@ -27,7 +27,9 @@ class ServiceInterface {
 
   virtual void DispatchCommand(CmdArgList args, ConnectionContext* cntx) = 0;
 
-  virtual void DispatchManyCommands(absl::Span<CmdArgList> args_list, ConnectionContext* cntx) = 0;
+  // Returns number of processed commands
+  virtual size_t DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                      ConnectionContext* cntx) = 0;
 
   virtual void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                           ConnectionContext* cntx) = 0;

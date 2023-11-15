@@ -272,6 +272,7 @@ void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg
 
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
   self->last_interaction_ = time(nullptr);
+  self->skip_next_squashing_ = false;
 }
 
 void Connection::DispatchOperations::operator()(const MigrationRequestMessage& msg) {
@@ -960,24 +961,19 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
 
   vector<CmdArgList> squash_cmds;
-  vector<PipelineMessagePtr> squash_msgs;
-
   squash_cmds.reserve(dispatch_q_.size());
-  squash_msgs.reserve(dispatch_q_.size());
 
-  while (!dispatch_q_.empty()) {
-    auto& msg = dispatch_q_.front();
+  for (auto& msg : dispatch_q_) {
     CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
-        << "Found " << msg.handle.index() << " on " << DebugInfo();
+        << msg.handle.index() << " on " << DebugInfo();
 
-    squash_msgs.push_back(std::move(std::get<PipelineMessagePtr>(msg.handle)));
-    squash_cmds.push_back(absl::MakeSpan(squash_msgs.back()->args));
-    dispatch_q_.pop_front();
+    auto& pmsg = get<PipelineMessagePtr>(msg.handle);
+    squash_cmds.push_back(absl::MakeSpan(pmsg->args));
   }
 
   cc_->async_dispatch = true;
 
-  service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
+  size_t dispatched = service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
 
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
     builder->FlushBatch();
@@ -986,8 +982,17 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
 
   cc_->async_dispatch = false;
 
-  for (auto& msg : squash_msgs)
-    RecycleMessage(MessageHandle{std::move(msg)});
+  auto it = dispatch_q_.begin();
+  while (it->IsIntrusive())  // Skip all newly received intrusive messages
+    ++it;
+
+  for (auto rit = it; rit != it + dispatched; ++rit)
+    RecycleMessage(std::move(*rit));
+
+  dispatch_q_.erase(it, it + dispatched);
+
+  // If interrupted due to pause, fall back to regular dispatch
+  skip_next_squashing_ = dispatched != squash_cmds.size();
 }
 
 void Connection::ClearPipelinedMessages() {
@@ -1068,7 +1073,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
     bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == dispatch_q_.size();
-    if (squashing_enabled && threshold_reached && are_all_plain_cmds) {
+    if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
       SquashPipeline(builder);
     } else {
       MessageHandle msg = move(dispatch_q_.front());

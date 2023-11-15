@@ -1228,13 +1228,15 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   return true;
 }
 
-void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
-                                   facade::ConnectionContext* cntx) {
+size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                     facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
+
+  size_t dispatched = 0;
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1251,10 +1253,16 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     dfly_cntx->transaction = dist_trans.get();
     MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds), dfly_cntx, this, true, false);
     dfly_cntx->transaction = nullptr;
+
+    dispatched += stored_cmds.size();
     stored_cmds.clear();
   };
 
   for (auto args : args_list) {
+    // Stop accumulating when a pause is requested, fall back to regular dispatch
+    if (dfly::ServerState::tlocal()->IsPaused())
+      break;
+
     ToUpper(&args[0]);
     const auto [cid, tail_args] = FindCmd(args);
 
@@ -1281,12 +1289,15 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
     DispatchCommand(args, cntx);
+    dispatched++;
   }
 
   perform_squash();
 
   if (dist_trans)
     dist_trans->UnlockMulti();
+
+  return dispatched;
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,

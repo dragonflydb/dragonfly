@@ -347,6 +347,8 @@ class Connection : public util::Connection {
   bool migration_enabled_;
   util::fb2::ProactorBase* migration_request_ = nullptr;
 
+  bool skip_next_squashing_ = false;  // Forcefully skip next squashing
+
   // Pooled pipeline messages per-thread
   // Aggregated while handling pipelines, gradually released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
