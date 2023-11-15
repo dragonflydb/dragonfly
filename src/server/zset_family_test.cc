@@ -839,6 +839,14 @@ TEST_F(ZSetFamilyTest, GeoSearch) {
 }
 
 TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
+  // EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "2", "b"}));
+  // EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
+  // RespExpr resp;
+
+  // EXPECT_EQ(1, CheckedInt({"zinterstore", "a", "2", "z1", "z2"}));
+  // resp = Run({"zrange", "a", "0", "-1", "withscores"});
+  // EXPECT_THAT(resp.GetVec(), ElementsAre("b", "4"));
+
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
                             "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
@@ -856,6 +864,27 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
               ElementsAre("Lisbon", "502.20769462704084",
                           RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
 
+  resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(
+              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
+          RespArray(
+              ElementsAre("Lisbon", "502.20769462704084",
+                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+  resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(
+              "Madrid", "0", RespArray(ElementsAre("3.7038007378578186", "40.416799319406216")))),
+          RespArray(
+              ElementsAre("Lisbon", "502.20769462704084",
+                          RespArray(ElementsAre("9.142698347568512", "38.736900197448534")))))));
+
+  resp = Run({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "store_key"});
+  std::cout << "get resp: " << resp.GetString() << "\n";
   EXPECT_EQ(
       2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE", "store_key"}));
 
