@@ -458,8 +458,8 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     shard_set->RunBlockingInParallel(std::move(cb));
   }
 
-  sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
   if (*status != OpStatus::OK) {
+    sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
     return rb->SendError("Takeover failed!");
   }
   (*cntx)->SendOk();

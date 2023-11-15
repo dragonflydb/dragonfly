@@ -219,7 +219,7 @@ class TestSetsnapshot_cron(SnapshotTestBase):
 
 @dfly_args({**BASIC_ARGS})
 class TestDoubleSave(SnapshotTestBase):
-    """Test set snapshot_cron flag"""
+    """Test simultaneous save operations"""
 
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
@@ -233,14 +233,20 @@ class TestDoubleSave(SnapshotTestBase):
         )
         await seeder.run(target_deviation=0.05)
 
-        try:
-            await asyncio.gather(
-                async_client.execute_command("save rdb dump"),
-                async_client.execute_command("save rdb dump"),
-            )
-            assert False, "one of the operation shouldn't pass"
-        except Exception as e:
-            pass
+        async def save():
+            try:
+                res = await async_client.execute_command("save", "rdb", "dump")
+                return True
+            except Exception as e:
+                return False
+
+        save_commnands = [asyncio.create_task(save()) for _ in range(2)]
+
+        num_successes = 0
+        for result in asyncio.as_completed(save_commnands):
+            num_successes += await result
+
+        assert num_successes == 1, "Only one SAVE must be successful"
 
 
 @dfly_args({**BASIC_ARGS})

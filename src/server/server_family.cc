@@ -622,7 +622,8 @@ void ServerFamily::Shutdown() {
 
   JoinSnapshotSchedule();
 
-  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
+  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty() &&
+      service_.GetGlobalState() != GlobalState::TAKEN_OVER) {
     shard_set->pool()->GetNextProactor()->Await([this] {
       GenericError ec = DoSave();
       if (ec) {
