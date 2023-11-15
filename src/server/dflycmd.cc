@@ -423,7 +423,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
   }
-  VLOG(1) << "AwaitDispatches done";
+  VLOG(1) << "AwaitCurrentDispatches done";
 
   // We have this guard to disable expirations: We don't want any writes to the journal after
   // we send the `PING`, and expirations could ruin that.

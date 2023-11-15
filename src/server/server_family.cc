@@ -1307,10 +1307,7 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
 
   // TODO handle blocking commands
   const absl::Duration kDispatchTimeout = absl::Seconds(1);
-  if (!AwaitDispatches(kDispatchTimeout, [self = cntx->conn()](util::Connection* conn) {
-        // Wait until the only command dispatching is the client pause command.
-        return conn != self;
-      })) {
+  if (!AwaitCurrentDispatches(kDispatchTimeout, cntx->conn())) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << kDispatchTimeout;
     service_.proactor_pool().Await([](util::ProactorBase* pb) {
       ServerState& etl = *ServerState::tlocal();
