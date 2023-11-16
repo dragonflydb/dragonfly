@@ -45,7 +45,16 @@ def test_length_in_set_command(df_server: DflyInstance):
     command = b"set foo 0 0 4\r\nother\r\n"
     client.sendall(command)
     response = client.recv(256)
+    assert response == b"CLIENT_ERROR bad data chunk\r\n"
+
+    command = b"set foo 0 0 4\r\not\r\n\r\n"
+    client.sendall(command)
+    response = client.recv(256)
+    assert response == b"STORED\r\n"
+
+    command = b"set foo 0 0 4\r\n\r\n\r\n\r\n"
+    client.sendall(command)
+    response = client.recv(256)
+    assert response == b"STORED\r\n"
 
     client.close()
-
-    assert response == b"CLIENT_ERROR bad data chunk\r\n"
