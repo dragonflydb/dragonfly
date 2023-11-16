@@ -468,9 +468,6 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
     return rb->SendError("Takeover failed!");
   }
-  if (save_flag) {
-    sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
-  }
   (*cntx)->SendOk();
 
   VLOG(1) << "Takeover accepted, shutting down.";
