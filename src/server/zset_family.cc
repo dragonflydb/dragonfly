@@ -1067,9 +1067,9 @@ void HandleOpStatus(ConnectionContext* cntx, OpStatus op_status) {
   }
 }
 
-OpResult<ScoredMap> IntersectResults(const vector<OpResult<ScoredMap>>& results, AggType agg_type) {
-  OpResult<ScoredMap> result;
-  for (auto op_res : results) {
+OpResult<ScoredMap> IntersectResults(vector<OpResult<ScoredMap>>& results, AggType agg_type) {
+  ScoredMap result;
+  for (auto& op_res : results) {
     if (op_res.status() == OpStatus::SKIPPED)
       continue;
 
@@ -1078,14 +1078,17 @@ OpResult<ScoredMap> IntersectResults(const vector<OpResult<ScoredMap>>& results,
     }
 
     if (op_res->empty()) {
-      return op_res.status();
+      return ScoredMap{};
     }
 
-    if (result.value().empty()) {
-      result.value().swap(op_res.value());
+    if (result.empty()) {
+      result.swap(op_res.value());
     } else {
-      InterScoredMap(&(result.value()), &op_res.value(), agg_type);
+      InterScoredMap(&result, &op_res.value(), agg_type);
     }
+
+    if (result.empty())
+      break;
   }
   return result;
 }
