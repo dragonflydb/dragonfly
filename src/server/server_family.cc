@@ -1605,7 +1605,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("MEMORY")) {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
-    append("used_memory_peak", used_mem_peak.load(memory_order_relaxed));
+    const auto ump = used_mem_peak.load(memory_order_relaxed);
+    append("used_memory_peak", ump);
+    append("used_memory_peak_human", HumanReadableNumBytes(ump));
 
     size_t rss = rss_mem_current.load(memory_order_relaxed);
     append("used_memory_rss", rss);
