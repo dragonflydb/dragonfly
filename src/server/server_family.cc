@@ -1288,7 +1288,7 @@ void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
 
-  auto timeout = parser.Next().Int<uint64_t>();
+  auto timeout = parser.Next<uint64_t>();
   enum ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
     pause_state =
