@@ -145,15 +145,18 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 }
 
 SaveStagesController::~SaveStagesController() {
-  service_->SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  if (!ignore_state_)
+    service_->SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
 }
 
 GenericError SaveStagesController::Save() {
   if (auto err = BuildFullPath(); err)
     return err;
 
-  if (auto err = SwitchState(); err)
-    return err;
+  if (!ignore_state_) {
+    if (auto err = SwitchState(); err)
+      return err;
+  }
 
   if (auto err = InitResources(); err)
     return err;

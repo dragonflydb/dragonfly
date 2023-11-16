@@ -227,11 +227,10 @@ class TestDoubleSave(SnapshotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.slow
-    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
-        seeder = df_seeder_factory.create(
-            port=df_server.port, keys=100000, multi_transaction_probability=0
+    async def test_snapshot(self, async_client, df_server):
+        await async_client.execute_command(
+            "debug", "populate", "1000000", "askldjh", "1000", "RAND"
         )
-        await seeder.run(target_deviation=0.05)
 
         async def save():
             try:

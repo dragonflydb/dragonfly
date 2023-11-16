@@ -21,6 +21,7 @@ namespace detail {
 
 struct SaveStagesInputs {
   bool use_dfs_format_;
+  bool ignore_state_;
   std::string_view basename_;
   Transaction* trans_;
   Service* service_;
@@ -67,7 +68,7 @@ class RdbSnapshot {
 };
 
 struct SaveStagesController : public SaveStagesInputs {
-  SaveStagesController(SaveStagesInputs&& inputs);
+  SaveStagesController(SaveStagesInputs&& input);
 
   ~SaveStagesController();
 

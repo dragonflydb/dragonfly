@@ -15,6 +15,7 @@
 #include "absl/strings/numbers.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "server/engine_shard_set.h"
@@ -128,7 +129,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return StartStable(args, cntx);
   }
 
-  if (sub_cmd == "TAKEOVER" && args.size() == 3) {
+  if (sub_cmd == "TAKEOVER" && (args.size() == 3 || args.size() == 4)) {
     return TakeOver(args, cntx);
   }
 
@@ -388,14 +389,19 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
 
 void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  string_view sync_id_str = ArgS(args, 2);
-  float timeout;
-  if (!absl::SimpleAtof(ArgS(args, 1), &timeout)) {
-    return (*cntx)->SendError(kInvalidIntErr);
-  }
+  CmdArgParser parser{args};
+  parser.Next();
+  float timeout = parser.Next<float>();
   if (timeout < 0) {
     return (*cntx)->SendError("timeout is negative");
   }
+
+  bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
+
+  string_view sync_id_str = parser.Next<std::string_view>();
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
   VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str << " time out:" << timeout;
 
@@ -462,10 +468,15 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
     return rb->SendError("Takeover failed!");
   }
+  if (save_flag) {
+    sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
+  }
   (*cntx)->SendOk();
 
   VLOG(1) << "Takeover accepted, shutting down.";
-  return sf_->ShutdownCmd({}, cntx);
+  std::string save_arg = save_flag ? "SAVE" : "NOSAVE";
+  MutableSlice sargs(save_arg);
+  return sf_->ShutdownCmd(CmdArgList(&sargs, 1), cntx);
 }
 
 void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {

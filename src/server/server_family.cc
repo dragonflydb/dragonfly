@@ -622,10 +622,9 @@ void ServerFamily::Shutdown() {
 
   JoinSnapshotSchedule();
 
-  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty() &&
-      service_.GetGlobalState() != GlobalState::TAKEN_OVER) {
+  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
-      GenericError ec = DoSave();
+      GenericError ec = DoSave(true);
       if (ec) {
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
       }
@@ -1060,18 +1059,19 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
-GenericError ServerFamily::DoSave() {
+GenericError ServerFamily::DoSave(bool ignore_state) {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(0, {});
-  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get());
+  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
+GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+                                  bool ignore_state) {
   SaveStagesController sc{detail::SaveStagesInputs{
-      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
-      &save_mu_, &save_bytes_cb_, snapshot_storage_}};
+      new_version, ignore_state, basename, trans, &service_, &is_saving_, fq_threadpool_.get(),
+      &last_save_info_, &save_mu_, &save_bytes_cb_, snapshot_storage_}};
   return sc.Save();
 }
 
@@ -2021,13 +2021,20 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   unique_lock lk(replicaof_mu_);
 
-  float_t timeout_sec;
-  if (!absl::SimpleAtof(ArgS(args, 0), &timeout_sec)) {
-    return (*cntx)->SendError(kInvalidIntErr);
-  }
+  CmdArgParser parser{args};
+
+  auto timeout_sec = parser.Next<float>();
   if (timeout_sec < 0) {
     return (*cntx)->SendError("timeout is negative");
   }
+
+  bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
+
+  if (parser.HasNext())
+    return (*cntx)->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
   if (ServerState::tlocal()->is_master)
     return (*cntx)->SendError("Already a master instance");
@@ -2039,7 +2046,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("Full sync not done");
   }
 
-  std::error_code ec = replica_->TakeOver(ArgS(args, 0));
+  std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
   if (ec)
     return (*cntx)->SendError("Couldn't execute takeover");
 
@@ -2360,7 +2367,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
              ShutdownCmd)
       << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
       << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
-      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, acl::kReplTakeOver}.HFUNC(
+      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)

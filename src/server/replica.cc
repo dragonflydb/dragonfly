@@ -149,12 +149,12 @@ void Replica::Pause(bool pause) {
   Proactor()->Await([&] { is_paused_ = pause; });
 }
 
-std::error_code Replica::TakeOver(std::string_view timeout) {
+std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
   VLOG(1) << "Taking over";
 
   std::error_code ec;
-  Proactor()->Await(
-      [this, &ec, timeout] { ec = SendNextPhaseRequest(absl::StrCat("TAKEOVER ", timeout)); });
+  auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout, (save_flag ? " SAVE" : ""));
+  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd)] { ec = SendNextPhaseRequest(cmd); });
 
   // If we successfully taken over, return and let server_family stop the replication.
   return ec;
