@@ -48,7 +48,6 @@ struct CmdArgParser {
       return std::string{operator std::string_view()};
     }
 
-    template <typename T> [[deprecated]] T Int();
     template <typename T> T Num();
 
     // Detect value based on cases.

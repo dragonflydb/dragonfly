@@ -34,19 +34,6 @@ CmdArgParser::CheckProxy::operator bool() const {
   return true;
 }
 
-template <typename T> T CmdArgParser::NextProxy::Int() {
-  T out;
-  if (absl::SimpleAtoi(operator std::string_view(), &out))
-    return out;
-  parser_->Report(INVALID_INT, idx_);
-  return T{0};
-}
-
-template uint64_t CmdArgParser::NextProxy::Int<uint64_t>();
-template int64_t CmdArgParser::NextProxy::Int<int64_t>();
-template uint32_t CmdArgParser::NextProxy::Int<uint32_t>();
-template int32_t CmdArgParser::NextProxy::Int<int32_t>();
-
 template <typename T> T CmdArgParser::NextProxy::Num() {
   T out;
   if constexpr (std::is_same_v<T, float>) {
