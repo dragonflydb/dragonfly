@@ -43,9 +43,11 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
+#include "server/search/doc_index.h"
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/transaction.h"
 #include "strings/human_readable.h"
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
@@ -1794,9 +1796,12 @@ struct RdbLoader::ObjSettings {
 
   bool has_expired = false;
 
+  bool is_sticky = false;
+
   void Reset() {
     expiretime = 0;
     has_expired = false;
+    is_sticky = false;
   }
 
   void SetExpire(int64_t val) {
@@ -1890,6 +1895,13 @@ error_code RdbLoader::Load(io::Source* src) {
       continue; /* Read next opcode. */
     }
 
+    if (type == RDB_OPCODE_DF_MASK) {
+      uint32_t mask;
+      SET_OR_RETURN(FetchInt<uint32_t>(), mask);
+      settings.is_sticky = mask & DF_MASK_FLAG_STICKY;
+      continue; /* Read next opcode. */
+    }
+
     if (type == RDB_OPCODE_FREQ) {
       /* FREQ: LFU frequency. */
       FetchInt<uint8_t>();  // IGNORE
@@ -1913,8 +1925,11 @@ error_code RdbLoader::Load(io::Source* src) {
       VLOG(1) << "Read RDB_OPCODE_FULLSYNC_END";
       RETURN_ON_ERR(EnsureRead(8));
       mem_buf_->ConsumeInput(8);  // ignore 8 bytes
-      if (full_sync_cut_cb)
+
+      if (full_sync_cut_cb) {
+        FlushAllShards();  // Flush as the handler awakes post load handlers
         full_sync_cut_cb();
+      }
       continue;
     }
 
@@ -1985,10 +2000,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_JOURNAL_BLOB) {
-      // We should flush all changes on the current db before applying incremental changes.
-      for (unsigned i = 0; i < shard_set->size(); ++i) {
-        FlushShardAsync(i);
-      }
+      FlushAllShards();  // Always flush before applying incremental on top
       RETURN_ON_ERR(HandleJournalBlob(service_));
       continue;
     }
@@ -2224,7 +2236,7 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "redis-bits") {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
-    LoadSearchIndexDefFromAux(move(auxval));
+    LoadSearchIndexDefFromAux(std::move(auxval));
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
@@ -2258,6 +2270,11 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   shard_set->Add(sid, std::move(cb));
 }
 
+void RdbLoader::FlushAllShards() {
+  for (ShardId i = 0; i < shard_set->size(); i++)
+    FlushShardAsync(i);
+}
+
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv);
   std::visit(visitor, opaque.obj);
@@ -2282,6 +2299,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     try {
       auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+      it->first.SetSticky(item->is_sticky);
       if (!added) {
         LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
       }
@@ -2338,6 +2356,8 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     return kOk;
   }
 
+  item->is_sticky = settings->is_sticky;
+
   ShardId sid = Shard(item->key, shard_set->size());
   item->expire_ms = settings->expiretime;
 
@@ -2369,9 +2389,11 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::CapturingReplyBuilder crb{};
   ConnectionContext cntx{nullptr, nullptr, &crb};
+  cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
 
+  // Avoid deleting local crb
   absl::Cleanup cntx_clean = [&cntx] { cntx.Inject(nullptr); };
 
   uint32_t consumed = 0;
@@ -2379,7 +2401,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::RedisParser parser;
 
   def += "\r\n";  // RESP terminator
-  absl::Span<uint8_t> buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
+  io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
   auto res = parser.Parse(buffer, &consumed, &resp_vec);
 
   if (res != facade::RedisParser::Result::OK) {
@@ -2387,9 +2409,9 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
     return;
   }
 
+  // Prepend FT.CREATE to index definiton
   CmdArgVec arg_vec;
   facade::RespExpr::VecToArgList(resp_vec, &arg_vec);
-
   string ft_create = "FT.CREATE";
   arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
 
@@ -2399,6 +2421,30 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   if (auto err = facade::CapturingReplyBuilder::GetError(response); err) {
     LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
   }
+}
+
+void RdbLoader::PerformPreLoad(Service* service) {
+  const CommandId* cmd = service->FindCmd("FT.DROPINDEX");
+  if (cmd == nullptr)
+    return;  // MacOS
+
+  Transaction::RunOnceAsCommand(cmd, [](auto* trans, auto* es) {
+    for (const auto& name : es->search_indices()->GetIndexNames())
+      es->search_indices()->DropIndex(name);
+    return OpStatus::OK;
+  });
+}
+
+void RdbLoader::PerformPostLoad(Service* service) {
+  const CommandId* cmd = service->FindCmd("FT.CREATE");
+  if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
+    return;
+
+  // Rebuild all search indices as only their definitions are extracted from the snapshot
+  Transaction::RunOnceAsCommand(cmd, [](auto* trans, auto* es) {
+    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
+    return OpStatus::OK;
+  });
 }
 
 }  // namespace dfly

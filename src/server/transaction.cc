@@ -982,7 +982,7 @@ ShardId Transaction::GetUniqueShard() const {
 KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;
-  res.key_step = cid_->key_arg_step();
+  res.key_step = cid_->opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1;
   res.args = GetShardArgs(sid);
   DCHECK(!res.args.empty() || (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL));
 
@@ -1409,6 +1409,22 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {}, false);
 }
 
+void Transaction::RunOnceAsCommand(const CommandId* cid, RunnableType cb) {
+  if (!ProactorBase::IsProactorThread())
+    return shard_set->pool()->at(0)->Await([cid, cb] { return RunOnceAsCommand(cid, cb); });
+
+  DCHECK(cid);
+  DCHECK(cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL));
+  DCHECK(ProactorBase::IsProactorThread());
+
+  boost::intrusive_ptr<Transaction> trans{new Transaction{cid}};
+  trans->InitByArgs(0, {});
+  trans->ScheduleSingleHop([cb](auto* trans, auto* es) {
+    cb(trans, es);
+    return OpStatus::OK;
+  });
+}
+
 void Transaction::CancelBlocking() {
   if (coordinator_state_ & COORD_BLOCKED) {
     coordinator_state_ |= COORD_CANCELLED;
@@ -1483,7 +1499,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     } else {
       key_index.end = last > 0 ? last : (int(args.size()) + last + 1);
     }
-    key_index.step = cid->key_arg_step();
+    key_index.step = cid->opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1;
 
     return key_index;
   }

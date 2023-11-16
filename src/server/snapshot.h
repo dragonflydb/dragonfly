@@ -8,6 +8,7 @@
 #include <bitset>
 
 #include "base/pod_array.h"
+#include "core/size_tracking_channel.h"
 #include "io/file.h"
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
@@ -50,12 +51,19 @@ class SliceSnapshot {
   struct DbRecord {
     uint64_t id;
     std::string value;
+
+    size_t size() const {
+      constexpr size_t kSmallStringOptSize = 15;
+      return value.capacity() > kSmallStringOptSize ? value.capacity() : 0UL;
+    }
   };
 
-  using RecordChannel = SimpleChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
+  using RecordChannel = SizeTrackingChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
 
   SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode);
   ~SliceSnapshot();
+
+  static size_t GetThreadLocalMemoryUsage();
 
   // Initialize snapshot, start bucket iteration fiber, register listeners.
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
@@ -114,15 +122,12 @@ class SliceSnapshot {
     return snapshot_version_;
   }
 
-  size_t pushed_bytes() const {
-    return stats_.pushed_bytes;
-  }
-
   const RdbTypeFreqMap& freq_map() const {
     return type_freq_map_;
   }
 
-  size_t GetTotalBufferCapacity() const;
+  size_t GetTotalBufferCapacity() const;   // In bytes
+  size_t GetTotalChannelCapacity() const;  // In bytes
 
  private:
   DbSlice* db_slice_;
@@ -148,7 +153,6 @@ class SliceSnapshot {
   uint64_t rec_id_ = 0;
 
   struct Stats {
-    size_t pushed_bytes = 0;
     size_t loop_serialized = 0, skipped = 0, side_saved = 0;
     size_t savecb_calls = 0;
   } stats_;

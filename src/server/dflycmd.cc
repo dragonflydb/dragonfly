@@ -291,6 +291,8 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   std::string_view sync_type = "FULL";
   if (seqid.has_value()) {
     if (sf_->journal()->IsLSNInBuffer(*seqid) || sf_->journal()->GetLsn() == *seqid) {
+      // This does not guarantee the lsn will still be present when DFLY SYNC runs,
+      // replication will be retried if it gets evicted by then.
       flow.start_partial_sync_at = *seqid;
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
               << " and is available. (current_lsn=" << sf_->journal()->GetLsn() << ")";
@@ -413,18 +415,15 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   absl::Time start = absl::Now();
   AggregateStatus status;
 
+  sf_->CancelBlockingCommands();
+
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
-  sf_->CancelBlockingCommands();
-  if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->conn()](util::Connection* conn) {
-        // The only command that is currently dispatching should be the takeover command -
-        // so we wait until this is true.
-        return conn != self;
-      })) {
+  if (!sf_->AwaitCurrentDispatches(timeout_dur, cntx->conn())) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
   }
-  VLOG(1) << "AwaitDispatches done";
+  VLOG(1) << "AwaitCurrentDispatches done";
 
   // We have this guard to disable expirations: We don't want any writes to the journal after
   // we send the `PING`, and expirations could ruin that.
@@ -440,7 +439,10 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
       shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
       while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
         if (absl::Now() - start > timeout_dur) {
-          LOG(WARNING) << "Couldn't synchronize with replica for takeover in time.";
+          LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: "
+                       << replica_ptr->address << ":" << replica_ptr->listening_port
+                       << ", last acked: " << flow->last_acked_lsn << ", expecting "
+                       << shard->journal()->GetLsn();
           status = OpStatus::TIMED_OUT;
           return;
         }
@@ -558,15 +560,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   RdbSaver* saver = flow->saver.get();
 
   if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
-    auto scripts = sf_->script_mgr()->GetAll();
-    StringVec script_bodies;
-    for (auto& [sha, data] : scripts) {
-      // Always send original body (with header & without auto async calls) that determines the sha,
-      // It's stored only if it's different from the post-processed version.
-      string& body = data.orig_body.empty() ? data.body : data.orig_body;
-      script_bodies.push_back(std::move(body));
-    }
-    ec = saver->SaveHeader({script_bodies, {}});
+    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service()));
   } else {
     ec = saver->SaveHeader({});
   }

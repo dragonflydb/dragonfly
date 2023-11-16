@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -367,21 +368,6 @@ bool IsReplicatingNoOne(string_view host, string_view port) {
   return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
 }
 
-void RebuildAllSearchIndices(Service* service) {
-  const CommandId* cmd = service->FindCmd("FT.CREATE");
-  if (cmd == nullptr) {
-    // On MacOS we don't include search so FT.CREATE won't exist.
-    return;
-  }
-
-  boost::intrusive_ptr<Transaction> trans{new Transaction{cmd}};
-  trans->InitByArgs(0, {});
-  trans->ScheduleSingleHop([](auto* trans, auto* es) {
-    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
-    return OpStatus::OK;
-  });
-}
-
 template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
 }
@@ -693,6 +679,8 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     return {};
   }
 
+  RdbLoader::PerformPreLoad(&service_);
+
   auto& pool = service_.proactor_pool();
 
   vector<Fiber> load_fibers;
@@ -729,11 +717,14 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
+
     if (aggregated_result->first_error) {
       LOG(ERROR) << "Rdb load failed. " << (*aggregated_result->first_error).message();
       exit(1);
     }
-    RebuildAllSearchIndices(&service_);
+
+    RdbLoader::PerformPostLoad(&service_);
+
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     ec_promise.set_value(*(aggregated_result->first_error));
@@ -1133,17 +1124,20 @@ void ServerFamily::CancelBlockingCommands() {
   }
 }
 
-bool ServerFamily::AwaitDispatches(absl::Duration timeout,
-                                   const std::function<bool(util::Connection*)>& filter) {
-  auto start = absl::Now();
+bool ServerFamily::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer) {
+  vector<Fiber> fibers;
+  bool successful = true;
+
   for (auto* listener : listeners_) {
-    absl::Duration remaining_time = timeout - (absl::Now() - start);
-    if (remaining_time < absl::Nanoseconds(0) ||
-        !listener->AwaitDispatches(remaining_time, filter)) {
-      return false;
-    }
+    fibers.push_back(MakeFiber([listener, timeout, issuer, &successful]() {
+      successful &= listener->AwaitCurrentDispatches(timeout, issuer);
+    }));
   }
-  return true;
+
+  for (auto& fb : fibers)
+    fb.JoinIfNeeded();
+
+  return successful;
 }
 
 string GetPassword() {
@@ -1223,41 +1217,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
+  CmdArgList sub_args = args.subspan(1);
 
-  if (sub_cmd == "SETNAME" && args.size() == 2) {
-    cntx->conn()->SetName(string{ArgS(args, 1)});
-    return (*cntx)->SendOk();
-  }
-
-  if (sub_cmd == "GETNAME") {
-    auto name = cntx->conn()->GetName();
-    if (!name.empty()) {
-      return (*cntx)->SendBulkString(name);
-    } else {
-      return (*cntx)->SendNull();
-    }
-  }
-
-  if (sub_cmd == "LIST") {
-    vector<string> client_info;
-    absl::base_internal::SpinLock mu;
-
-    // we can not preempt the connection traversal, so we need to use a spinlock.
-    // alternatively we could lock when mutating the connection list, but it seems not important.
-    auto cb = [&](unsigned thread_index, util::Connection* conn) {
-      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-      string info = dcon->GetClientInfo(thread_index);
-      absl::base_internal::SpinLockHolder l(&mu);
-      client_info.push_back(move(info));
-    };
-
-    for (auto* listener : listeners_) {
-      listener->TraverseConnections(cb);
-    }
-
-    string result = absl::StrJoin(move(client_info), "\n");
-    result.append("\n");
-    return (*cntx)->SendBulkString(result);
+  if (sub_cmd == "SETNAME") {
+    return ClientSetName(sub_args, cntx);
+  } else if (sub_cmd == "GETNAME") {
+    return ClientGetName(sub_args, cntx);
+  } else if (sub_cmd == "LIST") {
+    return ClientList(sub_args, cntx);
+  } else if (sub_cmd == "PAUSE") {
+    return ClientPause(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -1266,6 +1235,118 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
+}
+
+void ServerFamily::ClientSetName(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 1) {
+    cntx->conn()->SetName(string{ArgS(args, 0)});
+    return (*cntx)->SendOk();
+  } else {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+}
+
+void ServerFamily::ClientGetName(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+  auto name = cntx->conn()->GetName();
+  if (!name.empty()) {
+    return (*cntx)->SendBulkString(name);
+  } else {
+    return (*cntx)->SendNull();
+  }
+}
+
+void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+
+  vector<string> client_info;
+  absl::base_internal::SpinLock mu;
+
+  // we can not preempt the connection traversal, so we need to use a spinlock.
+  // alternatively we could lock when mutating the connection list, but it seems not important.
+  auto cb = [&](unsigned thread_index, util::Connection* conn) {
+    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+    string info = dcon->GetClientInfo(thread_index);
+    absl::base_internal::SpinLockHolder l(&mu);
+    client_info.push_back(std::move(info));
+  };
+
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+
+  string result = absl::StrJoin(client_info, "\n");
+  result.append("\n");
+  return (*cntx)->SendBulkString(result);
+}
+
+void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+
+  auto timeout = parser.Next().Int<uint64_t>();
+  enum ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state =
+        parser.ToUpper().Next().Case("WRITE", ClientPause::WRITE).Case("ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return (*cntx)->SendError(err->MakeReply());
+  }
+
+  // Pause dispatch commands before updating client puase state, and enable dispatch after updating
+  // pause state. This will unsure that when we after changing the state all running commands will
+  // read the new pause state, and we will not pause client in the middle of a transaction.
+  service_.proactor_pool().Await([](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseDispatch(true);
+  });
+
+  // TODO handle blocking commands
+  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  if (!AwaitCurrentDispatches(kDispatchTimeout, cntx->conn())) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << kDispatchTimeout;
+    service_.proactor_pool().Await([](util::ProactorBase* pb) {
+      ServerState& etl = *ServerState::tlocal();
+      etl.SetPauseDispatch(false);
+    });
+    return (*cntx)->SendError("Failed to pause all running clients");
+  }
+
+  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseState(pause_state, true);
+    etl.SetPauseDispatch(false);
+  });
+
+  // We should not expire/evict keys while clients are puased.
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+
+  fb2::Fiber("client_pause", [this, timeout, pause_state]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
+    // ensure this fiber will not left hanging .
+    auto step = 10ms;
+    auto timeout_ms = timeout * 1ms;
+    int64_t steps = timeout_ms.count() / step.count();
+    ServerState& etl = *ServerState::tlocal();
+    do {
+      ThisFiber::SleepFor(step);
+    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
+
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      });
+      shard_set->RunBriefInParallel(
+          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    }
+  }).Detach();
+
+  (*cntx)->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -2223,33 +2304,32 @@ void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
   registry->StartFamily();
   *registry
-      << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0, acl::kAuth}.HFUNC(Auth)
-      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::kBGSave}.HFUNC(Save)
-      << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0, acl::kClient}.HFUNC(Client)
-      << CI{"CONFIG", CO::ADMIN, -2, 0, 0, 0, acl::kConfig}.HFUNC(Config)
-      << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0, acl::kDbSize}.HFUNC(DbSize)
-      << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, 0, acl::kDebug}.HFUNC(Debug)
-      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, 0, acl::kFlushDB}.HFUNC(FlushDb)
-      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::kFlushAll}.HFUNC(FlushAll)
-      << CI{"INFO", CO::LOADING, -1, 0, 0, 0, acl::kInfo}.HFUNC(Info)
-      << CI{"HELLO", CO::LOADING, -1, 0, 0, 0, acl::kHello}.HFUNC(Hello)
-      << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, 0, acl::kLastSave}.HFUNC(LastSave)
-      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0, acl::kLatency}.HFUNC(
+      << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
+      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, acl::kBGSave}.HFUNC(Save)
+      << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
+      << CI{"CONFIG", CO::ADMIN, -2, 0, 0, acl::kConfig}.HFUNC(Config)
+      << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
+      << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
+      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, acl::kFlushDB}.HFUNC(FlushDb)
+      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::kFlushAll}.HFUNC(FlushAll)
+      << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
+      << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
+      << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
+      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, acl::kLatency}.HFUNC(
              Latency)
-      << CI{"MEMORY", kMemOpts, -2, 0, 0, 0, acl::kMemory}.HFUNC(Memory)
-      << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0, acl::kSave}.HFUNC(Save)
-      << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0, acl::kShutDown}.HFUNC(
+      << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
+      << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
+      << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kShutDown}.HFUNC(
              ShutdownCmd)
-      << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
-      << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
-      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, 0, acl::kReplTakeOver}.HFUNC(
+      << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
+      << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
+      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
-      << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
-      << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0, acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
-      << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, 0, acl::kScript}.HFUNC(
-             Script)
-      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0, acl::kDfly}.HFUNC(Dfly);
+      << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
+      << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
+      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
+      << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
+      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly);
 }
 
 }  // namespace dfly

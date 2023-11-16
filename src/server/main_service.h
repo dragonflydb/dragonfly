@@ -73,6 +73,7 @@ class Service : public facade::ServiceInterface {
                                            facade::Connection* owner) final;
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
+  void AwaitOnPauseDispatch() final;
 
   std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
   const CommandId* FindCmd(std::string_view) const;
@@ -110,6 +111,10 @@ class Service : public facade::ServiceInterface {
   absl::flat_hash_map<std::string, unsigned> UknownCmdMap() const;
 
   ScriptMgr* script_mgr() {
+    return server_family_.script_mgr();
+  }
+
+  const ScriptMgr* script_mgr() const {
     return server_family_.script_mgr();
   }
 

@@ -32,7 +32,9 @@ extern "C" {
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/main_service.h"
 #include "server/rdb_extensions.h"
+#include "server/search/doc_index.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
@@ -272,14 +274,21 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
                                              uint64_t expire_ms, DbIndex dbid) {
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   SelectDb(dbid);
-  uint8_t buf[16];
-  error_code ec;
+
   /* Save the expire time */
   if (expire_ms > 0) {
-    buf[0] = RDB_OPCODE_EXPIRETIME_MS;
+    uint8_t buf[16] = {RDB_OPCODE_EXPIRETIME_MS};
     absl::little_endian::Store64(buf + 1, expire_ms);
-    ec = WriteRaw(Bytes{buf, 9});
-    if (ec)
+    if (auto ec = WriteRaw(Bytes{buf, 9}); ec)
+      return make_unexpected(ec);
+  }
+
+  /* Save the key poperties */
+  uint32_t df_mask_flags = pk.IsSticky() ? DF_MASK_FLAG_STICKY : 0;
+  if (df_mask_flags != 0) {
+    uint8_t buf[8] = {RDB_OPCODE_DF_MASK};
+    absl::little_endian::Store32(buf + 1, df_mask_flags);
+    if (auto ec = WriteRaw(Bytes{buf, 5}); ec)
       return make_unexpected(ec);
   }
 
@@ -290,16 +299,13 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
 
   DVLOG(3) << ((void*)this) << ": Saving key/val start " << key << " in dbid=" << dbid;
 
-  ec = WriteOpcode(rdb_type);
-  if (ec)
+  if (auto ec = WriteOpcode(rdb_type); ec)
     return make_unexpected(ec);
 
-  ec = SaveString(key);
-  if (ec)
+  if (auto ec = SaveString(key); ec)
     return make_unexpected(ec);
 
-  ec = SaveValue(pv);
-  if (ec) {
+  if (auto ec = SaveValue(pv); ec) {
     LOG(ERROR) << "Problems saving value for key " << key << " in dbid=" << dbid;
     return make_unexpected(ec);
   }
@@ -948,10 +954,6 @@ class RdbSaver::Impl {
   // Multi entry compression is available only on df snapshot, this will
   // make snapshot size smaller and opreation faster.
   CompressionMode compression_mode_;
-
-  struct Stats {
-    std::atomic<size_t> pulled_bytes{0};
-  } stats_;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -1041,8 +1043,6 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
-      stats_.pulled_bytes.fetch_add(record->value.size(), memory_order_relaxed);
-
       io_error = sink_->Write(io::Buffer(record->value));
       if (io_error) {
         break;
@@ -1050,16 +1050,11 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
     } while ((record = records_popper.TryPop()));
   }  // while (records_popper.Pop())
 
-  size_t pushed_bytes = 0;
   for (auto& ptr : shard_snapshots_) {
     ptr->Join();
-    pushed_bytes += ptr->pushed_bytes();
   }
 
   DCHECK(!record.has_value() || !channel_.TryPop(*record));
-
-  VLOG(1) << "Channel pulled bytes: " << stats_.pulled_bytes.load(memory_order_relaxed)
-          << " pushed bytes: " << pushed_bytes;
 
   return io_error;
 }
@@ -1103,13 +1098,12 @@ void RdbSaver::Impl::Cancel() {
 // This function is called from connection thread when info command is invoked.
 // All accessed variableds must be thread safe, as they are fetched not from the rdb saver thread.
 size_t RdbSaver::Impl::GetTotalBuffersSize() const {
-  std::atomic<size_t> pushed_bytes{0};
+  std::atomic<size_t> channel_bytes{0};
   std::atomic<size_t> serializer_bytes{0};
-  size_t pulled_bytes = stats_.pulled_bytes.load(memory_order_relaxed);
 
-  auto cb = [this, &pushed_bytes, &serializer_bytes](ShardId sid) {
+  auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
-    pushed_bytes.fetch_add(snapshot->pushed_bytes(), memory_order_relaxed);
+    channel_bytes.fetch_add(snapshot->GetTotalChannelCapacity(), memory_order_relaxed);
     serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
   };
 
@@ -1117,17 +1111,37 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
     cb(0);
   } else {
     shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
-    // Note that pushed bytes and pulled bytes values are fetched at different times, as we need to
-    // calc the pushed bytes using RunBriefInParallel.
-    // pulled bytes might be higher untill we return here from RunBriefInParallel.
   }
-  size_t total_bytes = pushed_bytes.load(memory_order_relaxed) +
-                       serializer_bytes.load(memory_order_relaxed) - pulled_bytes;
-  VLOG(2) << "pushed_bytes:" << pushed_bytes.load(memory_order_relaxed)
-          << " serializer_bytes: " << serializer_bytes.load(memory_order_relaxed)
-          << " pulled_bytes: " << pulled_bytes << " total_bytes:" << total_bytes;
 
-  return total_bytes;
+  VLOG(2) << "channel_bytes:" << channel_bytes.load(memory_order_relaxed)
+          << " serializer_bytes: " << serializer_bytes.load(memory_order_relaxed);
+  return channel_bytes.load(memory_order_relaxed) + serializer_bytes.load(memory_order_relaxed);
+}
+
+RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
+  StringVec script_bodies, search_indices;
+
+  {
+    auto scripts = service->script_mgr()->GetAll();
+    script_bodies.reserve(scripts.size());
+    for (auto& [sha, data] : scripts)
+      script_bodies.push_back(move(data.body));
+  }
+
+#ifndef __APPLE__
+  {
+    shard_set->Await(0, [&] {
+      auto* indices = EngineShard::tlocal()->search_indices();
+      for (auto index_name : indices->GetIndexNames()) {
+        auto index_info = indices->GetIndex(index_name)->GetInfo();
+        search_indices.emplace_back(
+            absl::StrCat(index_name, " ", index_info.BuildRestoreCommand()));
+      }
+    });
+  }
+#endif
+
+  return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices)};
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -1265,7 +1279,7 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
     if (!glob_state.search_indices.empty())
       LOG(WARNING) << "Dragonfly search index data is incompatible with the RDB format";
   } else {
-    // Search index definitions are not tied to shards  and are saved in the summary file
+    // Search index definitions are not tied to shards and are saved in the summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_indices.empty());
     for (const string& s : glob_state.search_indices)
       RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));

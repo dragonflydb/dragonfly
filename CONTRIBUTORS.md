@@ -15,3 +15,4 @@
 * **[Elle Y](https://github.com/inohime)**
 * **[ATM SALEH](https://github.com/ATM-SALEH)**
 * **[Leonardo Mello](https://github.com/lsvmello)**
+* **[Nico Coetzee](https://github.com/nicc777)**

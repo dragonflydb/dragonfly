@@ -44,6 +44,8 @@ template <typename T> T CmdArgParser::NextProxy::Int() {
 
 template uint64_t CmdArgParser::NextProxy::Int<uint64_t>();
 template int64_t CmdArgParser::NextProxy::Int<int64_t>();
+template uint32_t CmdArgParser::NextProxy::Int<uint32_t>();
+template int32_t CmdArgParser::NextProxy::Int<int32_t>();
 
 ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
   switch (type) {

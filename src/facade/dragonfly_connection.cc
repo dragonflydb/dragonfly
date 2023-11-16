@@ -148,6 +148,7 @@ struct Connection::DispatchOperations {
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
+  void operator()(CheckpointMessage msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -190,35 +191,35 @@ size_t Connection::PipelineMessage::StorageCapacity() const {
   return storage.capacity() + args.capacity();
 }
 
-template <class... Ts> struct Overloaded : Ts... {
-  using Ts::operator()...;
-
-  template <typename T, typename D> size_t operator()(const unique_ptr<T, D>& ptr) {
-    return operator()(*ptr.get());
-  }
-};
-
-template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
-
 size_t Connection::MessageHandle::UsedMemory() const {
-  // TODO: don't count inline size
-  auto pub_size = [](const PubMessage& msg) -> size_t {
-    return sizeof(PubMessage) + (msg.channel_len + msg.message_len);
+  struct MessageSize {
+    size_t operator()(const PubMessagePtr& msg) {
+      return sizeof(PubMessage) + (msg->channel_len + msg->message_len);
+    }
+    size_t operator()(const PipelineMessagePtr& msg) {
+      return sizeof(PipelineMessage) + msg->args.capacity() * sizeof(MutableSlice) +
+             msg->storage.capacity();
+    }
+    size_t operator()(const MonitorMessage& msg) {
+      return msg.capacity();
+    }
+    size_t operator()(const AclUpdateMessage& msg) {
+      return 0;
+    }
+    size_t operator()(const MigrationRequestMessage& msg) {
+      return 0;
+    }
+    size_t operator()(const CheckpointMessage& msg) {
+      return 0;  // no access to internal type, memory usage negligible
+    }
   };
-  auto msg_size = [](const PipelineMessage& arg) -> size_t {
-    return sizeof(PipelineMessage) + arg.args.capacity() * sizeof(MutableSlice) +
-           arg.storage.capacity();
-  };
-  auto monitor_size = [](const MonitorMessage& arg) -> size_t { return arg.capacity(); };
-  auto acl_update_size = [](const AclUpdateMessage& msg) -> size_t {
-    return sizeof(AclUpdateMessage);
-  };
-  auto migration_request_size = [](const MigrationRequestMessage& msg) -> size_t {
-    return sizeof(MigrationRequestMessage);
-  };
-  return sizeof(MessageHandle) + visit(Overloaded{pub_size, msg_size, monitor_size, acl_update_size,
-                                                  migration_request_size},
-                                       this->handle);
+
+  return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
+}
+
+bool Connection::MessageHandle::IsIntrusive() const {
+  return holds_alternative<AclUpdateMessage>(handle) ||
+         holds_alternative<CheckpointMessage>(handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -271,6 +272,10 @@ void Connection::DispatchOperations::operator()(const MigrationRequestMessage& m
   // no-op
 }
 
+void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
+  msg.bc.Dec();
+}
+
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service), name_{} {
@@ -297,6 +302,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   queue_backpressure_ = &tl_queue_backpressure_;
   if (queue_backpressure_->limit == 0) {
     queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
+    queue_backpressure_->pipeline_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   }
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
@@ -585,10 +591,12 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // After the client disconnected.
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
+
   VLOG(1) << "Before dispatch_fb.join()";
-  if (dispatch_fb_.IsJoinable())
-    dispatch_fb_.Join();
+  dispatch_fb_.JoinIfNeeded();
   VLOG(1) << "After dispatch_fb.join()";
+  DCHECK(dispatch_q_.empty());
+
   service_->OnClose(cc_.get());
 
   stats_->read_buf_capacity -= io_buf_.Capacity();
@@ -845,9 +853,10 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     io_buf_.CommitWrite(*recv_sz);
     stats_->io_read_bytes += *recv_sz;
     ++stats_->io_read_cnt;
+
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
-
+    service_->AwaitOnPauseDispatch();
     if (redis_parser_) {
       parse_status = ParseRedis(orig_builder);
     } else {
@@ -933,6 +942,39 @@ bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
   return false;
 }
 
+void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
+  DCHECK_EQ(dispatch_q_.size(), dispatch_q_cmds_count_);
+
+  vector<CmdArgList> squash_cmds;
+  vector<PipelineMessagePtr> squash_msgs;
+
+  squash_cmds.reserve(dispatch_q_.size());
+  squash_msgs.reserve(dispatch_q_.size());
+
+  while (!dispatch_q_.empty()) {
+    auto& msg = dispatch_q_.front();
+    CHECK(holds_alternative<PipelineMessagePtr>(msg.handle));
+
+    squash_msgs.push_back(std::move(std::get<PipelineMessagePtr>(msg.handle)));
+    squash_cmds.push_back(absl::MakeSpan(squash_msgs.back()->args));
+    dispatch_q_.pop_front();
+  }
+
+  cc_->async_dispatch = true;
+
+  service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
+
+  if (dispatch_q_cmds_count_ == squash_cmds.size()) {  // Flush if no new commands appeared
+    builder->FlushBatch();
+    builder->SetBatchMode(false);  // in case the next dispatch is sync
+  }
+
+  cc_->async_dispatch = false;
+
+  for (auto& msg : squash_msgs)
+    RecycleMessage(MessageHandle{std::move(msg)});
+}
+
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
 // into the dispatch queue and DispatchFiber will run those commands asynchronously with
@@ -944,7 +986,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
 
-  uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
@@ -969,23 +1010,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     prev_epoch = cur_epoch;
     builder->SetBatchMode(dispatch_q_.size() > 1);
 
-    auto recycle = [this, request_cache_limit](MessageHandle msg) {
-      size_t used_mem = msg.UsedMemory();
-      queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
-
-      stats_->dispatch_queue_bytes -= used_mem;
-      stats_->dispatch_queue_entries--;
-
-      // Retain pipeline message in pool.
-      if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
-        dispatch_q_cmds_count_--;
-        if (stats_->pipeline_cmd_cache_bytes < request_cache_limit) {
-          stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
-          pipeline_req_pool_.push_back(move(*pipe));
-        }
-      }
-    };
-
     // Special case: if the dispatch queue accumulated a big number of commands,
     // we can try to squash them
     // It is only enabled if the threshold is reached and the whole dispatch queue
@@ -994,37 +1018,14 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     bool threshold_reached = dispatch_q_cmds_count_ > squashing_threshold;
     bool are_all_plain_cmds = dispatch_q_cmds_count_ == dispatch_q_.size();
     if (squashing_enabled && threshold_reached && are_all_plain_cmds) {
-      vector<CmdArgList> args;
-      args.reserve(dispatch_q_.size());
-      for (auto& msg : dispatch_q_) {
-        CHECK(holds_alternative<PipelineMessagePtr>(msg.handle));
-        auto& pipe_msg = get<PipelineMessagePtr>(msg.handle);
-        args.push_back(absl::MakeSpan(pipe_msg->args));
-      }
-
-      cc_->async_dispatch = true;
-      service_->DispatchManyCommands(absl::MakeSpan(args), cc_.get());
-      cc_->async_dispatch = false;
-
-      // Flush strictly before the dispatch queue is cleared so that no sync dispatch can occur
-      if (dispatch_q_.size() == args.size()) {  // Flush if no new messages appeared
-        builder->FlushBatch();
-        builder->SetBatchMode(false);  // in case the next dispatch is sync
-      }
-
-      DCHECK(!cc_->sync_dispatch);
-      // Dispatch queue could have grown, so handle strictly as many as we executed
-      for (size_t i = 0; i < args.size(); i++) {
-        recycle(move(dispatch_q_.front()));
-        dispatch_q_.pop_front();
-      }
-
+      SquashPipeline(builder);
     } else {
       MessageHandle msg = move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
       if (ShouldEndDispatchFiber(msg)) {
-        recycle(move(msg));
+        RecycleMessage(std::move(msg));
+        DCHECK(dispatch_q_.empty());
         return;
       }
 
@@ -1032,15 +1033,22 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       std::visit(dispatch_op, msg.handle);
       cc_->async_dispatch = false;
 
-      recycle(move(msg));
+      RecycleMessage(std::move(msg));
     }
 
     queue_backpressure_->ec.notify();
   }
 
+  DCHECK(cc_->conn_closing || builder->GetError());
   cc_->conn_closing = true;
 
-  // make sure that we don't have any leftovers!
+  // Recycle messages even from disconnecting client to keep properly track of memory stats
+  for (auto& msg : dispatch_q_) {
+    FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
+    if (msg.IsIntrusive())
+      visit(dispatch_op, msg.handle);  // to not miss checkpoints
+    RecycleMessage(std::move(msg));
+  }
   dispatch_q_.clear();
 }
 
@@ -1135,6 +1143,14 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({std::move(msg)});
 }
 
+void Connection::SendCheckpoint(fb2::BlockingCounter bc) {
+  if (!IsCurrentlyDispatching())
+    return;
+
+  bc.Add(1);
+  SendAsync({CheckpointMessage{bc}});
+}
+
 void Connection::LaunchDispatchFiberIfNeeded() {
   if (!dispatch_fb_.IsJoinable()) {
     dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
@@ -1147,39 +1163,47 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK(owner());
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
-  if (cc_->conn_closing)
+  // We still deliver control messages even to closing connections, as messages
+  // like checkpoints always expect to be handled.
+  if (cc_->conn_closing && !msg.IsIntrusive())
     return;
 
   LaunchDispatchFiberIfNeeded();
 
-  auto place_in_dispatch_q = [this](MessageHandle msg) {
-    auto it = dispatch_q_.begin();
-    const auto end = dispatch_q_.end();
-    while (it < end && std::holds_alternative<AclUpdateMessage>(it->handle))
-      ++it;
-    dispatch_q_.insert(it, std::move(msg));
-  };
-
   size_t used_mem = msg.UsedMemory();
   queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
-
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
-  if (std::holds_alternative<AclUpdateMessage>(msg.handle)) {
-    // We need to reorder the queue, since multiple updates might happen before we
-    // pop the message, invalidating the correct order since we always push at the front
-    place_in_dispatch_q(std::move(msg));
+  if (msg.IsIntrusive()) {
+    auto it = dispatch_q_.begin();
+    while (it < dispatch_q_.end() && it->IsIntrusive())
+      ++it;
+    dispatch_q_.insert(it, std::move(msg));
   } else {
     dispatch_q_.push_back(std::move(msg));
   }
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.
-  // This might only happen if we started receving messages while `SUBSCRIBE`
-  // is still updating thread local data (see channel_store). We need to make sure its
-  // ack is sent before all other messages.
   if (dispatch_q_.size() == 1 && !cc_->sync_dispatch) {
     evc_.notify();
+  }
+}
+
+void Connection::RecycleMessage(MessageHandle msg) {
+  size_t used_mem = msg.UsedMemory();
+  queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
+
+  stats_->dispatch_queue_bytes -= used_mem;
+  stats_->dispatch_queue_entries--;
+
+  // Retain pipeline message in pool.
+  if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
+    dispatch_q_cmds_count_--;
+    if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
+      stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
+      pipeline_req_pool_.push_back(move(*pipe));
+    }
   }
 }
 

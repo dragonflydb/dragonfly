@@ -623,7 +623,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
           "slot_ranges": [
             {
               "start": 0,
-              "end": 8000
+              "end": $1
             }
           ],
           "master": {
@@ -636,7 +636,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
         {
           "slot_ranges": [
             {
-              "start": 8001,
+              "start": $2,
               "end": 16383
             }
           ],
@@ -648,7 +648,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, GetMyId());
+
+  string config = absl::Substitute(config_template, GetMyId(), "8000", "8001");
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
@@ -662,7 +663,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
   EXPECT_THAT(Run({"dbsize"}), IntArg(3));
 
   // Move ownership over 8000 to other master
-  config = absl::StrReplaceAll(config, {{"8000", "7999"}, {"8001", "8000"}});
+  config = absl::Substitute(config_template, GetMyId(), "7999", "8000");
   EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
   // Verify that keys for slot 8000 were deleted, while key for slot 7999 was kept

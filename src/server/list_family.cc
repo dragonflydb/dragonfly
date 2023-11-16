@@ -1328,38 +1328,33 @@ constexpr uint32_t kBLMove = READ | LIST | SLOW | BLOCKING;
 void ListFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
-      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPush}.HFUNC(LPush)
-      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kLPushX}.HFUNC(LPushX)
-      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1, acl::kLPop}.HFUNC(LPop)
-      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kRPush}.HFUNC(RPush)
-      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1, acl::kRPushX}.HFUNC(RPushX)
-      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1, acl::kRPop}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 2, 1, acl::kRPopLPush}
+      << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPush}.HFUNC(LPush)
+      << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPushX}.HFUNC(LPushX)
+      << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kLPop}.HFUNC(LPop)
+      << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPush}.HFUNC(RPush)
+      << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPushX}.HFUNC(RPushX)
+      << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kRPop}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRPopLPush}
              .SetHandler(RPopLPush)
-      << CI{"BRPOPLPUSH",
-            CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL,
-            4,
-            1,
-            2,
-            1,
+      << CI{"BRPOPLPUSH",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2,
             acl::kBRPopLPush}
              .SetHandler(BRPopLPush)
-      << CI{"BLPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1,
+      << CI{"BLPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
             acl::kBLPop}
              .HFUNC(BLPop)
-      << CI{"BRPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1,
+      << CI{"BRPOP",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
             acl::kBRPop}
              .HFUNC(BRPop)
-      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kLLen}.HFUNC(LLen)
-      << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, 1, acl::kLPos}.HFUNC(LPos)
-      << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1, acl::kLIndex}.HFUNC(LIndex)
-      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1, 1, acl::kLInsert}.HFUNC(LInsert)
-      << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1, acl::kLRange}.HFUNC(LRange)
-      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1, acl::kLSet}.HFUNC(LSet)
-      << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1, acl::kLTrim}.HFUNC(LTrim)
-      << CI{"LREM", CO::WRITE, 4, 1, 1, 1, acl::kLRem}.HFUNC(LRem)
-      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, 1, acl::kLMove}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, 1, acl::kBLMove}
+      << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kLLen}.HFUNC(LLen)
+      << CI{"LPOS", CO::READONLY | CO::FAST, -3, 1, 1, acl::kLPos}.HFUNC(LPos)
+      << CI{"LINDEX", CO::READONLY, 3, 1, 1, acl::kLIndex}.HFUNC(LIndex)
+      << CI{"LINSERT", CO::WRITE | CO::DENYOOM, 5, 1, 1, acl::kLInsert}.HFUNC(LInsert)
+      << CI{"LRANGE", CO::READONLY, 4, 1, 1, acl::kLRange}.HFUNC(LRange)
+      << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, acl::kLSet}.HFUNC(LSet)
+      << CI{"LTRIM", CO::WRITE, 4, 1, 1, acl::kLTrim}.HFUNC(LTrim)
+      << CI{"LREM", CO::WRITE, 4, 1, 1, acl::kLRem}.HFUNC(LRem)
+      << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, acl::kLMove}.HFUNC(LMove)
+      << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, acl::kBLMove}
              .SetHandler(BLMove);
 }
 

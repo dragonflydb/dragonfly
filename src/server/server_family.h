@@ -137,6 +137,10 @@ class ServerFamily {
     return script_mgr_.get();
   }
 
+  const ScriptMgr* script_mgr() const {
+    return script_mgr_.get();
+  }
+
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
@@ -178,6 +182,10 @@ class ServerFamily {
     return dfly_cmd_.get();
   }
 
+  const std::vector<facade::Listener*>& GetListeners() const {
+    return listeners_;
+  }
+
   bool HasReplica() const;
   std::optional<Replica::Info> GetReplicaInfo() const;
   std::string GetReplicaMasterId() const;
@@ -188,8 +196,8 @@ class ServerFamily {
 
   void CancelBlockingCommands();
 
-  bool AwaitDispatches(absl::Duration timeout,
-                       const std::function<bool(util::Connection*)>& filter);
+  // Wait until all current dispatches finish, returns true on success, false if timeout was reached
+  bool AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer);
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);
@@ -203,6 +211,10 @@ class ServerFamily {
 
   void Auth(CmdArgList args, ConnectionContext* cntx);
   void Client(CmdArgList args, ConnectionContext* cntx);
+  void ClientSetName(CmdArgList args, ConnectionContext* cntx);
+  void ClientGetName(CmdArgList args, ConnectionContext* cntx);
+  void ClientList(CmdArgList args, ConnectionContext* cntx);
+  void ClientPause(CmdArgList args, ConnectionContext* cntx);
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);

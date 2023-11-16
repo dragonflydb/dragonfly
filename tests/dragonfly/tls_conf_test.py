@@ -54,6 +54,19 @@ async def test_client_tls_cert(df_factory, with_tls_server_args):
         pass
 
 
+async def test_config_enable_tls_with_ca_dir(
+    df_factory, with_ca_dir_tls_server_args, with_tls_client_args
+):
+    server_args, ca_cert = with_ca_dir_tls_server_args
+    server_args["tls"] = "true"
+
+    with df_factory.create(**server_args) as server:
+        async with server.client(**with_tls_client_args, ssl_ca_certs=ca_cert) as client:
+            await client.execute_command("SET foo 44")
+            res = await client.execute_command("GET foo")
+            assert res == "44"
+
+
 async def test_config_update_tls_certs(
     df_factory, with_tls_server_args, with_tls_ca_cert_args, tmp_dir
 ):

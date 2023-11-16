@@ -103,8 +103,6 @@ struct SaveStagesController : public SaveStagesInputs {
 
   void RunStage(void (SaveStagesController::*cb)(unsigned));
 
-  RdbSaver::GlobalData GetGlobalData() const;
-
   size_t GetSaveBuffersSize();
 
  private:

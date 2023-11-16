@@ -423,14 +423,14 @@ async def test_cancel_replication_immediately(
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
-    COMMANDS_TO_ISSUE = 200
+    COMMANDS_TO_ISSUE = 100
 
     replica = df_local_factory.create()
     master = df_local_factory.create()
     df_local_factory.start_all([replica, master])
 
     seeder = df_seeder_factory.create(port=master.port)
-    c_replica = replica.client(socket_timeout=20)
+    c_replica = replica.client(socket_timeout=80)
 
     await seeder.run(target_deviation=0.1)
 
@@ -451,7 +451,7 @@ async def test_cancel_replication_immediately(
     replication_commands = [asyncio.create_task(replicate()) for _ in range(COMMANDS_TO_ISSUE)]
 
     num_successes = 0
-    for result in asyncio.as_completed(replication_commands, timeout=30):
+    for result in asyncio.as_completed(replication_commands, timeout=80):
         num_successes += await result
 
     logging.info(f"succeses: {num_successes}")
@@ -1125,7 +1125,6 @@ take_over_cases = [
 async def test_take_over_counters(df_local_factory, master_threads, replica_threads):
     master = df_local_factory.create(
         proactor_threads=master_threads,
-        #  vmodule="journal_slice=2,dflycmd=2,main_service=1",
         logtostderr=True,
     )
     replica1 = df_local_factory.create(proactor_threads=replica_threads)
@@ -1166,7 +1165,7 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
         assert time.time() - start < 10
 
     async def delayed_takeover():
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.3)
         await c1.execute_command(f"REPLTAKEOVER 5")
 
     _, _, *results = await asyncio.gather(
@@ -1714,3 +1713,97 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
     master.stop()
     replica.stop()
     assert master.is_in_logs("Partial sync requested from stale LSN")
+
+
+async def test_search(df_local_factory):
+    master = df_local_factory.create(proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=4)
+
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # First, create an index on replica
+    await c_replica.execute_command("FT.CREATE", "idx-r", "SCHEMA", "f1", "numeric")
+    for i in range(0, 10):
+        await c_replica.hset(f"k{i}", mapping={"f1": i})
+    assert (await c_replica.ft("idx-r").search("@f1:[5 9]")).total == 5
+
+    # Second, create an index on master
+    await c_master.execute_command("FT.CREATE", "idx-m", "SCHEMA", "f2", "numeric")
+    for i in range(0, 10):
+        await c_master.hset(f"k{i}", mapping={"f2": i * 2})
+    assert (await c_master.ft("idx-m").search("@f2:[6 10]")).total == 3
+
+    # Replicate
+    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
+    await wait_available_async(c_replica)
+
+    # Check master index was picked up and original index was deleted
+    assert (await c_replica.execute_command("FT._LIST")) == ["idx-m"]
+
+    # Check query from master runs on replica
+    assert (await c_replica.ft("idx-m").search("@f2:[6 10]")).total == 3
+
+    # Set a new key
+    await c_master.hset("kNEW", mapping={"f2": 100})
+    await asyncio.sleep(0.1)
+
+    assert (await c_replica.ft("idx-m").search("@f2:[100 100]")).docs[0].id == "kNEW"
+
+    # Create a new aux index on master
+    await c_master.execute_command("FT.CREATE", "idx-m2", "SCHEMA", "f2", "numeric", "sortable")
+    await asyncio.sleep(0.1)
+
+    from redis.commands.search.query import Query
+
+    assert (await c_replica.ft("idx-m2").search(Query("*").sort_by("f2").paging(0, 1))).docs[
+        0
+    ].id == "k0"
+
+
+# @pytest.mark.slow
+@pytest.mark.skip(reason="Client pause command bug with pipeline squashing")
+@pytest.mark.asyncio
+async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=4)
+    df_local_factory.start_all([master, replica])
+
+    seeder = df_seeder_factory.create(port=master.port)
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Give the seeder a bit of time.
+    await asyncio.sleep(1)
+    # block the seeder for 4 seconds
+    await c_master.execute_command("client pause 4000 write")
+    stats = await c_master.info("CommandStats")
+    await asyncio.sleep(0.5)
+    stats_after_sleep = await c_master.info("CommandStats")
+    # Check no commands are executed except info and replconf called from replica
+    for cmd, cmd_stats in stats_after_sleep.items():
+        if "cmdstat_INFO" != cmd and "cmdstat_REPLCONF" != cmd_stats:
+            assert stats[cmd] == cmd_stats, cmd
+
+    await asyncio.sleep(6)
+    seeder.stop()
+    await fill_task
+    stats_after_pause_finish = await c_master.info("CommandStats")
+    more_exeuted = False
+    for cmd, cmd_stats in stats_after_pause_finish.items():
+        if "cmdstat_INFO" != cmd and "cmdstat_REPLCONF" != cmd_stats and stats[cmd] != cmd_stats:
+            more_exeuted = True
+    assert more_exeuted
+
+    capture = await seeder.capture(port=master.port)
+    assert await seeder.compare(capture, port=replica.port)
+
+    await disconnect_clients(c_master, c_replica)

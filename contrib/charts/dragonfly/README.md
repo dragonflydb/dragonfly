@@ -17,13 +17,14 @@ Kubernetes: `>=1.23.0-0`
 
 ## Installing from a pre-packaged OCI
 
-Pick a version from https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly/helm/dragonfly
+Pick a version from https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly%2Fhelm%2Fdragonfly
 
+Example:
 
-E.g. VERSION=v0.15.0
-
+```shell
+VERSION=v1.12.1
 helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragonfly --version $VERSION
-
+```
 
 ## Values
 

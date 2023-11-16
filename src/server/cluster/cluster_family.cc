@@ -504,11 +504,9 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   auto cb = [&](util::ProactorBase* pb) { tl_cluster_config = new_config; };
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
-
   DCHECK(tl_cluster_config != nullptr);
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
-
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = GetDeletedSlots(is_first_config, before, after);
     DeleteSlots(deleted_slots);
@@ -609,12 +607,12 @@ constexpr uint32_t kReadWrite = FAST | CONNECTION;
 
 void ClusterFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
-  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0, acl::kCluster}.HFUNC(Cluster)
-            << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0,
+  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
+            << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0,
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite);
+            << CI{"READONLY", CO::READONLY, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
+            << CI{"READWRITE", CO::READONLY, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite);
 }
 
 }  // namespace dfly

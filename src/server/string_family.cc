@@ -1497,36 +1497,36 @@ constexpr uint32_t kClThrottle = THROTTLE;
 void StringFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
-      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1, acl::kSet}.HFUNC(Set)
-      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1, acl::kSetEx}.HFUNC(
+      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kSet}.HFUNC(Set)
+      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, acl::kSetEx}.HFUNC(
              SetEx)
-      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1, acl::kPSetEx}.HFUNC(
+      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, acl::kPSetEx}.HFUNC(
              PSetEx)
-      << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1, acl::kSetNx}.HFUNC(SetNx)
-      << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1, acl::kAppend}.HFUNC(Append)
-      << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1, acl::kPrepend}.HFUNC(Prepend)
-      << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1, 1, acl::kIncr}.HFUNC(Incr)
-      << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1, 1, acl::kDecr}.HFUNC(Decr)
-      << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1, 1, acl::kIncrBy}.HFUNC(IncrBy)
-      << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1, 1, acl::kIncrByFloat}.HFUNC(IncrByFloat)
-      << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1, 1, acl::kDecrBy}.HFUNC(DecrBy)
-      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kGet}.HFUNC(Get)
-      << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1, 1, acl::kGetDel}.HFUNC(GetDel)
-      << CI{"GETEX",    CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, 1,
-            acl::kGetEx}
+      << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, acl::kSetNx}.HFUNC(SetNx)
+      << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::kAppend}.HFUNC(Append)
+      << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::kPrepend}.HFUNC(Prepend)
+      << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1, acl::kIncr}.HFUNC(Incr)
+      << CI{"DECR", CO::WRITE | CO::FAST, 2, 1, 1, acl::kDecr}.HFUNC(Decr)
+      << CI{"INCRBY", CO::WRITE | CO::FAST, 3, 1, 1, acl::kIncrBy}.HFUNC(IncrBy)
+      << CI{"INCRBYFLOAT", CO::WRITE | CO::FAST, 3, 1, 1, acl::kIncrByFloat}.HFUNC(IncrByFloat)
+      << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1, acl::kDecrBy}.HFUNC(DecrBy)
+      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, acl::kGet}.HFUNC(Get)
+      << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1, acl::kGetDel}.HFUNC(GetDel)
+      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, acl::kGetEx}
              .HFUNC(GetEx)
-      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1, acl::kGetSet}.HFUNC(GetSet)
-      << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1, acl::kMGet}.HFUNC(
+      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::kGetSet}.HFUNC(GetSet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, acl::kMGet}.HFUNC(
              MGet)
-      << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2, acl::kMSet}.HFUNC(MSet)
-      << CI{"MSETNX", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2, acl::kMSetNx}.HFUNC(MSetNx)
-      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1, acl::kStrLen}.HFUNC(StrLen)
-      << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1, acl::kGetRange}.HFUNC(GetRange)
-      << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1, acl::kSubStr}.HFUNC(
+      << CI{"MSET", CO::WRITE | CO::DENYOOM | CO::INTERLEAVED_KEYS, -3, 1, -1, acl::kMSet}.HFUNC(
+             MSet)
+      << CI{"MSETNX", CO::WRITE | CO::DENYOOM | CO::INTERLEAVED_KEYS, -3, 1, -1, acl::kMSetNx}
+             .HFUNC(MSetNx)
+      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kStrLen}.HFUNC(StrLen)
+      << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, acl::kGetRange}.HFUNC(GetRange)
+      << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, acl::kSubStr}.HFUNC(
              GetRange)  // Alias for GetRange
-      << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1, acl::kSetRange}.HFUNC(
-             SetRange)
-      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1, acl::kClThrottle}.HFUNC(
+      << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, acl::kSetRange}.HFUNC(SetRange)
+      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::kClThrottle}.HFUNC(
              ClThrottle);
 }
 
