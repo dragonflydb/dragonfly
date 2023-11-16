@@ -24,8 +24,9 @@ extern "C" {
 using namespace std;
 
 ABSL_FLAG(string, spill_file_prefix, "",
-          "Enables tiered storage if set. The string denotes the path "
-          "and prefix of the files associated with tiered storage. E.g,"
+          "Experimental flag. Enables tiered storage if set. "
+          "The string denotes the path and prefix of the files "
+          " associated with tiered storage. E.g,"
           "spill_file_prefix=/path/to/file-prefix");
 
 ABSL_FLAG(uint32_t, hz, 100,
