@@ -390,10 +390,10 @@ void SendJsonValue(ConnectionContext* cntx, const JsonType& j) {
   }
 }
 
-OpResult<string> OpGet(const OpArgs& op_args, string_view key,
-                       vector<pair<string_view, optional<JsonExpression>>> expressions,
-                       bool should_format, const OptString& indent, const OptString& new_line,
-                       const OptString& space) {
+OpResult<string> OpJsonGet(const OpArgs& op_args, string_view key,
+                           const vector<pair<string_view, optional<JsonExpression>>>& expressions,
+                           bool should_format, const OptString& indent, const OptString& new_line,
+                           const OptString& space) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
@@ -1824,8 +1824,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   bool should_format = (indent || new_line || space);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGet(t->GetOpArgs(shard), key, std::move(expressions), should_format, indent, new_line,
-                 space);
+    return OpJsonGet(t->GetOpArgs(shard), key, expressions, should_format, indent, new_line, space);
   };
 
   Transaction* trans = cntx->transaction;
