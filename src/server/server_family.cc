@@ -1782,6 +1782,15 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
   }
 
+  if (should_enter("MODULES")) {
+    append("module",
+           "name=ReJSON,ver=20000,api=1,filters=0,usedby=[search],using=[],options=[handle-io-"
+           "errors]");
+    append("module",
+           "name=search,ver=20000,api=1,filters=0,usedby=[],using=[ReJSON],options=[handle-io-"
+           "errors]");
+  }
+
   if (should_enter("SEARCH", true)) {
     append("search_memory", m.search_stats.used_memory);
     append("search_num_indices", m.search_stats.num_indices);
@@ -2284,7 +2293,7 @@ void ServerFamily::Module(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendSimpleString("name");
   (*cntx)->SendSimpleString("ReJSON");
   (*cntx)->SendSimpleString("ver");
-  (*cntx)->SendLong(10'000);
+  (*cntx)->SendLong(20'000);
 
   // Search
   (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
