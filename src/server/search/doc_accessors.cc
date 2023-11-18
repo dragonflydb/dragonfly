@@ -90,7 +90,7 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
 
 BaseAccessor::StringList StringMapAccessor::GetStrings(string_view active_field) const {
   auto it = hset_->Find(active_field);
-  return it != hset_->end() ? StringList{it->second} : StringList{};
+  return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
 }
 
 BaseAccessor::VectorInfo StringMapAccessor::GetVector(string_view active_field) const {

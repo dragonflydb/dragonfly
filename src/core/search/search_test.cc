@@ -513,6 +513,54 @@ TEST_P(KnnTest, Simple2D) {
   }
 }
 
+TEST_P(KnnTest, Cosine) {
+  // Four arrows, closest cosing distance will be closes by angle
+  // 0 🡢 1 🡣 2 🡠 3 🡡
+  const pair<float, float> kTestCoords[] = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};
+
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params =
+      SchemaField::VectorParams{GetParam(), 2, VectorSimilarity::COSINE};
+  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+
+  for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
+    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
+    MockedDocument doc{Map{{"pos", coords}}};
+    indices.Add(i, &doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Point down
+  {
+    params["vec"] = ToBytes({-0.1, -10});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
+  }
+
+  // Point left
+  {
+    params["vec"] = ToBytes({-0.1, -0.01});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(2));
+  }
+
+  // Point up
+  {
+    params["vec"] = ToBytes({0, 5});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
+  }
+
+  // Point right
+  {
+    params["vec"] = ToBytes({0.2, 0.05});
+    algo.Init("* =>[KNN 1 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0));
+  }
+}
+
 TEST_P(KnnTest, AutoResize) {
   // Make sure index resizes automatically even with a small initial capacity
   const size_t kInitialCapacity = 5;
