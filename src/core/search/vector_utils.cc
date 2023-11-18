@@ -24,6 +24,7 @@ __attribute__((optimize("fast-math"))) float L2Distance(const float* u, const fl
   return sqrt(sum);
 }
 
+// TODO: Normalize vectors ahead if cosine distance is used
 __attribute__((optimize("fast-math"))) float CosineDistance(const float* u, const float* v,
                                                             size_t dims) {
   float sum_uv = 0, sum_uu = 0, sum_vv = 0;
@@ -34,7 +35,7 @@ __attribute__((optimize("fast-math"))) float CosineDistance(const float* u, cons
   }
 
   if (float denom = sum_uu * sum_vv; denom != 0.0f)
-    return sum_uv / sqrt(denom);
+    return 1 - sum_uv / sqrt(denom);
   return 0.0f;
 }
 
