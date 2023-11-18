@@ -2272,6 +2272,28 @@ void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
+void ServerFamily::Module(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[0]);
+  if (ArgS(args, 0) != "LIST")
+    return (*cntx)->SendError(kSyntaxErr);
+
+  (*cntx)->StartArray(2);
+
+  // Json
+  (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
+  (*cntx)->SendSimpleString("name");
+  (*cntx)->SendSimpleString("ReJSON");
+  (*cntx)->SendSimpleString("ver");
+  (*cntx)->SendLong(10'000);
+
+  // Search
+  (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
+  (*cntx)->SendSimpleString("name");
+  (*cntx)->SendSimpleString("search");
+  (*cntx)->SendSimpleString("ver");
+  (*cntx)->SendLong(20'000);  // we target v2
+}
+
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 namespace acl {
@@ -2297,6 +2319,7 @@ constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
+constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
 // TODO(check this)
 constexpr uint32_t kDfly = ADMIN;
 }  // namespace acl
@@ -2331,7 +2354,8 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
-      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly);
+      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
+      << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
 }
 
 }  // namespace dfly

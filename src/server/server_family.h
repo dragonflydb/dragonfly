@@ -235,6 +235,7 @@ class ServerFamily {
   void Script(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);
   void SlowLog(CmdArgList args, ConnectionContext* cntx);
+  void Module(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
