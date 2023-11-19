@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json_object.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
@@ -392,6 +393,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterMyId(args, cntx);
   } else if (sub_cmd == "FLUSHSLOTS") {
     return DflyClusterFlushSlots(args, cntx);
+  } else if (sub_cmd == "START-SLOT-MIGRATION") {
+    return DflyClusterStartSlotMigration(args, cntx);
   }
 
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -585,6 +588,43 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
   }
 
   DeleteSlots(slots);
+
+  return rb->SendOk();
+}
+
+void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  args.remove_prefix(1);  // Removes "START-SLOT-MIGRATION" subcmd string
+
+  //<SOURCE HOST IP> <PORT> <SLOT-ID-START> <SLOT-ID-END> [<SLOT-ID-START> <SLOT-ID-END>..
+  CmdArgParser parser(args);
+  auto host_ip = parser.Next<std::string_view>();
+  auto port = parser.Next<uint32_t>();
+  std::vector<ClusterConfig::SlotRange> slots;
+  tl_cluster_config->Initialize do {
+    auto slot_start = parser.Next<uint32_t>();
+    auto slot_end = parser.Next<uint32_t>();
+    slots.emplace_back(slot_start, slot_end);
+  }
+  while (parser.HasNext())
+
+    if (auto err = parser.Error(); err)
+      return (*cntx)->SendError(err->MakeReply());
+
+  SlotSet slots;
+  slots.reserve(args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    unsigned slot;
+    if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
+      return rb->SendError(kSyntaxErrType);
+    }
+    slots.insert(static_cast<SlotId>(slot));
+  }
+
+  VLOG(1) << "Connecting to master";
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_);
+  RETURN_ON_ERR(check_connection_error(ec, kConnErr));
 
   return rb->SendOk();
 }
