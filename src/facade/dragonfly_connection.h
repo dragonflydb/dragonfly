@@ -136,7 +136,7 @@ class Connection : public util::Connection {
         handle;
   };
 
-  enum Phase { SETUP, READ_SOCKET, PROCESS, NUM_PHASES };
+  enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
  public:
   // Add PubMessage to dispatch queue.

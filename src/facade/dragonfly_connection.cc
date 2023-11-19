@@ -455,8 +455,10 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   int my_cpu_id = sched_getcpu();
 #endif
 
-  static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process"};
-  static_assert(PHASE_NAMES[PROCESS] == "process");
+  static constexpr string_view PHASE_NAMES[] = {"setup", "readsock", "process", "shutting_down",
+                                                "preclose"};
+  static_assert(NUM_PHASES == ABSL_ARRAYSIZE(PHASE_NAMES));
+  static_assert(PHASE_NAMES[SHUTTING_DOWN] == "shutting_down");
 
   absl::StrAppend(&before, "id=", id_, " addr=", re, " laddr=", le);
   absl::StrAppend(&before, " fd=", socket_->native_handle(), " name=", name_);
@@ -591,12 +593,13 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // After the client disconnected.
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
+  phase_ = SHUTTING_DOWN;
 
   VLOG(1) << "Before dispatch_fb.join()";
   dispatch_fb_.JoinIfNeeded();
   VLOG(1) << "After dispatch_fb.join()";
   DCHECK(dispatch_q_.empty());
-
+  phase_ = PRECLOSE;
   service_->OnClose(cc_.get());
 
   stats_->read_buf_capacity -= io_buf_.Capacity();
@@ -1017,7 +1020,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       if (ShouldEndDispatchFiber(msg)) {
         RecycleMessage(std::move(msg));
         DCHECK(dispatch_q_.empty());
-        return;
+        break;
       }
 
       cc_->async_dispatch = true;
@@ -1034,6 +1037,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   cc_->conn_closing = true;
 
   // Recycle messages even from disconnecting client to keep properly track of memory stats
+  // As well as to avoid pubsub backpressure leakege.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
     if (msg.IsIntrusive())
