@@ -1166,7 +1166,6 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(owner());
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
-  DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 
   // "Closing" connections might be still processing commands, as we don't interrupt them.
   // So we still want to deliver control messages to them (like checkpoints).
@@ -1176,6 +1175,8 @@ void Connection::SendAsync(MessageHandle msg) {
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
   if (!cc_->conn_closing)
     LaunchDispatchFiberIfNeeded();
+
+  DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 
   size_t used_mem = msg.UsedMemory();
   queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
