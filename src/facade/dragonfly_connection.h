@@ -153,8 +153,8 @@ class Connection : public util::Connection {
   // decrement it once finished.
   void SendCheckpoint(util::fb2::BlockingCounter bc);
 
-  // Must be called before SendAsync to ensure the connection dispatch queue is not overfilled.
-  // Blocks until free space is available.
+  // Must be called before SendAsync to ensure the threads pipeline queue limit is not reached.
+  // Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
   void EnsureAsyncMemoryBudget();
 
   // Register hook that is executed on connection shutdown.
