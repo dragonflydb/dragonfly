@@ -285,6 +285,9 @@ class Connection : public util::Connection {
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline(facade::SinkReplyBuilder*);
 
+  // Clear pipelined messages, disaptching only intrusive ones.
+  void ClearPipelinedMessages();
+
  private:
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue

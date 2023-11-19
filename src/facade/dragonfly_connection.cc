@@ -598,8 +598,12 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   VLOG(1) << "Before dispatch_fb.join()";
   dispatch_fb_.JoinIfNeeded();
   VLOG(1) << "After dispatch_fb.join()";
-  DCHECK(dispatch_q_.empty());
+
   phase_ = PRECLOSE;
+
+  ClearPipelinedMessages();
+  DCHECK(dispatch_q_.empty());
+
   service_->OnClose(cc_.get());
 
   stats_->read_buf_capacity -= io_buf_.Capacity();
@@ -969,6 +973,20 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
     RecycleMessage(MessageHandle{std::move(msg)});
 }
 
+void Connection::ClearPipelinedMessages() {
+  DispatchOperations dispatch_op{cc_->reply_builder(), this};
+
+  // Recycle messages even from disconnecting client to keep properly track of memory stats
+  // As well as to avoid pubsub backpressure leakege.
+  for (auto& msg : dispatch_q_) {
+    FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
+    if (msg.IsIntrusive())
+      visit(dispatch_op, msg.handle);  // to not miss checkpoints
+    RecycleMessage(std::move(msg));
+  }
+  dispatch_q_.clear();
+}
+
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
 // into the dispatch queue and DispatchFiber will run those commands asynchronously with
@@ -1020,7 +1038,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       if (ShouldEndDispatchFiber(msg)) {
         RecycleMessage(std::move(msg));
         DCHECK(dispatch_q_.empty());
-        break;
+        return;  // don't set conn closing flag
       }
 
       cc_->async_dispatch = true;
@@ -1035,16 +1053,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   DCHECK(cc_->conn_closing || builder->GetError());
   cc_->conn_closing = true;
-
-  // Recycle messages even from disconnecting client to keep properly track of memory stats
-  // As well as to avoid pubsub backpressure leakege.
-  for (auto& msg : dispatch_q_) {
-    FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
-    if (msg.IsIntrusive())
-      visit(dispatch_op, msg.handle);  // to not miss checkpoints
-    RecycleMessage(std::move(msg));
-  }
-  dispatch_q_.clear();
 }
 
 Connection::PipelineMessagePtr Connection::FromArgs(RespVec args, mi_heap_t* heap) {
@@ -1122,6 +1130,7 @@ void Connection::ShutdownThreadLocal() {
 bool Connection::IsCurrentlyDispatching() const {
   if (!cc_)
     return false;
+
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
 
@@ -1157,13 +1166,16 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
   DCHECK(owner());
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
+  DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 
-  // We still deliver control messages even to closing connections, as messages
-  // like checkpoints always expect to be handled.
+  // "Closing" connections might be still processing commands, as we don't interrupt them.
+  // So we still want to deliver control messages to them (like checkpoints).
   if (cc_->conn_closing && !msg.IsIntrusive())
     return;
 
-  LaunchDispatchFiberIfNeeded();
+  // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
+  if (!cc_->conn_closing)
+    LaunchDispatchFiberIfNeeded();
 
   size_t used_mem = msg.UsedMemory();
   queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
