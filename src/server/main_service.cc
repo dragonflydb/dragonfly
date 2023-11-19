@@ -2335,23 +2335,27 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   ConnectionState& conn_state = server_cntx->conn_state;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
-    if (!conn_state.subscribe_info->channels.empty()) {
-      auto token = conn_state.subscribe_info->borrow_token;
-      server_cntx->UnsubscribeAll(false);
+    optional<BlockingCounter> token;
 
-      // Check that all borrowers finished processing.
-      // token is increased in channel_slice (the publisher side).
-      token.Wait();
+    if (!conn_state.subscribe_info->channels.empty()) {
+      token = conn_state.subscribe_info->borrow_token;
+      server_cntx->UnsubscribeAll(false);
     }
 
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
-      auto token = conn_state.subscribe_info->borrow_token;
+      // DCHECK(!token || *token == conn_state.subscribe_info->borrow_token);
+
+      token = conn_state.subscribe_info->borrow_token;
       server_cntx->PUnsubscribeAll(false);
-      // Check that all borrowers finished processing
-      token.Wait();
-      DCHECK(!conn_state.subscribe_info);
     }
+
+    // Check that all borrowers finished processing.
+    // The tokens are increased in channel_slice (the publisher side).
+    if (token)
+      token->Wait();
+
+    DCHECK(!conn_state.subscribe_info);
   }
 
   DeactivateMonitoring(server_cntx);
