@@ -736,7 +736,16 @@ auto Connection::ParseMemcache() -> ParserStatus {
     if (MemcacheParser::IsStoreCmd(cmd.type)) {
       total_len += cmd.bytes_len + 2;
       if (io_buf_.InputLen() >= total_len) {
-        value = str.substr(consumed, cmd.bytes_len);
+        std::string_view parsed_value = str.substr(consumed, cmd.bytes_len + 2);
+        if (parsed_value[cmd.bytes_len] != '\r' && parsed_value[cmd.bytes_len + 1] != '\n') {
+          builder->SendClientError("bad data chunk");
+          // We consume the whole buffer because we don't really know where it ends
+          // since the value length exceeds the cmd.bytes_len.
+          io_buf_.ConsumeInput(io_buf_.InputLen());
+          return OK;
+        }
+
+        value = parsed_value.substr(0, cmd.bytes_len);
         // TODO: dispatch.
       } else {
         return NEED_MORE;
