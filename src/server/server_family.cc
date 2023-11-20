@@ -624,8 +624,7 @@ void ServerFamily::Shutdown() {
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
-      GenericError ec = DoSave();
-      if (ec) {
+      if (GenericError ec = DoSave(); ec) {
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
       }
     });
