@@ -295,7 +295,7 @@ will eventually unblock when it disconnects.
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-@dfly_args({"proactor_threads": "1", "pipeline_queue_limit": "100"})
+@dfly_args({"proactor_threads": "1", "subscriber_thread_limit": "100"})
 async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port, limit=10)
     writer.write(b"SUBSCRIBE channel\r\n")
@@ -313,13 +313,13 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
     await asyncio.sleep(5)
 
     # Check we reached the limit
-    pub_bytes = int((await async_client.info())["dispatch_queue_pub_bytes"])
+    pub_bytes = int((await async_client.info())["dispatch_queue_subscriber_bytes"])
     assert pub_bytes >= 100
 
     await asyncio.sleep(0.1)
 
     # Make sure processing is stalled
-    new_pub_bytes = int((await async_client.info())["dispatch_queue_pub_bytes"])
+    new_pub_bytes = int((await async_client.info())["dispatch_queue_subscriber_bytes"])
     assert new_pub_bytes == pub_bytes
 
     writer.write(b"QUIT\r\n")
