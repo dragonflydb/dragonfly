@@ -240,8 +240,8 @@ class Connection : public util::Connection {
     dfly::EventCount ec;
     std::atomic_size_t subscriber_bytes = 0;
 
-    size_t subsciber_thread_limit = 0;  // cached flag subsciber_thread_limit
-    size_t pipeline_cache_limit = 0;    // cached flag pipeline_cache_limit
+    size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
+    size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
   };
 
  private:
