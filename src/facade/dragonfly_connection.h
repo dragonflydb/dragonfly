@@ -120,6 +120,7 @@ class Connection : public util::Connection {
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
   using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
   using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
+  using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
   // Variant wrapper around different message types
   struct MessageHandle {
@@ -132,10 +133,13 @@ class Connection : public util::Connection {
     bool IsPipelineMsg() const;
     bool IsPubMsg() const;
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage,
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
                  MigrationRequestMessage, CheckpointMessage>
         handle;
   };
+
+  static_assert(sizeof(MessageHandle) <= 40,
+                "Big structs should use indirection to avoid wasting deque space!");
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 

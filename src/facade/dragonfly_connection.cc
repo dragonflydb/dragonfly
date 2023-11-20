@@ -203,8 +203,10 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const MonitorMessage& msg) {
       return msg.capacity();
     }
-    size_t operator()(const AclUpdateMessage& msg) {
-      return 0;
+    size_t operator()(const AclUpdateMessagePtr& msg) {
+      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(string) +
+             msg->commands.capacity() * sizeof(vector<int>) +
+             msg->categories.capacity() * sizeof(uint32_t);
     }
     size_t operator()(const MigrationRequestMessage& msg) {
       return 0;
@@ -1150,7 +1152,7 @@ void Connection::SendMonitorMessageAsync(string msg) {
 }
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
-  SendAsync({std::move(msg)});
+  SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
 }
 
 void Connection::SendCheckpoint(fb2::BlockingCounter bc) {
