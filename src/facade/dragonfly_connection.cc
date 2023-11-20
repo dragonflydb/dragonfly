@@ -43,8 +43,8 @@ ABSL_FLAG(string, admin_bind, "",
 ABSL_FLAG(uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(uint64_t, pipeline_queue_limit, 1ULL << 27,  // 128MB
-          "Amount of memory to use for storing pipelined commands in bytes - per IO thread");
+ABSL_FLAG(uint64_t, subsciber_thread_limit, 1ULL << 27,  // 128MB
+          "Amount of memory to use for storing pub commands in bytes - per IO thread");
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
@@ -108,7 +108,8 @@ thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_poo
 thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
 
 void Connection::QueueBackpressure::EnsureBelowLimit() {
-  ec.await([this] { return pub_bytes.load(memory_order_relaxed) <= pipeline_queue_limit; });
+  ec.await(
+      [this] { return subscriber_bytes.load(memory_order_relaxed) <= subsciber_thread_limit; });
 }
 
 struct Connection::Shutdown {
@@ -306,8 +307,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   id_ = next_id.fetch_add(1, memory_order_relaxed);
 
   queue_backpressure_ = &tl_queue_backpressure_;
-  if (queue_backpressure_->pipeline_queue_limit == 0) {
-    queue_backpressure_->pipeline_queue_limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
+  if (queue_backpressure_->subsciber_thread_limit == 0) {
+    queue_backpressure_->subsciber_thread_limit = absl::GetFlag(FLAGS_subsciber_thread_limit);
     queue_backpressure_->pipeline_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   }
 
@@ -1193,8 +1194,8 @@ void Connection::SendAsync(MessageHandle msg) {
   stats_->dispatch_queue_bytes += used_mem;
 
   if (msg.IsPubMsg()) {
-    queue_backpressure_->pub_bytes.fetch_add(used_mem, memory_order_relaxed);
-    stats_->dispatch_queue_pub_bytes += used_mem;
+    queue_backpressure_->subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
+    stats_->dispatch_queue_subscriber_bytes += used_mem;
   }
 
   if (msg.IsIntrusive()) {
@@ -1219,8 +1220,8 @@ void Connection::RecycleMessage(MessageHandle msg) {
   stats_->dispatch_queue_entries--;
 
   if (msg.IsPubMsg()) {
-    queue_backpressure_->pub_bytes.fetch_sub(used_mem, memory_order_relaxed);
-    stats_->dispatch_queue_pub_bytes -= used_mem;
+    queue_backpressure_->subscriber_bytes.fetch_sub(used_mem, memory_order_relaxed);
+    stats_->dispatch_queue_subscriber_bytes -= used_mem;
   }
 
   // Retain pipeline message in pool.

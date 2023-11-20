@@ -32,7 +32,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
   ADD(dispatch_queue_bytes);
-  ADD(dispatch_queue_pub_bytes);
+  ADD(dispatch_queue_subscriber_bytes);
   ADD(pipeline_cmd_cache_bytes);
   ADD(io_read_cnt);
   ADD(io_read_bytes);

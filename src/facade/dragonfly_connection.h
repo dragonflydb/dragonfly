@@ -231,18 +231,17 @@ class Connection : public util::Connection {
   struct Shutdown;
 
   // Keeps track of total per-thread sizes of dispatch queues to
-  // limit memory taken up by pipelined / pubsub commands and slow down clients
+  // limit memory taken up by messages from PUBLISH commands and slow down clients
   // producing them to quickly via EnsureAsyncMemoryBudget.
-  // Currently we provide backpressure only to pubsub's PUBLISH.
   struct QueueBackpressure {
     // Block until memory usage is below limit, can be called from any thread
     void EnsureBelowLimit();
 
     dfly::EventCount ec;
-    std::atomic_size_t pub_bytes = 0;
+    std::atomic_size_t subscriber_bytes = 0;
 
-    size_t pipeline_queue_limit = 0;  // cached flag pipeline_queue_limit
-    size_t pipeline_cache_limit = 0;  // cached flag pipeline_cache_limit
+    size_t subsciber_thread_limit = 0;  // cached flag subsciber_thread_limit
+    size_t pipeline_cache_limit = 0;    // cached flag pipeline_cache_limit
   };
 
  private:
