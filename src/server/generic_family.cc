@@ -563,6 +563,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
+  constexpr uint64_t kMaxScanTimeMs = 100;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -580,10 +581,17 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
       OpArgs op_args{EngineShard::tlocal(), 0, db_cntx};
       OpScan(op_args, scan_opts, &cursor, keys);
     });
+
     if (cursor == 0) {
       ++sid;
       if (unsigned(sid) == shard_count)
         break;
+    }
+
+    // Break after kMaxScanTimeMs.
+    uint64_t time_now_ms = GetCurrentTimeMs();
+    if (time_now_ms > db_cntx.time_now_ms + kMaxScanTimeMs) {
+      break;
     }
   } while (keys->size() < scan_opts.limit);
 
