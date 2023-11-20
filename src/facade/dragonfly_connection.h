@@ -120,6 +120,7 @@ class Connection : public util::Connection {
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
   using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
   using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
+  using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
   // Variant wrapper around different message types
   struct MessageHandle {
@@ -130,13 +131,17 @@ class Connection : public util::Connection {
     bool IsIntrusive() const;
 
     bool IsPipelineMsg() const;
+    bool IsPubMsg() const;
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage,
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
                  MigrationRequestMessage, CheckpointMessage>
         handle;
   };
 
-  enum Phase { SETUP, READ_SOCKET, PROCESS, NUM_PHASES };
+  static_assert(sizeof(MessageHandle) <= 40,
+                "Big structs should use indirection to avoid wasting deque space!");
+
+  enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
  public:
   // Add PubMessage to dispatch queue.
@@ -153,8 +158,8 @@ class Connection : public util::Connection {
   // decrement it once finished.
   void SendCheckpoint(util::fb2::BlockingCounter bc);
 
-  // Must be called before SendAsync to ensure the connection dispatch queue is not overfilled.
-  // Blocks until free space is available.
+  // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
+  // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
   void EnsureAsyncMemoryBudget();
 
   // Register hook that is executed on connection shutdown.
@@ -226,16 +231,17 @@ class Connection : public util::Connection {
   struct Shutdown;
 
   // Keeps track of total per-thread sizes of dispatch queues to
-  // limit memory taken up by pipelined / pubsub commands and slow down clients
+  // limit memory taken up by messages from PUBLISH commands and slow down clients
   // producing them to quickly via EnsureAsyncMemoryBudget.
   struct QueueBackpressure {
     // Block until memory usage is below limit, can be called from any thread
     void EnsureBelowLimit();
 
     dfly::EventCount ec;
-    std::atomic_size_t bytes = 0;
-    size_t limit = 0;
-    size_t pipeline_cache_limit = 0;
+    std::atomic_size_t subscriber_bytes = 0;
+
+    size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
+    size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
   };
 
  private:
@@ -284,6 +290,9 @@ class Connection : public util::Connection {
 
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline(facade::SinkReplyBuilder*);
+
+  // Clear pipelined messages, disaptching only intrusive ones.
+  void ClearPipelinedMessages();
 
  private:
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;

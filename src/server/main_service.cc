@@ -2076,14 +2076,21 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   int num_published = subscribers.size();
 
   if (!subscribers.empty()) {
-    // Make sure neither of the subscribers buffers is filled up.
+    // Make sure neither of the threads limits is reached.
     // This check actually doesn't reserve any memory ahead and doesn't prevent the buffer
-    // from eventually filling up, especially if multiple clients are unblocked simultaneously
+    // from eventually filling up, especially if multiple clients are unblocked simultaneously,
     // but is generally good enough to limit too fast producers.
     // Most importantly, this approach allows not blocking and not awaiting in the dispatch below,
     // thus not adding any overhead to backpressure checks.
-    for (auto& sub : subscribers)
+    optional<uint32_t> last_thread;
+    for (auto& sub : subscribers) {
+      DCHECK_LE(last_thread.value_or(0), sub.thread_id);
+      if (last_thread && *last_thread == sub.thread_id)  // skip same thread
+        continue;
+
       sub.conn_cntx->conn()->EnsureAsyncMemoryBudget();
+      last_thread = sub.thread_id;
+    }
 
     auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
     auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
@@ -2339,12 +2346,13 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
+
       auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->PUnsubscribeAll(false);
-      // Check that all borrowers finished processing
-      token.Wait();
-      DCHECK(!conn_state.subscribe_info);
+      token.Wait();  // Same as above
     }
+
+    DCHECK(!conn_state.subscribe_info);
   }
 
   DeactivateMonitoring(server_cntx);

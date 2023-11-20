@@ -39,9 +39,10 @@ struct CmdArgListFormatter {
 struct ConnectionStats {
   absl::flat_hash_map<std::string, uint64_t> err_count_map;
 
-  size_t read_buf_capacity = 0;       // total capacity of input buffers
-  size_t dispatch_queue_entries = 0;  // total number of dispatch queue entries
-  size_t dispatch_queue_bytes = 0;    // total size of all dispatch queue entries
+  size_t read_buf_capacity = 0;                // total capacity of input buffers
+  size_t dispatch_queue_entries = 0;           // total number of dispatch queue entries
+  size_t dispatch_queue_bytes = 0;             // total size of all dispatch queue entries
+  size_t dispatch_queue_subscriber_bytes = 0;  // total size of all publish messages
 
   size_t pipeline_cmd_cache_bytes = 0;
 
