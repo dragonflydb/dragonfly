@@ -471,7 +471,10 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendOk();
 
   VLOG(1) << "Takeover accepted, shutting down.";
-  std::string save_arg = save_flag ? "SAVE" : "NOSAVE";
+  if (save_flag) {
+    sf_->DoSave(true);
+  }
+  std::string save_arg = "NOSAVE";
   MutableSlice sargs(save_arg);
   return sf_->ShutdownCmd(CmdArgList(&sargs, 1), cntx);
 }

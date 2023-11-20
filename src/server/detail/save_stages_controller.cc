@@ -145,23 +145,11 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 }
 
 SaveStagesController::~SaveStagesController() {
-  if (!ignore_state_)
-    service_->SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
 }
 
 GenericError SaveStagesController::Save() {
-  if (bool expected = false; !is_saving_->compare_exchange_strong(
-          expected, true, std::memory_order_acq_rel, memory_order_relaxed)) {
-    return GenericError{make_error_code(errc::operation_in_progress),
-                        "Another save operation is in progress"};
-  }
   if (auto err = BuildFullPath(); err)
     return err;
-
-  if (!ignore_state_) {
-    if (auto err = SwitchState(); err)
-      return err;
-  }
 
   if (auto err = InitResources(); err)
     return err;
@@ -172,6 +160,7 @@ GenericError SaveStagesController::Save() {
   else
     SaveRdb();
 
+  is_saving_->store(true, memory_order_relaxed);
   {
     lock_guard lk{*save_mu_};
     *save_bytes_cb_ = [this]() { return GetSaveBuffersSize(); };
@@ -183,14 +172,14 @@ GenericError SaveStagesController::Save() {
     *save_bytes_cb_ = nullptr;
   }
 
+  is_saving_->store(false, memory_order_relaxed);
+
   RunStage(&SaveStagesController::CloseCb);
 
   FinalizeFileMovement();
 
   if (!shared_err_)
     UpdateSaveInfo();
-
-  is_saving_->store(false, memory_order_release);
 
   return *shared_err_;
 }
@@ -343,14 +332,6 @@ GenericError SaveStagesController::BuildFullPath() {
   full_path_ = dir_path / filename;
   is_cloud_ = IsCloudPath(full_path_.string());
   return {};
-}
-
-// Switch to saving state if in active state
-GenericError SaveStagesController::SwitchState() {
-  auto [new_state, success] = service_->SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-  return success ? GenericError()
-                 : GenericError{make_error_code(errc::operation_in_progress),
-                                StrCat(GlobalStateName(new_state), " - can not save database")};
 }
 
 void SaveStagesController::SaveCb(unsigned index) {

@@ -624,7 +624,7 @@ void ServerFamily::Shutdown() {
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
-      GenericError ec = DoSave(true);
+      GenericError ec = DoSave();
       if (ec) {
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
       }
@@ -1069,10 +1069,20 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
                                   bool ignore_state) {
+  if (!ignore_state) {
+    auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
+    if (!success) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          StrCat(GlobalStateName(new_state), " - can not save database")};
+    }
+  }
   SaveStagesController sc{detail::SaveStagesInputs{
-      new_version, ignore_state, basename, trans, &service_, &is_saving_, fq_threadpool_.get(),
-      &last_save_info_, &save_mu_, &save_bytes_cb_, snapshot_storage_}};
-  return sc.Save();
+      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
+      &save_mu_, &save_bytes_cb_, snapshot_storage_}};
+  auto res = sc.Save();
+  if (!ignore_state)
+    service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  return res;
 }
 
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
