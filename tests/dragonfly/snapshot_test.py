@@ -218,8 +218,8 @@ class TestSetsnapshot_cron(SnapshotTestBase):
 
 
 @dfly_args({**BASIC_ARGS})
-class TestDoubleSave(SnapshotTestBase):
-    """Test simultaneous save operations"""
+class TestOnlyOneSaveAtATime(SnapshotTestBase):
+    """Dragonfly does not allow simultaneous save operations, send 2 save operations and make sure one is rejected"""
 
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):

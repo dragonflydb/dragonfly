@@ -150,6 +150,11 @@ SaveStagesController::~SaveStagesController() {
 }
 
 GenericError SaveStagesController::Save() {
+  if (bool expected = false; !is_saving_->compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel, memory_order_relaxed)) {
+    return GenericError{make_error_code(errc::operation_in_progress),
+                        "Another save operation is in progress"};
+  }
   if (auto err = BuildFullPath(); err)
     return err;
 
@@ -167,7 +172,6 @@ GenericError SaveStagesController::Save() {
   else
     SaveRdb();
 
-  is_saving_->store(true, memory_order_relaxed);
   {
     lock_guard lk{*save_mu_};
     *save_bytes_cb_ = [this]() { return GetSaveBuffersSize(); };
@@ -179,14 +183,14 @@ GenericError SaveStagesController::Save() {
     *save_bytes_cb_ = nullptr;
   }
 
-  is_saving_->store(false, memory_order_relaxed);
-
   RunStage(&SaveStagesController::CloseCb);
 
   FinalizeFileMovement();
 
   if (!shared_err_)
     UpdateSaveInfo();
+
+  is_saving_->store(false, memory_order_release);
 
   return *shared_err_;
 }
