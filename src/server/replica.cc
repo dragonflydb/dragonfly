@@ -133,8 +133,10 @@ void Replica::EnableReplication(ConnectionContext* cntx) {
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
   // Stops the loop in MainReplicationFb.
-  state_mask_.store(0);  // Specifically ~R_ENABLED.
+  // Note: we must call cntx_.Cancel() before reseting state, to make sure we dont have race between
+  // Start and Stop. In Start we store R_ENABLED and after we check of cancel.
   cntx_.Cancel();        // Context is fully resposible for cleanup.
+  state_mask_.store(0);  // Specifically ~R_ENABLED.
 
   waker_.notifyAll();
 
