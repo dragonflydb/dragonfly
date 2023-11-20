@@ -220,7 +220,7 @@ size_t Connection::MessageHandle::UsedMemory() const {
 }
 
 bool Connection::MessageHandle::IsIntrusive() const {
-  return holds_alternative<AclUpdateMessage>(handle) ||
+  return holds_alternative<AclUpdateMessagePtr>(handle) ||
          holds_alternative<CheckpointMessage>(handle);
 }
 
