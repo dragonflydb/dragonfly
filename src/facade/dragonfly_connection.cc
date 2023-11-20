@@ -824,6 +824,8 @@ void Connection::HandleMigrateRequest() {
     queue_backpressure_ = &tl_queue_backpressure_;
   }
 
+  DCHECK(dispatch_q_.empty());
+
   // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
   LaunchDispatchFiberIfNeeded();
 }
@@ -1045,7 +1047,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
       if (ShouldEndDispatchFiber(msg)) {
         RecycleMessage(std::move(msg));
-        DCHECK(dispatch_q_.empty());
+        CHECK(dispatch_q_.empty());
         return;  // don't set conn closing flag
       }
 
