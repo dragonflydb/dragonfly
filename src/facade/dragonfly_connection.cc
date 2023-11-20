@@ -108,7 +108,7 @@ thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_poo
 thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
 
 void Connection::QueueBackpressure::EnsureBelowLimit() {
-  ec.await([this] { return bytes.load(memory_order_relaxed) <= limit; });
+  ec.await([this] { return pub_bytes.load(memory_order_relaxed) <= pipeline_queue_limit; });
 }
 
 struct Connection::Shutdown {
@@ -223,7 +223,11 @@ bool Connection::MessageHandle::IsIntrusive() const {
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
-  return get_if<PipelineMessagePtr>(&this->handle) != nullptr;
+  return holds_alternative<PipelineMessagePtr>(handle);
+}
+
+bool Connection::MessageHandle::IsPubMsg() const {
+  return holds_alternative<PubMessagePtr>(handle);
 }
 
 void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
@@ -300,8 +304,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   id_ = next_id.fetch_add(1, memory_order_relaxed);
 
   queue_backpressure_ = &tl_queue_backpressure_;
-  if (queue_backpressure_->limit == 0) {
-    queue_backpressure_->limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
+  if (queue_backpressure_->pipeline_queue_limit == 0) {
+    queue_backpressure_->pipeline_queue_limit = absl::GetFlag(FLAGS_pipeline_queue_limit);
     queue_backpressure_->pipeline_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
   }
 
@@ -984,7 +988,9 @@ void Connection::ClearPipelinedMessages() {
       visit(dispatch_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
+
   dispatch_q_.clear();
+  queue_backpressure_->ec.notifyAll();
 }
 
 // DispatchFiber handles commands coming from the InputLoop.
@@ -1179,9 +1185,13 @@ void Connection::SendAsync(MessageHandle msg) {
   DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 
   size_t used_mem = msg.UsedMemory();
-  queue_backpressure_->bytes.fetch_add(used_mem, memory_order_relaxed);
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
+
+  if (msg.IsPubMsg()) {
+    queue_backpressure_->pub_bytes.fetch_add(used_mem, memory_order_relaxed);
+    stats_->dispatch_queue_pub_bytes += used_mem;
+  }
 
   if (msg.IsIntrusive()) {
     auto it = dispatch_q_.begin();
@@ -1200,10 +1210,14 @@ void Connection::SendAsync(MessageHandle msg) {
 
 void Connection::RecycleMessage(MessageHandle msg) {
   size_t used_mem = msg.UsedMemory();
-  queue_backpressure_->bytes.fetch_sub(used_mem, memory_order_relaxed);
 
   stats_->dispatch_queue_bytes -= used_mem;
   stats_->dispatch_queue_entries--;
+
+  if (msg.IsPubMsg()) {
+    queue_backpressure_->pub_bytes.fetch_sub(used_mem, memory_order_relaxed);
+    stats_->dispatch_queue_pub_bytes -= used_mem;
+  }
 
   // Retain pipeline message in pool.
   if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {

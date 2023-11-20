@@ -130,6 +130,7 @@ class Connection : public util::Connection {
     bool IsIntrusive() const;
 
     bool IsPipelineMsg() const;
+    bool IsPubMsg() const;
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage,
                  MigrationRequestMessage, CheckpointMessage>
@@ -153,8 +154,8 @@ class Connection : public util::Connection {
   // decrement it once finished.
   void SendCheckpoint(util::fb2::BlockingCounter bc);
 
-  // Must be called before SendAsync to ensure the threads pipeline queue limit is not reached.
-  // Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
+  // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
+  // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
   void EnsureAsyncMemoryBudget();
 
   // Register hook that is executed on connection shutdown.
@@ -228,14 +229,16 @@ class Connection : public util::Connection {
   // Keeps track of total per-thread sizes of dispatch queues to
   // limit memory taken up by pipelined / pubsub commands and slow down clients
   // producing them to quickly via EnsureAsyncMemoryBudget.
+  // Currently we provide backpressure only to pubsub's PUBLISH.
   struct QueueBackpressure {
     // Block until memory usage is below limit, can be called from any thread
     void EnsureBelowLimit();
 
     dfly::EventCount ec;
-    std::atomic_size_t bytes = 0;
-    size_t limit = 0;
-    size_t pipeline_cache_limit = 0;
+    std::atomic_size_t pub_bytes = 0;
+
+    size_t pipeline_queue_limit = 0;  // cached flag pipeline_queue_limit
+    size_t pipeline_cache_limit = 0;  // cached flag pipeline_cache_limit
   };
 
  private:
