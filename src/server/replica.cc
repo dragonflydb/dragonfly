@@ -67,6 +67,7 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
     : ProtocolClient(std::move(host), port), service_(*se), id_{id} {
+  proactor_ = ProactorBase::me();
 }
 
 Replica::~Replica() {
@@ -133,8 +134,11 @@ void Replica::EnableReplication(ConnectionContext* cntx) {
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
   // Stops the loop in MainReplicationFb.
-  state_mask_.store(0);  // Specifically ~R_ENABLED.
-  cntx_.Cancel();        // Context is fully resposible for cleanup.
+
+  proactor_->Await([this] {
+    cntx_.Cancel();        // Context is fully resposible for cleanup.
+    state_mask_.store(0);  // Specifically ~R_ENABLED.
+  });
 
   waker_.notifyAll();
 
