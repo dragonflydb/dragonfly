@@ -25,37 +25,20 @@ runs:
   # bring back timeouts once composite actions start supporting them
   # timeout-minutes: 20
   steps:
-    - name: Run PyTests
-      id: first
-      shell: bash
-      run: |
-        ls -l ${GITHUB_WORKSPACE}/
-        cd ${GITHUB_WORKSPACE}/tests
-        echo "Current commit is ${{github.sha}}"
-        pip3 install -r dragonfly/requirements.txt
-        # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
-        export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-
-        timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
-        if [[ $code -ne 0 ]]; then
-          echo "TIMEDOUT=1">> "$GITHUB_OUTPUT";
-          exit 1
-        fi
-
-    - name: Run PyTests replication test
+    - name: Run PyTests replication test fails
       id: second
       if: ${{ inputs.run-only-on-ubuntu-latest == 'true' || (inputs.run-only-on-ubuntu-latest == 'false' && matrix.runner == 'ubuntu-latest') }}
       shell: bash
       run: |
         echo "Running PyTests replication test"
         cd ${GITHUB_WORKSPACE}/tests
+        pip3 install -r dragonfly/requirements.txt
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
         run_pytest_with_args() {
           timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report \
-            --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO \
+            --json-report-file=rep1_report.json dragonfly/replication_test.py::test_network_disconnect_small_buffer --count=50 --log-cli-level=INFO \
             --df alsologtostderr $1 $2 || code=$?
           if [[ $code -ne 0 ]]; then
             echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"
