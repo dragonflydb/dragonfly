@@ -38,8 +38,8 @@ TEST_F(CmdArgParserTest, BasicTypes) {
   EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "VIEW"sv);
 
 #ifndef __APPLE__
-  EXPECT_EQ(parser.Next().Int<size_t>(), 11u);
-  EXPECT_EQ(parser.Next().Int<size_t>(), 22u);
+  EXPECT_EQ(parser.Next<size_t>(), 11u);
+  EXPECT_EQ(parser.Next<size_t>(), 22u);
 #endif
 
   EXPECT_FALSE(parser.HasNext());
@@ -61,7 +61,7 @@ TEST_F(CmdArgParserTest, BoundError) {
 TEST_F(CmdArgParserTest, IntError) {
   auto parser = Make({"NOTANINT"});
 
-  EXPECT_EQ(parser.Next().Int<size_t>(), 0u);
+  EXPECT_EQ(parser.Next<size_t>(), 0u);
 
   auto err = parser.Error();
   EXPECT_TRUE(err);

@@ -86,7 +86,7 @@ class Replica : ProtocolClient {
 
   void Pause(bool pause);
 
-  std::error_code TakeOver(std::string_view timeout);
+  std::error_code TakeOver(std::string_view timeout, bool save_flag);
 
   std::string_view MasterId() const {
     return master_context_.master_repl_id;

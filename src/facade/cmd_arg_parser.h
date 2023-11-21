@@ -48,7 +48,7 @@ struct CmdArgParser {
       return std::string{operator std::string_view()};
     }
 
-    template <typename T> T Int();
+    template <typename T> T Num();
 
     // Detect value based on cases.
     // Returns default if the argument is not present among the cases list,
@@ -123,10 +123,19 @@ struct CmdArgParser {
   }
 
   // Consume next value
-  NextProxy Next() {
+  template <class T = NextProxy> auto Next() {
     if (cur_i_ >= args_.size())
       Report(OUT_OF_BOUNDS, cur_i_);
-    return NextProxy{this, cur_i_++};
+
+    NextProxy next{this, cur_i_++};
+    if constexpr (std::is_arithmetic_v<T>) {
+      return next.Num<T>();
+    } else if constexpr (std::is_convertible_v<std::string_view, T>) {
+      return static_cast<T>(next);
+    } else {
+      static_assert(std::is_same_v<T, NextProxy>, "incorrect type");
+      return next;
+    }
   }
 
   // Check if the next value if equal to a specific tag. If equal, its consumed.

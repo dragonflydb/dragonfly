@@ -153,12 +153,12 @@ void Replica::Pause(bool pause) {
   Proactor()->Await([&] { is_paused_ = pause; });
 }
 
-std::error_code Replica::TakeOver(std::string_view timeout) {
+std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
   VLOG(1) << "Taking over";
 
   std::error_code ec;
-  Proactor()->Await(
-      [this, &ec, timeout] { ec = SendNextPhaseRequest(absl::StrCat("TAKEOVER ", timeout)); });
+  auto takeOverCmd = absl::StrCat("TAKEOVER ", timeout, (save_flag ? " SAVE" : ""));
+  Proactor()->Await([this, &ec, cmd = std::move(takeOverCmd)] { ec = SendNextPhaseRequest(cmd); });
 
   // If we successfully taken over, return and let server_family stop the replication.
   return ec;
@@ -371,7 +371,8 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
     // Set LOADING state.
-    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
+    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
+          GlobalState::LOADING);
     absl::Cleanup cleanup = [this]() {
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     };
@@ -461,7 +462,8 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
+  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
+        GlobalState::LOADING);
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);

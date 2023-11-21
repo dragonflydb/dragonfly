@@ -145,11 +145,12 @@ class ServerFamily {
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   // if basename is not empty it will override dbfilename flag.
-  GenericError DoSave(bool new_version, std::string_view basename, Transaction* transaction);
+  GenericError DoSave(bool new_version, std::string_view basename, Transaction* transaction,
+                      bool ignore_state = false);
 
   // Calls DoSave with a default generated transaction and with the format
   // specified in --df_snapshot_format
-  GenericError DoSave();
+  GenericError DoSave(bool ignore_state = false);
 
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
