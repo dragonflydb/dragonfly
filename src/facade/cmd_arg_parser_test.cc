@@ -30,7 +30,7 @@ class CmdArgParserTest : public testing::Test {
 };
 
 TEST_F(CmdArgParserTest, BasicTypes) {
-  auto parser = Make({"STRING", "VIEW", "11", "22"});
+  auto parser = Make({"STRING", "VIEW", "11", "22", "33", "44"});
 
   EXPECT_TRUE(parser.HasNext());
 
@@ -40,6 +40,9 @@ TEST_F(CmdArgParserTest, BasicTypes) {
 #ifndef __APPLE__
   EXPECT_EQ(parser.Next<size_t>(), 11u);
   EXPECT_EQ(parser.Next<size_t>(), 22u);
+  auto [a, b] = parser.Next<size_t, size_t>();
+  EXPECT_EQ(a, 33u);
+  EXPECT_EQ(b, 44u);
 #endif
 
   EXPECT_FALSE(parser.HasNext());

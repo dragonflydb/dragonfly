@@ -50,7 +50,7 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   auto sim = search::VectorSimilarity::L2;
   size_t capacity = 1000;
 
-  bool use_hnsw = parser->ToUpper().Next().Case("HNSW", true).Case("FLAT", false);
+  bool use_hnsw = parser->ToUpper().Switch("HNSW", true, "FLAT", false);
   size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
@@ -62,9 +62,8 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     }
 
     if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
-      sim = parser->Next()
-                .Case("L2", search::VectorSimilarity::L2)
-                .Case("COSINE", search::VectorSimilarity::COSINE);
+      sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
+                           search::VectorSimilarity::COSINE);
       continue;
     }
 
@@ -316,8 +315,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   while (parser.ToUpper().HasNext()) {
     // ON HASH | JSON
     if (parser.Check("ON").ExpectTail(1)) {
-      index.type =
-          parser.ToUpper().Next().Case("HASH"sv, DocIndex::HASH).Case("JSON"sv, DocIndex::JSON);
+      index.type = parser.ToUpper().Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 

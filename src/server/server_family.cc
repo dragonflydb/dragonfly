@@ -1300,8 +1300,7 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   auto timeout = parser.Next<uint64_t>();
   enum ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
-    pause_state =
-        parser.ToUpper().Next().Case("WRITE", ClientPause::WRITE).Case("ALL", ClientPause::ALL);
+    pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
   if (auto err = parser.Error(); err) {
     return (*cntx)->SendError(err->MakeReply());
