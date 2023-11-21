@@ -99,19 +99,6 @@ struct TransactionGuard {
   Transaction* t;
 };
 
-struct ExpirationGuard {
-  explicit ExpirationGuard(EngineShard* s = EngineShard::tlocal()) : shard(s) {
-    VLOG(2) << "Expiration guard";
-    shard->db_slice().SetExpireAllowed(false);
-  }
-
-  ~ExpirationGuard() {
-    VLOG(2) << "Releasing Expiration guard";
-    shard->db_slice().SetExpireAllowed(true);
-  }
-
-  EngineShard* shard;
-};
 }  // namespace
 
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
