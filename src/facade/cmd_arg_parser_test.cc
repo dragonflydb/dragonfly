@@ -34,8 +34,8 @@ TEST_F(CmdArgParserTest, BasicTypes) {
 
   EXPECT_TRUE(parser.HasNext());
 
-  EXPECT_EQ(absl::implicit_cast<string>(parser.Next()), "STRING"s);
-  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "VIEW"sv);
+  EXPECT_EQ(parser.Next<string>(), "STRING"s);
+  EXPECT_EQ(parser.Next<string_view>(), "VIEW"sv);
 
 #ifndef __APPLE__
   EXPECT_EQ(parser.Next<size_t>(), 11u);
@@ -100,9 +100,9 @@ TEST_F(CmdArgParserTest, CheckTailFail) {
 TEST_F(CmdArgParserTest, Cases) {
   auto parser = Make({"TWO", "NONE"});
 
-  EXPECT_EQ(int(parser.Next().Case("ONE", 1).Case("TWO", 2)), 2);
+  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 2);
 
-  EXPECT_EQ(int(parser.Next().Case("ONE", 1).Case("TWO", 2)), 0);
+  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 0);
   auto err = parser.Error();
   EXPECT_TRUE(err);
   EXPECT_EQ(err->type, CmdArgParser::INVALID_CASES);

@@ -88,6 +88,7 @@ struct CmdArgParser {
     } else {
       std::tuple<T, Ts...> res;
       NextImpl<0>(&res);
+      cur_i_ += sizeof...(Ts) + 1;
       return res;
     }
   }
