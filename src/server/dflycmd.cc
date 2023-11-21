@@ -12,6 +12,7 @@
 #include <optional>
 #include <utility>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/strings/numbers.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -447,7 +448,15 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   // We have this guard to disable expirations: We don't want any writes to the journal after
   // we send the `PING`, and expirations could ruin that.
-  ExpirationGuard eg;
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+  VLOG(2) << "Disable expiration";
+
+  absl::Cleanup([] {
+    shard_set->RunBriefInParallel(
+        [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    VLOG(2) << "Enable expiration";
+  });
 
   if (*status == OpStatus::OK) {
     auto cb = [&cntx = replica_ptr->cntx, replica_ptr = replica_ptr, timeout_dur, start,
