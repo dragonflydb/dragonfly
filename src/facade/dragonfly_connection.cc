@@ -958,7 +958,7 @@ bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
 }
 
 void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
-  DCHECK_EQ(dispatch_q_.size(), dispatch_q_cmds_count_);
+  DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
 
   vector<CmdArgList> squash_cmds;
   vector<PipelineMessagePtr> squash_msgs;
@@ -968,7 +968,8 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
 
   while (!dispatch_q_.empty()) {
     auto& msg = dispatch_q_.front();
-    CHECK(holds_alternative<PipelineMessagePtr>(msg.handle));
+    CHECK(holds_alternative<PipelineMessagePtr>(msg.handle))
+        << "Found " << msg.handle.index() << " on " << DebugInfo();
 
     squash_msgs.push_back(std::move(std::get<PipelineMessagePtr>(msg.handle)));
     squash_cmds.push_back(absl::MakeSpan(squash_msgs.back()->args));
@@ -979,7 +980,7 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
 
   service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
 
-  if (dispatch_q_cmds_count_ == squash_cmds.size()) {  // Flush if no new commands appeared
+  if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
     builder->FlushBatch();
     builder->SetBatchMode(false);  // in case the next dispatch is sync
   }
@@ -1004,6 +1005,23 @@ void Connection::ClearPipelinedMessages() {
 
   dispatch_q_.clear();
   queue_backpressure_->ec.notifyAll();
+}
+
+std::string Connection::DebugInfo() const {
+  std::string info = "{";
+
+  absl::StrAppend(&info, "phase=", phase_, ", ");
+  absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
+  absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
+  absl::StrAppend(&info, "dispatch_fiber:joinable=", dispatch_fb_.IsJoinable(), ", ");
+
+  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsIntrusive();
+  absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
+  absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
+  absl::StrAppend(&info, "dispatch_queue:intrusive", intrusive_front, ", ");
+
+  absl::StrAppend(&info, "}");
+  return info;
 }
 
 // DispatchFiber handles commands coming from the InputLoop.
@@ -1037,8 +1055,11 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     if (dispatch_q_.size() == 1 && cur_epoch == prev_epoch) {
       ThisFiber::Yield();
       DVLOG(2) << "After yielding to producer, dispatch_q_.size()=" << dispatch_q_.size();
+      if (cc_->conn_closing)
+        break;
     }
     prev_epoch = cur_epoch;
+
     builder->SetBatchMode(dispatch_q_.size() > 1);
 
     // Special case: if the dispatch queue accumulated a big number of commands,
@@ -1046,8 +1067,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     // It is only enabled if the threshold is reached and the whole dispatch queue
     // consists only of commands (no pubsub or monitor messages)
     bool squashing_enabled = squashing_threshold > 0;
-    bool threshold_reached = dispatch_q_cmds_count_ > squashing_threshold;
-    bool are_all_plain_cmds = dispatch_q_cmds_count_ == dispatch_q_.size();
+    bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
+    bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == dispatch_q_.size();
     if (squashing_enabled && threshold_reached && are_all_plain_cmds) {
       SquashPipeline(builder);
     } else {
@@ -1056,7 +1077,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
       if (ShouldEndDispatchFiber(msg)) {
         RecycleMessage(std::move(msg));
-        CHECK(dispatch_q_.empty());
+        CHECK(dispatch_q_.empty()) << DebugInfo();
         return;  // don't set conn closing flag
       }
 
@@ -1207,7 +1228,7 @@ void Connection::SendAsync(MessageHandle msg) {
   }
 
   if (msg.IsPipelineMsg()) {
-    dispatch_q_cmds_count_++;
+    pending_pipeline_cmd_cnt_++;
   }
 
   if (msg.IsIntrusive()) {
@@ -1238,7 +1259,7 @@ void Connection::RecycleMessage(MessageHandle msg) {
 
   // Retain pipeline message in pool.
   if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
-    dispatch_q_cmds_count_--;
+    pending_pipeline_cmd_cnt_--;
     if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
       stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
       pipeline_req_pool_.push_back(move(*pipe));
