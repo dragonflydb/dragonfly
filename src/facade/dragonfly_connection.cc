@@ -693,7 +693,6 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
       evc_.notify();
 
   } else {
-    dispatch_q_cmds_count_++;
     SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), heap)});
     if (dispatch_q_.size() > 10)
       ThisFiber::Yield();
@@ -1205,6 +1204,10 @@ void Connection::SendAsync(MessageHandle msg) {
   if (msg.IsPubMsg()) {
     queue_backpressure_->subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
     stats_->dispatch_queue_subscriber_bytes += used_mem;
+  }
+
+  if (msg.IsPipelineMsg()) {
+    dispatch_q_cmds_count_++;
   }
 
   if (msg.IsIntrusive()) {
