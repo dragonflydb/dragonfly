@@ -1018,7 +1018,7 @@ std::string Connection::DebugInfo() const {
   bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsIntrusive();
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
-  absl::StrAppend(&info, "dispatch_queue:intrusive", intrusive_front, ", ");
+  absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
 
   absl::StrAppend(&info, "}");
   return info;
