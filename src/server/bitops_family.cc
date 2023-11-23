@@ -677,7 +677,7 @@ struct Overflow {
           *value = max + res;
           break;
         }
-        case Overflow::SAT:
+       case Overflow::SAT:
           *value = min;
           break;
         case Overflow::FAIL:
