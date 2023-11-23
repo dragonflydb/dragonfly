@@ -341,7 +341,7 @@ class Transaction {
   // owned std::string because callbacks its used in run fully async and can outlive the entries.
   using KeyList = std::vector<std::pair<std::string, LockCnt>>;
 
-  struct PerShardData {
+  struct alignas(64) PerShardData {
     PerShardData(PerShardData&&) noexcept {
     }
 

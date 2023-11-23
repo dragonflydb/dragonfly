@@ -42,24 +42,28 @@ DEFINE_VARZ(VarzQps, get_qps);
 constexpr uint32_t kMaxStrLen = 1 << 28;
 constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
-string GetString(EngineShard* shard, const PrimeValue& pv) {
-  string res;
-  if (pv.ObjType() != OBJ_STRING) {
-    // An attempt to read a non-string's string value can happen when overriding a non-string value
-    // with a string value.
-    return "";
-  }
+size_t CopyValueToBuffer(const PrimeValue& pv, EngineShard* shard, char* dest) {
+  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
 
   if (pv.IsExternal()) {
     auto* tiered = shard->tiered_storage();
     auto [offset, size] = pv.GetExternalSlice();
-    res.resize(size);
 
-    error_code ec = tiered->Read(offset, size, res.data());
+    error_code ec = tiered->Read(offset, size, dest);
     CHECK(!ec) << "TBD: " << ec;
-  } else {
-    pv.GetString(&res);
+    return size;
   }
+
+  pv.GetString(dest);
+  return pv.Size();
+}
+
+string GetString(EngineShard* shard, const PrimeValue& pv) {
+  string res;
+  if (pv.ObjType() != OBJ_STRING)
+    return res;
+  res.resize(pv.Size());
+  CopyValueToBuffer(pv, shard, res.data());
 
   return res;
 }
@@ -499,6 +503,53 @@ class SetResultBuilder {
   bool return_prev_value_;
   std::optional<string> prev_value_;
 };
+
+SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
+                                      EngineShard* shard) {
+  auto args = t->GetShardArgs(shard->shard_id());
+  DCHECK(!args.empty());
+
+  auto& db_slice = shard->db_slice();
+
+  SinkReplyBuilder::MGetResponse response(args.size());
+  absl::InlinedVector<PrimeIterator, 32> iters(args.size());
+
+  size_t total_size = 0;
+  for (size_t i = 0; i < args.size(); ++i) {
+    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_STRING);
+    if (!it_res)
+      continue;
+    iters[i] = *it_res;
+    total_size += (*it_res)->second.Size();
+  }
+
+  response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
+  char* next = response.storage_list->data;
+
+  for (size_t i = 0; i < args.size(); ++i) {
+    PrimeIterator it = iters[i];
+    if (it.is_done())
+      continue;
+
+    auto& resp = response.resp_arr[i].emplace();
+
+    size_t size = CopyValueToBuffer(it->second, shard, next);
+    resp.value = string_view(next, size);
+    next += size;
+
+    if (fetch_mcflag) {
+      if (it->second.HasFlag()) {
+        resp.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
+      }
+
+      if (fetch_mcver) {
+        resp.mc_ver = it.GetVersion();
+      }
+    }
+  }
+
+  return response;
+}
 
 }  // namespace
 
@@ -1129,7 +1180,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* transaction = cntx->transaction;
   unsigned shard_count = shard_set->size();
-  std::vector<MGetResponse> mget_resp(shard_count);
+  std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_count);
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool fetch_mcflag = cntx->protocol() == Protocol::MEMCACHE;
@@ -1149,34 +1200,36 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   CHECK_EQ(OpStatus::OK, result);
 
   // reorder the responses back according to the order of their corresponding keys.
-  vector<SinkReplyBuilder::OptResp> res(args.size());
+  SinkReplyBuilder::MGetResponse res(args.size());
 
   for (ShardId sid = 0; sid < shard_count; ++sid) {
     if (!transaction->IsActive(sid))
       continue;
 
-    MGetResponse& results = mget_resp[sid];
+    SinkReplyBuilder::MGetResponse& src = mget_resp[sid];
+    src.storage_list->next = res.storage_list;
+    res.storage_list = src.storage_list;
+    src.storage_list = nullptr;
+
     ArgSlice slice = transaction->GetShardArgs(sid);
 
     DCHECK(!slice.empty());
-    DCHECK_EQ(slice.size(), results.size());
+    DCHECK_EQ(slice.size(), src.resp_arr.size());
 
     for (size_t j = 0; j < slice.size(); ++j) {
-      if (!results[j])
+      if (!src.resp_arr[j])
         continue;
 
       uint32_t indx = transaction->ReverseArgIndex(sid, j);
 
-      auto& dest = res[indx].emplace();
-      auto& src = *results[j];
-      dest.key = ArgS(args, indx);
-      dest.value = std::move(src.value);
-      dest.mc_flag = src.mc_flag;
-      dest.mc_ver = src.mc_ver;
+      res.resp_arr[indx] = std::move(src.resp_arr[j]);
+      if (cntx->protocol() == Protocol::MEMCACHE) {
+        res.resp_arr[indx]->key = ArgS(args, indx);
+      }
     }
   }
 
-  return cntx->reply_builder()->SendMGetResponse(res);
+  return cntx->reply_builder()->SendMGetResponse(std::move(res));
 }
 
 void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
@@ -1315,37 +1368,6 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   } else {
     (*cntx)->SendLong(result.value());
   }
-}
-
-auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
-                          EngineShard* shard) -> MGetResponse {
-  auto args = t->GetShardArgs(shard->shard_id());
-  DCHECK(!args.empty());
-
-  MGetResponse response(args.size());
-
-  auto& db_slice = shard->db_slice();
-  for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_STRING);
-    if (!it_res)
-      continue;
-
-    const PrimeIterator& it = *it_res;
-    auto& dest = response[i].emplace();
-
-    dest.value = GetString(shard, it->second);
-    if (fetch_mcflag) {
-      if (it->second.HasFlag()) {
-        dest.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
-      }
-
-      if (fetch_mcver) {
-        dest.mc_ver = it.GetVersion();
-      }
-    }
-  }
-
-  return response;
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
