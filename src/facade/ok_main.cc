@@ -44,6 +44,10 @@ class OkService : public ServiceInterface {
   ConnectionStats* GetThreadLocalConnectionStats() final {
     return &tl_stats;
   }
+
+  void AwaitOnPauseDispatch() {
+    return;
+  }
 };
 
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {

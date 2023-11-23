@@ -1208,7 +1208,7 @@ async def test_take_over_seeder(
 
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
-    await c_replica.execute_command(f"REPLTAKEOVER 5")
+    await c_replica.execute_command(f"REPLTAKEOVER 5 SAVE")
     seeder.stop()
 
     assert await c_replica.execute_command("role") == ["master", []]
@@ -1761,3 +1761,47 @@ async def test_search(df_local_factory):
     assert (await c_replica.ft("idx-m2").search(Query("*").sort_by("f2").paging(0, 1))).docs[
         0
     ].id == "k0"
+
+
+@pytest.mark.asyncio
+async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=4)
+    df_local_factory.start_all([master, replica])
+
+    seeder = df_seeder_factory.create(port=master.port)
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Give the seeder a bit of time.
+    await asyncio.sleep(1)
+    # block the seeder for 4 seconds
+    await c_master.execute_command("client pause 4000 write")
+    stats = await c_master.info("CommandStats")
+    await asyncio.sleep(0.5)
+    stats_after_sleep = await c_master.info("CommandStats")
+    # Check no commands are executed except info and replconf called from replica
+    for cmd, cmd_stats in stats_after_sleep.items():
+        if "cmdstat_INFO" != cmd and "cmdstat_REPLCONF" != cmd_stats:
+            assert stats[cmd] == cmd_stats, cmd
+
+    await asyncio.sleep(6)
+    seeder.stop()
+    await fill_task
+    stats_after_pause_finish = await c_master.info("CommandStats")
+    more_exeuted = False
+    for cmd, cmd_stats in stats_after_pause_finish.items():
+        if "cmdstat_INFO" != cmd and "cmdstat_REPLCONF" != cmd_stats and stats[cmd] != cmd_stats:
+            more_exeuted = True
+    assert more_exeuted
+
+    capture = await seeder.capture(port=master.port)
+    assert await seeder.compare(capture, port=replica.port)
+
+    await disconnect_clients(c_master, c_replica)

@@ -1058,6 +1058,41 @@ struct SetOpArgs {
   bool with_scores = false;
 };
 
+void HandleOpStatus(ConnectionContext* cntx, OpStatus op_status) {
+  switch (op_status) {
+    case OpStatus::INVALID_FLOAT:
+      return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
+    default:
+      return (*cntx)->SendError(op_status);
+  }
+}
+
+OpResult<ScoredMap> IntersectResults(vector<OpResult<ScoredMap>>& results, AggType agg_type) {
+  ScoredMap result;
+  for (auto& op_res : results) {
+    if (op_res.status() == OpStatus::SKIPPED)
+      continue;
+
+    if (!op_res) {
+      return op_res.status();
+    }
+
+    if (op_res->empty()) {
+      return ScoredMap{};
+    }
+
+    if (result.empty()) {
+      result.swap(op_res.value());
+    } else {
+      InterScoredMap(&result, &op_res.value(), agg_type);
+    }
+
+    if (result.empty())
+      break;
+  }
+  return result;
+}
+
 OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
   if (agg == "SUM") {
     op_args->agg_type = AggType::SUM;
@@ -1161,12 +1196,7 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
 void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) {
   OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, store);
   if (!op_args_res) {
-    switch (op_args_res.status()) {
-      case OpStatus::INVALID_FLOAT:
-        return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
-      default:
-        return (*cntx)->SendError(op_args_res.status());
-    }
+    return HandleOpStatus(cntx, op_args_res.status());
   }
   const auto& op_args = *op_args_res;
   if (op_args.num_keys == 0) {
@@ -1969,12 +1999,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, true);
 
   if (!op_args_res) {
-    switch (op_args_res.status()) {
-      case OpStatus::INVALID_FLOAT:
-        return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
-      default:
-        return (*cntx)->SendError(op_args_res.status());
-    }
+    return HandleOpStatus(cntx, op_args_res.status());
   }
   const auto& op_args = *op_args_res;
   if (op_args.num_keys == 0) {
@@ -1991,28 +2016,14 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(cb), false);
 
-  ScoredMap result;
-  for (auto& op_res : maps) {
-    if (op_res.status() == OpStatus::SKIPPED)
-      continue;
-
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
-
-    if (result.empty()) {
-      result.swap(op_res.value());
-    } else {
-      InterScoredMap(&result, &op_res.value(), op_args.agg_type);
-    }
-
-    if (result.empty())
-      break;
-  }
+  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
+  if (!result)
+    return (*cntx)->SendError(result.status());
 
   ShardId dest_shard = Shard(dest_key, maps.size());
   AddResult add_result;
   vector<ScoredMemberView> smvec;
-  for (const auto& elem : result) {
+  for (const auto& elem : result.value()) {
     smvec.emplace_back(elem.second, elem.first);
   }
 
@@ -2028,6 +2039,44 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(store_cb), true);
 
   (*cntx)->SendLong(smvec.size());
+}
+
+void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
+  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, false);
+
+  if (!op_args_res) {
+    return HandleOpStatus(cntx, op_args_res.status());
+  }
+  const auto& op_args = *op_args_res;
+  if (op_args.num_keys == 0) {
+    return SendAtLeastOneKeyError(cntx);
+  }
+
+  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpInter(shard, t, "", op_args.agg_type, op_args.weights, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
+  if (!result)
+    return (*cntx)->SendError(result.status());
+
+  std::vector<std::pair<std::string, double>> scored_array;
+  scored_array.reserve(result.value().size());
+  for (const auto& elem : result.value()) {
+    scored_array.emplace_back(elem.first, elem.second);
+  }
+
+  std::sort(scored_array.begin(), scored_array.end(),
+            [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) {
+              return a.second < b.second;
+            });
+
+  (*cntx)->SendScoredArray(scored_array, op_args_res->with_scores);
 }
 
 void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
@@ -2054,28 +2103,14 @@ void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->transaction->ScheduleSingleHop(std::move(cb));
 
-  ScoredMap result;
-  for (auto& op_res : maps) {
-    if (op_res.status() == OpStatus::SKIPPED)
-      continue;
+  OpResult<ScoredMap> result = IntersectResults(maps, AggType::NOOP);
+  if (!result)
+    return (*cntx)->SendError(result.status());
 
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
-
-    if (result.empty()) {
-      result.swap(op_res.value());
-    } else {
-      InterScoredMap(&result, &op_res.value(), AggType::NOOP);
-    }
-
-    if (result.empty())
-      break;
-  }
-
-  if (0 < limit && limit < result.size()) {
+  if (0 < limit && limit < result.value().size()) {
     return (*cntx)->SendLong(limit);
   }
-  (*cntx)->SendLong(result.size());
+  (*cntx)->SendLong(result.value().size());
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, ConnectionContext* cntx) {
@@ -2291,7 +2326,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
-  int count = is_count ? parser.Next().Int<int>() : 1;
+  int count = is_count ? parser.Next<int>() : 1;
 
   range_spec.params.with_scores = static_cast<bool>(parser.Check("WITHSCORES").IgnoreCase());
 
@@ -3066,6 +3101,7 @@ constexpr uint32_t kZCount = READ | SORTEDSET | FAST;
 constexpr uint32_t kZDiff = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZIncrBy = WRITE | SORTEDSET | FAST;
 constexpr uint32_t kZInterStore = WRITE | SORTEDSET | SLOW;
+constexpr uint32_t kZInter = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZInterCard = WRITE | SORTEDSET | SLOW;
 constexpr uint32_t kZLexCount = READ | SORTEDSET | FAST;
 constexpr uint32_t kZPopMax = WRITE | SORTEDSET | FAST;
@@ -3112,6 +3148,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZDiff}.HFUNC(ZDiff)
       << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, acl::kZIncrBy}.HFUNC(ZIncrBy)
       << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, acl::kZInterStore}.HFUNC(ZInterStore)
+      << CI{"ZINTER", kStoreMask, -3, 2, 2, acl::kZInter}.HFUNC(ZInter)
       << CI{"ZINTERCARD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2,
             acl::kZInterCard}
              .HFUNC(ZInterCard)

@@ -218,6 +218,37 @@ class TestSetsnapshot_cron(SnapshotTestBase):
 
 
 @dfly_args({**BASIC_ARGS})
+class TestOnlyOneSaveAtATime(SnapshotTestBase):
+    """Dragonfly does not allow simultaneous save operations, send 2 save operations and make sure one is rejected"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        super().setup(tmp_dir)
+
+    @pytest.mark.asyncio
+    @pytest.mark.slow
+    async def test_snapshot(self, async_client, df_server):
+        await async_client.execute_command(
+            "debug", "populate", "1000000", "askldjh", "1000", "RAND"
+        )
+
+        async def save():
+            try:
+                res = await async_client.execute_command("save", "rdb", "dump")
+                return True
+            except Exception as e:
+                return False
+
+        save_commnands = [asyncio.create_task(save()) for _ in range(2)]
+
+        num_successes = 0
+        for result in asyncio.as_completed(save_commnands):
+            num_successes += await result
+
+        assert num_successes == 1, "Only one SAVE must be successful"
+
+
+@dfly_args({**BASIC_ARGS})
 class TestPathEscapes(SnapshotTestBase):
     """Test that we don't allow path escapes. We just check that df_server.start()
     fails because we don't have a much better way to test that."""

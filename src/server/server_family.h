@@ -145,11 +145,12 @@ class ServerFamily {
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   // if basename is not empty it will override dbfilename flag.
-  GenericError DoSave(bool new_version, std::string_view basename, Transaction* transaction);
+  GenericError DoSave(bool new_version, std::string_view basename, Transaction* transaction,
+                      bool ignore_state = false);
 
   // Calls DoSave with a default generated transaction and with the format
   // specified in --df_snapshot_format
-  GenericError DoSave();
+  GenericError DoSave(bool ignore_state = false);
 
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
@@ -196,8 +197,8 @@ class ServerFamily {
 
   void CancelBlockingCommands();
 
-  bool AwaitDispatches(absl::Duration timeout,
-                       const std::function<bool(util::Connection*)>& filter);
+  // Wait until all current dispatches finish, returns true on success, false if timeout was reached
+  bool AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer);
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);
@@ -211,6 +212,10 @@ class ServerFamily {
 
   void Auth(CmdArgList args, ConnectionContext* cntx);
   void Client(CmdArgList args, ConnectionContext* cntx);
+  void ClientSetName(CmdArgList args, ConnectionContext* cntx);
+  void ClientGetName(CmdArgList args, ConnectionContext* cntx);
+  void ClientList(CmdArgList args, ConnectionContext* cntx);
+  void ClientPause(CmdArgList args, ConnectionContext* cntx);
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
@@ -231,6 +236,7 @@ class ServerFamily {
   void Script(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);
   void SlowLog(CmdArgList args, ConnectionContext* cntx);
+  void Module(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 

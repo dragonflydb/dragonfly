@@ -1082,7 +1082,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-
+    if (stored_cmd.Cid()->opt_mask() & CO::WRITE) {
+      dfly_cntx->conn_state.exec_info.is_write = true;
+    }
     return cntx->SendSimpleString("QUEUED");
   }
 
@@ -1185,10 +1187,19 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return true;  // return false only for internal error aborts
   }
 
+  ServerState& etl = *ServerState::tlocal();
+
+  string_view cmd_name(cid->name());
+  bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
+                  cmd_name == "EVALSHA";
+  if (cmd_name == "EXEC" && cntx->conn_state.exec_info.is_write) {
+    is_write = true;
+  }
+  etl.AwaitPauseState(is_write);
+
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
   // enabled on them - see https://redis.io/commands/monitor/
-  ServerState& etl = *ServerState::tlocal();
   const MonitorsRepo& monitors = etl.Monitors();
   if (!monitors.Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
     DispatchMonitor(cntx, cid, tail_args);
@@ -1408,6 +1419,10 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
 facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
   return ServerState::tl_connection_stats();
+}
+
+void Service::AwaitOnPauseDispatch() {
+  ServerState::tlocal()->AwaitOnPauseDispatch();
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {
@@ -2061,14 +2076,21 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   int num_published = subscribers.size();
 
   if (!subscribers.empty()) {
-    // Make sure neither of the subscribers buffers is filled up.
+    // Make sure neither of the threads limits is reached.
     // This check actually doesn't reserve any memory ahead and doesn't prevent the buffer
-    // from eventually filling up, especially if multiple clients are unblocked simultaneously
+    // from eventually filling up, especially if multiple clients are unblocked simultaneously,
     // but is generally good enough to limit too fast producers.
     // Most importantly, this approach allows not blocking and not awaiting in the dispatch below,
     // thus not adding any overhead to backpressure checks.
-    for (auto& sub : subscribers)
+    optional<uint32_t> last_thread;
+    for (auto& sub : subscribers) {
+      DCHECK_LE(last_thread.value_or(0), sub.thread_id);
+      if (last_thread && *last_thread == sub.thread_id)  // skip same thread
+        continue;
+
       sub.conn_cntx->conn()->EnsureAsyncMemoryBudget();
+      last_thread = sub.thread_id;
+    }
 
     auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
     auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
@@ -2268,17 +2290,17 @@ VarzValue::Map Service::GetVarzStats() {
   return res;
 }
 
-GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
+std::pair<GlobalState, bool> Service::SwitchState(GlobalState from, GlobalState to) {
   lock_guard lk(mu_);
   if (global_state_ != from)
-    return global_state_;
+    return {global_state_, false};
 
   VLOG(1) << "Switching state from " << GlobalStateName(from) << " to " << GlobalStateName(to);
 
   global_state_ = to;
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
-  return to;
+  return {to, true};
 }
 
 GlobalState Service::GetGlobalState() const {
@@ -2324,12 +2346,13 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
+
       auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->PUnsubscribeAll(false);
-      // Check that all borrowers finished processing
-      token.Wait();
-      DCHECK(!conn_state.subscribe_info);
+      token.Wait();  // Same as above
     }
+
+    DCHECK(!conn_state.subscribe_info);
   }
 
   DeactivateMonitoring(server_cntx);

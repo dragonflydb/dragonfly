@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 #include "io/file_util.h"
@@ -623,8 +624,7 @@ void ServerFamily::Shutdown() {
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
-      GenericError ec = DoSave();
-      if (ec) {
+      if (GenericError ec = DoSave(); ec) {
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
       }
     });
@@ -672,9 +672,9 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
   LOG(INFO) << "Loading " << load_path;
 
-  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+  auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state.first != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
     return {};
   }
 
@@ -1058,19 +1058,30 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
-GenericError ServerFamily::DoSave() {
+GenericError ServerFamily::DoSave(bool ignore_state) {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(0, {});
-  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get());
+  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
+GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+                                  bool ignore_state) {
+  if (!ignore_state) {
+    auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
+    if (!success) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          StrCat(GlobalStateName(new_state), " - can not save database")};
+    }
+  }
   SaveStagesController sc{detail::SaveStagesInputs{
       new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
       &save_mu_, &save_bytes_cb_, snapshot_storage_}};
-  return sc.Save();
+  auto res = sc.Save();
+  if (!ignore_state)
+    service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  return res;
 }
 
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
@@ -1123,17 +1134,20 @@ void ServerFamily::CancelBlockingCommands() {
   }
 }
 
-bool ServerFamily::AwaitDispatches(absl::Duration timeout,
-                                   const std::function<bool(util::Connection*)>& filter) {
-  auto start = absl::Now();
+bool ServerFamily::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer) {
+  vector<Fiber> fibers;
+  bool successful = true;
+
   for (auto* listener : listeners_) {
-    absl::Duration remaining_time = timeout - (absl::Now() - start);
-    if (remaining_time < absl::Nanoseconds(0) ||
-        !listener->AwaitDispatches(remaining_time, filter)) {
-      return false;
-    }
+    fibers.push_back(MakeFiber([listener, timeout, issuer, &successful]() {
+      successful &= listener->AwaitCurrentDispatches(timeout, issuer);
+    }));
   }
-  return true;
+
+  for (auto& fb : fibers)
+    fb.JoinIfNeeded();
+
+  return successful;
 }
 
 string GetPassword() {
@@ -1213,41 +1227,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
+  CmdArgList sub_args = args.subspan(1);
 
-  if (sub_cmd == "SETNAME" && args.size() == 2) {
-    cntx->conn()->SetName(string{ArgS(args, 1)});
-    return (*cntx)->SendOk();
-  }
-
-  if (sub_cmd == "GETNAME") {
-    auto name = cntx->conn()->GetName();
-    if (!name.empty()) {
-      return (*cntx)->SendBulkString(name);
-    } else {
-      return (*cntx)->SendNull();
-    }
-  }
-
-  if (sub_cmd == "LIST") {
-    vector<string> client_info;
-    absl::base_internal::SpinLock mu;
-
-    // we can not preempt the connection traversal, so we need to use a spinlock.
-    // alternatively we could lock when mutating the connection list, but it seems not important.
-    auto cb = [&](unsigned thread_index, util::Connection* conn) {
-      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-      string info = dcon->GetClientInfo(thread_index);
-      absl::base_internal::SpinLockHolder l(&mu);
-      client_info.push_back(move(info));
-    };
-
-    for (auto* listener : listeners_) {
-      listener->TraverseConnections(cb);
-    }
-
-    string result = absl::StrJoin(move(client_info), "\n");
-    result.append("\n");
-    return (*cntx)->SendBulkString(result);
+  if (sub_cmd == "SETNAME") {
+    return ClientSetName(sub_args, cntx);
+  } else if (sub_cmd == "GETNAME") {
+    return ClientGetName(sub_args, cntx);
+  } else if (sub_cmd == "LIST") {
+    return ClientList(sub_args, cntx);
+  } else if (sub_cmd == "PAUSE") {
+    return ClientPause(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -1256,6 +1245,117 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
+}
+
+void ServerFamily::ClientSetName(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 1) {
+    cntx->conn()->SetName(string{ArgS(args, 0)});
+    return (*cntx)->SendOk();
+  } else {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+}
+
+void ServerFamily::ClientGetName(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+  auto name = cntx->conn()->GetName();
+  if (!name.empty()) {
+    return (*cntx)->SendBulkString(name);
+  } else {
+    return (*cntx)->SendNull();
+  }
+}
+
+void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return (*cntx)->SendError(facade::kSyntaxErr);
+  }
+
+  vector<string> client_info;
+  absl::base_internal::SpinLock mu;
+
+  // we can not preempt the connection traversal, so we need to use a spinlock.
+  // alternatively we could lock when mutating the connection list, but it seems not important.
+  auto cb = [&](unsigned thread_index, util::Connection* conn) {
+    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+    string info = dcon->GetClientInfo(thread_index);
+    absl::base_internal::SpinLockHolder l(&mu);
+    client_info.push_back(std::move(info));
+  };
+
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+
+  string result = absl::StrJoin(client_info, "\n");
+  result.append("\n");
+  return (*cntx)->SendBulkString(result);
+}
+
+void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+
+  auto timeout = parser.Next<uint64_t>();
+  enum ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return (*cntx)->SendError(err->MakeReply());
+  }
+
+  // Pause dispatch commands before updating client puase state, and enable dispatch after updating
+  // pause state. This will unsure that when we after changing the state all running commands will
+  // read the new pause state, and we will not pause client in the middle of a transaction.
+  service_.proactor_pool().Await([](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseDispatch(true);
+  });
+
+  // TODO handle blocking commands
+  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  if (!AwaitCurrentDispatches(kDispatchTimeout, cntx->conn())) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << kDispatchTimeout;
+    service_.proactor_pool().Await([](util::ProactorBase* pb) {
+      ServerState& etl = *ServerState::tlocal();
+      etl.SetPauseDispatch(false);
+    });
+    return (*cntx)->SendError("Failed to pause all running clients");
+  }
+
+  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+    ServerState& etl = *ServerState::tlocal();
+    etl.SetPauseState(pause_state, true);
+    etl.SetPauseDispatch(false);
+  });
+
+  // We should not expire/evict keys while clients are puased.
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+
+  fb2::Fiber("client_pause", [this, timeout, pause_state]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
+    // ensure this fiber will not left hanging .
+    auto step = 10ms;
+    auto timeout_ms = timeout * 1ms;
+    int64_t steps = timeout_ms.count() / step.count();
+    ServerState& etl = *ServerState::tlocal();
+    do {
+      ThisFiber::SleepFor(step);
+    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
+
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      });
+      shard_set->RunBriefInParallel(
+          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    }
+  }).Detach();
+
+  (*cntx)->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -1514,7 +1614,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("MEMORY")) {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
-    append("used_memory_peak", used_mem_peak.load(memory_order_relaxed));
+    const auto ump = used_mem_peak.load(memory_order_relaxed);
+    append("used_memory_peak", ump);
+    append("used_memory_peak_human", HumanReadableNumBytes(ump));
 
     size_t rss = rss_mem_current.load(memory_order_relaxed);
     append("used_memory_rss", rss);
@@ -1542,6 +1644,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("small_string_bytes", m.small_string_bytes);
     append("pipeline_cache_bytes", m.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.conn_stats.dispatch_queue_bytes);
+    append("dispatch_queue_subscriber_bytes", m.conn_stats.dispatch_queue_subscriber_bytes);
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
 
@@ -1687,6 +1790,15 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append_sorted("cmdstat_", move(commands));
     append_sorted("unknown_",
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
+  }
+
+  if (should_enter("MODULES")) {
+    append("module",
+           "name=ReJSON,ver=20000,api=1,filters=0,usedby=[search],using=[],options=[handle-io-"
+           "errors]");
+    append("module",
+           "name=search,ver=20000,api=1,filters=0,usedby=[],using=[ReJSON],options=[handle-io-"
+           "errors]");
   }
 
   if (should_enter("SEARCH", true)) {
@@ -1836,7 +1948,8 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
       replica_.reset();
     }
 
-    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
+    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE).first ==
+          GlobalState::ACTIVE)
         << "Server is set to replica no one, yet state is not active!";
 
     return (*cntx)->SendOk();
@@ -1850,8 +1963,8 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
 
   // First, switch into the loading state
   if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-      new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+      new_state.first != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
     (*cntx)->SendError("Invalid state");
     return;
   }
@@ -1916,13 +2029,20 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   unique_lock lk(replicaof_mu_);
 
-  float_t timeout_sec;
-  if (!absl::SimpleAtof(ArgS(args, 0), &timeout_sec)) {
-    return (*cntx)->SendError(kInvalidIntErr);
-  }
+  CmdArgParser parser{args};
+
+  auto timeout_sec = parser.Next<float>();
   if (timeout_sec < 0) {
     return (*cntx)->SendError("timeout is negative");
   }
+
+  bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
+
+  if (parser.HasNext())
+    return (*cntx)->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
   if (ServerState::tlocal()->is_master)
     return (*cntx)->SendError("Already a master instance");
@@ -1934,7 +2054,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("Full sync not done");
   }
 
-  std::error_code ec = replica_->TakeOver(ArgS(args, 0));
+  std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
   if (ec)
     return (*cntx)->SendError("Couldn't execute takeover");
 
@@ -2179,6 +2299,28 @@ void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
+void ServerFamily::Module(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[0]);
+  if (ArgS(args, 0) != "LIST")
+    return (*cntx)->SendError(kSyntaxErr);
+
+  (*cntx)->StartArray(2);
+
+  // Json
+  (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
+  (*cntx)->SendSimpleString("name");
+  (*cntx)->SendSimpleString("ReJSON");
+  (*cntx)->SendSimpleString("ver");
+  (*cntx)->SendLong(20'000);
+
+  // Search
+  (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
+  (*cntx)->SendSimpleString("name");
+  (*cntx)->SendSimpleString("search");
+  (*cntx)->SendSimpleString("ver");
+  (*cntx)->SendLong(20'000);  // we target v2
+}
+
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 namespace acl {
@@ -2204,6 +2346,7 @@ constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
+constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
 // TODO(check this)
 constexpr uint32_t kDfly = ADMIN;
 }  // namespace acl
@@ -2232,13 +2375,14 @@ void ServerFamily::Register(CommandRegistry* registry) {
              ShutdownCmd)
       << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
       << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
-      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, acl::kReplTakeOver}.HFUNC(
+      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
       << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
-      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly);
+      << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
+      << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);
 }
 
 }  // namespace dfly

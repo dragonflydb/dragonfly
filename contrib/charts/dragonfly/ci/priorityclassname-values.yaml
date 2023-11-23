@@ -1,0 +1,10 @@
+priorityClassName: "high-priority"
+
+extraObjects:
+  - apiVersion: scheduling.k8s.io/v1
+    kind: PriorityClass
+    metadata:
+      name: high-priority
+    value: 1000000
+    globalDefault: false
+    description: "This priority class should be used only for tests."

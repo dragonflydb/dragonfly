@@ -21,52 +21,6 @@ struct CmdArgParser {
     INVALID_CASES,
   };
 
-  struct NextProxy;
-
-  template <typename T> struct CaseProxy {
-    operator T();
-
-    CaseProxy Case(std::string_view tag, T value);
-
-   private:
-    friend struct NextProxy;
-
-    CaseProxy(CmdArgParser* parser, size_t idx) : parser_{parser}, idx_{idx} {
-    }
-
-    CmdArgParser* parser_;
-    size_t idx_;
-    std::optional<T> value_;
-  };
-
-  struct NextProxy {
-    operator std::string_view() {
-      return parser_->SafeSV(idx_);
-    }
-
-    operator std::string() {
-      return std::string{operator std::string_view()};
-    }
-
-    template <typename T> T Int();
-
-    // Detect value based on cases.
-    // Returns default if the argument is not present among the cases list,
-    // and reports an error.
-    template <typename T> auto Case(std::string_view tag, T value) {
-      return CaseProxy<T>{parser_, idx_}.Case(tag, value);
-    }
-
-   private:
-    friend struct CmdArgParser;
-
-    NextProxy(CmdArgParser* parser, size_t idx) : parser_{parser}, idx_{idx} {
-    }
-
-    CmdArgParser* parser_;
-    size_t idx_;
-  };
-
   struct CheckProxy {
     explicit operator bool() const;
 
@@ -118,15 +72,38 @@ struct CmdArgParser {
   ~CmdArgParser();
 
   // Get next value without consuming it
-  NextProxy Peek() {
-    return NextProxy(this, cur_i_);
+  std::string_view Peek() {
+    return SafeSV(cur_i_);
   }
 
   // Consume next value
-  NextProxy Next() {
+  template <class T = std::string_view, class... Ts> auto Next() {
+    if (cur_i_ + sizeof...(Ts) >= args_.size()) {
+      Report(OUT_OF_BOUNDS, cur_i_);
+    }
+
+    if constexpr (sizeof...(Ts) == 0) {
+      auto idx = cur_i_++;
+      return Convert<T>(idx);
+    } else {
+      std::tuple<T, Ts...> res;
+      NextImpl<0>(&res);
+      cur_i_ += sizeof...(Ts) + 1;
+      return res;
+    }
+  }
+
+  template <class... Cases> auto Switch(Cases&&... cases) {
     if (cur_i_ >= args_.size())
       Report(OUT_OF_BOUNDS, cur_i_);
-    return NextProxy{this, cur_i_++};
+
+    auto idx = cur_i_++;
+    auto res = SwitchImpl(SafeSV(idx), std::forward<Cases>(cases)...);
+    if (!res) {
+      Report(INVALID_CASES, idx);
+      return typename decltype(res)::value_type{};
+    }
+    return *res;
   }
 
   // Check if the next value if equal to a specific tag. If equal, its consumed.
@@ -167,6 +144,34 @@ struct CmdArgParser {
   }
 
  private:
+  template <class T, class... Cases>
+  std::optional<std::decay_t<T>> SwitchImpl(std::string_view arg, std::string_view tag, T&& value,
+                                            Cases&&... cases) {
+    if (arg == tag)
+      return std::forward<T>(value);
+
+    if constexpr (sizeof...(cases) > 0)
+      return SwitchImpl(arg, cases...);
+
+    return std::nullopt;
+  }
+
+  template <size_t shift, class Tuple> void NextImpl(Tuple* t) {
+    std::get<shift>(*t) = Convert<std::tuple_element_t<shift, Tuple>>(cur_i_ + shift);
+    if constexpr (constexpr auto next = shift + 1; next < std::tuple_size_v<Tuple>)
+      NextImpl<next>(t);
+  }
+
+  template <class T> T Convert(size_t idx) {
+    static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view>,
+                  "incorrect type");
+    if constexpr (std::is_arithmetic_v<T>) {
+      return Num<T>(idx);
+    } else if constexpr (std::is_constructible_v<T, std::string_view>) {
+      return static_cast<T>(SafeSV(idx));
+    }
+  }
+
   std::string_view SafeSV(size_t i) const {
     if (i >= args_.size())
       return "";
@@ -178,6 +183,8 @@ struct CmdArgParser {
       error_ = {type, idx};
   }
 
+  template <typename T> T Num(size_t idx);
+
   void ToUpper(size_t i);
 
  private:
@@ -186,19 +193,5 @@ struct CmdArgParser {
 
   std::optional<ErrorInfo> error_;
 };
-
-template <typename T> CmdArgParser::CaseProxy<T>::operator T() {
-  if (!value_)
-    parser_->Report(INVALID_CASES, idx_);
-  return value_.value_or(T{});
-}
-
-template <typename T>
-CmdArgParser::CaseProxy<T> CmdArgParser::CaseProxy<T>::Case(std::string_view tag, T value) {
-  std::string_view arg = parser_->SafeSV(idx_);
-  if (arg == tag)
-    value_ = std::move(value);
-  return *this;
-}
 
 }  // namespace facade

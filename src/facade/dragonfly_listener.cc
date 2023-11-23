@@ -234,26 +234,30 @@ void Listener::PreAcceptLoop(util::ProactorBase* pb) {
   per_thread_.resize(pool()->size());
 }
 
-bool Listener::AwaitDispatches(absl::Duration timeout,
-                               const std::function<bool(util::Connection*)>& filter) {
-  absl::Time start = absl::Now();
+bool Listener::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer) {
+  // Fill blocking counter with ongoing dispatches
+  util::fb2::BlockingCounter bc{0};
+  this->TraverseConnections([bc, issuer](unsigned thread_index, util::Connection* conn) {
+    if (conn != issuer)
+      static_cast<Connection*>(conn)->SendCheckpoint(bc);
+  });
 
-  while (absl::Now() - start < timeout) {
-    std::atomic<bool> any_connection_dispatching = false;
-    auto cb = [&any_connection_dispatching, &filter](unsigned thread_index,
-                                                     util::Connection* conn) {
-      if (filter(conn) && static_cast<Connection*>(conn)->IsCurrentlyDispatching()) {
-        any_connection_dispatching.store(true);
+  auto cancelled = make_shared<bool>(false);
+
+  // TODO: Add wait with timeout or polling to helio (including cancel flag)
+  util::MakeFiber([bc, cancelled = weak_ptr{cancelled}, start = absl::Now(), timeout]() mutable {
+    while (!cancelled.expired()) {
+      if (absl::Now() - start > timeout) {
+        VLOG(1) << "AwaitCurrentDispatches timed out";
+        *cancelled.lock() = true;  // same thread, no promotion race
+        bc.Cancel();
       }
-    };
-    this->TraverseConnections(cb);
-    if (!any_connection_dispatching.load()) {
-      return true;
+      ThisFiber::SleepFor(10ms);
     }
-    VLOG(1) << "A command is still dispatching, let's wait for it";
-    ThisFiber::SleepFor(100us);
-  }
-  return false;
+  }).Detach();
+
+  bc.Wait();
+  return !*cancelled;
 }
 
 bool Listener::IsPrivilegedInterface() const {
@@ -273,8 +277,7 @@ void Listener::PreShutdown() {
   // at this stage since we're in SHUTDOWN mode.
   // If a command is running for too long we give up and proceed.
   const absl::Duration kDispatchShutdownTimeout = absl::Milliseconds(10);
-
-  if (!AwaitDispatches(kDispatchShutdownTimeout, [](util::Connection*) { return true; })) {
+  if (!AwaitCurrentDispatches(kDispatchShutdownTimeout, nullptr)) {
     LOG(WARNING) << "Some commands are still being dispatched but didn't conclude in time. "
                     "Proceeding in shutdown.";
   }

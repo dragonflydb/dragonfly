@@ -4,6 +4,10 @@
 
 #include "server/json_family.h"
 
+#include <absl/strings/str_replace.h>
+
+#include <jsoncons/json.hpp>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -105,6 +109,14 @@ static const string PhonebookJson = R"(
 TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
   auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
   ASSERT_THAT(resp, "OK");
+
+  auto compact_json = jsoncons::json::parse(PhonebookJson).as_string();
+
+  resp = Run({"JSON.GET", "json", "."});
+  EXPECT_EQ(resp, compact_json);
+
+  resp = Run({"JSON.GET", "json", "$"});
+  EXPECT_EQ(resp, "[" + compact_json + "]");
 
   resp = Run({"JSON.GET", "json", "$.address.*"});
   EXPECT_EQ(resp, R"(["New York","NY","21 2nd Street","10021-3100"])");
@@ -1036,17 +1048,6 @@ TEST_F(JsonFamilyTest, Set) {
 
   resp = Run({"JSON.GET", "json3", "$"});
   EXPECT_EQ(resp, R"([{"a":2,"b":8,"c":[1,2,3]}])");
-}
-
-TEST_F(JsonFamilyTest, LegacyV1) {
-  string json = R"({"key":[1,2,3,4]})";
-
-  auto resp = Run({"JSON.SET", "json1", ".", json});
-  EXPECT_THAT(resp, "OK");
-
-  // JSON.GET key "." is the same as JSON.GET key "$"
-  resp = Run({"JSON.GET", "json1", "."});
-  EXPECT_THAT(resp, absl::StrCat("[", json, "]"));
 }
 
 }  // namespace dfly

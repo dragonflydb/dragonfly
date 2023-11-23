@@ -34,18 +34,30 @@ CmdArgParser::CheckProxy::operator bool() const {
   return true;
 }
 
-template <typename T> T CmdArgParser::NextProxy::Int() {
+template <typename T> T CmdArgParser::Num(size_t idx) {
+  auto arg = SafeSV(idx);
   T out;
-  if (absl::SimpleAtoi(operator std::string_view(), &out))
-    return out;
-  parser_->Report(INVALID_INT, idx_);
-  return T{0};
+  if constexpr (std::is_same_v<T, float>) {
+    if (absl::SimpleAtof(arg, &out))
+      return out;
+  } else if constexpr (std::is_same_v<T, double>) {
+    if (absl::SimpleAtod(arg, &out))
+      return out;
+  } else if constexpr (std::is_integral_v<T>) {
+    if (absl::SimpleAtoi(arg, &out))
+      return out;
+  }
+
+  Report(INVALID_INT, idx);
+  return {};
 }
 
-template uint64_t CmdArgParser::NextProxy::Int<uint64_t>();
-template int64_t CmdArgParser::NextProxy::Int<int64_t>();
-template uint32_t CmdArgParser::NextProxy::Int<uint32_t>();
-template int32_t CmdArgParser::NextProxy::Int<int32_t>();
+template float CmdArgParser::Num<float>(size_t);
+template double CmdArgParser::Num<double>(size_t);
+template uint64_t CmdArgParser::Num<uint64_t>(size_t);
+template int64_t CmdArgParser::Num<int64_t>(size_t);
+template uint32_t CmdArgParser::Num<uint32_t>(size_t);
+template int32_t CmdArgParser::Num<int32_t>(size_t);
 
 ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
   switch (type) {

@@ -67,7 +67,7 @@ class RdbSnapshot {
 };
 
 struct SaveStagesController : public SaveStagesInputs {
-  SaveStagesController(SaveStagesInputs&& inputs);
+  SaveStagesController(SaveStagesInputs&& input);
 
   ~SaveStagesController();
 

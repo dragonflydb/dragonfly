@@ -15,13 +15,11 @@
 #include <variant>
 
 #include "base/io_buf.h"
-#include "util/connection.h"
-#include "util/http/http_handler.h"
-
-//
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
+#include "util/connection.h"
+#include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;
@@ -77,16 +75,7 @@ class Connection : public util::Connection {
                size_t message_len);
   };
 
-  struct MonitorMessage : public std::string {};
-
-  struct AclUpdateMessage {
-    std::vector<std::string> username;
-    std::vector<uint32_t> categories;
-    std::vector<std::vector<uint64_t>> commands;
-  };
-
-  struct MigrationRequestMessage {};
-
+  // Pipeline message, accumulated command to be executed.
   struct PipelineMessage {
     PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
@@ -105,6 +94,24 @@ class Connection : public util::Connection {
     StorageType storage;
   };
 
+  // Monitor message, carries a simple payload with the registered event to be sent.
+  struct MonitorMessage : public std::string {};
+
+  // ACL Update message, contains ACL updates to be applied to the connection.
+  struct AclUpdateMessage {
+    std::vector<std::string> username;
+    std::vector<uint32_t> categories;
+    std::vector<std::vector<uint64_t>> commands;
+  };
+
+  // Migration request message, the dispatch fiber stops to give way for thread migration.
+  struct MigrationRequestMessage {};
+
+  // Checkpoint message, used to track when the connection finishes executing the current command.
+  struct CheckpointMessage {
+    util::fb2::BlockingCounter bc;  // Decremented counter when processed
+  };
+
   struct MessageDeleter {
     void operator()(PipelineMessage* msg) const;
     void operator()(PubMessage* msg) const;
@@ -113,18 +120,28 @@ class Connection : public util::Connection {
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
   using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
   using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
+  using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
+  // Variant wrapper around different message types
   struct MessageHandle {
     size_t UsedMemory() const;  // How much bytes this handle takes up in total.
 
-    bool IsPipelineMsg() const;
+    // Intrusive messages put themselves at the front of the queue, but only after all other
+    // intrusive ones. Used for quick transfer or control / update messages.
+    bool IsIntrusive() const;
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessage,
-                 MigrationRequestMessage>
+    bool IsPipelineMsg() const;
+    bool IsPubMsg() const;
+
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
+                 MigrationRequestMessage, CheckpointMessage>
         handle;
   };
 
-  enum Phase { SETUP, READ_SOCKET, PROCESS, NUM_PHASES };
+  static_assert(sizeof(MessageHandle) <= 40,
+                "Big structs should use indirection to avoid wasting deque space!");
+
+  enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
  public:
   // Add PubMessage to dispatch queue.
@@ -137,8 +154,12 @@ class Connection : public util::Connection {
   // Add acl update to dispatch queue.
   void SendAclUpdateAsync(AclUpdateMessage msg);
 
-  // Must be called before SendAsync to ensure the connection dispatch queue is not overfilled.
-  // Blocks until free space is available.
+  // If any dispatch is currently in progress, increment counter and send checkpoint message to
+  // decrement it once finished.
+  void SendCheckpoint(util::fb2::BlockingCounter bc);
+
+  // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
+  // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
   void EnsureAsyncMemoryBudget();
 
   // Register hook that is executed on connection shutdown.
@@ -210,16 +231,17 @@ class Connection : public util::Connection {
   struct Shutdown;
 
   // Keeps track of total per-thread sizes of dispatch queues to
-  // limit memory taken up by pipelined / pubsub commands and slow down clients
+  // limit memory taken up by messages from PUBLISH commands and slow down clients
   // producing them to quickly via EnsureAsyncMemoryBudget.
   struct QueueBackpressure {
     // Block until memory usage is below limit, can be called from any thread
     void EnsureBelowLimit();
 
     dfly::EventCount ec;
-    std::atomic_size_t bytes = 0;
-    size_t limit = 0;
-    size_t pipeline_cache_limit = 0;
+    std::atomic_size_t subscriber_bytes = 0;
+
+    size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
+    size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
   };
 
  private:
@@ -264,18 +286,25 @@ class Connection : public util::Connection {
   void HandleMigrateRequest();
   bool ShouldEndDispatchFiber(const MessageHandle& msg);
 
-  void LaunchDispatchFiberIfNeeded();
+  void LaunchDispatchFiberIfNeeded();  // Dispatch fiber is started lazily
 
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline(facade::SinkReplyBuilder*);
 
- private:
+  // Clear pipelined messages, disaptching only intrusive ones.
+  void ClearPipelinedMessages();
+
+  // Get quick debug info for logs
+  std::string DebugInfo() const;
+
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
+
+ private:
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
-  size_t dispatch_q_cmds_count_;  // how many queued async commands
+  size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued async commands in dispatch_q
 
   base::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
