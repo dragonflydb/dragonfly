@@ -61,6 +61,8 @@ class RedisParser {
     return stash_;
   }
 
+  size_t UsedMemory() const;
+
  private:
   void InitStart(uint8_t prefix_b, RespVec* res);
   void StashState(RespVec* res);
@@ -98,8 +100,8 @@ class RedisParser {
   absl::InlinedVector<std::pair<uint32_t, RespVec*>, 4> parse_stack_;
   std::vector<std::unique_ptr<RespVec>> stash_;
 
-  using BlobPtr = std::unique_ptr<uint8_t[]>;
-  std::vector<BlobPtr> buf_stash_;
+  using Blob = std::vector<uint8_t>;
+  std::vector<Blob> buf_stash_;
   RespVec* cached_expr_ = nullptr;
   uint32_t max_arr_len_;
 

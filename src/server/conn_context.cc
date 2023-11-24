@@ -5,6 +5,7 @@
 #include "server/conn_context.h"
 
 #include "base/logging.h"
+#include "core/heap_size.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
@@ -230,6 +231,11 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
   else
     (*this)->SendNull();
   (*this)->SendLong(count);
+}
+
+size_t ConnectionContext::UsedMemory() const {
+  return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(authed_username) +
+         dfly::HeapSize(acl_commands);
 }
 
 void ConnectionState::ExecInfo::Clear() {
