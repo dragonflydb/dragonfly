@@ -973,7 +973,7 @@ OpResult<vector<OptLong>> OpArrIndex(const OpArgs& op_args, string_view key,
 }
 
 // Returns string vector that represents the query result of each supplied key.
-vector<OptString> OpMGet(JsonExpression expression, const Transaction* t, EngineShard* shard) {
+vector<OptString> OpJsonMGet(JsonExpression expression, const Transaction* t, EngineShard* shard) {
   auto args = t->GetShardArgs(shard->shard_id());
   DCHECK(!args.empty());
   vector<OptString> response(args.size());
@@ -1271,7 +1271,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    mget_resp[sid] = OpMGet(ParseJsonPath(path, &ec), t, shard);
+    mget_resp[sid] = OpJsonMGet(ParseJsonPath(path, &ec), t, shard);
     return OpStatus::OK;
   };
 

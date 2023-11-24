@@ -51,6 +51,26 @@ std::string_view GetErrorType(std::string_view err) {
   return err == kSyntaxErr ? kSyntaxErrType : err;
 }
 
+SinkReplyBuilder::MGetResponse MakeMGetResponse(const vector<optional<string>>& values) {
+  size_t total_size = 0;
+  for (const auto& val : values) {
+    total_size += val.value_or(string{}).size();
+  }
+  SinkReplyBuilder::MGetResponse resp(values.size());
+  resp.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
+  char* ptr = resp.storage_list->data;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (!values[i].has_value()) {
+      continue;
+    }
+    const string& val = values[i].value();
+    memcpy(ptr, val.data(), val.size());
+    resp.resp_arr[i] = SinkReplyBuilder::GetResp{{ptr, val.size()}};
+    ptr += val.size();
+  }
+  return resp;
+}
+
 }  // namespace
 
 class RedisReplyBuilderTest : public testing::Test {
@@ -760,22 +780,20 @@ TEST_F(RedisReplyBuilderTest, TestSendScoredArray) {
 }
 
 TEST_F(RedisReplyBuilderTest, TestSendMGetResponse) {
-  std::vector<SinkReplyBuilder::OptResp> mget_res(3);
-  auto& v = mget_res[0].emplace();
-  v.value = "v1";
-  v = mget_res[2].emplace();
-  v.value = "v3";
+  SinkReplyBuilder::MGetResponse resp = MakeMGetResponse({"v1", nullopt, "v3"});
 
   builder_->SetResp3(false);
-  builder_->SendMGetResponse(mget_res);
+  builder_->SendMGetResponse(std::move(resp));
   ASSERT_TRUE(builder_->err_count().empty());
-  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv3\r\n$-1\r\n$0\r\n\r\n")
+  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv1\r\n$-1\r\n$2\r\nv3\r\n")
       << "Resp2 SendMGetResponse failed.";
 
+  resp = MakeMGetResponse({"v1", nullopt, "v3"});
   builder_->SetResp3(true);
-  builder_->SendMGetResponse(mget_res);
+  builder_->SendMGetResponse(std::move(resp));
   ASSERT_TRUE(builder_->err_count().empty());
-  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv3\r\n_\r\n$0\r\n\r\n") << "Resp3 SendMGetResponse failed.";
+  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv1\r\n_\r\n$2\r\nv3\r\n")
+      << "Resp3 SendMGetResponse failed.";
 }
 
 TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
@@ -828,12 +846,10 @@ TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
         r->SendSimpleStrArr(kTestSws);
       },
       [](RRB* r) {
-        vector<RRB::OptResp> v = {
-            RRB::ResponseValue{"key-1", "value-1", 0, 0},
-            nullopt,
-            RRB::ResponseValue{"key-2", "value-2", 0, 0},
-        };
-        r->SendMGetResponse(v);
+        SinkReplyBuilder::MGetResponse resp = MakeMGetResponse({"value-1", "value-2"});
+        resp.resp_arr[0]->key = "key-1";
+        resp.resp_arr[1]->key = "key-2";
+        r->SendMGetResponse(std::move(resp));
       },
       big_arr_cb,
   };
