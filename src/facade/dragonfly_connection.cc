@@ -18,7 +18,6 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
-#include "server/conn_context.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
@@ -239,12 +238,11 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 }
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
-  auto* ctx = static_cast<dfly::ConnectionContext*>(self->cntx());
-  if (ctx) {
+  if (self->cntx()) {
     for (size_t id = 0; id < msg.username.size(); ++id) {
-      if (msg.username[id] == ctx->authed_username) {
-        ctx->acl_categories = msg.categories[id];
-        ctx->acl_commands = msg.commands[id];
+      if (msg.username[id] == self->cntx()->authed_username) {
+        self->cntx()->acl_categories = msg.categories[id];
+        self->cntx()->acl_commands = msg.commands[id];
       }
     }
   }
