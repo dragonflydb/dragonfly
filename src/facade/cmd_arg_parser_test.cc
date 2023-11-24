@@ -30,16 +30,19 @@ class CmdArgParserTest : public testing::Test {
 };
 
 TEST_F(CmdArgParserTest, BasicTypes) {
-  auto parser = Make({"STRING", "VIEW", "11", "22"});
+  auto parser = Make({"STRING", "VIEW", "11", "22", "33", "44"});
 
   EXPECT_TRUE(parser.HasNext());
 
-  EXPECT_EQ(absl::implicit_cast<string>(parser.Next()), "STRING"s);
-  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "VIEW"sv);
+  EXPECT_EQ(parser.Next<string>(), "STRING"s);
+  EXPECT_EQ(parser.Next<string_view>(), "VIEW"sv);
 
 #ifndef __APPLE__
-  EXPECT_EQ(parser.Next().Int<size_t>(), 11u);
-  EXPECT_EQ(parser.Next().Int<size_t>(), 22u);
+  EXPECT_EQ(parser.Next<size_t>(), 11u);
+  EXPECT_EQ(parser.Next<size_t>(), 22u);
+  auto [a, b] = parser.Next<size_t, size_t>();
+  EXPECT_EQ(a, 33u);
+  EXPECT_EQ(b, 44u);
 #endif
 
   EXPECT_FALSE(parser.HasNext());
@@ -61,7 +64,7 @@ TEST_F(CmdArgParserTest, BoundError) {
 TEST_F(CmdArgParserTest, IntError) {
   auto parser = Make({"NOTANINT"});
 
-  EXPECT_EQ(parser.Next().Int<size_t>(), 0u);
+  EXPECT_EQ(parser.Next<size_t>(), 0u);
 
   auto err = parser.Error();
   EXPECT_TRUE(err);
@@ -97,9 +100,9 @@ TEST_F(CmdArgParserTest, CheckTailFail) {
 TEST_F(CmdArgParserTest, Cases) {
   auto parser = Make({"TWO", "NONE"});
 
-  EXPECT_EQ(int(parser.Next().Case("ONE", 1).Case("TWO", 2)), 2);
+  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 2);
 
-  EXPECT_EQ(int(parser.Next().Case("ONE", 1).Case("TWO", 2)), 0);
+  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 0);
   auto err = parser.Error();
   EXPECT_TRUE(err);
   EXPECT_EQ(err->type, CmdArgParser::INVALID_CASES);

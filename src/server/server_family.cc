@@ -624,8 +624,7 @@ void ServerFamily::Shutdown() {
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
-      GenericError ec = DoSave();
-      if (ec) {
+      if (GenericError ec = DoSave(); ec) {
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
       }
     });
@@ -673,9 +672,9 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
   LOG(INFO) << "Loading " << load_path;
 
-  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+  auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state.first != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
     return {};
   }
 
@@ -1059,19 +1058,30 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
-GenericError ServerFamily::DoSave() {
+GenericError ServerFamily::DoSave(bool ignore_state) {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(0, {});
-  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get());
+  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans) {
+GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+                                  bool ignore_state) {
+  if (!ignore_state) {
+    auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
+    if (!success) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          StrCat(GlobalStateName(new_state), " - can not save database")};
+    }
+  }
   SaveStagesController sc{detail::SaveStagesInputs{
       new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
       &save_mu_, &save_bytes_cb_, snapshot_storage_}};
-  return sc.Save();
+  auto res = sc.Save();
+  if (!ignore_state)
+    service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  return res;
 }
 
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
@@ -1287,11 +1297,10 @@ void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
 
-  auto timeout = parser.Next().Int<uint64_t>();
+  auto timeout = parser.Next<uint64_t>();
   enum ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
-    pause_state =
-        parser.ToUpper().Next().Case("WRITE", ClientPause::WRITE).Case("ALL", ClientPause::ALL);
+    pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
   if (auto err = parser.Error(); err) {
     return (*cntx)->SendError(err->MakeReply());
@@ -1939,7 +1948,8 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
       replica_.reset();
     }
 
-    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
+    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE).first ==
+          GlobalState::ACTIVE)
         << "Server is set to replica no one, yet state is not active!";
 
     return (*cntx)->SendOk();
@@ -1953,8 +1963,8 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
 
   // First, switch into the loading state
   if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-      new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+      new_state.first != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
     (*cntx)->SendError("Invalid state");
     return;
   }
@@ -2019,13 +2029,20 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   unique_lock lk(replicaof_mu_);
 
-  float_t timeout_sec;
-  if (!absl::SimpleAtof(ArgS(args, 0), &timeout_sec)) {
-    return (*cntx)->SendError(kInvalidIntErr);
-  }
+  CmdArgParser parser{args};
+
+  auto timeout_sec = parser.Next<float>();
   if (timeout_sec < 0) {
     return (*cntx)->SendError("timeout is negative");
   }
+
+  bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
+
+  if (parser.HasNext())
+    return (*cntx)->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
   if (ServerState::tlocal()->is_master)
     return (*cntx)->SendError("Already a master instance");
@@ -2037,7 +2054,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("Full sync not done");
   }
 
-  std::error_code ec = replica_->TakeOver(ArgS(args, 0));
+  std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
   if (ec)
     return (*cntx)->SendError("Couldn't execute takeover");
 
@@ -2358,7 +2375,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
              ShutdownCmd)
       << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
       << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
-      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, acl::kReplTakeOver}.HFUNC(
+      << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)

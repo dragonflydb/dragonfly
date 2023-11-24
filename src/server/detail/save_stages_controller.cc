@@ -145,14 +145,10 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 }
 
 SaveStagesController::~SaveStagesController() {
-  service_->SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
 }
 
 GenericError SaveStagesController::Save() {
   if (auto err = BuildFullPath(); err)
-    return err;
-
-  if (auto err = SwitchState(); err)
     return err;
 
   if (auto err = InitResources(); err)
@@ -335,15 +331,6 @@ GenericError SaveStagesController::BuildFullPath() {
   filename = absl::FormatTime(filename.string(), start_time_, absl::LocalTimeZone());
   full_path_ = dir_path / filename;
   is_cloud_ = IsCloudPath(full_path_.string());
-  return {};
-}
-
-// Switch to saving state if in active state
-GenericError SaveStagesController::SwitchState() {
-  GlobalState new_state = service_->SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-  if (new_state != GlobalState::SAVING && new_state != GlobalState::TAKEN_OVER)
-    return {make_error_code(errc::operation_in_progress),
-            StrCat(GlobalStateName(new_state), " - can not save database")};
   return {};
 }
 

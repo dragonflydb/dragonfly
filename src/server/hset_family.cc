@@ -404,7 +404,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
   return deleted;
 }
 
-OpResult<vector<OptStr>> OpMGet(const OpArgs& op_args, std::string_view key, CmdArgList fields) {
+OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, CmdArgList fields) {
   DCHECK(!fields.empty());
 
   auto& db_slice = op_args.shard->db_slice();
@@ -801,7 +801,7 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpMGet(t->GetOpArgs(shard), key, args);
+    return OpHMGet(t->GetOpArgs(shard), key, args);
   };
 
   OpResult<vector<OptStr>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

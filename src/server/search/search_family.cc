@@ -50,26 +50,25 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   auto sim = search::VectorSimilarity::L2;
   size_t capacity = 1000;
 
-  bool use_hnsw = parser->ToUpper().Next().Case("HNSW", true).Case("FLAT", false);
-  size_t num_args = parser->Next().Int<size_t>();
+  bool use_hnsw = parser->ToUpper().Switch("HNSW", true, "FLAT", false);
+  size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
     parser->ToUpper();
 
     if (parser->Check("DIM").ExpectTail(1)) {
-      dim = parser->Next().Int<size_t>();
+      dim = parser->Next<size_t>();
       continue;
     }
 
     if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
-      sim = parser->Next()
-                .Case("L2", search::VectorSimilarity::L2)
-                .Case("COSINE", search::VectorSimilarity::COSINE);
+      sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
+                           search::VectorSimilarity::COSINE);
       continue;
     }
 
     if (parser->Check("INITIAL_CAP").ExpectTail(1)) {
-      capacity = parser->Next().Int<size_t>();
+      capacity = parser->Next<size_t>();
       continue;
     }
 
@@ -159,14 +158,14 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   while (parser.ToUpper().HasNext()) {
     // [LIMIT offset total]
     if (parser.Check("LIMIT").ExpectTail(2)) {
-      params.limit_offset = parser.Next().Int<size_t>();
-      params.limit_total = parser.Next().Int<size_t>();
+      params.limit_offset = parser.Next<size_t>();
+      params.limit_total = parser.Next<size_t>();
       continue;
     }
 
     // RETURN {num} [{ident} AS {name}...]
     if (parser.Check("RETURN").ExpectTail(1)) {
-      size_t num_fields = parser.Next().Int<size_t>();
+      size_t num_fields = parser.Next<size_t>();
       params.return_fields = SearchParams::FieldReturnList{};
       while (params.return_fields->size() < num_fields) {
         string_view ident = parser.Next();
@@ -184,7 +183,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
     if (parser.Check("PARAMS").ExpectTail(1)) {
-      size_t num_args = parser.Next().Int<size_t>();
+      size_t num_args = parser.Next<size_t>();
       while (parser.HasNext() && params.query_params.Size() * 2 < num_args) {
         string_view k = parser.Next();
         string_view v = parser.Next();
@@ -316,14 +315,13 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   while (parser.ToUpper().HasNext()) {
     // ON HASH | JSON
     if (parser.Check("ON").ExpectTail(1)) {
-      index.type =
-          parser.ToUpper().Next().Case("HASH"sv, DocIndex::HASH).Case("JSON"sv, DocIndex::JSON);
+      index.type = parser.ToUpper().Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 
     // PREFIX count prefix [prefix ...]
     if (parser.Check("PREFIX").ExpectTail(2)) {
-      if (size_t num = parser.Next().Int<size_t>(); num != 1)
+      if (size_t num = parser.Next<size_t>(); num != 1)
         return (*cntx)->SendError("Multiple prefixes are not supported");
       index.prefix = string(parser.Next());
       continue;

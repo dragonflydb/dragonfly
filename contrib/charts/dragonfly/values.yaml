@@ -193,6 +193,9 @@ resources:
   #   cpu: 100m
   #   memory: 128Mi
 
+# -- Priority class name for pod assignment
+priorityClassName: ""
+
 # -- Node labels for pod assignment
 nodeSelector: {}
 

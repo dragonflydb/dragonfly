@@ -5,7 +5,7 @@
 #pragma once
 
 #include "absl/container/flat_hash_map.h"
-#include "base/logging.h"
+#include "facade/acl_commands_def.h"
 
 namespace dfly::acl {
 /* There are 21 ACL categories as of redis 7
@@ -65,9 +65,7 @@ enum AclCat {
   JSON = 1ULL << 31
 };
 
-// Special flag/mask for all
-constexpr uint32_t NONE = 0;
-constexpr uint32_t ALL = std::numeric_limits<uint32_t>::max();
+// See definitions for NONE and ALL in facade/acl_commands_def.h
 
 inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABLE{
     {"KEYSPACE", KEYSPACE},

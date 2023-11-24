@@ -16,6 +16,9 @@ volumeMounts:
 {{- end }}
 
 {{- define "dragonfly.pod" -}}
+{{- if ne .Values.priorityClassName "" }}
+priorityClassName: {{ .Values.priorityClassName }}
+{{- end }}
 {{- with .Values.tolerations }}
 tolerations:
   {{- toYaml . | trim | nindent 2 -}}

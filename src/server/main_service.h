@@ -87,8 +87,9 @@ class Service : public facade::ServiceInterface {
   // Returns: the new state.
   // if from equals the old state then the switch is performed "to" is returned.
   // Otherwise, does not switch and returns the current state in the system.
+  // true if operation is successed
   // Upon switch, updates cached global state in threadlocal ServerState struct.
-  GlobalState SwitchState(GlobalState from, GlobalState to);
+  std::pair<GlobalState, bool> SwitchState(GlobalState from, GlobalState to);
 
   GlobalState GetGlobalState() const;
 

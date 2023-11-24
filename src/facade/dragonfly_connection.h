@@ -294,13 +294,17 @@ class Connection : public util::Connection {
   // Clear pipelined messages, disaptching only intrusive ones.
   void ClearPipelinedMessages();
 
- private:
+  // Get quick debug info for logs
+  std::string DebugInfo() const;
+
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
+
+ private:
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
-  size_t dispatch_q_cmds_count_;  // how many queued async commands
+  size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued async commands in dispatch_q
 
   base::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;

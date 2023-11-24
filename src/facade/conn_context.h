@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/reply_builder.h"
 
@@ -79,6 +80,12 @@ class ConnectionContext {
 
   // How many async subscription sources are active: monitor and/or pubsub - at most 2.
   uint8_t subscriptions;
+
+  std::string authed_username{"default"};
+  uint32_t acl_categories{dfly::acl::ALL};
+  std::vector<uint64_t> acl_commands;
+  // Skip ACL validation, used by internal commands and commands run on admin port
+  bool skip_acl_validation = false;
 
  private:
   Connection* owner_;
