@@ -970,7 +970,7 @@ nonstd::expected<int64_t, std::string> ParseValue(CmdArgParser& parser) {
   return res;
 }
 
-nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
+nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, bool read_only) {
   CommandList result;
 
   using nonstd::make_unexpected;
@@ -985,6 +985,9 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
 
     using namespace std::string_view_literals;
     if (op == "OVERFLOW"sv) {
+      if (read_only) {
+        make_unexpected("BITFIELD_RO only supports the GET subcommand");
+      }
       auto policy = parser.ToUpper().Next();
       if (auto res = Overflow::PolicyFromStr(policy); res) {
         result.push_back(Overflow{*res});
@@ -1002,6 +1005,10 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
     if (op == "GET"sv) {
       result.push_back(Command(Get(attr)));
       continue;
+    }
+
+    if (read_only) {
+      return make_unexpected("BITFIELD_RO only supports the GET subcommand");
     }
 
     auto maybe_value = ParseValue(parser);
@@ -1041,13 +1048,13 @@ void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx
   }
 }
 
-void BitField(CmdArgList args, ConnectionContext* cntx) {
+void BitFieldGeneric(CmdArgList args, ConnectionContext* cntx, bool read_only) {
   if (args.size() == 1) {
     (*cntx)->SendNullArray();
     return;
   }
   auto key = ArgS(args, 0);
-  auto maybe_ops_list = ParseToCommandList(args.subspan(1));
+  auto maybe_ops_list = ParseToCommandList(args.subspan(1), read_only);
 
   if (!maybe_ops_list.has_value()) {
     cntx->SendError(maybe_ops_list.error());
@@ -1072,9 +1079,12 @@ void BitField(CmdArgList args, ConnectionContext* cntx) {
   SendResults(*res, cntx);
 }
 
+void BitField(CmdArgList args, ConnectionContext* cntx) {
+  BitFieldGeneric(args, cntx, false);
+}
+
 void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendError("Not Yet Implemented");
-  // return BitField(args, cntx);
+  BitFieldGeneric(args, cntx, true);
 }
 
 void BitOp(CmdArgList args, ConnectionContext* cntx) {
