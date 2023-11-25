@@ -362,20 +362,28 @@ TEST_F(SearchFamilyTest, TestLimit) {
 }
 
 TEST_F(SearchFamilyTest, TestReturn) {
-  for (unsigned i = 0; i < 20; i++)
-    Run({"hset", "k"s + to_string(i), "longA", to_string(i), "longB", to_string(i + 1), "longC",
-         to_string(i + 2), "secret", to_string(i + 3)});
+  auto floatsv = [](const float* f) -> string_view {
+    return {reinterpret_cast<const char*>(f), sizeof(float)};
+  };
 
-  Run({"ft.create", "i1", "SCHEMA", "longA", "AS", "justA", "TEXT", "longB", "AS", "justB",
-       "NUMERIC", "longC", "AS", "justC", "NUMERIC"});
+  for (unsigned i = 0; i < 20; i++) {
+    const float score = i;
+    Run({"hset", "k"s + to_string(i), "longA", to_string(i), "longB", to_string(i + 1), "longC",
+         to_string(i + 2), "secret", to_string(i + 3), "vector", floatsv(&score)});
+  }
+
+  Run({"ft.create", "i1",     "SCHEMA", "longA",   "AS",    "justA", "TEXT",
+       "longB",     "AS",     "justB",  "NUMERIC", "longC", "AS",    "justC",
+       "NUMERIC",   "vector", "VECTOR", "FLAT",    "2",     "DIM",   "1"});
 
   auto MatchEntry = [](string key, auto... fields) {
-    return RespArray(ElementsAre(IntArg(1), "k0", RespArray(UnorderedElementsAre(fields...))));
+    return RespArray(ElementsAre(IntArg(1), key, RespArray(UnorderedElementsAre(fields...))));
   };
 
   // Check all fields are returned
   auto resp = Run({"ft.search", "i1", "@justA:0"});
-  EXPECT_THAT(resp, MatchEntry("k0", "longA", "0", "longB", "1", "longC", "2", "secret", "3"));
+  EXPECT_THAT(resp, MatchEntry("k0", "longA", "0", "longB", "1", "longC", "2", "secret", "3",
+                               "vector", "[0]"));
 
   // Check no fields are returned
   resp = Run({"ft.search", "i1", "@justA:0", "return", "0"});
@@ -399,6 +407,13 @@ TEST_F(SearchFamilyTest, TestReturn) {
   // Check non-existing field
   resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "nothere"});
   EXPECT_THAT(resp, MatchEntry("k0", "nothere", ""));
+
+  // Check sort doesn't shadow knn return alias
+  const float score = 20;
+  resp = Run({"ft.search", "i1", "@justA:0 => [KNN 20 @vector $vector AS vec_return]", "SORTBY",
+              "vec_return", "DESC", "RETURN", "1", "vec_return", "PARAMS", "2", "vector",
+              floatsv(&score)});
+  EXPECT_THAT(resp, MatchEntry("k0", "vec_return", "20"));
 }
 
 TEST_F(SearchFamilyTest, SimpleUpdates) {
