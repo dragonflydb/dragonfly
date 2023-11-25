@@ -141,8 +141,6 @@ namespace h2 = boost::beast::http;
 
 namespace {
 
-DEFINE_VARZ(VarzMapAverage, request_latency_usec);
-
 std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
@@ -805,7 +803,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   if (!tcp_disabled && !listeners.empty()) {
     acl_family_.Init(listeners.front(), &user_registry_);
   }
-  request_latency_usec.Init(&pp_);
+
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
   server_family_.Init(acceptor, std::move(listeners));
@@ -833,7 +831,6 @@ void Service::Shutdown() {
   GenericFamily::Shutdown();
 
   engine_varz.reset();
-  request_latency_usec.Shutdown();
 
   ChannelStore::Destroy();
 
@@ -1088,9 +1085,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     return cntx->SendSimpleString("QUEUED");
   }
 
-  uint64_t start_ns = absl::GetCurrentTimeNanos();
-
   if (cid->opt_mask() & CO::DENYOOM && etl.is_master) {
+    uint64_t start_ns = absl::GetCurrentTimeNanos();
+
     uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
@@ -1142,9 +1139,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
-
-  uint64_t end_ns = ProactorBase::GetMonotonicTimeNs();
-  request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;

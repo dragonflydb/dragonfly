@@ -513,11 +513,11 @@ uint32_t Connection::GetClientId() const {
 }
 
 bool Connection::IsPrivileged() const {
-  return static_cast<Listener*>(owner())->IsPrivilegedInterface();
+  return static_cast<Listener*>(listener())->IsPrivilegedInterface();
 }
 
 bool Connection::IsMain() const {
-  return static_cast<Listener*>(owner())->IsMainInterface();
+  return static_cast<Listener*>(listener())->IsMainInterface();
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
@@ -1158,7 +1158,7 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
   CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
 
-  owner()->Migrate(this, dest);
+  listener()->Migrate(this, dest);
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1202,7 +1202,7 @@ void Connection::LaunchDispatchFiberIfNeeded() {
 
 void Connection::SendAsync(MessageHandle msg) {
   DCHECK(cc_);
-  DCHECK(owner());
+  DCHECK(listener());
   DCHECK_EQ(ProactorBase::me(), socket_->proactor());
 
   // "Closing" connections might be still processing commands, as we don't interrupt them.
