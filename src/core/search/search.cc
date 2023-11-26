@@ -314,11 +314,14 @@ struct BasicSearch {
   // SORTBY field [DESC]: Sort by field. Part of params and not "core query".
   IndexResult Search(const AstSortNode& node, string_view active_field) {
     auto sub_results = SearchGeneric(*node.filter, active_field);
-    preagg_total_ = sub_results.Size();
 
-    // Skip sorting again for KNN queries
-    if (holds_alternative<AstKnnNode>(node.filter->Variant()))
+    // Skip sorting again for KNN queries, reverse if needed will be applied on aggregation
+    if (auto knn = get_if<AstKnnNode>(&node.filter->Variant());
+        knn && knn->score_alias == node.field) {
       return sub_results;
+    }
+
+    preagg_total_ = sub_results.Size();
 
     if (auto* sort_index = GetSortIndex(node.field); sort_index) {
       auto ids_vec = sub_results.Take();
@@ -398,7 +401,7 @@ struct BasicSearch {
 
     // Top level results don't need to be sorted, because they will be scored, sorted by fields or
     // used by knn
-    DCHECK(top_level ||
+    DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
            visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
 
     if (profile_builder_)
@@ -590,8 +593,16 @@ optional<AggregationInfo> SearchAlgorithm::HasAggregation() const {
   DCHECK(query_);
   if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
     return AggregationInfo{knn->limit, string_view{knn->score_alias}, false};
-  if (holds_alternative<AstSortNode>(*query_))
-    return AggregationInfo{nullopt, "", get<AstSortNode>(*query_.get()).descending};
+
+  if (auto* sort = get_if<AstSortNode>(query_.get()); sort) {
+    string_view alias = "";
+    if (auto* knn = get_if<AstKnnNode>(&sort->filter->Variant());
+        knn && knn->score_alias == sort->field)
+      alias = knn->score_alias;
+
+    return AggregationInfo{nullopt, alias, sort->descending};
+  }
+
   return nullopt;
 }
 

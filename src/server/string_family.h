@@ -96,16 +96,6 @@ class StringFamily {
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
   static void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx);
   static void SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx);
-
-  struct GetResp {
-    std::string value;
-    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
-    uint32_t mc_flag = 0;
-  };
-
-  using MGetResponse = std::vector<std::optional<GetResp>>;
-  static MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
-                             EngineShard* shard);
 };
 
 }  // namespace dfly

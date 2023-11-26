@@ -2330,7 +2330,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
-  int count = is_count ? parser.Next().Int<int>() : 1;
+  int count = is_count ? parser.Next<int>() : 1;
 
   range_spec.params.with_scores = static_cast<bool>(parser.Check("WITHSCORES").IgnoreCase());
 

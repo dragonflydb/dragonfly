@@ -23,22 +23,59 @@ enum class ReplyMode {
 
 class SinkReplyBuilder {
  public:
-  struct ResponseValue {
-    std::string key;
-    std::string value;
-    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
-    uint32_t mc_flag = 0;
+  struct MGetStorage {
+    MGetStorage* next = nullptr;
+    char data[1];
   };
 
-  using OptResp = std::optional<ResponseValue>;
+  struct GetResp {
+    std::string key;  // TODO: to use backing storage to optimize this as well.
+    std::string_view value;
 
- public:
+    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+    uint32_t mc_flag = 0;
+
+    GetResp() = default;
+    GetResp(std::string_view val) : value(val) {
+    }
+  };
+
+  struct MGetResponse {
+    MGetStorage* storage_list = nullptr;  // backing storage of resp_arr values.
+    std::vector<std::optional<GetResp>> resp_arr;
+
+    MGetResponse() = default;
+
+    MGetResponse(size_t size) : resp_arr(size) {
+    }
+
+    ~MGetResponse();
+
+    MGetResponse(MGetResponse&& other) noexcept
+        : storage_list(other.storage_list), resp_arr(std::move(other.resp_arr)) {
+      other.storage_list = nullptr;
+    }
+
+    MGetResponse& operator=(MGetResponse&& other) noexcept {
+      resp_arr = std::move(other.resp_arr);
+      storage_list = other.storage_list;
+      other.storage_list = nullptr;
+      return *this;
+    }
+  };
+
   SinkReplyBuilder(const SinkReplyBuilder&) = delete;
   void operator=(const SinkReplyBuilder&) = delete;
 
   SinkReplyBuilder(::io::Sink* sink);
 
   virtual ~SinkReplyBuilder() {
+  }
+
+  static MGetStorage* AllocMGetStorage(size_t size) {
+    static_assert(alignof(MGetStorage) == 8);  // if this breaks we should fix the code below.
+    char* buf = new char[size + sizeof(MGetStorage)];
+    return new (buf) MGetStorage();
   }
 
   virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
@@ -48,7 +85,7 @@ class SinkReplyBuilder {
   virtual void SendStored() = 0;  // Reply for set commands.
   virtual void SendSetSkipped() = 0;
 
-  virtual void SendMGetResponse(absl::Span<const OptResp>) = 0;
+  virtual void SendMGetResponse(MGetResponse resp) = 0;
 
   virtual void SendLong(long val) = 0;
   virtual void SendSimpleString(std::string_view str) = 0;
@@ -116,6 +153,8 @@ class SinkReplyBuilder {
   void ExpectReply();
   bool HasReplied() const;
 
+  virtual size_t UsedMemory() const;
+
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
   void SendRawVec(absl::Span<const std::string_view> msg_vec);
@@ -151,7 +190,7 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
 
   // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
-  void SendMGetResponse(absl::Span<const OptResp>) final;
+  void SendMGetResponse(MGetResponse resp) final;
 
   void SendStored() final;
   void SendLong(long val) final;
@@ -182,7 +221,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SendError(std::string_view str, std::string_view type = {}) override;
   using SinkReplyBuilder::SendError;
 
-  void SendMGetResponse(absl::Span<const OptResp>) override;
+  void SendMGetResponse(MGetResponse resp) override;
 
   void SendStored() override;
   void SendSetSkipped() override;

@@ -25,7 +25,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
  public:
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendError(ErrorReply error) override;
-  void SendMGetResponse(absl::Span<const OptResp>) override;
+  void SendMGetResponse(MGetResponse resp) override;
 
   // SendStored -> SendSimpleString("OK")
   // SendSetSkipped -> SendNull()
@@ -71,9 +71,9 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
       : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {
   }
 
-  using Payload = std::variant<std::monostate, Null, Error, OpStatus, long, double, SimpleString,
-                               BulkString, StrArrPayload, std::unique_ptr<CollectionPayload>,
-                               std::vector<OptResp>, ScoredArray>;
+  using Payload =
+      std::variant<std::monostate, Null, Error, OpStatus, long, double, SimpleString, BulkString,
+                   StrArrPayload, std::unique_ptr<CollectionPayload>, MGetResponse, ScoredArray>;
 
   // Non owned Error based on SendError arguments (msg, type)
   using ErrorRef = std::pair<std::string_view, std::string_view>;

@@ -1208,7 +1208,7 @@ async def test_take_over_seeder(
 
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
-    await c_replica.execute_command(f"REPLTAKEOVER 5")
+    await c_replica.execute_command(f"REPLTAKEOVER 5 SAVE")
     seeder.stop()
 
     assert await c_replica.execute_command("role") == ["master", []]

@@ -282,7 +282,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendStored() final;
 
   void SendSimpleString(std::string_view str) final;
-  void SendMGetResponse(absl::Span<const OptResp>) final;
+  void SendMGetResponse(MGetResponse resp) final;
   void SendSimpleStrArr(StrSpan arr) final;
   void SendNullArray() final;
 
@@ -389,13 +389,13 @@ void InterpreterReplier::SendSimpleString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::SendMGetResponse(absl::Span<const OptResp> arr) {
+void InterpreterReplier::SendMGetResponse(MGetResponse resp) {
   DCHECK(array_len_.empty());
 
-  explr_->OnArrayStart(arr.size());
-  for (uint32_t i = 0; i < arr.size(); ++i) {
-    if (arr[i].has_value()) {
-      explr_->OnString(arr[i]->value);
+  explr_->OnArrayStart(resp.resp_arr.size());
+  for (uint32_t i = 0; i < resp.resp_arr.size(); ++i) {
+    if (resp.resp_arr[i].has_value()) {
+      explr_->OnString(resp.resp_arr[i]->value);
     } else {
       explr_->OnNil();
     }
@@ -1242,6 +1242,9 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     if (!dist_trans) {
       dist_trans.reset(new Transaction{exec_cid_});
       dist_trans->StartMultiNonAtomic();
+    } else {
+      // Reset to original command id as it's changed during squashing
+      dist_trans->MultiSwitchCmd(exec_cid_);
     }
 
     dfly_cntx->transaction = dist_trans.get();
@@ -2290,17 +2293,17 @@ VarzValue::Map Service::GetVarzStats() {
   return res;
 }
 
-GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
+std::pair<GlobalState, bool> Service::SwitchState(GlobalState from, GlobalState to) {
   lock_guard lk(mu_);
   if (global_state_ != from)
-    return global_state_;
+    return {global_state_, false};
 
   VLOG(1) << "Switching state from " << GlobalStateName(from) << " to " << GlobalStateName(to);
 
   global_state_ = to;
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
-  return to;
+  return {to, true};
 }
 
 GlobalState Service::GetGlobalState() const {

@@ -52,10 +52,7 @@ class SliceSnapshot {
     uint64_t id;
     std::string value;
 
-    size_t size() const {
-      constexpr size_t kSmallStringOptSize = 15;
-      return value.capacity() > kSmallStringOptSize ? value.capacity() : 0UL;
-    }
+    size_t size() const;
   };
 
   using RecordChannel = SizeTrackingChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;

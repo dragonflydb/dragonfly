@@ -13,6 +13,7 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
+#include "core/heap_size.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -28,6 +29,10 @@ using namespace chrono_literals;
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 }  // namespace
+
+size_t SliceSnapshot::DbRecord::size() const {
+  return HeapSize(value);
+}
 
 SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode)
     : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
