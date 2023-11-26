@@ -6,6 +6,7 @@
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
+#include "core/heap_size.h"
 
 namespace facade {
 
@@ -133,10 +134,10 @@ void RedisParser::StashState(RespExpr::Vec* res) {
         if (ebuf.empty() && last_stashed_index_ + 1 == cur.size())
           break;
         if (!ebuf.empty() && !e.has_support) {
-          BlobPtr ptr(new uint8_t[ebuf.size()]);
-          memcpy(ptr.get(), ebuf.data(), ebuf.size());
-          ebuf = Buffer{ptr.get(), ebuf.size()};
-          buf_stash_.push_back(std::move(ptr));
+          Blob blob(ebuf.size());
+          memcpy(blob.data(), ebuf.data(), ebuf.size());
+          ebuf = Buffer{blob.data(), blob.size()};
+          buf_stash_.push_back(std::move(blob));
           e.has_support = true;
         }
       }
@@ -421,9 +422,9 @@ auto RedisParser::ConsumeBulk(Buffer str) -> Result {
       DVLOG(1) << "Extending bulk stash to size " << bulk_str.size();
     } else {
       DVLOG(1) << "New bulk stash size " << bulk_len_;
-      std::unique_ptr<uint8_t[]> nb(new uint8_t[bulk_len_]);
-      memcpy(nb.get(), str.data(), len);
-      bulk_str = Buffer{nb.get(), len};
+      vector<uint8_t> nb(bulk_len_);
+      memcpy(nb.data(), str.data(), len);
+      bulk_str = Buffer{nb.data(), len};
       buf_stash_.emplace_back(move(nb));
       is_broken_token_ = true;
       cached_expr_->back().has_support = true;
@@ -461,13 +462,17 @@ void RedisParser::ExtendLastString(Buffer str) {
 
   Buffer& last_str = get<Buffer>(cached_expr_->back().u);
 
-  DCHECK(last_str.data() == buf_stash_.back().get());
+  DCHECK(last_str.data() == buf_stash_.back().data());
 
-  std::unique_ptr<uint8_t[]> nb(new uint8_t[last_str.size() + str.size()]);
-  memcpy(nb.get(), last_str.data(), last_str.size());
-  memcpy(nb.get() + last_str.size(), str.data(), str.size());
-  last_str = RespExpr::Buffer{nb.get(), last_str.size() + str.size()};
+  vector<uint8_t> nb(last_str.size() + str.size());
+  memcpy(nb.data(), last_str.data(), last_str.size());
+  memcpy(nb.data() + last_str.size(), str.data(), str.size());
+  last_str = RespExpr::Buffer{nb.data(), last_str.size() + str.size()};
   buf_stash_.back() = std::move(nb);
+}
+
+size_t RedisParser::UsedMemory() const {
+  return dfly::HeapSize(parse_stack_) + dfly::HeapSize(stash_) + dfly::HeapSize(buf_stash_);
 }
 
 }  // namespace facade

@@ -153,6 +153,8 @@ class SinkReplyBuilder {
   void ExpectReply();
   bool HasReplied() const;
 
+  virtual size_t UsedMemory() const;
+
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
   void SendRawVec(absl::Span<const std::string_view> msg_vec);

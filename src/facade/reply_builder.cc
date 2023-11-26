@@ -10,6 +10,7 @@
 
 #include "absl/strings/escaping.h"
 #include "base/logging.h"
+#include "core/heap_size.h"
 #include "facade/error.h"
 
 using namespace std;
@@ -171,6 +172,10 @@ void SinkReplyBuilder::FlushBatch() {
     DVLOG(1) << "Error flushing to stream: " << ec.message();
     ec_ = ec;
   }
+}
+
+size_t SinkReplyBuilder::UsedMemory() const {
+  return dfly::HeapSize(batch_) + dfly::HeapSize(err_count_);
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {

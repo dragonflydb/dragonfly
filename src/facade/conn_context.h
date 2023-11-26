@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/reply_builder.h"
@@ -20,8 +21,6 @@ class ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
-  // We won't have any virtual methods, probably. However, since we allocate a derived class,
-  // we need to declare a virtual d-tor, so we could properly delete it from Connection code.
   virtual ~ConnectionContext() {
   }
 
@@ -67,6 +66,10 @@ class ConnectionContext {
 
   void SendOk() {
     rbuilder_->SendOk();
+  }
+
+  virtual size_t UsedMemory() const {
+    return dfly::HeapSize(rbuilder_);
   }
 
   // connection state / properties.

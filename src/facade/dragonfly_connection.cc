@@ -13,6 +13,7 @@
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/heap_size.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
@@ -1313,6 +1314,23 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
   // Connections can migrate at most once.
   migration_enabled_ = false;
   migration_request_ = dest;
+}
+
+Connection::MemoryUsage Connection::GetMemoryUsage() const {
+  size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
+               dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
+               dfly::HeapSize(memcache_parser_) + dfly::HeapSize(redis_parser_) +
+               dfly::HeapSize(cc_);
+
+  // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
+  // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
+  // according to our checks) is actually part of the RSS.
+  mem += 9'000;
+
+  return {
+      .mem = mem,
+      .buf_mem = io_buf_.GetMemoryUsage(),
+  };
 }
 
 }  // namespace facade
