@@ -567,6 +567,31 @@ async def test_squashed_pipeline_seeder(df_server, df_seeder_factory):
     await seeder.run(target_deviation=0.1)
 
 
+"""
+This test makes sure that multi transactions can be integrated into pipeline squashing
+"""
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 1})
+async def test_squashed_pipeline_multi(async_client: aioredis.Redis):
+    p = async_client.pipeline(transaction=False)
+    for _ in range(5):
+        # Series of squashable commands
+        for _ in range(5):
+            p.set("first", "true")
+        # Non-squashable
+        p.info()
+        # Eval without at tx
+        p.execute_command("MULTI")
+        p.set("second", "true")
+        p.execute_command("EXEC")
+        # Finishing sequence
+        for _ in range(5):
+            p.set("third", "true")
+    await p.execute()
+
+
 @pytest.mark.asyncio
 async def test_memcached_large_request(df_local_factory):
     server = df_local_factory.create(

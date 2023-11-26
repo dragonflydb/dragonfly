@@ -53,6 +53,10 @@ class RespExpr {
                                               : std::nullopt;
   }
 
+  size_t UsedMemory() const {
+    return 0;
+  }
+
   static const char* TypeName(Type t);
 
   static void VecToArgList(const Vec& src, CmdArgVec* dest);

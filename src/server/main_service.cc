@@ -1242,6 +1242,9 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     if (!dist_trans) {
       dist_trans.reset(new Transaction{exec_cid_});
       dist_trans->StartMultiNonAtomic();
+    } else {
+      // Reset to original command id as it's changed during squashing
+      dist_trans->MultiSwitchCmd(exec_cid_);
     }
 
     dfly_cntx->transaction = dist_trans.get();
