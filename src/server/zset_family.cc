@@ -45,6 +45,8 @@ static const char kFromMemberLonglatErr[] =
 static const char kByRadiusBoxErr[] =
     "BYRADIUS and BYBOX options at the same time are not compatible";
 static const char kAscDescErr[] = "ASC and DESC options at the same time are not compatible";
+static const char kStoreTypeErr[] =
+    "STORE and STOREDIST options at the same time are not compatible";
 static const char kScoreNaN[] = "resulting score is not a number (NaN)";
 static const char kFloatRangeErr[] = "min or max is not a float";
 static const char kLexRangeErr[] = "min or max not valid string range item";
@@ -69,6 +71,7 @@ struct GeoPoint {
 using GeoArray = std::vector<GeoPoint>;
 
 enum class Sorting { kUnsorted, kAsc, kDesc };
+enum class GeoStoreType { kNoStore, kStoreHash, kStoreDist };
 struct GeoSearchOpts {
   double conversion = 0;
   uint64_t count = 0;
@@ -77,6 +80,7 @@ struct GeoSearchOpts {
   bool withdist = 0;
   bool withcoord = 0;
   bool withhash = 0;
+  GeoStoreType store = GeoStoreType::kNoStore;
 };
 
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
@@ -3052,6 +3056,7 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("unsupported unit provided. please use M, KM, FT, MI");
   }
   shape.type = CIRCULAR_TYPE;
+  string_view store_key;
 
   for (size_t i = 4; i < args.size(); ++i) {
     ToUpper(&args[i]);
@@ -3086,6 +3091,28 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
       geo_ops.withdist = true;
     } else if (cur_arg == "WITHHASH") {
       geo_ops.withhash = true;
+    } else if (cur_arg == "STORE") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return (*cntx)->SendError(kStoreTypeErr);
+      }
+      if (i + 1 < args.size()) {
+        store_key = ArgS(args, i + 1);
+        geo_ops.store = GeoStoreType::kStoreHash;
+        i++;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+    } else if (cur_arg == "STOREDIST") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return (*cntx)->SendError(kStoreTypeErr);
+      }
+      if (i + 1 < args.size()) {
+        store_key = ArgS(args, i + 1);
+        geo_ops.store = GeoStoreType::kStoreDist;
+        i++;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
     } else {
       return (*cntx)->SendError(kSyntaxErr);
     }
