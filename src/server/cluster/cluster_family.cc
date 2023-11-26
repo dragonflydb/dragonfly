@@ -16,6 +16,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/cluster/cluster_slot_migration.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -597,34 +598,19 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
 
   args.remove_prefix(1);  // Removes "START-SLOT-MIGRATION" subcmd string
 
-  //<SOURCE HOST IP> <PORT> <SLOT-ID-START> <SLOT-ID-END> [<SLOT-ID-START> <SLOT-ID-END>..
   CmdArgParser parser(args);
-  auto host_ip = parser.Next<std::string_view>();
-  auto port = parser.Next<uint32_t>();
+  auto [host_ip, port] = parser.Next<std::string_view, uint32_t>();
   std::vector<ClusterConfig::SlotRange> slots;
-  tl_cluster_config->Initialize do {
-    auto slot_start = parser.Next<uint32_t>();
-    auto slot_end = parser.Next<uint32_t>();
+  do {
+    auto [slot_start, slot_end] = parser.Next<uint32_t, uint32_t>();
     slots.emplace_back(slot_start, slot_end);
-  }
-  while (parser.HasNext())
+  } while (parser.HasNext());
+  (void)slots;
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
-    if (auto err = parser.Error(); err)
-      return (*cntx)->SendError(err->MakeReply());
-
-  SlotSet slots;
-  slots.reserve(args.size());
-  for (size_t i = 0; i < args.size(); ++i) {
-    unsigned slot;
-    if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
-      return rb->SendError(kSyntaxErrType);
-    }
-    slots.insert(static_cast<SlotId>(slot));
-  }
-
-  VLOG(1) << "Connecting to master";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_);
-  RETURN_ON_ERR(check_connection_error(ec, kConnErr));
+  ClusterSlotMigration node(std::string(host_ip), port);
+  node.Start(cntx);
 
   return rb->SendOk();
 }

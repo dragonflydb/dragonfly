@@ -4,6 +4,7 @@
 #pragma once
 
 #include <absl/container/inlined_vector.h>
+#include <absl/strings/escaping.h>
 
 #include <boost/fiber/barrier.hpp>
 #include <queue>

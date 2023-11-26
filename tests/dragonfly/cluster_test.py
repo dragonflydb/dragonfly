@@ -224,6 +224,10 @@ async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFact
         c_nodes_admin,
     )
 
+    res = await c_nodes_admin[1].execute_command(
+        "DFLYCLUSTER", "START-SLOT-MIGRATION", "localhost", str(BASE_PORT + 1000), "5200", "5259"
+    )
+
     # Slot for "KEY1" is 5259
 
     # Insert a key that should stay in node0
@@ -691,3 +695,66 @@ async def test_cluster_native_client(df_local_factory: DflyInstanceFactory):
 
     await test_random_keys()
     await client.close()
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
+    # Check slot migration from one node to another
+    nodes = [
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        for i in range(2)
+    ]
+
+    df_local_factory.start_all(nodes)
+
+    c_nodes = [node.client() for node in nodes]
+    c_nodes_admin = [node.admin_client() for node in nodes]
+
+    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes_admin))
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": LAST_SLOT_CUTOFF
+            }}
+          ],
+          "master": {{
+            "id": "{node_ids[0]}",
+            "ip": "localhost",
+            "port": {nodes[0].port}
+          }},
+          "replicas": []
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": NEXT_SLOT_CUTOFF,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{node_ids[1]}",
+            "ip": "localhost",
+            "port": {nodes[1].port}
+          }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes_admin,
+    )
+
+    res = await c_nodes_admin[1].execute_command(
+        "DFLYCLUSTER", "START-SLOT-MIGRATION", "localhost", str(BASE_PORT + 1000), "5200", "5259"
+    )
+
+    assert "OK" == res
+
+    await c_nodes_admin[0].close()
+    await c_nodes_admin[1].close()
