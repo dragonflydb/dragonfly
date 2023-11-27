@@ -40,7 +40,7 @@ class ChannelStore {
   friend class ChannelStoreUpdater;
 
  public:
-  struct Subscriber : public facade::Connection::BorrowedRef {
+  struct Subscriber : public facade::Connection::WeakRef {
     // Sort by thread-id. Subscriber without owner comes first.
     static bool ByThread(const Subscriber& lhs, const Subscriber& rhs);
     static bool ByThreadId(const Subscriber& lhs, const unsigned thread);
