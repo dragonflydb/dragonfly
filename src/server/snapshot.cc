@@ -176,7 +176,7 @@ void SliceSnapshot::Join() {
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   {
-    auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::GetIndex());
+    auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
     ThisFiber::SetName(std::move(fiber_name));
   }
 

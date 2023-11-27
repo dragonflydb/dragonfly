@@ -539,7 +539,7 @@ bool BaseFamilyTest::IsLocked(DbIndex db_index, std::string_view key) const {
 }
 
 string BaseFamilyTest::GetId() const {
-  int32 id = ProactorBase::GetIndex();
+  int32 id = ProactorBase::me()->GetPoolIndex();
   CHECK_GE(id, 0);
   return absl::StrCat("IO", id);
 }

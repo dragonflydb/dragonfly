@@ -37,7 +37,7 @@ ServerState::Stats& ServerState::Stats::operator+=(const ServerState::Stats& oth
 void MonitorsRepo::Add(facade::Connection* connection) {
   VLOG(1) << "register connection "
           << " at address 0x" << std::hex << (const void*)connection << " for thread "
-          << util::ProactorBase::GetIndex();
+          << util::ProactorBase::me()->GetPoolIndex();
 
   monitors_.push_back(connection);
 }
