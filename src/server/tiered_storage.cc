@@ -396,6 +396,23 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
 
   bin_record.pending_entries.insert(it->first);
 
+  PrimeTable* pt = db_slice_.GetTables(db_index).first;
+  DbSlice::Context db_context{db_index, GetCurrentTimeMs()};
+  auto erase_deleted_or_expire = [pt, db_context, this](CompactObjectView key_view) {
+    PrimeIterator it = pt->Find(key_view);
+    if (!IsValid(it)) {
+      return true;
+    }
+    if (it->second.HasExpire()) {
+      auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, it);
+      if (pit.is_done()) {
+        return true;
+      }
+    }
+    return false;
+  };
+  absl::erase_if(bin_record.pending_entries, erase_deleted_or_expire);
+
   if (bin_record.pending_entries.size() < max_entries)
     return error_code{};  // gather more.
 
@@ -515,13 +532,13 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   auto& bin_record = db->bin_map[bin_index];
 
   DCHECK_EQ(bin_record.pending_entries.size(), NumEntriesInSmallBin(kSmallBins[bin_index]));
-  DbSlice::Context db_context{db_index, GetCurrentTimeMs()};
 
   DCHECK_LT(bin_record.pending_entries.size(), 60u);
 
   InflightWriteRequest* req = new InflightWriteRequest(db_index, bin_index, res / kBlockLen);
 
   size_t keys_size = 0;
+
   for (auto key_view : bin_record.pending_entries) {
     keys_size += key_view->Size();
   }
@@ -530,10 +547,6 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   for (auto key_view : bin_record.pending_entries) {
     PrimeIterator it = pt->Find(key_view);
     DCHECK(IsValid(it));
-    if (it->second.HasExpire()) {
-      auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, it);
-      CHECK(!pit.is_done()) << "TBD: should abort in case of expired keys";
-    }
 
     req->Add(it->first, it->second);
     it->second.SetIoPending(true);
