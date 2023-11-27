@@ -316,6 +316,9 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
 
+  // Create dummy value for valid control block and then use aliasing contrutor to return `this`
+  self_ = {make_shared<std::nullptr_t>(nullptr), this};
+
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
   // still using it.
@@ -1181,6 +1184,13 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
   listener()->Migrate(this, dest);
 }
 
+Connection::BorrowedRef Connection::Borrow(unsigned thread) {
+  DCHECK(self_);
+  DCHECK_GT(cc_->subscriptions, 0);
+
+  return BorrowedRef{self_, queue_backpressure_, thread};
+}
+
 void Connection::ShutdownThreadLocal() {
   pipeline_req_pool_.clear();
 }
@@ -1290,10 +1300,6 @@ void Connection::RecycleMessage(MessageHandle msg) {
   }
 }
 
-void Connection::EnsureAsyncMemoryBudget() {
-  queue_backpressure_->EnsureBelowLimit();
-}
-
 std::string Connection::LocalBindStr() const {
   if (socket_->IsUDS())
     return "unix-domain-socket";
@@ -1365,6 +1371,28 @@ void Connection::DecreaseStatsOnClose() {
     --stats_->num_replicas;
   }
   --stats_->num_conns;
+}
+
+Connection::BorrowedRef::BorrowedRef(std::shared_ptr<Connection> ptr,
+                                     QueueBackpressure* backpressure, unsigned thread)
+    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread} {
+}
+
+unsigned Connection::BorrowedRef::Thread() const {
+  return thread_;
+}
+
+Connection* Connection::BorrowedRef::Get() const {
+  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
+  return ptr_.lock().get();
+}
+
+bool Connection::BorrowedRef::EnsureMemoryBudget() const {
+  if (!ptr_.expired()) {
+    backpressure_->EnsureBelowLimit();
+    return true;
+  }
+  return false;
 }
 
 }  // namespace facade

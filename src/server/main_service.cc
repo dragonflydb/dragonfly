@@ -2091,12 +2091,12 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     // thus not adding any overhead to backpressure checks.
     optional<uint32_t> last_thread;
     for (auto& sub : subscribers) {
-      DCHECK_LE(last_thread.value_or(0), sub.thread_id);
-      if (last_thread && *last_thread == sub.thread_id)  // skip same thread
+      DCHECK_LE(last_thread.value_or(0), sub.Thread());
+      if (last_thread && *last_thread == sub.Thread())  // skip same thread
         continue;
 
-      sub.conn_cntx->conn()->EnsureAsyncMemoryBudget();
-      last_thread = sub.thread_id;
+      if (sub.EnsureMemoryBudget())  // Invalid pointers are skipped
+        last_thread = sub.Thread();
     }
 
     auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
@@ -2106,14 +2106,13 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
     auto cb = [subscribers_ptr, buf, channel, msg](unsigned idx, util::ProactorBase*) {
       auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
-                            ChannelStore::Subscriber::ByThread);
+                            ChannelStore::Subscriber::ByThreadId);
 
-      while (it != subscribers_ptr->end() && it->thread_id == idx) {
-        facade::Connection* conn = it->conn_cntx->conn();
-        DCHECK(conn);
-        conn->SendPubMessageAsync(
-            {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
-        it->borrow_token.Dec();
+      while (it != subscribers_ptr->end() && it->Thread() == idx) {
+        if (auto* ptr = it->Get(); ptr) {
+          ptr->SendPubMessageAsync(
+              {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
+        }
         it++;
       }
     };
@@ -2343,20 +2342,12 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {
-      auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->UnsubscribeAll(false);
-
-      // Check that all borrowers finished processing.
-      // token is increased in channel_slice (the publisher side).
-      token.Wait();
     }
 
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
-
-      auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->PUnsubscribeAll(false);
-      token.Wait();  // Same as above
     }
 
     DCHECK(!conn_state.subscribe_info);
