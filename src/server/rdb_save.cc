@@ -109,7 +109,9 @@ constexpr size_t kAmask = 4_KB - 1;
 
 }  // namespace
 
-uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
+uint8_t RdbObjectType(const PrimeValue& pv) {
+  unsigned type = pv.ObjType();
+  unsigned compact_enc = pv.Encoding();
   switch (type) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
@@ -132,8 +134,12 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
     case OBJ_HASH:
       if (compact_enc == kEncodingListPack)
         return RDB_TYPE_HASH_ZIPLIST;
-      else if (compact_enc == kEncodingStrMap2)
-        return RDB_TYPE_HASH;
+      else if (compact_enc == kEncodingStrMap2) {
+        if (((StringMap*)pv.RObjPtr())->ExpirationUsed())
+          return RDB_TYPE_HASH_WITH_EXPIRY;  // Incompatible with Redis
+        else
+          return RDB_TYPE_HASH;
+      }
       break;
     case OBJ_STREAM:
       return RDB_TYPE_STREAM_LISTPACKS;
@@ -293,9 +299,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   }
 
   string_view key = pk.GetSlice(&tmp_str_);
-  unsigned obj_type = pv.ObjType();
-  unsigned encoding = pv.Encoding();
-  uint8_t rdb_type = RdbObjectType(obj_type, encoding);
+  uint8_t rdb_type = RdbObjectType(pv);
 
   DVLOG(3) << ((void*)this) << ": Saving key/val start " << key << " in dbid=" << dbid;
 
@@ -438,9 +442,16 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
 
     RETURN_ON_ERR(SaveLen(string_map->SizeSlow()));
 
-    for (const auto& k_v : *string_map) {
-      RETURN_ON_ERR(SaveString(string_view{k_v.first, sdslen(k_v.first)}));
-      RETURN_ON_ERR(SaveString(string_view{k_v.second, sdslen(k_v.second)}));
+    for (auto it = string_map->begin(); it != string_map->end(); ++it) {
+      const auto& [k, v] = *it;
+      RETURN_ON_ERR(SaveString(string_view{k, sdslen(k)}));
+      RETURN_ON_ERR(SaveString(string_view{v, sdslen(v)}));
+      if (string_map->ExpirationUsed()) {
+        int64_t expiry = -1;
+        if (it.HasExpiry())
+          expiry = it.ExpiryTime();
+        RETURN_ON_ERR(SaveLongLongAsString(expiry));
+      }
     }
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());

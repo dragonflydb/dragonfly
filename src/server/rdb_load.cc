@@ -442,6 +442,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
       CreateSet(ptr.get());
       break;
     case RDB_TYPE_HASH:
+    case RDB_TYPE_HASH_WITH_EXPIRY:
       CreateHMap(ptr.get());
       break;
     case RDB_TYPE_LIST_QUICKLIST:
@@ -560,10 +561,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
-  size_t len = ltrace->blob_count() / 2;
+  size_t increment = 2;
+  if (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY)
+    increment = 3;
+
+  size_t len = ltrace->blob_count() / increment;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = (len <= 64);
+  bool keep_lp = (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -603,12 +608,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
   } else {
     StringMap* string_map = new StringMap;
+    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
 
     auto cleanup = absl::MakeCleanup([&] { delete string_map; });
     std::string key;
     string_map->Reserve(len);
     for (const auto& seg : ltrace->arr) {
-      for (size_t i = 0; i < seg.size(); i += 2) {
+      for (size_t i = 0; i < seg.size(); i += increment) {
         // ToSV may reference an internal buffer, therefore we can use only before the
         // next call to ToSV. To workaround, copy the key locally.
         key = ToSV(seg[i].rdb_var);
@@ -617,7 +623,27 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         if (ec_)
           return;
 
-        if (!string_map->AddOrSkip(key, val)) {
+        uint32_t ttl_sec = UINT32_MAX;
+        if (increment == 3) {
+          int64_t ttl_time = -1;
+          string_view ttl_str = ToSV(seg[i + 2].rdb_var);
+          if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
+            LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", val=" << val
+                       << ", ttl=" << ttl_str;
+            ec_ = RdbError(errc::rdb_file_corrupted);
+            return;
+          }
+
+          if (ttl_time != -1) {
+            if (ttl_time < string_map->time_now()) {
+              continue;
+            }
+
+            ttl_sec = ttl_time - string_map->time_now();
+          }
+        }
+
+        if (!string_map->AddOrSkip(key, val, ttl_sec)) {
           LOG(ERROR) << "Duplicate hash fields detected for field " << key;
           ec_ = RdbError(errc::rdb_file_corrupted);
           return;
@@ -1321,7 +1347,8 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
-      iores = ReadHMap();
+    case RDB_TYPE_HASH_WITH_EXPIRY:
+      iores = ReadHMap(rdbtype);
       break;
     case RDB_TYPE_ZSET:
     case RDB_TYPE_ZSET_2:
@@ -1498,7 +1525,7 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(str_obj), rdbtype};
 }
 
-auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
   SET_OR_UNEXPECT(LoadLen(nullptr), len);
 
@@ -1507,7 +1534,13 @@ auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
 
-  len *= 2;
+  if (rdbtype == RDB_TYPE_HASH) {
+    len *= 2;
+  } else {
+    DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
+    len *= 3;
+  }
+
   load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
   for (size_t i = 0; i < load_trace->arr.size(); ++i) {
     size_t n = std::min<size_t>(len, kMaxBlobLen);
@@ -1520,7 +1553,7 @@ auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
     len -= n;
   }
 
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_HASH};
+  return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {

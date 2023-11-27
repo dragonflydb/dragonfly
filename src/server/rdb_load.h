@@ -127,7 +127,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadSet();
   ::io::Result<OpaqueObj> ReadIntSet();
   ::io::Result<OpaqueObj> ReadGeneric(int rdbtype);
-  ::io::Result<OpaqueObj> ReadHMap();
+  ::io::Result<OpaqueObj> ReadHMap(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
