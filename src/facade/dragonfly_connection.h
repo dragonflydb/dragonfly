@@ -53,6 +53,8 @@ class SinkReplyBuilder;
 // For pipelined requests, monitor and pubsub messages it uses
 // a separate dispatch queue that is processed on a separate fiber.
 class Connection : public util::Connection {
+  struct QueueBackpressure;
+
  public:
   Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
              ServiceInterface* service);
@@ -143,6 +145,29 @@ class Connection : public util::Connection {
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
+  // Stores an non-owning weak reference to a connection.
+  struct BorrowedRef {
+   public:
+    // Get residing thread of connection. Thread-safe.
+    unsigned Thread() const;
+
+    // Get pointer to connection if still valid, nullptr if expired.
+    // Can only be called from connection's thread.
+    Connection* Get() const;
+
+    // Ensure owner thread's memory budget. If expired, skips and returns false. Thread-safe.
+    bool EnsureMemoryBudget() const;
+
+   private:
+    friend class Connection;
+
+    BorrowedRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread);
+
+    std::weak_ptr<Connection> ptr_;
+    QueueBackpressure* backpressure_;
+    unsigned thread_;
+  };
+
  public:
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.
@@ -175,6 +200,9 @@ class Connection : public util::Connection {
 
   // Migrate this connecton to a different thread.
   void Migrate(util::fb2::ProactorBase* dest);
+
+  // Borrow weak reference to connection. Can be called from any thread.
+  BorrowedRef Borrow(unsigned thread);
 
   static void ShutdownThreadLocal();
 
@@ -337,6 +365,9 @@ class Connection : public util::Connection {
 
   RespVec tmp_parse_args_;
   CmdArgVec tmp_cmd_vec_;
+
+  // Used to keep track of borrowed references. Does not really own itself
+  std::shared_ptr<Connection> self_;
 
   // Pointer to corresponding queue backpressure struct.
   // Needed for access from different threads by EnsureAsyncMemoryBudget().

@@ -117,8 +117,6 @@ struct ConnectionState {
     // TODO: to provide unique_strings across service. This will allow us to use string_view here.
     absl::flat_hash_set<std::string> channels;
     absl::flat_hash_set<std::string> patterns;
-
-    BlockingCounter borrow_token{0};
   };
 
   struct ReplicationInfo {
@@ -208,6 +206,7 @@ class ConnectionContext : public facade::ConnectionContext {
     subscriptions++;  // required to support the monitoring
     monitor = enable;
   }
+
   void SendSubscriptionChangedResponse(std::string_view action,
                                        std::optional<std::string_view> topic, unsigned count);
 };
