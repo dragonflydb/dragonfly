@@ -203,7 +203,7 @@ class Connection : public util::Connection {
   void Migrate(util::fb2::ProactorBase* dest);
 
   // Borrow weak reference to connection. Can be called from any thread.
-  WeakRef Borrow(unsigned thread);
+  WeakRef Borrow();
 
   static void ShutdownThreadLocal();
 
