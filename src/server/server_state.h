@@ -231,6 +231,8 @@ class ServerState {  // public struct - to allow initialization.
   // @is_write controls whether the command is a write command or not.
   void AwaitPauseState(bool is_write);
 
+  bool IsPaused() const;
+
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
   };

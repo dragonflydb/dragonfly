@@ -126,6 +126,10 @@ void ServerState::AwaitPauseState(bool is_write) {
   });
 }
 
+bool ServerState::IsPaused() const {
+  return client_pauses_[0] + client_pauses_[1] > 0;
+}
+
 Interpreter* ServerState::BorrowInterpreter() {
   return interpreter_mgr_.Get();
 }
