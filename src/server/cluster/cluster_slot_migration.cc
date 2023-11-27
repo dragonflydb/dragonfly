@@ -10,15 +10,19 @@
 #include "server/main_service.h"
 
 ABSL_FLAG(int, source_connect_timeout_ms, 20000,
-          "Timeout for establishing connection to a replication master");
+          "Timeout for establishing connection to a source node");
+
+ABSL_DECLARE_FLAG(int32_t, port);
 
 namespace dfly {
 
 using namespace std;
+using namespace facade;
 using absl::GetFlag;
 
-ClusterSlotMigration::ClusterSlotMigration(string host, uint16_t port)
-    : ProtocolClient(std::move(host), port) {
+ClusterSlotMigration::ClusterSlotMigration(string host, uint16_t port,
+                                           std::vector<ClusterConfig::SlotRange> slots)
+    : ProtocolClient(std::move(host), port), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -30,14 +34,13 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
   auto check_connection_error = [this, &cntx](error_code ec, const char* msg) -> error_code {
     if (ec) {
       (*cntx)->SendError(absl::StrCat(msg, ec.message()));
-      cntx_.Cancel();
     }
     return ec;
   };
 
   VLOG(1) << "Resolving source host DNS";
   error_code ec = ResolveMasterDns();
-  RETURN_ON_ERR(check_connection_error(ec, "could not resolve master dns"));
+  RETURN_ON_ERR(check_connection_error(ec, "could not resolve source dns"));
 
   VLOG(1) << "Connecting to source";
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
@@ -45,7 +48,7 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
 
   VLOG(1) << "Greeting";
   ec = Greet();
-  RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
+  RETURN_ON_ERR(check_connection_error(ec, "couldn't greet source "));
 
   (*cntx)->SendOk();
 
@@ -57,6 +60,19 @@ error_code ClusterSlotMigration::Greet() {
   VLOG(1) << "greeting message handling";
   RETURN_ON_ERR(SendCommandAndReadResponse("PING"));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
+
+  auto port = absl::GetFlag(FLAGS_port);
+  auto cmd = absl::StrCat("MGRTCONF ", port);
+  for (const auto& s : slots_) {
+    cmd = absl::StrCat(cmd, " ", s.start, " ", s.end);
+  }
+  VLOG(1) << "Migration command: " << cmd;
+  RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
+  // Response is: num_shards
+  if (!CheckRespFirstTypes({RespExpr::INT64}))
+    return make_error_code(errc::bad_message);
+
+  flows_num_ = get<int64_t>(LastResponseArgs()[0].u);
 
   return error_code{};
 }

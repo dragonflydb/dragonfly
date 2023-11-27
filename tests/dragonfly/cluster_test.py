@@ -751,7 +751,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     )
 
     res = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "START-SLOT-MIGRATION", "localhost", str(BASE_PORT + 1000), "5200", "5259"
+        "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(BASE_PORT + 1000), "5200", "5259"
     )
 
     assert "OK" == res
