@@ -832,6 +832,9 @@ void Connection::HandleMigrateRequest() {
   if (cc_->subscriptions == 0) {
     migration_request_ = nullptr;
     this->Migrate(dest);
+
+    // We're now running in `dest` thread
+    queue_backpressure_ = &tl_queue_backpressure_;
   }
 
   DCHECK(dispatch_q_.empty());
