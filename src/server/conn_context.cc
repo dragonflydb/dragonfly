@@ -141,7 +141,7 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   auto& sinfo = *conn->conn_state.subscribe_info.get();
   auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
 
-  int32_t tid = util::ProactorBase::GetIndex();
+  int32_t tid = util::ProactorBase::me()->GetPoolIndex();
   DCHECK_GE(tid, 0);
 
   ChannelStoreUpdater csu{pattern, to_add, conn, uint32_t(tid)};

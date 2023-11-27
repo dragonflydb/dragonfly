@@ -251,8 +251,8 @@ void SendMonitor(const std::string& msg) {
   const auto& monitor_repo = ServerState::tlocal()->Monitors();
   const auto& monitors = monitor_repo.monitors();
   if (!monitors.empty()) {
-    VLOG(1) << "thread " << util::ProactorBase::GetIndex() << " sending monitor message '" << msg
-            << "' for " << monitors.size();
+    VLOG(1) << "thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
+            << msg << "' for " << monitors.size();
 
     for (auto monitor_conn : monitors) {
       // never preempts, so we can iterate safely.
@@ -1815,8 +1815,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     if (*sid != ServerState::tlocal()->thread_index()) {
-      VLOG(1) << "Migrating connection " << cntx->conn() << " from " << ProactorBase::GetIndex()
-              << " to " << *sid;
+      VLOG(1) << "Migrating connection " << cntx->conn() << " from "
+              << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
       cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
     }
   } else {

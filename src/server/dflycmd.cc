@@ -217,7 +217,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
 
   if (args.size() == 1) {  // DFLY THREAD : returns connection thread index and number of threads.
     rb->StartArray(2);
-    rb->SendLong(ProactorBase::GetIndex());
+    rb->SendLong(ProactorBase::me()->GetPoolIndex());
     rb->SendLong(long(pool->size()));
     return;
   }
@@ -230,7 +230,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (num_thread < pool->size()) {
-    if (int(num_thread) != ProactorBase::GetIndex()) {
+    if (int(num_thread) != ProactorBase::me()->GetPoolIndex()) {
       cntx->conn()->Migrate(pool->at(num_thread));
     }
 

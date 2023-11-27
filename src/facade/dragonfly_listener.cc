@@ -287,7 +287,7 @@ void Listener::PostShutdown() {
 }
 
 void Listener::OnConnectionStart(util::Connection* conn) {
-  unsigned id = conn->socket()->proactor()->GetIndex();
+  unsigned id = conn->socket()->proactor()->GetPoolIndex();
   DCHECK_LT(id, per_thread_.size());
 
   facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
@@ -313,7 +313,7 @@ void Listener::OnConnectionStart(util::Connection* conn) {
 
 void Listener::OnConnectionClose(util::Connection* conn) {
   // TODO: We do not account for connections migrated to other threads. This is a rare case.
-  unsigned id = conn->socket()->proactor()->GetIndex();
+  unsigned id = conn->socket()->proactor()->GetPoolIndex();
   DCHECK_LT(id, per_thread_.size());
   auto& pth = per_thread_[id];
 
