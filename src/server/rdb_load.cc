@@ -467,15 +467,10 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const JsonType& json) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
-  size_t increment = 1;
-  if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
-    increment = 2;
-  }
+  size_t len = ltrace->blob_count();
 
-  size_t len = ltrace->blob_count() / increment;
-
-  bool is_intset = (rdb_type_ == RDB_TYPE_HASH);
-  if (len <= SetFamily::MaxIntsetEntries()) {
+  bool is_intset = true;
+  if (rdb_type_ == RDB_TYPE_HASH && ltrace->blob_count() <= SetFamily::MaxIntsetEntries()) {
     Iterate(*ltrace, [&](const LoadBlob& blob) {
       if (!holds_alternative<long long>(blob.rdb_var)) {
         is_intset = false;
@@ -514,6 +509,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   } else {
     bool use_set2 = GetFlag(FLAGS_use_set2) || rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY;
     if (use_set2) {
+      LOG_IF(ERROR, !GetFlag(FLAGS_use_set2))
+          << "Using set2 despite it being disabled due to field expiry usage.";
       StringSet* set = new StringSet{CompactObj::memory_resource()};
       set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       res = createObject(OBJ_SET, set);
@@ -533,6 +530,11 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     }
 
     if (use_set2) {
+      size_t increment = 1;
+      if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
+        increment = 2;
+      }
+
       auto set = (StringSet*)res->ptr;
       for (const auto& seg : ltrace->arr) {
         for (size_t i = 0; i < seg.size(); i += increment) {
