@@ -316,8 +316,9 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
 
-  // Create dummy value for valid control block and then use aliasing construtor to return `this`
-  self_ = {make_shared<std::nullptr_t>(nullptr), this};
+  // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
+  // We use it for reference counting and accessing `this` (without managing it).
+  self_ = {std::make_shared<std::monostate>(std::monostate{}), this};
 
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
