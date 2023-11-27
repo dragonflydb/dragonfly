@@ -1186,11 +1186,11 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
   listener()->Migrate(this, dest);
 }
 
-Connection::WeakRef Connection::Borrow(unsigned thread) {
+Connection::WeakRef Connection::Borrow() {
   DCHECK(self_);
   DCHECK_GT(cc_->subscriptions, 0);
 
-  return WeakRef{self_, queue_backpressure_, thread};
+  return WeakRef(self_, queue_backpressure_, socket_->proactor()->GetPoolIndex());
 }
 
 void Connection::ShutdownThreadLocal() {
