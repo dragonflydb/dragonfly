@@ -313,7 +313,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
 
-  // Create dummy value for valid control block and then use aliasing contrutor to return `this`
+  // Create dummy value for valid control block and then use aliasing construtor to return `this`
   self_ = {make_shared<std::nullptr_t>(nullptr), this};
 
 #ifdef DFLY_USE_SSL
@@ -1165,11 +1165,11 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
   listener()->Migrate(this, dest);
 }
 
-Connection::BorrowedRef Connection::Borrow(unsigned thread) {
+Connection::WeakRef Connection::Borrow(unsigned thread) {
   DCHECK(self_);
   DCHECK_GT(cc_->subscriptions, 0);
 
-  return BorrowedRef{self_, queue_backpressure_, thread};
+  return WeakRef{self_, queue_backpressure_, thread};
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1339,21 +1339,21 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
   };
 }
 
-Connection::BorrowedRef::BorrowedRef(std::shared_ptr<Connection> ptr,
-                                     QueueBackpressure* backpressure, unsigned thread)
+Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
+                             unsigned thread)
     : ptr_{ptr}, backpressure_{backpressure}, thread_{thread} {
 }
 
-unsigned Connection::BorrowedRef::Thread() const {
+unsigned Connection::WeakRef::Thread() const {
   return thread_;
 }
 
-Connection* Connection::BorrowedRef::Get() const {
+Connection* Connection::WeakRef::Get() const {
   DCHECK_EQ(ProactorBase::GetIndex(), int(thread_));
   return ptr_.lock().get();
 }
 
-bool Connection::BorrowedRef::EnsureMemoryBudget() const {
+bool Connection::WeakRef::EnsureMemoryBudget() const {
   if (!ptr_.expired()) {
     backpressure_->EnsureBelowLimit();
     return true;

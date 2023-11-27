@@ -145,8 +145,9 @@ class Connection : public util::Connection {
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
-  // Stores an non-owning weak reference to a connection.
-  struct BorrowedRef {
+  // Weak reference to a connection, invalidated upon connection close.
+  // Used to dispatch async operations for the connection without worrying about pointer lifetime.
+  struct WeakRef {
    public:
     // Get residing thread of connection. Thread-safe.
     unsigned Thread() const;
@@ -161,7 +162,7 @@ class Connection : public util::Connection {
    private:
     friend class Connection;
 
-    BorrowedRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread);
+    WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread);
 
     std::weak_ptr<Connection> ptr_;
     QueueBackpressure* backpressure_;
@@ -202,7 +203,7 @@ class Connection : public util::Connection {
   void Migrate(util::fb2::ProactorBase* dest);
 
   // Borrow weak reference to connection. Can be called from any thread.
-  BorrowedRef Borrow(unsigned thread);
+  WeakRef Borrow(unsigned thread);
 
   static void ShutdownThreadLocal();
 
