@@ -1335,7 +1335,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       server_family_.StatsMC(cmd.key, cntx);
       return;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString(StrCat("VERSION ", kGitTag));
+      mc_builder->SendSimpleString("VERSION 1.5.0 DF");
       return;
     default:
       mc_builder->SendClientError("bad command line format");

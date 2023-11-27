@@ -38,6 +38,19 @@ def test_mixed_reply(memcached_connection):
 
 
 @dfly_args({"memcached_port": 11211})
+def test_version(memcached_connection: pymemcache.Client):
+    """
+    php-memcached client expects version to be in the format of "n.n.n",
+    so we return 1.5.0 emulating an old memcached server. Our real version is being returned in the stats command. Also verified manually that php client parses correctly the version string
+    that ends with "DF".
+    """
+    assert b"1.5.0 DF" == memcached_connection.version()
+    stats = memcached_connection.stats()
+    version = stats[b"version"].decode("utf-8")
+    assert version.startswith("v") or version == "dev"
+
+
+@dfly_args({"memcached_port": 11211})
 def test_length_in_set_command(df_server: DflyInstance):
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.connect(("127.0.0.1", 11211))
