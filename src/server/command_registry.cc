@@ -62,19 +62,19 @@ void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
   int64_t after = absl::GetCurrentTimeNanos();
 
   ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_micro_s = (after - before) / 1000;
+  int64_t execution_time_usec = (after - before) / 1000;
 
   const auto* conn = cntx->conn();
   auto& ent = command_stats_[ss->thread_index()];
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
   if (!(opt_mask_ & CO::BLOCKING) && conn != nullptr && ss->GetSlowLog().Capacity() > 0 &&
-      execution_time_micro_s > ss->log_slower_than_usec) {
+      execution_time_usec > ss->log_slower_than_usec) {
     ss->GetSlowLog().Add(name(), args, conn->GetName(), conn->RemoteEndpointStr(),
-                         execution_time_micro_s, after);
+                         execution_time_usec, after);
   }
   ++ent.first;
-  ent.second += execution_time_micro_s;
+  ent.second += execution_time_usec;
 }
 
 optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {

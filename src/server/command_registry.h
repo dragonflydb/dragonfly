@@ -60,7 +60,7 @@ static_assert(!IsEvalKind(""));
 
 };  // namespace CO
 
-// Per thread vector of command stats. Each entry is {cmd_calls, cmd_sum}.
+// Per thread vector of command stats. Each entry is {cmd_calls, cmd_latency_agg in usec}.
 using CmdCallStats = std::pair<uint64_t, uint64_t>;
 
 class CommandId : public facade::CommandId {

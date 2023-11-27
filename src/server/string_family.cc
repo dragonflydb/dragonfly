@@ -26,7 +26,6 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
-#include "util/varz.h"
 
 namespace dfly {
 
@@ -36,8 +35,6 @@ using namespace std;
 using namespace facade;
 
 using CI = CommandId;
-DEFINE_VARZ(VarzQps, set_qps);
-DEFINE_VARZ(VarzQps, get_qps);
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
 constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
@@ -722,8 +719,6 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
 }
 
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
-  set_qps.Inc();
-
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -850,8 +845,6 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
-  get_qps.Inc();
-
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpGet(t->GetOpArgs(shard), key); };
@@ -876,8 +869,6 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
-  get_qps.Inc();
-
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1477,13 +1468,9 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::Init(util::ProactorPool* pp) {
-  set_qps.Init(pp);
-  get_qps.Init(pp);
 }
 
 void StringFamily::Shutdown() {
-  set_qps.Shutdown();
-  get_qps.Shutdown();
 }
 
 #define HFUNC(x) SetHandler(&StringFamily::x)
