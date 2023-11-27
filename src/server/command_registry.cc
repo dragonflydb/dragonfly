@@ -193,6 +193,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "interleaved-keys";
     case GLOBAL_TRANS:
       return "global-trans";
+    case STORE_LAST_KEY:
+      return "store-last-key";
     case VARIADIC_KEYS:
       return "variadic-keys";
     case NO_AUTOJOURNAL:
