@@ -1259,10 +1259,6 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   };
 
   for (auto args : args_list) {
-    // Stop accumulating when a pause is requested, fall back to regular dispatch
-    if (dfly::ServerState::tlocal()->IsPaused())
-      break;
-
     ToUpper(&args[0]);
     const auto [cid, tail_args] = FindCmd(args);
 
@@ -1286,6 +1282,10 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 
     // Squash accumulated commands
     perform_squash();
+
+    // Stop accumulating when a pause is requested, fall back to regular dispatch
+    if (dfly::ServerState::tlocal()->IsPaused())
+      break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
     DispatchCommand(args, cntx);
