@@ -439,6 +439,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
 void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr) {
   switch (rdb_type_) {
     case RDB_TYPE_SET:
+    case RDB_TYPE_SET_WITH_EXPIRY:
       CreateSet(ptr.get());
       break;
     case RDB_TYPE_HASH:
@@ -466,9 +467,14 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const JsonType& json) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
-  size_t len = ltrace->blob_count();
+  size_t increment = 1;
+  if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
+    increment = 2;
+  }
 
-  bool is_intset = true;
+  size_t len = ltrace->blob_count() / increment;
+
+  bool is_intset = (rdb_type_ == RDB_TYPE_HASH);
   if (len <= SetFamily::MaxIntsetEntries()) {
     Iterate(*ltrace, [&](const LoadBlob& blob) {
       if (!holds_alternative<long long>(blob.rdb_var)) {
@@ -506,9 +512,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    bool use_set2 = GetFlag(FLAGS_use_set2);
+    bool use_set2 = GetFlag(FLAGS_use_set2) || rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY;
     if (use_set2) {
       StringSet* set = new StringSet{CompactObj::memory_resource()};
+      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       res = createObject(OBJ_SET, set);
       res->encoding = OBJ_ENCODING_HT;
     } else {
@@ -526,18 +533,36 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     }
 
     if (use_set2) {
-      Iterate(*ltrace, [&](const LoadBlob& blob) {
-        sdsele = ToSds(blob.rdb_var);
-        if (!sdsele)
-          return false;
+      auto set = (StringSet*)res->ptr;
+      for (const auto& seg : ltrace->arr) {
+        for (size_t i = 0; i < seg.size(); i += increment) {
+          string_view element = ToSV(seg[i].rdb_var);
 
-        if (!((StringSet*)res->ptr)->AddSds(sdsele)) {
-          LOG(ERROR) << "Duplicate set members detected";
-          ec_ = RdbError(errc::duplicate_key);
-          return false;
+          uint32_t ttl_sec = UINT32_MAX;
+          if (increment == 2) {
+            int64_t ttl_time = -1;
+            string_view ttl_str = ToSV(seg[i + 1].rdb_var);
+            if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
+              LOG(ERROR) << "Can't parse set TTL " << ttl_str;
+              ec_ = RdbError(errc::rdb_file_corrupted);
+              return;
+            }
+
+            if (ttl_time != -1) {
+              if (ttl_time < set->time_now()) {
+                continue;
+              }
+
+              ttl_sec = ttl_time - set->time_now();
+            }
+          }
+          if (!set->Add(element, ttl_sec)) {
+            LOG(ERROR) << "Duplicate set members detected";
+            ec_ = RdbError(errc::duplicate_key);
+            return;
+          }
         }
-        return true;
-      });
+      }
     } else {
       Iterate(*ltrace, [&](const LoadBlob& blob) {
         sdsele = ToSds(blob.rdb_var);
@@ -1336,7 +1361,8 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       return ReadStringObj(&dest->obj);
     }
     case RDB_TYPE_SET:
-      iores = ReadSet();
+    case RDB_TYPE_SET_WITH_EXPIRY:
+      iores = ReadSet(rdbtype);
       break;
     case RDB_TYPE_SET_INTSET:
       iores = ReadIntSet();
@@ -1466,12 +1492,16 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
   return res;
 }
 
-auto RdbLoaderBase::ReadSet() -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
   SET_OR_UNEXPECT(LoadLen(NULL), len);
 
   if (len == 0)
     return Unexpected(errc::empty_key);
+
+  if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
+    len *= 2;
+  }
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
@@ -1486,7 +1516,7 @@ auto RdbLoaderBase::ReadSet() -> io::Result<OpaqueObj> {
     }
   }
 
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_SET};
+  return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {

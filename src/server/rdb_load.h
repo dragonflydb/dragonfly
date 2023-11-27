@@ -124,7 +124,7 @@ class RdbLoaderBase {
   ::io::Result<long long> ReadIntObj(int encoding);
   ::io::Result<LzfString> ReadLzf();
 
-  ::io::Result<OpaqueObj> ReadSet();
+  ::io::Result<OpaqueObj> ReadSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadIntSet();
   ::io::Result<OpaqueObj> ReadGeneric(int rdbtype);
   ::io::Result<OpaqueObj> ReadHMap(int rdbtype);

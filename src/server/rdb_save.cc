@@ -122,8 +122,12 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_SET:
       if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
-      else if (compact_enc == kEncodingStrMap || compact_enc == kEncodingStrMap2)
-        return RDB_TYPE_SET;
+      else if (compact_enc == kEncodingStrMap || compact_enc == kEncodingStrMap2) {
+        if (((StringSet*)pv.RObjPtr())->ExpirationUsed())
+          return RDB_TYPE_SET_WITH_EXPIRY;
+        else
+          return RDB_TYPE_SET;
+      }
       break;
     case OBJ_ZSET:
       if (compact_enc == OBJ_ENCODING_LISTPACK)
@@ -420,8 +424,14 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
 
     RETURN_ON_ERR(SaveLen(set->SizeSlow()));
 
-    for (sds ele : *set) {
-      RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
+    for (auto it = set->begin(); it != set->end(); ++it) {
+      RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
+      if (set->ExpirationUsed()) {
+        int64_t expiry = -1;
+        if (it.HasExpiry())
+          expiry = it.ExpiryTime();
+        RETURN_ON_ERR(SaveLongLongAsString(expiry));
+      }
     }
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
