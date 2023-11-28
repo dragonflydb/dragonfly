@@ -114,7 +114,8 @@ void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<S
   out->reserve(out->size() + src.size());
   for (const auto [cntx, thread_id] : src) {
     CHECK(cntx->conn_state.subscribe_info);
-    out->push_back({cntx->conn()->Borrow(), pattern});
+    Subscriber sub{cntx->conn()->Borrow(), pattern};
+    out->push_back(std::move(sub));
   }
 }
 

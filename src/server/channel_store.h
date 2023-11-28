@@ -41,6 +41,10 @@ class ChannelStore {
 
  public:
   struct Subscriber : public facade::Connection::WeakRef {
+    Subscriber(WeakRef ref, const std::string& pattern)
+        : facade::Connection::WeakRef(std::move(ref)), pattern(pattern) {
+    }
+
     // Sort by thread-id. Subscriber without owner comes first.
     static bool ByThread(const Subscriber& lhs, const Subscriber& rhs);
     static bool ByThreadId(const Subscriber& lhs, const unsigned thread);
