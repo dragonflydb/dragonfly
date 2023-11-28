@@ -280,6 +280,8 @@ void Connection::DispatchOperations::operator()(const MigrationRequestMessage& m
 }
 
 void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
+  VLOG(1) << "Decremented checkpoint at " << self->DebugInfo();
+
   msg.bc.Dec();
 }
 
@@ -1014,6 +1016,7 @@ void Connection::ClearPipelinedMessages() {
 std::string Connection::DebugInfo() const {
   std::string info = "{";
 
+  absl::StrAppend(&info, "address=", uint64_t(this), ", ");
   absl::StrAppend(&info, "phase=", phase_, ", ");
   absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
   absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
@@ -1197,6 +1200,8 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused) {
 
   if (cc_->paused && !ignore_paused)
     return;
+
+  VLOG(1) << "Sent checkpoint to " << DebugInfo();
 
   bc.Add(1);
   SendAsync({CheckpointMessage{bc}});
