@@ -853,7 +853,7 @@ class CommandApplyVisitor {
     return get.ApplyTo(overflow_, &bitfield_);
   }
 
-  Result operator()(auto& update) {
+  template <typename T> Result operator()(T& update) {
     should_commit_ = true;
     return update.ApplyTo(overflow_, &bitfield_);
   }
