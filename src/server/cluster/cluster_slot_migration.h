@@ -9,7 +9,7 @@ namespace dfly {
 
 class ClusterSlotMigration : ProtocolClient {
  public:
-  ClusterSlotMigration(std::string source_host, uint16_t port,
+  ClusterSlotMigration(std::string host_ip, uint16_t port,
                        std::vector<ClusterConfig::SlotRange> slots);
   ~ClusterSlotMigration();
 
@@ -18,7 +18,7 @@ class ClusterSlotMigration : ProtocolClient {
  private:
   std::error_code Greet();
   std::vector<ClusterConfig::SlotRange> slots_;
-  size_t flows_num_ = 0;
+  size_t souce_shards_num_ = 0;
 };
 
 }  // namespace dfly

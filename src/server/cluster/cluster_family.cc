@@ -615,6 +615,17 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
   return rb->SendOk();
 }
 
+void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
+  args.remove_prefix(1);
+  if (sub_cmd == "CONF") {
+    MigrationConf(args, cntx);
+  } else {
+    (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
+  }
+}
+
 void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Create slot migration config";
   CmdArgParser parser{args};
@@ -673,8 +684,7 @@ void ClusterFamily::Register(CommandRegistry* registry) {
                    .HFUNC(DflyCluster)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
             << CI{"READWRITE", CO::READONLY, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
-            << CI{"MGRTCONF", CO::ADMIN | CO::LOADING, -3, 0, 0, acl::kMGRTConf}.HFUNC(
-                   MigrationConf);
+            << CI{"DFLYMIGRATE", CO::ADMIN, -1, 0, 0, acl::kMGRTConf}.HFUNC(DflyMigrate);
 }
 
 }  // namespace dfly

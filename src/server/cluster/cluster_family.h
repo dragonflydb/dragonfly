@@ -46,6 +46,7 @@ class ClusterFamily {
   void DflyClusterMyId(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx);
+  void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
 
   void MigrationConf(CmdArgList args, ConnectionContext* cntx);
 

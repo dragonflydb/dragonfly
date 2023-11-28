@@ -20,9 +20,9 @@ using namespace std;
 using namespace facade;
 using absl::GetFlag;
 
-ClusterSlotMigration::ClusterSlotMigration(string host, uint16_t port,
+ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(std::move(host), port), slots_(std::move(slots)) {
+    : ProtocolClient(ServerContext::CreateFromIp(move(host_ip), port)), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -37,8 +37,6 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
     }
     return ec;
   };
-
-  InitEndpoint();
 
   VLOG(1) << "Connecting to source";
   auto ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
@@ -60,9 +58,9 @@ error_code ClusterSlotMigration::Greet() {
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   auto port = absl::GetFlag(FLAGS_port);
-  auto cmd = absl::StrCat("MGRTCONF ", port);
+  auto cmd = absl::StrCat("DFLYMIGRATE CONF ", port);
   for (const auto& s : slots_) {
-    cmd = absl::StrCat(cmd, " ", s.start, " ", s.end);
+    absl::StrAppend(&cmd, " ", s.start, " ", s.end);
   }
   VLOG(1) << "Migration command: " << cmd;
   RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
@@ -70,7 +68,7 @@ error_code ClusterSlotMigration::Greet() {
   if (!CheckRespFirstTypes({RespExpr::INT64}))
     return make_error_code(errc::bad_message);
 
-  flows_num_ = get<int64_t>(LastResponseArgs()[0].u);
+  souce_shards_num_ = get<int64_t>(LastResponseArgs()[0].u);
 
   return error_code{};
 }

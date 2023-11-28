@@ -53,6 +53,8 @@ class ProtocolClient {
 
  protected:
   struct ServerContext {
+    static ServerContext CreateFromIp(std::string ip, uint16_t port);
+
     std::string host;
     uint16_t port;
     boost::asio::ip::tcp::endpoint endpoint;
@@ -65,7 +67,6 @@ class ProtocolClient {
   explicit ProtocolClient(ServerContext context);
 
   std::error_code InitEndpointWithDns();
-  void InitEndpoint();
   // Connect to master and authenticate if needed.
   std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms, Context* cntx);
 
