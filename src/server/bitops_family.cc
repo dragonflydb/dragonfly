@@ -592,6 +592,10 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   HandleOpValueResult(res, cntx);
 }
 
+// GCC yields a wrong warning about uninitialized optional use
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
 enum class EncodingType { UINT, INT, NILL };
 
 struct CommonAttributes {
@@ -1092,6 +1096,8 @@ void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendError("Not Yet Implemented");
   // return BitField(args, cntx);
 }
+
+#pragma GCC diagnostic pop
 
 void BitOp(CmdArgList args, ConnectionContext* cntx) {
   static const std::array<std::string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
