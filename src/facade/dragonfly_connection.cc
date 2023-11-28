@@ -1358,7 +1358,10 @@ Connection* Connection::WeakRef::Get() const {
 }
 
 bool Connection::WeakRef::EnsureMemoryBudget() const {
+  // Simple optimization: If a connection was closed, don't check memory budget.
   if (!ptr_.expired()) {
+    // We don't rely on the connection ptr staying valid because we only access
+    // the threads backpressure
     backpressure_->EnsureBelowLimit();
     return true;
   }
