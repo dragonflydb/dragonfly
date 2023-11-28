@@ -212,7 +212,7 @@ ProtocolClient::~ProtocolClient() {
 #endif
 }
 
-error_code ProtocolClient::ResolveMasterDns() {
+error_code ProtocolClient::InitEndpointWithDns() {
   char ip_addr[INET6_ADDRSTRLEN];
   int resolve_res = ResolveDns(server_context_.host, ip_addr);
   if (resolve_res != 0) {
@@ -226,6 +226,10 @@ error_code ProtocolClient::ResolveMasterDns() {
   server_context_.endpoint = {ip::make_address(ip_addr), server_context_.port};
 
   return error_code{};
+}
+
+void ProtocolClient::InitEndpoint() {
+  server_context_.endpoint = {ip::make_address(server_context_.host), server_context_.port};
 }
 
 error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms,

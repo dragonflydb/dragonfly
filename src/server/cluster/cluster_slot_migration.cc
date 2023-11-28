@@ -38,12 +38,10 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
     return ec;
   };
 
-  VLOG(1) << "Resolving source host DNS";
-  error_code ec = ResolveMasterDns();
-  RETURN_ON_ERR(check_connection_error(ec, "could not resolve source dns"));
+  InitEndpoint();
 
   VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+  auto ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
   VLOG(1) << "Greeting";

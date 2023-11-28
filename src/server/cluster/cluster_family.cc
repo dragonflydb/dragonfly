@@ -624,7 +624,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   std::vector<ClusterConfig::SlotRange> slots;
   do {
     auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
-    slots.emplace_back(slot_start, slot_end);
+    slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
   if (!tl_cluster_config) {

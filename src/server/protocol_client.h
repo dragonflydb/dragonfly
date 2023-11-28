@@ -64,7 +64,8 @@ class ProtocolClient {
   // the DNS resolution step.
   explicit ProtocolClient(ServerContext context);
 
-  std::error_code ResolveMasterDns();  // Resolve master dns
+  std::error_code InitEndpointWithDns();
+  void InitEndpoint();
   // Connect to master and authenticate if needed.
   std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms, Context* cntx);
 
