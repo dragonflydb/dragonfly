@@ -301,6 +301,9 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
+ protected:
+  std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
+
  private:
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
@@ -325,10 +328,6 @@ class Connection : public util::Connection {
 
   Phase phase_ = SETUP;
   std::string name_;
-
-  // A pointer to the ConnectionContext object if it exists. Some connections (like http
-  // requests) don't have it.
-  std::unique_ptr<ConnectionContext> cc_;
 
   unsigned parser_error_ = 0;
   bool break_cb_engaged_ = false;

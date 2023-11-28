@@ -65,6 +65,7 @@ static vector<string> SplitLines(const std::string& src) {
 
 TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
     : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
+  cc_.reset(new dfly::ConnectionContext(sink_, this));
 }
 
 void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
@@ -105,7 +106,7 @@ class BaseFamilyTest::TestConnWrapper {
   const facade::Connection::PubMessage& GetPubMessage(size_t index) const;
 
   ConnectionContext* cmd_cntx() {
-    return &cmd_cntx_;
+    return static_cast<ConnectionContext*>(dummy_conn_->cntx());
   }
 
   StringVec SplitLines() const {
@@ -125,14 +126,13 @@ class BaseFamilyTest::TestConnWrapper {
 
   std::unique_ptr<TestConnection> dummy_conn_;
 
-  ConnectionContext cmd_cntx_;
   std::vector<std::unique_ptr<std::string>> tmp_str_vec_;
 
   std::unique_ptr<RedisParser> parser_;
 };
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
-    : dummy_conn_(new TestConnection(proto, &sink_)), cmd_cntx_(&sink_, dummy_conn_.get()) {
+    : dummy_conn_(new TestConnection(proto, &sink_)) {
 }
 
 BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
