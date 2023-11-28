@@ -600,10 +600,10 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
 
   CmdArgParser parser(args);
   auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
-  std::vector<ClusterConfig::SlotRange> slots;
+  std::vector<SlotRange> slots;
   do {
     auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
-    slots.emplace_back(slot_start, slot_end);
+    slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
   if (auto err = parser.Error(); err)
