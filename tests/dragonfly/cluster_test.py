@@ -224,10 +224,6 @@ async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFact
         c_nodes_admin,
     )
 
-    res = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "START-SLOT-MIGRATION", "localhost", str(BASE_PORT + 1000), "5200", "5259"
-    )
-
     # Slot for "KEY1" is 5259
 
     # Insert a key that should stay in node0
