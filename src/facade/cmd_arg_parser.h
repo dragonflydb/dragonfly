@@ -144,9 +144,6 @@ struct CmdArgParser {
   }
 
   bool HasAtLeast(size_t i) const {
-    if (i == 0) {
-      return false;
-    }
     return cur_i_ + i <= args_.size() && !error_;
   }
 
