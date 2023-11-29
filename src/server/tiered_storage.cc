@@ -122,7 +122,10 @@ struct TieredStorage::PerDb {
   };
 
   BinRecord bin_map[kSmallBinLen];
-  absl::flat_hash_map<int64, size_t> pages;  // map from page offset to page size.
+
+  // Map page offset to page size. We track all db allocted offsets
+  // inorder to free all the allocated offsets during flushdb and flushall.
+  absl::flat_hash_map<int64, size_t> pages;
 };
 
 class TieredStorage::InflightWriteRequest {
