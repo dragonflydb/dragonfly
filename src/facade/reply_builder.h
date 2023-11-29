@@ -154,6 +154,7 @@ class SinkReplyBuilder {
   bool HasReplied() const;
 
   virtual size_t UsedMemory() const;
+  std::string batch_;
 
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
@@ -164,7 +165,6 @@ class SinkReplyBuilder {
   void StartAggregate();
   void StopAggregate();
 
-  std::string batch_;
   ::io::Sink* sink_;
   std::error_code ec_;
 
@@ -246,6 +246,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void StartCollection(unsigned len, CollectionType type);
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
+
+  void SendRET();
 
  protected:
   struct WrappedStrSpan : public StrSpan {

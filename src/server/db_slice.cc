@@ -15,6 +15,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/proactor_base.h"
 
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
@@ -219,9 +220,13 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
       return 0;
     }
 
+    std::string tmp;
+    std::string_view key = last_slot_it->first.GetSlice(&tmp);
+
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
     PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
+    db_slice_->SendInvalidationTrackingMessage(key);
   }
   me->ShiftRight(bucket_it);
 
@@ -320,7 +325,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->prime.Reserve(key_size);
 }
 
-auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) const
+auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type)
     -> OpResult<PrimeIterator> {
   auto it = FindExt(cntx, key).first;
 
@@ -334,7 +339,7 @@ auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) 
   return it;
 }
 
-pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
+pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) {
   pair<PrimeIterator, ExpireIterator> res;
 
   if (!IsDbValid(cntx.db_index))
@@ -547,15 +552,15 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   auto& db = db_arr_[db_ind];
 
   auto obj_type = it->second.ObjType();
+  string tmp;
+  string_view key = it->first.GetSlice(&tmp);
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
-    string tmp;
-    string_view key = it->first.GetSlice(&tmp);
     DbContext cntx{db_ind, GetCurrentTimeMs()};
     doc_del_cb_(key, cntx, it->second);
   }
 
   PerformDeletion(it, shard_owner(), db.get());
-
+  SendInvalidationTrackingMessage(key);
   return true;
 }
 
@@ -571,6 +576,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     SlotId sid = ClusterConfig::KeySlot(key);
     if (slot_ids.contains(sid) && it.GetVersion() < next_version) {
       PerformDeletion(it, shard_owner(), db_arr_[0].get());
+      SendInvalidationTrackingMessage(key);
     }
     return true;
   };
@@ -616,7 +622,10 @@ void DbSlice::FlushDb(DbIndex db_ind) {
       if (db_ptr->stats.tiered_entries > 0) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
           if (it->second.IsExternal()) {
+            std::string tmp;
+            std::string_view key = it->first.GetSlice(&tmp);
             PerformDeletion(it, shard_owner(), db_ptr.get());
+            SendInvalidationTrackingMessage(key);
           }
         }
       }
@@ -652,6 +661,9 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   for (auto& db : all_dbs)
     db.reset();
   mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+
+  // clear all the tracking table.
+  client_tracking_map_.clear();
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {
@@ -973,10 +985,11 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   if (ClusterConfig::IsEnabled()) {
     db.slots_stats[ClusterConfig::KeySlot(key)].total_writes += 1;
   }
+
+  SendInvalidationTrackingMessage(key);
 }
 
-pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
-                                                            PrimeIterator it) const {
+pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
   DCHECK(it->second.HasExpire());
   auto& db = db_arr_[cntx.db_index];
 
@@ -992,23 +1005,22 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
     return make_pair(it, expire_it);
 
   string tmp_key_buf;
-  string_view tmp_key;
+  string_view tmp_key = it->first.GetSlice(&tmp_key_buf);
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
-    tmp_key = it->first.GetSlice(&tmp_key_buf);
     RecordExpiry(cntx.db_index, tmp_key);
   }
 
   auto obj_type = it->second.ObjType();
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
-    if (tmp_key.empty())
-      tmp_key = it->first.GetSlice(&tmp_key_buf);
     doc_del_cb_(tmp_key, cntx, it->second);
   }
 
   PerformDeletion(it, expire_it, shard_owner(), db.get());
   ++events_.expired_keys;
+
+  SendInvalidationTrackingMessage(tmp_key);
 
   return make_pair(PrimeIterator{}, ExpireIterator{});
 }
@@ -1169,6 +1181,8 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
           PerformDeletion(evict_it, shard_owner(), db_table.get());
           ++evicted;
 
+          SendInvalidationTrackingMessage(key);
+
           used_memory_after = owner_->UsedMemory();
           // returns when whichever condition is met first
           if ((evicted == max_eviction_per_hb) ||
@@ -1231,6 +1245,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
     return current < used_memory_start ? used_memory_start - current : 0;
   };
 
+  std::string tmp;
   for (unsigned i = 0; !evict_succeeded && i < kNumStashBuckets; ++i) {
     unsigned stash_bid = i + PrimeTable::Segment_t::kNumBuckets;
     const auto& bucket = segment->GetBucket(stash_bid);
@@ -1246,8 +1261,13 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
+      string_view key = evict_it->first.GetSlice(&tmp);
+
       PerformDeletion(evict_it, shard_owner(), table);
       ++evicted;
+
+      SendInvalidationTrackingMessage(key);
+
       if (freed_memory_fun() > memory_to_free) {
         evict_succeeded = true;
         break;
@@ -1272,8 +1292,11 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
+      string_view key = evict_it->first.GetSlice(&tmp);
       PerformDeletion(evict_it, shard_owner(), table);
       ++evicted;
+
+      SendInvalidationTrackingMessage(key);
 
       if (freed_memory_fun() > memory_to_free) {
         evict_succeeded = true;
@@ -1336,6 +1359,59 @@ void DbSlice::SetDocDeletionCallback(DocDeletionCallback ddcb) {
 
 void DbSlice::ResetUpdateEvents() {
   events_.update = 0;
+}
+
+// todo: perhaps we need to limit the total number of entry in the tracking
+// table so that we have a way to limit the amount of memory used for
+// client tracking
+void DbSlice::TrackKeys(ConnectionContext* cntx, int32_t tid,
+                        const std::vector<std::string_view>& keys) {
+  DVLOG(2) << "Start tracking the following keys for thread ID: " << tid
+           << ", client ID: " << cntx->conn()->GetClientId();
+  for (auto key : keys) {
+    // std::string_view k = key;
+    std::string k{key.begin(), key.end()};
+    DVLOG(2) << "  " << k;
+    if (client_tracking_map_.find(k) == client_tracking_map_.end()) {
+      std::pair<ConnectionContext*, int32_t> p{cntx, tid};
+      absl::flat_hash_set<std::pair<ConnectionContext*, int32_t>, Hash> tracker_set{p};
+      client_tracking_map_.insert({k, tracker_set});
+    } else {
+      std::pair<ConnectionContext*, int32_t> p{cntx, tid};
+      client_tracking_map_[k].insert(p);
+    }
+  }
+}
+
+void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
+  std::string k{key.begin(), key.end()};
+  if (client_tracking_map_.find(k) != client_tracking_map_.end()) {
+    // notify all the clients.
+    auto& client_set = client_tracking_map_[k];
+    DVLOG(2) << "Garbage collect clients that are no longer tracking... ";
+    auto is_not_tracking = [](std::pair<ConnectionContext*, int32_t> p) {
+      return (!p.first->conn()->IsTrackingOn());
+    };
+    absl::erase_if(client_set, is_not_tracking);
+    DVLOG(2) << "Number of clients left: " << client_set.size();
+
+    if (!client_set.empty()) {
+      auto cb = [key, client_set](unsigned idx, util::ProactorBase*) {
+        for (auto it = client_set.begin(); it != client_set.end(); ++it) {
+          if ((unsigned int)it->second != idx)
+            continue;
+          facade::Connection* conn = it->first->conn();
+          DCHECK(conn);
+          facade::Connection::InvalidationMessage x{key};
+          conn->SendInvalidationMessageAsync(x);
+          return;
+        }
+      };
+      shard_set->pool()->DispatchBrief(std::move(cb));
+    }
+    // remove this key from the tracking table as the key no longer exists
+    client_tracking_map_.erase(k);
+  }
 }
 
 }  // namespace dfly

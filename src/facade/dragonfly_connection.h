@@ -77,7 +77,23 @@ class Connection : public util::Connection {
                size_t message_len);
   };
 
-  // Pipeline message, accumulated command to be executed.
+
+  struct InvalidationMessage {
+    std::string_view key;
+    bool invalidate_due_to_flush = false;
+  };
+
+  struct MonitorMessage : public std::string {};
+
+  struct AclUpdateMessage {
+    std::vector<std::string> username;
+    std::vector<uint32_t> categories;
+    std::vector<std::vector<uint64_t>> commands;
+  };
+
+  struct MigrationRequestMessage {};
+
+  // Pipeline message, accumulated command to be execute.d
   struct PipelineMessage {
     PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
@@ -136,7 +152,7 @@ class Connection : public util::Connection {
     bool IsPubMsg() const;
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
-                 MigrationRequestMessage, CheckpointMessage>
+                 MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
         handle;
   };
 
@@ -173,6 +189,9 @@ class Connection : public util::Connection {
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.
   virtual void SendPubMessageAsync(PubMessage);
+
+  // Add InvalidationMessage to dispatch queue.
+  void SendInvalidationMessageAsync(InvalidationMessage);
 
   // Add monitor message to dispatch queue.
   void SendMonitorMessageAsync(std::string);
@@ -248,6 +267,18 @@ class Connection : public util::Connection {
   // Requests that at some point, this connection will be migrated to `dest` thread.
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+
+  void EnableTracking() {
+    tracking_enabled_ = true;
+  }
+
+  void DisableTracking() {
+    tracking_enabled_ = false;
+  }
+
+  bool IsTrackingOn() const {
+    return tracking_enabled_;
+  }
 
  protected:
   void OnShutdown() override;
@@ -384,6 +415,9 @@ class Connection : public util::Connection {
 
   // Per-thread queue backpressure structs.
   static thread_local QueueBackpressure tl_queue_backpressure_;
+
+  // whether client tracking is enabled
+  bool tracking_enabled_ = false;
 };
 
 }  // namespace facade

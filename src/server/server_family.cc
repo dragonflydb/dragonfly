@@ -1164,10 +1164,29 @@ string GetPassword() {
   return "";
 }
 
+void ServerFamily::SendInvalidationMessages() const {
+  // send invalidation message (caused by flushdb) to all the clients which
+  // turned on client tracking
+  auto cb = [](unsigned thread_index, util::Connection* conn) {
+    facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
+    if (fc) {
+      ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
+      if (cntx->conn()->IsTrackingOn()) {
+        facade::Connection::InvalidationMessage x;
+        x.invalidate_due_to_flush = true;
+        cntx->conn()->SendInvalidationMessageAsync(x);
+      }
+    }
+  };
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+}
+
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, cntx->transaction->GetDbIndex());
-
+  SendInvalidationMessages();
   cntx->reply_builder()->SendOk();
 }
 
@@ -1179,6 +1198,7 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
 
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, DbSlice::kDbAll);
+  SendInvalidationMessages();
   (*cntx)->SendOk();
 }
 
@@ -1241,6 +1261,19 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "SETINFO") {
     return (*cntx)->SendOk();
+  }
+
+  if (sub_cmd == "TRACKING" && args.size() == 2) {
+    ToUpper(&args[1]);
+    string_view switch_state = ArgS(args, 1);
+    if (switch_state == "ON") {
+      cntx->conn()->EnableTracking();
+      return (*cntx)->SendOk();
+    } else if (switch_state == "OFF") {
+      cntx->conn()->DisableTracking();
+      // todo: the client id in tracking table will be garbage collected.
+      return (*cntx)->SendOk();
+    }
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";

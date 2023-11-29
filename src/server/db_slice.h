@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -147,11 +148,10 @@ class DbSlice {
     return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
-  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
-                               unsigned req_obj_type) const;
+  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key, unsigned req_obj_type);
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
-  std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
+  std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -269,8 +269,7 @@ class DbSlice {
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return PrimeIterator{}.
-  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx,
-                                                          PrimeIterator it) const;
+  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx, PrimeIterator it);
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -334,6 +333,13 @@ class DbSlice {
     expire_allowed_ = is_allowed;
   }
 
+  // Start tracking keys for the client with client_id
+  void TrackKeys(ConnectionContext*, int32_t, const std::vector<std::string_view>&);
+
+  // Send invalidatoin message when a key being tracked is updated/deleted.
+  // A connection that has been closed will be garbage collected along the way.
+  void SendInvalidationTrackingMessage(std::string_view key);
+
  private:
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
@@ -384,6 +390,20 @@ class DbSlice {
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
+
+  struct Hash {
+    size_t operator()(const std::pair<ConnectionContext*, int32_t>& p) const {
+      // return std::hash<int32_t>()(p.second);
+      return std::hash<uint32_t>()(p.first->conn()->GetClientId());
+    }
+  };
+
+  // maps keys to the IDs of the clients that are tracking this key.
+  // absl::flat_hash_map<std::string_view, absl::flat_hash_set<std::pair<ConnectionContext*,
+  // int32_t>, Hash> > client_tracking_map_;
+  absl::flat_hash_map<std::string,
+                      absl::flat_hash_set<std::pair<ConnectionContext*, int32_t>, Hash>>
+      client_tracking_map_;
 };
 
 }  // namespace dfly

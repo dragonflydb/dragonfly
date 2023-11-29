@@ -1040,6 +1040,13 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
 }
 
+OpResult<bool> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, uint32_t tid,
+                           vector<string_view>& keys, CmdArgList args) {
+  auto& db_slice = op_args.shard->db_slice();
+  db_slice.TrackKeys(cntx, tid, keys);
+  return true;
+}
+
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1139,6 +1146,83 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
+
+  // if this is a read command, and client tracking has enabled,
+  // start tracking updates to the keys in this read command
+  // notify the client when there is update, see PostUpdate() in db_slice.cc
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+    OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args_no_cmd);
+    if (!key_index_res)
+      return (*cntx)->SendError(key_index_res.status());
+
+    const auto& key_index = *key_index_res;
+    vector<string_view> keys_to_track;
+    for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
+      string_view key = ArgS(args_no_cmd, i);
+      keys_to_track.push_back(key);
+    }
+
+    // let's pass thread id and connection to db_slice for tracking
+    int32_t tid = util::ProactorBase::GetIndex();
+
+    // uint32_t client_id = dfly_cntx->conn()->GetClientId();
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, tid, keys_to_track, args);
+    };
+
+    // OpResult<bool> remember_key_result =
+    dfly_cntx->transaction->ScheduleSingleHopT(cb);
+
+    //(*dfly_cntx)->StartCollection(2, RedisReplyBuilder::CollectionType::PUSH);
+    // std::string inval = "invalidate";
+    //(*dfly_cntx)->SendBulkString(inval);
+    //(*dfly_cntx)->SendStringArr(keys_to_track);
+    //(*dfly_cntx)->SendRET();
+
+    //(*dfly_cntx)->StartCollection(2, RedisReplyBuilder::CollectionType::PUSH);
+    //(*dfly_cntx)->SendBulkString(inval);
+    //(*dfly_cntx)->SendStringArr(keys_to_track);
+  }
+
+  /*
+    if (is_read_cmd) {
+
+    OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args_no_cmd);
+    if (!key_index_res) {
+    }
+
+    const auto& key_index = *key_index_res;
+    std::vector<string_view> keys;
+    // Iterate keys and check to which slot they belong.
+    for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
+      string_view key = ArgS(args_no_cmd, i);
+      keys.push_back(key);
+    }
+
+      uint32_t client_id = dfly_cntx->conn()->GetClientId();
+
+       auto cb = [&](Transaction* t, EngineShard* shard) {
+        return OpRememberKey(t->GetOpArgs(shard), client_id, keys, args);
+      };
+
+
+
+      //OpStatus status =
+      //      dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
+      OpResult<bool> remember_key_result = dfly_cntx->transaction->ScheduleSingleHopT(cb);
+
+
+      // send PUSH message to client to invalidate the key
+      (*dfly_cntx)->StartCollection(2, RedisReplyBuilder::CollectionType::PUSH);
+      std::string inval = "invalidate";
+      (*dfly_cntx)->SendBulkString(inval);
+      (*dfly_cntx)->SendStringArr(keys);
+
+    }
+  */
+
+  uint64_t end_ns = ProactorBase::GetMonotonicTimeNs();
+  request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
@@ -2346,6 +2430,10 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   DeactivateMonitoring(server_cntx);
 
   server_family_.OnClose(server_cntx);
+
+  // disable client tracking.
+  if (server_cntx->conn()->IsTrackingOn())
+    server_cntx->conn()->DisableTracking();
 }
 
 string Service::GetContextInfo(facade::ConnectionContext* cntx) {

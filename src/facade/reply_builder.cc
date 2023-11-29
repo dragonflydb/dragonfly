@@ -30,6 +30,8 @@ constexpr char kCRLF[] = "\r\n";
 constexpr char kErrPref[] = "-ERR ";
 constexpr char kSimplePref[] = "+";
 
+constexpr char kRET[] = "$1\r\n\r\r\n";
+
 constexpr unsigned kConvFlags =
     DoubleToStringConverter::UNIQUE_ZERO | DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN;
 
@@ -289,9 +291,14 @@ void RedisReplyBuilder::SendProtocolError(std::string_view str) {
   SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
 }
 
+void RedisReplyBuilder::SendRET() {
+  // iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
+  iovec v[1] = {IoVec(kRET)};
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
 void RedisReplyBuilder::SendSimpleString(std::string_view str) {
   iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
-
   Send(v, ABSL_ARRAYSIZE(v));
 }
 

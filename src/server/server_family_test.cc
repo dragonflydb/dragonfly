@@ -199,5 +199,12 @@ TEST_F(ServerFamilyTest, ClientPause) {
   Run({"set", "key", "value2"});
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
 }
+  
+TEST_F(ServerFamilyTest, ClientTracking) {
+  // client tracking only works for RESP3
+  auto resp = Run({"hello", "3"});
+  resp = RUN({"client", "tracking", "on"});
+  EXPECT_THAT(resp.GetString(), "OK");
+}
 
 }  // namespace dfly

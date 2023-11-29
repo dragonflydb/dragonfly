@@ -256,6 +256,8 @@ class ServerFamily {
 
   void SnapshotScheduling();
 
+  void SendInvalidationMessages() const;
+
   Fiber snapshot_schedule_fb_;
   Future<GenericError> load_result_;
 

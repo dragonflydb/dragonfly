@@ -150,6 +150,7 @@ struct Connection::DispatchOperations {
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
   void operator()(CheckpointMessage msg);
+  void operator()(const InvalidationMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -215,6 +216,9 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const CheckpointMessage& msg) {
       return 0;  // no access to internal type, memory usage negligible
     }
+    size_t operator()(const InvalidationMessage& msg) {
+      return 0;
+    }
   };
 
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
@@ -278,8 +282,22 @@ void Connection::DispatchOperations::operator()(const MigrationRequestMessage& m
   // no-op
 }
 
+
 void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
   msg.bc.Dec();
+}
+
+void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  rbuilder->SetResp3(true);
+  rbuilder->StartCollection(2, facade::RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->SendBulkString("invalidate");
+  if (msg.invalidate_due_to_flush) {
+    rbuilder->SendNull();
+  } else {
+    std::vector<string_view> keys{msg.key};
+    rbuilder->SendStringArr(keys);
+  }
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -1190,6 +1208,10 @@ bool Connection::IsCurrentlyDispatching() const {
 void Connection::SendPubMessageAsync(PubMessage msg) {
   void* ptr = mi_malloc(sizeof(PubMessage));
   SendAsync({PubMessagePtr{new (ptr) PubMessage{move(msg)}, MessageDeleter{}}});
+}
+
+void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
+  SendAsync({std::move(msg)});
 }
 
 void Connection::SendMonitorMessageAsync(string msg) {
