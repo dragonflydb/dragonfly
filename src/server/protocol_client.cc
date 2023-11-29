@@ -154,13 +154,6 @@ std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
-ProtocolClient::ServerContext ProtocolClient::ServerContext::CreateFromIp(std::string ip,
-                                                                          uint16_t port) {
-  ServerContext res{move(ip), port, {}};
-  res.endpoint = {ip::make_address(res.host), res.port};
-  return res;
-}
-
 void ValidateClientTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls_replication)) {
     return;
@@ -219,7 +212,7 @@ ProtocolClient::~ProtocolClient() {
 #endif
 }
 
-error_code ProtocolClient::InitEndpointWithDns() {
+error_code ProtocolClient::ResolveHostDns() {
   char ip_addr[INET6_ADDRSTRLEN];
   int resolve_res = ResolveDns(server_context_.host, ip_addr);
   if (resolve_res != 0) {

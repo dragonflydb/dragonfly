@@ -22,7 +22,7 @@ using absl::GetFlag;
 
 ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(ServerContext::CreateFromIp(move(host_ip), port)), slots_(std::move(slots)) {
+    : ProtocolClient(move(host_ip), port), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -38,8 +38,12 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
     return ec;
   };
 
+  VLOG(1) << "Resolving host DNS";
+  error_code ec = ResolveHostDns();
+  RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
+
   VLOG(1) << "Connecting to source";
-  auto ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
   VLOG(1) << "Greeting";
