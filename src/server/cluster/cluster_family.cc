@@ -12,9 +12,11 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json_object.h"
+#include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/cluster/cluster_slot_migration.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -392,6 +394,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterMyId(args, cntx);
   } else if (sub_cmd == "FLUSHSLOTS") {
     return DflyClusterFlushSlots(args, cntx);
+  } else if (sub_cmd == "START-SLOT-MIGRATION") {
+    return DflyClusterStartSlotMigration(args, cntx);
   }
 
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -589,6 +593,73 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
   return rb->SendOk();
 }
 
+void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  args.remove_prefix(1);  // Removes "START-SLOT-MIGRATION" subcmd string
+
+  CmdArgParser parser(args);
+  auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
+  std::vector<SlotRange> slots;
+  do {
+    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+    slots.emplace_back(SlotRange{slot_start, slot_end});
+  } while (parser.HasNext());
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
+
+  ClusterSlotMigration node(std::string(host_ip), port, slots);
+  node.Start(cntx);
+
+  return rb->SendOk();
+}
+
+void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
+  args.remove_prefix(1);
+  if (sub_cmd == "CONF") {
+    MigrationConf(args, cntx);
+  } else {
+    (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
+  }
+}
+
+void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "Create slot migration config";
+  CmdArgParser parser{args};
+  auto port = parser.Next<uint16_t>();
+  (void)port;  // we need it for the next step
+
+  std::vector<ClusterConfig::SlotRange> slots;
+  do {
+    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+    slots.emplace_back(SlotRange{slot_start, slot_end});
+  } while (parser.HasNext());
+
+  if (!tl_cluster_config) {
+    (*cntx)->SendError(kClusterNotConfigured);
+    return;
+  }
+
+  for (const auto& migration_range : slots) {
+    for (auto i = migration_range.start; i <= migration_range.end; ++i) {
+      if (!tl_cluster_config->IsMySlot(i)) {
+        VLOG(1) << "Invalid migration slot " << i << " in range " << migration_range.start << ':'
+                << migration_range.end;
+        (*cntx)->SendError("Invalid slots range");
+        return;
+      }
+    }
+  }
+
+  cntx->conn()->SetName("slot_migration_ctrl");
+
+  (*cntx)->SendLong(shard_set->size());
+  return;
+}
+
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
 inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
@@ -603,6 +674,7 @@ constexpr uint32_t kCluster = SLOW;
 constexpr uint32_t kDflyCluster = ADMIN | SLOW;
 constexpr uint32_t kReadOnly = FAST | CONNECTION;
 constexpr uint32_t kReadWrite = FAST | CONNECTION;
+constexpr uint32_t kDflyMigrate = ADMIN | SLOW | DANGEROUS;
 }  // namespace acl
 
 void ClusterFamily::Register(CommandRegistry* registry) {
@@ -612,7 +684,9 @@ void ClusterFamily::Register(CommandRegistry* registry) {
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite);
+            << CI{"READWRITE", CO::READONLY, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
+            << CI{"DFLYMIGRATE", CO::ADMIN | CO::HIDDEN, -1, 0, 0, acl::kDflyMigrate}.HFUNC(
+                   DflyMigrate);
 }
 
 }  // namespace dfly
