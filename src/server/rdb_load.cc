@@ -507,16 +507,23 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    bool use_set2 = GetFlag(FLAGS_use_set2) || rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY;
+    bool use_set2 = GetFlag(FLAGS_use_set2);
+
     if (use_set2) {
-      LOG_IF(ERROR, !GetFlag(FLAGS_use_set2))
-          << "Using set2 despite it being disabled due to field expiry usage.";
       StringSet* set = new StringSet{CompactObj::memory_resource()};
       set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       res = createObject(OBJ_SET, set);
       res->encoding = OBJ_ENCODING_HT;
     } else {
       res = createSetObject();
+
+      if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
+        LOG(ERROR) << "Detected set with key expiration, but use_set2 is disabled. Unable to load "
+                      "set - key will be ignored.";
+        pv_->ImportRObj(res);
+        std::move(cleanup).Cancel();
+        return;
+      }
     }
 
     // TODO: to move this logic to set_family similarly to ConvertToStrSet.
@@ -1498,9 +1505,6 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
   SET_OR_UNEXPECT(LoadLen(NULL), len);
 
-  if (len == 0)
-    return Unexpected(errc::empty_key);
-
   if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
     len *= 2;
   }
@@ -1560,9 +1564,6 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
 auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
   SET_OR_UNEXPECT(LoadLen(nullptr), len);
-
-  if (len == 0)
-    return Unexpected(errc::empty_key);
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
 

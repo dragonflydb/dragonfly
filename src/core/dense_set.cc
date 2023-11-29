@@ -28,7 +28,12 @@ constexpr bool kAllowDisplacements = true;
 DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
     : owner_(const_cast<DenseSet*>(owner)), curr_entry_(nullptr) {
   curr_list_ = is_end ? owner_->entries_.end() : owner_->entries_.begin();
-  if (curr_list_ != owner->entries_.end()) {
+
+  // Even if `is_end` is `false`, the list can be empty.
+  if (curr_list_ == owner->entries_.end()) {
+    curr_entry_ = nullptr;
+    owner_ = nullptr;
+  } else {
     curr_entry_ = &(*curr_list_);
     owner->ExpireIfNeeded(nullptr, curr_entry_);
 
