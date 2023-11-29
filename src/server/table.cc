@@ -42,10 +42,12 @@ SlotStats& SlotStats::operator+=(const SlotStats& o) {
   return *this;
 }
 
-DbTable::DbTable(PMR_NS::memory_resource* mr)
+DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
-      expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr),
-      top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}) {
+      expire(0, detail::ExpireTablePolicy{}, mr),
+      mcflag(0, detail::ExpireTablePolicy{}, mr),
+      top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}),
+      index(db_index) {
   if (ClusterConfig::IsEnabled()) {
     slots_stats.resize(ClusterConfig::kMaxSlotNum + 1);
   }

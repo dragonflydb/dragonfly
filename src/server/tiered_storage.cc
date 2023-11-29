@@ -122,6 +122,7 @@ struct TieredStorage::PerDb {
   };
 
   BinRecord bin_map[kSmallBinLen];
+  absl::flat_hash_map<int64, size_t> pages;  // map from page offset to page size.
 };
 
 class TieredStorage::InflightWriteRequest {
@@ -304,9 +305,10 @@ std::error_code TieredStorage::Read(size_t offset, size_t len, char* dest) {
   return io_mgr_.Read(offset, io::MutableBytes{reinterpret_cast<uint8_t*>(dest), len});
 }
 
-void TieredStorage::Free(size_t offset, size_t len) {
+void TieredStorage::Free(size_t offset, size_t len, DbIndex db_index) {
   if (offset % kBlockLen == 0) {
     alloc_.Free(offset, len);
+    db_arr_[db_index]->pages.erase(offset);
   } else {
     uint32_t offs_page = offset / kBlockLen;
     auto it = page_refcnt_.find(offs_page);
@@ -315,6 +317,7 @@ void TieredStorage::Free(size_t offset, size_t len) {
 
     if (--it->second == 0) {
       alloc_.Free(offs_page * kBlockLen, kBlockLen);
+      db_arr_[db_index]->pages.erase(offs_page * kBlockLen);
       page_refcnt_.erase(it);
     }
   }
@@ -338,6 +341,7 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   if (io_res < 0) {
     LOG(ERROR) << "Error writing into ssd file: " << util::detail::SafeErrorMessage(-io_res);
     alloc_.Free(req->page_index() * kBlockLen, kBlockLen);
+    db->pages.erase(req->page_index() * kBlockLen);
     req->Undo(&bin_record, &db_slice_);
     ++stats_.aborted_write_cnt;
   } else {
@@ -347,6 +351,7 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
     if (entries_serialized == 0) {  // aborted
       ++stats_.aborted_write_cnt;
       alloc_.Free(req->page_index() * kBlockLen, kBlockLen);
+      db->pages.erase(req->page_index() * kBlockLen);
     } else {  // succeeded.
       VLOG(2) << "page_refcnt emplace " << req->page_index();
       auto res = page_refcnt_.emplace(req->page_index(), entries_serialized);
@@ -367,19 +372,18 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   // Relevant only for OBJ_STRING, see CHECK above.
   size_t blob_len = it->second.Size();
 
+  if (db_arr_.size() <= db_index) {
+    db_arr_.resize(db_index + 1);
+  }
+  if (db_arr_[db_index] == nullptr) {
+    db_arr_[db_index] = new PerDb;
+  }
+
   if (blob_len > kMaxSmallBin) {
     if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
       WriteSingle(db_index, it, blob_len);
     }  // otherwise skip
     return error_code{};
-  }
-
-  if (db_arr_.size() <= db_index) {
-    db_arr_.resize(db_index + 1);
-  }
-
-  if (db_arr_[db_index] == nullptr) {
-    db_arr_[db_index] = new PerDb;
   }
 
   PerDb* db = db_arr_[db_index];
@@ -395,23 +399,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   CHECK_LT(bin_record.pending_entries.size(), max_entries);
 
   bin_record.pending_entries.insert(it->first);
-
-  PrimeTable* pt = db_slice_.GetTables(db_index).first;
-  DbSlice::Context db_context{db_index, GetCurrentTimeMs()};
-  auto erase_deleted_or_expire = [pt, db_context, this](CompactObjectView key_view) {
-    PrimeIterator it = pt->Find(key_view);
-    if (!IsValid(it)) {
-      return true;
-    }
-    if (it->second.HasExpire()) {
-      auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, it);
-      if (pit.is_done()) {
-        return true;
-      }
-    }
-    return false;
-  };
-  absl::erase_if(bin_record.pending_entries, erase_deleted_or_expire);
+  it->second.SetIoPending(true);
 
   if (bin_record.pending_entries.size() < max_entries)
     return error_code{};  // gather more.
@@ -463,6 +451,7 @@ bool IsObjFitToUnload(const PrimeValue& pv) {
 };
 
 void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_len) {
+  VLOG(2) << "WriteSingle " << blob_len;
   DCHECK(!it->second.HasIoPending());
 
   int64_t res = alloc_.Malloc(blob_len);
@@ -470,6 +459,9 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
     InitiateGrow(-res);
     return;
   }
+  DbTableStats* stats = db_slice_.MutableStats(db_index);
+  PerDb* db = db_arr_[db_index];
+  db->pages.emplace(res, blob_len);
 
   constexpr size_t kMask = kBlockAlignment - 1;
   size_t page_size = (blob_len + kMask) & (~kMask);
@@ -496,24 +488,56 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   it->second.GetString(block_ptr);
   it->second.SetIoPending(true);
 
-  auto cb = [req = std::move(req)](int io_res) {
+  auto cb = [this, req = std::move(req), stats, db_index](int io_res) {
     PrimeIterator it = req.pt->Find(req.key);
     CHECK(!it.is_done());
 
     // TODO: what happens when if the entry was deleted meanwhile
     // or it has been serialized again?
     CHECK(it->second.HasIoPending()) << "TBD: fix inconsistencies";
-    it->second.SetIoPending(false);
 
     if (io_res < 0) {
       LOG(ERROR) << "Error writing to ssd storage " << util::detail::SafeErrorMessage(-io_res);
+      it->second.SetIoPending(false);
+      alloc_.Free(req.offset, req.blob_len);
+      db_arr_[db_index]->pages.erase(req.offset);
       return;
     }
-    it->second.SetExternal(req.offset, req.blob_len);
+
+    ExternalizeEntry(req.offset, stats, &it->second);
+
     mi_free(req.block_ptr);
   };
 
   io_mgr_.WriteAsync(res, string_view{block_ptr, page_size}, std::move(cb));
+}
+
+void TieredStorage::FlushDB(DbIndex db_index) {
+  VLOG(2) << "FlushDB " << db_index;
+  PerDb* db_data = db_arr_[db_index];
+  if (!db_data)
+    return;
+  for (auto [offset, len] : db_data->pages) {
+    VLOG(2) << "FlushDB free offset " << offset;
+    alloc_.Free(offset, len);
+
+    if (len == kBlockLen) {
+      uint32_t offs_page = offset / kBlockLen;
+      auto it = page_refcnt_.find(offs_page);
+      if (it != page_refcnt_.end()) {
+        VLOG(2) << "FlushDB page_refcnt_ erase page offset " << offs_page;
+        page_refcnt_.erase(it);
+      }
+    }
+  }
+  delete db_data;
+  db_arr_[db_index] = nullptr;
+}
+
+void TieredStorage::FlushAll() {
+  for (size_t i = 0; i < db_arr_.size(); ++i) {
+    FlushDB(i);
+  }
 }
 
 bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
@@ -524,6 +548,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
     InitiateGrow(-res);
     return false;
   }
+  db->pages.emplace(res, kBlockLen);
 
   DCHECK_EQ(res % kBlockLen, 0u);
 
@@ -532,13 +557,13 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   auto& bin_record = db->bin_map[bin_index];
 
   DCHECK_EQ(bin_record.pending_entries.size(), NumEntriesInSmallBin(kSmallBins[bin_index]));
+  DbSlice::Context db_context{db_index, GetCurrentTimeMs()};
 
   DCHECK_LT(bin_record.pending_entries.size(), 60u);
 
   InflightWriteRequest* req = new InflightWriteRequest(db_index, bin_index, res / kBlockLen);
 
   size_t keys_size = 0;
-
   for (auto key_view : bin_record.pending_entries) {
     keys_size += key_view->Size();
   }
@@ -549,8 +574,10 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
     DCHECK(IsValid(it));
 
     req->Add(it->first, it->second);
-    it->second.SetIoPending(true);
-
+    if (it->second.HasExpire()) {
+      auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, it);
+      CHECK(!pit.is_done()) << "TBD: should abort in case of expired keys";
+    }
     auto res = bin_record.enqueued_entries.emplace(req->entries().back(), req);
     CHECK(res.second);
   }

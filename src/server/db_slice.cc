@@ -67,7 +67,11 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     stats.tiered_entries--;
     stats.tiered_size -= size;
     TieredStorage* tiered = shard->tiered_storage();
-    tiered->Free(offset, size);
+    tiered->Free(offset, size, table->index);
+  }
+  if (pv.HasIoPending()) {
+    TieredStorage* tiered = shard->tiered_storage();
+    tiered->CancelIo(table->index, del_it);
   }
 
   size_t value_heap_size = pv.MallocUsed();
@@ -612,22 +616,11 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     CreateDb(db_ind);
     db_arr_[db_ind]->trans_locks.swap(db_ptr->trans_locks);
 
-    auto cb = [this, db_ptr = std::move(db_ptr)]() mutable {
-      if (db_ptr->stats.tiered_entries > 0) {
-        for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-          if (it->second.IsExternal()) {
-            PerformDeletion(it, shard_owner(), db_ptr.get());
-          }
-        }
-      }
-
-      DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
-
-      db_ptr.reset();
-      mi_heap_collect(ServerState::tlocal()->data_heap(), true);
-    };
-
-    fb2::Fiber("flush_db", std::move(cb)).Detach();
+    if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
+      tiered->FlushDB(db_ptr->index);
+    }
+    db_ptr.reset();
+    mi_heap_collect(ServerState::tlocal()->data_heap(), true);
 
     return;
   }
@@ -636,6 +629,9 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     if (db_arr_[i]) {
       InvalidateDbWatches(i);
     }
+  }
+  if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
+    tiered->FlushAll();
   }
 
   auto all_dbs = std::move(db_arr_);
@@ -931,7 +927,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
       // After this code executes, the external blob is lost.
       TieredStorage* tiered = shard_owner()->tiered_storage();
       auto [offset, size] = it->second.GetExternalSlice();
-      tiered->Free(offset, size);
+      tiered->Free(offset, size, db_ind);
       it->second.Reset();
 
       stats->tiered_entries -= 1;
@@ -1203,7 +1199,7 @@ finish:
 void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
-    db.reset(new DbTable{owner_->memory_resource()});
+    db.reset(new DbTable{owner_->memory_resource(), db_ind});
   }
 }
 

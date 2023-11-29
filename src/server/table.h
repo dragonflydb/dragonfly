@@ -82,8 +82,9 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   ExpireTable::Cursor expire_cursor;
 
   TopKeys top_keys;
+  DbIndex index;
 
-  explicit DbTable(PMR_NS::memory_resource* mr);
+  explicit DbTable(PMR_NS::memory_resource* mr, DbIndex index);
   ~DbTable();
 
   void Clear();
