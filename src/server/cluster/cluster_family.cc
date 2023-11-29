@@ -646,7 +646,8 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   for (const auto& migration_range : slots) {
     for (auto i = migration_range.start; i <= migration_range.end; ++i) {
       if (!tl_cluster_config->IsMySlot(i)) {
-        VLOG(1) << "Invalid migration slot rane";
+        VLOG(1) << "Invalid migration slot " << i << ' in range ' << migration_range.start << ':'
+                << migration_range.end;
         (*cntx)->SendError("Invalid slots range");
         return;
       }
