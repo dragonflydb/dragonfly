@@ -462,7 +462,6 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
     InitiateGrow(-res);
     return;
   }
-  DbTableStats* stats = db_slice_.MutableStats(db_index);
   PerDb* db = db_arr_[db_index];
   db->pages.emplace(res, blob_len);
 
@@ -491,7 +490,7 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   it->second.GetString(block_ptr);
   it->second.SetIoPending(true);
 
-  auto cb = [this, req = std::move(req), stats, db_index](int io_res) {
+  auto cb = [this, req = std::move(req), db_index](int io_res) {
     PrimeIterator it = req.pt->Find(req.key);
     CHECK(!it.is_done());
 
@@ -507,7 +506,7 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
       return;
     }
 
-    ExternalizeEntry(req.offset, stats, &it->second);
+    ExternalizeEntry(req.offset, db_slice_.MutableStats(db_index), &it->second);
 
     mi_free(req.block_ptr);
   };
