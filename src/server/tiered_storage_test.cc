@@ -169,7 +169,6 @@ TEST_F(TieredStorageTest, AddBigValuse) {
   FillExternalKeys(100, 5000);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
   Metrics m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
   EXPECT_EQ(m.db_stats[0].tiered_entries, 100);
@@ -180,7 +179,6 @@ TEST_F(TieredStorageTest, AddBigValuse) {
 
   FillExternalKeys(100, 5000);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
-  usleep(50000);  // 0.02 milliseconds
 
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 100);

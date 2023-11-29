@@ -573,11 +573,12 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
     PrimeIterator it = pt->Find(key_view);
     DCHECK(IsValid(it));
 
-    req->Add(it->first, it->second);
     if (it->second.HasExpire()) {
       auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, it);
       CHECK(!pit.is_done()) << "TBD: should abort in case of expired keys";
     }
+
+    req->Add(it->first, it->second);
     auto res = bin_record.enqueued_entries.emplace(req->entries().back(), req);
     CHECK(res.second);
   }
