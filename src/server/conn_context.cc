@@ -5,6 +5,7 @@
 #include "server/conn_context.h"
 
 #include "base/logging.h"
+#include "core/heap_size.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
@@ -140,7 +141,7 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   auto& sinfo = *conn->conn_state.subscribe_info.get();
   auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
 
-  int32_t tid = util::ProactorBase::GetIndex();
+  int32_t tid = util::ProactorBase::me()->GetPoolIndex();
   DCHECK_GE(tid, 0);
 
   ChannelStoreUpdater csu{pattern, to_add, conn, uint32_t(tid)};
@@ -230,6 +231,11 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
   else
     (*this)->SendNull();
   (*this)->SendLong(count);
+}
+
+size_t ConnectionContext::UsedMemory() const {
+  return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(authed_username) +
+         dfly::HeapSize(acl_commands);
 }
 
 void ConnectionState::ExecInfo::Clear() {

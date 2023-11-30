@@ -10,6 +10,7 @@
 
 #include "absl/strings/escaping.h"
 #include "base/logging.h"
+#include "core/heap_size.h"
 #include "facade/error.h"
 
 using namespace std;
@@ -35,6 +36,14 @@ constexpr unsigned kConvFlags =
 DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
 }  // namespace
+
+SinkReplyBuilder::MGetResponse::~MGetResponse() {
+  while (storage_list) {
+    auto* next = storage_list->next;
+    delete[] reinterpret_cast<char*>(storage_list);
+    storage_list = next;
+  }
+}
 
 SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink)
     : sink_(sink), should_batch_(false), should_aggregate_(false), has_replied_(true) {
@@ -165,6 +174,10 @@ void SinkReplyBuilder::FlushBatch() {
   }
 }
 
+size_t SinkReplyBuilder::UsedMemory() const {
+  return dfly::HeapSize(batch_) + dfly::HeapSize(err_count_);
+}
+
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
 }
 
@@ -187,11 +200,11 @@ void MCReplyBuilder::SendLong(long val) {
   SendSimpleString(string_view(buf, next - buf));
 }
 
-void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
+void MCReplyBuilder::SendMGetResponse(MGetResponse resp) {
   string header;
-  for (unsigned i = 0; i < arr.size(); ++i) {
-    if (arr[i]) {
-      const auto& src = *arr[i];
+  for (unsigned i = 0; i < resp.resp_arr.size(); ++i) {
+    if (resp.resp_arr[i]) {
+      const auto& src = *resp.resp_arr[i];
       absl::StrAppend(&header, "VALUE ", src.key, " ", src.mc_flag, " ", src.value.size());
       if (src.mc_ver) {
         absl::StrAppend(&header, " ", src.mc_ver);
@@ -365,12 +378,13 @@ void RedisReplyBuilder::SendDouble(double val) {
   }
 }
 
-void RedisReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
-  string res = absl::StrCat("*", arr.size(), kCRLF);
-  for (size_t i = 0; i < arr.size(); ++i) {
-    if (arr[i]) {
-      StrAppend(&res, "$", arr[i]->value.size(), kCRLF);
-      res.append(arr[i]->value).append(kCRLF);
+void RedisReplyBuilder::SendMGetResponse(MGetResponse resp) {
+  string res = absl::StrCat("*", resp.resp_arr.size(), kCRLF);
+  for (size_t i = 0; i < resp.resp_arr.size(); ++i) {
+    const auto& item = resp.resp_arr[i];
+    if (item) {
+      StrAppend(&res, "$", item->value.size(), kCRLF);
+      res.append(item->value).append(kCRLF);
     } else {
       res.append(NullString());
     }

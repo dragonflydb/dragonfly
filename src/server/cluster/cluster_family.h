@@ -45,6 +45,10 @@ class ClusterFamily {
   void DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterMyId(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
+  void DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx);
+  void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
+
+  void MigrationConf(CmdArgList args, ConnectionContext* cntx);
 
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 

@@ -317,8 +317,8 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
     : queue_(kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
-      db_slice_(pb->GetIndex(), GetFlag(FLAGS_cache_mode), this) {
-  fiber_q_ = MakeFiber([this, index = pb->GetIndex()] {
+      db_slice_(pb->GetPoolIndex(), GetFlag(FLAGS_cache_mode), this) {
+  fiber_q_ = MakeFiber([this, index = pb->GetPoolIndex()] {
     ThisFiber::SetName(absl::StrCat("shard_queue", index));
     queue_.Run();
   });
@@ -355,14 +355,14 @@ void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
   if (clock_cycle_ms == 0)
     clock_cycle_ms = 1;
 
-  fiber_periodic_ = MakeFiber([this, index = pb->GetIndex(), period_ms = clock_cycle_ms] {
+  fiber_periodic_ = MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms] {
     ThisFiber::SetName(absl::StrCat("shard_periodic", index));
     RunPeriodic(std::chrono::milliseconds(period_ms));
   });
 }
 
 void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
-  CHECK(shard_ == nullptr) << pb->GetIndex();
+  CHECK(shard_ == nullptr) << pb->GetPoolIndex();
 
   mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
   void* ptr = mi_heap_malloc_aligned(data_heap, sizeof(EngineShard), alignof(EngineShard));

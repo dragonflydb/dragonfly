@@ -257,6 +257,55 @@ TEST_F(RdbTest, ReloadExpired) {
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+TEST_F(RdbTest, HashmapExpiry) {
+  // Add non-expiring elements
+  Run({"hset", "key", "key1", "val1", "key2", "val2"});
+  Run({"debug", "reload"});
+  EXPECT_THAT(Run({"hgetall", "key"}),
+              RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2")));
+
+  // Add expiring elements
+  Run({"hsetex", "key", "5", "key3", "val3", "key4", "val4"});
+  Run({"debug", "reload"});  // Reload before expiration
+  EXPECT_THAT(Run({"hgetall", "key"}),
+              RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2", "key3", "val3", "key4",
+                                             "val4")));
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"hgetall", "key"}),
+              RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2")));
+
+  Run({"hsetex", "key", "5", "key5", "val5", "key6", "val6"});
+  EXPECT_THAT(Run({"hgetall", "key"}),
+              RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2", "key5", "val5", "key6",
+                                             "val6")));
+  AdvanceTime(10'000);
+  Run({"debug", "reload"});  // Reload after expiration
+  EXPECT_THAT(Run({"hgetall", "key"}),
+              RespArray(UnorderedElementsAre("key1", "val1", "key2", "val2")));
+}
+
+TEST_F(RdbTest, SetExpiry) {
+  // Add non-expiring elements
+  Run({"sadd", "key", "key1", "key2"});
+  Run({"debug", "reload"});
+  EXPECT_THAT(Run({"smembers", "key"}), RespArray(UnorderedElementsAre("key1", "key2")));
+
+  // Add expiring elements
+  Run({"saddex", "key", "5", "key3", "key4"});
+  Run({"debug", "reload"});  // Reload before expiration
+  EXPECT_THAT(Run({"smembers", "key"}),
+              RespArray(UnorderedElementsAre("key1", "key2", "key3", "key4")));
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"smembers", "key"}), RespArray(UnorderedElementsAre("key1", "key2")));
+
+  Run({"saddex", "key", "5", "key5", "key6"});
+  EXPECT_THAT(Run({"smembers", "key"}),
+              RespArray(UnorderedElementsAre("key1", "key2", "key5", "key6")));
+  AdvanceTime(10'000);
+  Run({"debug", "reload"});  // Reload after expiration
+  EXPECT_THAT(Run({"smembers", "key"}), RespArray(UnorderedElementsAre("key1", "key2")));
+}
+
 TEST_F(RdbTest, SaveFlush) {
   Run({"debug", "populate", "500000"});
 

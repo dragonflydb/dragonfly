@@ -258,6 +258,10 @@ class DenseSet {
     return time_now_;
   }
 
+  bool ExpirationUsed() const {
+    return expiration_used_;
+  }
+
  protected:
   // Virtual functions to be implemented for generic data
   virtual uint64_t Hash(const void* obj, uint32_t cookie) const = 0;
@@ -397,6 +401,8 @@ class DenseSet {
   unsigned capacity_log_ = 0;
 
   uint32_t time_now_ = 0;
+
+  mutable bool expiration_used_ = false;
 };
 
 inline void* DenseSet::FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const {

@@ -101,7 +101,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
 
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
-  error_code ec = ResolveMasterDns();
+  error_code ec = ResolveHostDns();
   RETURN_ON_ERR(check_connection_error(ec, "could not resolve master dns"));
 
   // 2. Connect socket.
@@ -179,7 +179,7 @@ void Replica::MainReplicationFb() {
       if (is_paused_)
         continue;
 
-      ec = ResolveMasterDns();
+      ec = ResolveHostDns();
       if (ec) {
         LOG(ERROR) << "Error resolving dns to " << server().host << " " << ec;
         continue;

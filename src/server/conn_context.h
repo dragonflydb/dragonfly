@@ -190,6 +190,8 @@ class ConnectionContext : public facade::ConnectionContext {
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
   void CancelBlocking();           // Cancel an ongoing blocking transaction if there is one.
 
+  size_t UsedMemory() const override;
+
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext
   // instance that helps applying commands coming from master.
@@ -200,12 +202,6 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow;
-
-  std::string authed_username{"default"};
-  uint32_t acl_categories{acl::ALL};
-  std::vector<uint64_t> acl_commands;
-  // Skip ACL validation, used by internal commands and commands run on admin port
-  bool skip_acl_validation = false;
 
  private:
   void EnableMonitoring(bool enable) {

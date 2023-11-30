@@ -28,9 +28,9 @@ void CapturingReplyBuilder::SendError(ErrorReply error) {
   Capture(Error{move(message), error.kind});
 }
 
-void CapturingReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
+void CapturingReplyBuilder::SendMGetResponse(MGetResponse resp) {
   SKIP_LESS(ReplyMode::FULL);
-  Capture(vector<OptResp>{arr.begin(), arr.end()});
+  Capture(std::move(resp));
 }
 
 void CapturingReplyBuilder::SendError(OpStatus status) {
@@ -207,11 +207,11 @@ struct CaptureVisitor {
     }
     rb->StartCollection(cp->len, cp->type);
     for (auto& pl : cp->arr)
-      visit(*this, pl);
+      visit(*this, std::move(pl));
   }
 
-  void operator()(const vector<RedisReplyBuilder::OptResp>& mget) {
-    rb->SendMGetResponse(mget);
+  void operator()(SinkReplyBuilder::MGetResponse resp) {
+    rb->SendMGetResponse(std::move(resp));
   }
 
   void operator()(const CapturingReplyBuilder::ScoredArray& sarr) {
@@ -228,7 +228,7 @@ void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
   }
 
   CaptureVisitor cv{rb};
-  visit(cv, pl);
+  visit(cv, std::move(pl));
 }
 
 void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {

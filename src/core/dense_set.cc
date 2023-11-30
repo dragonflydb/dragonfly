@@ -28,7 +28,12 @@ constexpr bool kAllowDisplacements = true;
 DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
     : owner_(const_cast<DenseSet*>(owner)), curr_entry_(nullptr) {
   curr_list_ = is_end ? owner_->entries_.end() : owner_->entries_.begin();
-  if (curr_list_ != owner->entries_.end()) {
+
+  // Even if `is_end` is `false`, the list can be empty.
+  if (curr_list_ == owner->entries_.end()) {
+    curr_entry_ = nullptr;
+    owner_ = nullptr;
+  } else {
     curr_entry_ = &(*curr_list_);
     owner->ExpireIfNeeded(nullptr, curr_entry_);
 
@@ -86,8 +91,10 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data, bool ha
     it->SetLink(NewLink(data, *it));
   }
 
-  if (has_ttl)
+  if (has_ttl) {
     it->SetTtl(true);
+    expiration_used_ = true;
+  }
   return ObjectAllocSize(data);
 }
 
@@ -97,8 +104,10 @@ void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr pt
 
   if (it->IsEmpty()) {
     it->SetObject(ptr.GetObject());
-    if (ptr.HasTtl())
+    if (ptr.HasTtl()) {
       it->SetTtl(true);
+      expiration_used_ = true;
+    }
     if (ptr.IsLink()) {
       FreeLink(ptr.AsLink());
     }
@@ -112,8 +121,10 @@ void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr pt
 
     // allocate a new link if needed and copy the pointer to the new link
     it->SetLink(NewLink(ptr.Raw(), *it));
-    if (ptr.HasTtl())
+    if (ptr.HasTtl()) {
       it->SetTtl(true);
+      expiration_used_ = true;
+    }
     DCHECK(!it->AsLink()->next.IsEmpty());
   }
 }
@@ -175,6 +186,7 @@ void DenseSet::ClearInternal() {
   num_used_buckets_ = 0;
   num_chain_entries_ = 0;
   size_ = 0;
+  expiration_used_ = false;
 }
 
 bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
@@ -401,8 +413,10 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
    */
 
   DensePtr to_insert(obj);
-  if (has_ttl)
+  if (has_ttl) {
     to_insert.SetTtl(true);
+    expiration_used_ = true;
+  }
 
   while (!entries_[bucket_id].IsEmpty() && entries_[bucket_id].IsDisplaced()) {
     DensePtr unlinked = PopPtrFront(entries_.begin() + bucket_id);

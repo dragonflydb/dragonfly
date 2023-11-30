@@ -13,6 +13,7 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
+#include "core/heap_size.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -28,6 +29,10 @@ using namespace chrono_literals;
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 }  // namespace
+
+size_t SliceSnapshot::DbRecord::size() const {
+  return HeapSize(value);
+}
 
 SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode)
     : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
@@ -171,7 +176,7 @@ void SliceSnapshot::Join() {
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   {
-    auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::GetIndex());
+    auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
     ThisFiber::SetName(std::move(fiber_name));
   }
 

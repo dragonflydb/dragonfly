@@ -29,7 +29,7 @@ Journal::Journal() {
 }
 
 void Journal::StartInThread() {
-  journal_slice.Init(unsigned(ProactorBase::GetIndex()));
+  journal_slice.Init(unsigned(ProactorBase::me()->GetPoolIndex()));
 
   ServerState::tlocal()->set_journal(this);
   EngineShard* shard = EngineShard::tlocal();

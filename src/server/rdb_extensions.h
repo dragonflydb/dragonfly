@@ -11,9 +11,12 @@ extern "C" {
 //  Custom types: Range 30-35 is used by DF RDB types.
 constexpr uint8_t RDB_TYPE_JSON_OLD = 20;
 constexpr uint8_t RDB_TYPE_JSON = 30;
+constexpr uint8_t RDB_TYPE_HASH_WITH_EXPIRY = 31;
+constexpr uint8_t RDB_TYPE_SET_WITH_EXPIRY = 32;
 
 constexpr bool rdbIsObjectTypeDF(uint8_t type) {
-  return __rdbIsObjectType(type) || (type == RDB_TYPE_JSON);
+  return __rdbIsObjectType(type) || (type == RDB_TYPE_JSON) ||
+         (type == RDB_TYPE_HASH_WITH_EXPIRY) || (type == RDB_TYPE_SET_WITH_EXPIRY);
 }
 
 //  Opcodes: Range 200-240 is used by DF extensions.

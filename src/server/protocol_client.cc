@@ -212,7 +212,7 @@ ProtocolClient::~ProtocolClient() {
 #endif
 }
 
-error_code ProtocolClient::ResolveMasterDns() {
+error_code ProtocolClient::ResolveHostDns() {
   char ip_addr[INET6_ADDRSTRLEN];
   int resolve_res = ResolveDns(server_context_.host, ip_addr);
   if (resolve_res != 0) {

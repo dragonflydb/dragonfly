@@ -1085,7 +1085,7 @@ void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx
   }
 }
 
-void BitFieldGeneric(CmdArgList args, ConnectionContext* cntx, bool read_only) {
+void BitFieldGeneric(CmdArgList args, bool read_only, ConnectionContext* cntx) {
   if (args.size() == 1) {
     (*cntx)->SendNullArray();
     return;
@@ -1117,11 +1117,11 @@ void BitFieldGeneric(CmdArgList args, ConnectionContext* cntx, bool read_only) {
 }
 
 void BitField(CmdArgList args, ConnectionContext* cntx) {
-  BitFieldGeneric(args, cntx, false);
+  BitFieldGeneric(args, false, cntx);
 }
 
 void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
-  BitFieldGeneric(args, cntx, true);
+  BitFieldGeneric(args, true, cntx);
 }
 
 #pragma GCC diagnostic pop

@@ -141,8 +141,6 @@ namespace h2 = boost::beast::http;
 
 namespace {
 
-DEFINE_VARZ(VarzMapAverage, request_latency_usec);
-
 std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
@@ -253,8 +251,8 @@ void SendMonitor(const std::string& msg) {
   const auto& monitor_repo = ServerState::tlocal()->Monitors();
   const auto& monitors = monitor_repo.monitors();
   if (!monitors.empty()) {
-    VLOG(1) << "thread " << util::ProactorBase::GetIndex() << " sending monitor message '" << msg
-            << "' for " << monitors.size();
+    VLOG(1) << "thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
+            << msg << "' for " << monitors.size();
 
     for (auto monitor_conn : monitors) {
       // never preempts, so we can iterate safely.
@@ -282,7 +280,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendStored() final;
 
   void SendSimpleString(std::string_view str) final;
-  void SendMGetResponse(absl::Span<const OptResp>) final;
+  void SendMGetResponse(MGetResponse resp) final;
   void SendSimpleStrArr(StrSpan arr) final;
   void SendNullArray() final;
 
@@ -389,13 +387,13 @@ void InterpreterReplier::SendSimpleString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::SendMGetResponse(absl::Span<const OptResp> arr) {
+void InterpreterReplier::SendMGetResponse(MGetResponse resp) {
   DCHECK(array_len_.empty());
 
-  explr_->OnArrayStart(arr.size());
-  for (uint32_t i = 0; i < arr.size(); ++i) {
-    if (arr[i].has_value()) {
-      explr_->OnString(arr[i]->value);
+  explr_->OnArrayStart(resp.resp_arr.size());
+  for (uint32_t i = 0; i < resp.resp_arr.size(); ++i) {
+    if (resp.resp_arr[i].has_value()) {
+      explr_->OnString(resp.resp_arr[i]->value);
     } else {
       explr_->OnNil();
     }
@@ -805,7 +803,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   if (!tcp_disabled && !listeners.empty()) {
     acl_family_.Init(listeners.front(), &user_registry_);
   }
-  request_latency_usec.Init(&pp_);
+
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
   server_family_.Init(acceptor, std::move(listeners));
@@ -833,7 +831,6 @@ void Service::Shutdown() {
   GenericFamily::Shutdown();
 
   engine_varz.reset();
-  request_latency_usec.Shutdown();
 
   ChannelStore::Destroy();
 
@@ -1088,9 +1085,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     return cntx->SendSimpleString("QUEUED");
   }
 
-  uint64_t start_ns = absl::GetCurrentTimeNanos();
-
   if (cid->opt_mask() & CO::DENYOOM && etl.is_master) {
+    uint64_t start_ns = absl::GetCurrentTimeNanos();
+
     uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
@@ -1142,9 +1139,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
-
-  uint64_t end_ns = ProactorBase::GetMonotonicTimeNs();
-  request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
@@ -1242,6 +1236,9 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     if (!dist_trans) {
       dist_trans.reset(new Transaction{exec_cid_});
       dist_trans->StartMultiNonAtomic();
+    } else {
+      // Reset to original command id as it's changed during squashing
+      dist_trans->MultiSwitchCmd(exec_cid_);
     }
 
     dfly_cntx->transaction = dist_trans.get();
@@ -1338,7 +1335,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       server_family_.StatsMC(cmd.key, cntx);
       return;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString(StrCat("VERSION ", kGitTag));
+      mc_builder->SendSimpleString("VERSION 1.5.0 DF");
       return;
     default:
       mc_builder->SendClientError("bad command line format");
@@ -1818,8 +1815,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     if (*sid != ServerState::tlocal()->thread_index()) {
-      VLOG(1) << "Migrating connection " << cntx->conn() << " from " << ProactorBase::GetIndex()
-              << " to " << *sid;
+      VLOG(1) << "Migrating connection " << cntx->conn() << " from "
+              << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
       cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
     }
   } else {
@@ -2354,6 +2351,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
     DCHECK(!conn_state.subscribe_info);
   }
+
+  UnwatchAllKeys(server_cntx);
 
   DeactivateMonitoring(server_cntx);
 

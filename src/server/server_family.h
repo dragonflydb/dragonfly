@@ -87,13 +87,14 @@ struct Metrics {
   uint32_t traverse_ttl_per_sec = 0;
   uint32_t delete_ttl_per_sec = 0;
   uint64_t fiber_switch_cnt = 0;
-  uint64_t fiber_switch_delay_ns = 0;
+  uint64_t fiber_switch_delay_usec = 0;
 
   // Statistics about fibers running for a long time (more than 1ms).
   uint64_t fiber_longrun_cnt = 0;
-  uint64_t fiber_longrun_ns = 0;
+  uint64_t fiber_longrun_usec = 0;
 
-  std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;  // command call frequencies
+  // command call frequencies (count, aggregated latency in usec).
+  std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
 
   bool is_master = true;
   std::vector<ReplicaRoleInfo> replication_metrics;

@@ -8,6 +8,8 @@
 
 #include <memory>
 
+#include "core/heap_size.h"
+#include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/reply_builder.h"
 
@@ -19,8 +21,6 @@ class ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
-  // We won't have any virtual methods, probably. However, since we allocate a derived class,
-  // we need to declare a virtual d-tor, so we could properly delete it from Connection code.
   virtual ~ConnectionContext() {
   }
 
@@ -68,6 +68,10 @@ class ConnectionContext {
     rbuilder_->SendOk();
   }
 
+  virtual size_t UsedMemory() const {
+    return dfly::HeapSize(rbuilder_);
+  }
+
   // connection state / properties.
   bool conn_closing : 1;
   bool req_auth : 1;
@@ -79,6 +83,12 @@ class ConnectionContext {
 
   // How many async subscription sources are active: monitor and/or pubsub - at most 2.
   uint8_t subscriptions;
+
+  std::string authed_username{"default"};
+  uint32_t acl_categories{dfly::acl::ALL};
+  std::vector<uint64_t> acl_commands;
+  // Skip ACL validation, used by internal commands and commands run on admin port
+  bool skip_acl_validation = false;
 
  private:
   Connection* owner_;
