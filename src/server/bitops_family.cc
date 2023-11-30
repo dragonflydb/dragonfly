@@ -656,7 +656,7 @@ bool Overflow::UIntOverflow(int64_t incr, size_t total_bits, int64_t* value) con
 }
 
 bool Overflow::IntOverflow(size_t total_bits, int64_t incr, bool add, int64_t* value) const {
-  // first check the parsed value is in range
+  // This is exactly how redis handles signed overflow and we use the exact same chore
   const int64_t int_max = std::numeric_limits<int64_t>::max();
   const int64_t max = (total_bits == 64) ? int_max : ((1L << (total_bits - 1)) - 1);
   const int64_t min = (-max) - 1;
@@ -688,7 +688,10 @@ bool Overflow::IntOverflow(size_t total_bits, int64_t incr, bool add, int64_t* v
     return true;
   };
 
-  // These can overflow but it won't be an issue because we only use them after we check below
+  // maxincr/minincr can overflow but it won't be an issue because we only use them
+  // after checking 'value' range, so when they are used no overflow
+  // happens. 'uint64_t' cast is there just to prevent undefined behavior on
+  // overflow */
   int64_t maxincr = static_cast<uint64_t>(max) - *value;
   int64_t minincr = min - *value;
 
