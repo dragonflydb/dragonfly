@@ -611,13 +611,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   DCHECK(dispatch_q_.empty());
 
   service_->OnClose(cc_.get());
-
-  stats_->read_buf_capacity -= io_buf_.Capacity();
-
-  // Update num_replicas if this was a replica connection.
-  if (cc_->replica_conn) {
-    --stats_->num_replicas;
-  }
+  DecreaseStatsOnClose();
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
@@ -657,8 +651,6 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
     LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName() << ": " << ec
                  << " " << ec.message();
   }
-
-  --stats_->num_conns;
 }
 
 void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
@@ -826,10 +818,25 @@ void Connection::HandleMigrateRequest() {
   // handles. We can't check above, as the queue might have contained a subscribe request.
   if (cc_->subscriptions == 0) {
     migration_request_ = nullptr;
+
+    DecreaseStatsOnClose();
+
+    auto update_tl_vars = [this] __attribute__((noinline)) {
+      asm volatile("");
+      queue_backpressure_ = &tl_queue_backpressure_;
+
+      stats_ = service_->GetThreadLocalConnectionStats();
+      ++stats_->num_conns;
+      stats_->read_buf_capacity += io_buf_.Capacity();
+      if (cc_->replica_conn) {
+        ++stats_->num_replicas;
+      }
+    };
     this->Migrate(dest);
 
-    // We're now running in `dest` thread
-    queue_backpressure_ = &tl_queue_backpressure_;
+    // We're now running in `dest` thread. We use non-inline lambda to make sure that
+    // thread local variables have not been loaded into a register before we migrated.
+    update_tl_vars();
   }
 
   DCHECK(dispatch_q_.empty());
@@ -1331,6 +1338,16 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
       .mem = mem,
       .buf_mem = io_buf_.GetMemoryUsage(),
   };
+}
+
+void Connection::DecreaseStatsOnClose() {
+  stats_->read_buf_capacity -= io_buf_.Capacity();
+
+  // Update num_replicas if this was a replica connection.
+  if (cc_->replica_conn) {
+    --stats_->num_replicas;
+  }
+  --stats_->num_conns;
 }
 
 }  // namespace facade
