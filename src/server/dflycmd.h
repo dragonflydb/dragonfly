@@ -36,14 +36,14 @@ struct FlowInfo {
   // Shutdown associated socket if its still open.
   void TryShutdownSocket();
 
-  facade::Connection* conn;
+  facade::Connection* conn = nullptr;
 
   Fiber full_sync_fb;                         // Full sync fiber.
   std::unique_ptr<RdbSaver> saver;            // Saver for full sync phase.
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
 
-  DflyVersion version;
+  DflyVersion version = DflyVersion::VER0;
 
   std::optional<LSN> start_partial_sync_at;
   uint64_t last_acked_lsn = 0;
