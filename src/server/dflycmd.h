@@ -46,7 +46,7 @@ struct FlowInfo {
   DflyVersion version;
 
   std::optional<LSN> start_partial_sync_at;
-  uint64_t last_acked_lsn;
+  uint64_t last_acked_lsn = 0;
 
   std::function<void()> cleanup;  // Optional cleanup for cancellation.
 };
