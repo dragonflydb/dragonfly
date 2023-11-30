@@ -1211,12 +1211,28 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 
       invalid_mask |= (1u << slot);
 
-      auto it = dest_right->InsertUniq(std::forward<Key_t>(key),
-                                       std::forward<Value_t>(Value(i, slot)), hash, false);
+      Iterator it = dest_right->InsertUniq(std::forward<Key_t>(key),
+                                           std::forward<Value_t>(Value(i, slot)), hash, false);
 
       // we move items residing in a regular bucket to a new segment.
-      // I do not see a reason why it might overflow to a stash bucket.
-      assert(it.index < kNumBuckets);
+      // Note 1: in case we are somehow attacked with items that after the split
+      // will go into the same segment, we may have a problem.
+      // It is highly unlikely that this happens with real world data.
+      // Note 2: Dragonfly replication is in fact is such unlikely attack. Since we go over
+      // the source table in a special order (go over all the segments for bucket 0,
+      // then for all the segments for bucket 1 etc), what happens is that the rdb stream is full
+      // of items with the same bucket id, say 0. Lots of items will go to the initial segment
+      // into bucket 0, which will become full, then bucket 1 will get full,
+      // and then the 4 stash buckets in the segment. Then the segment will have to split even
+      // though only 6 buckets are used just because of this
+      // extreme skewness of keys distribution. When a segment splits, we will still
+      // have items going into bucket 0 in the new segment. To alleviate this effect we usually
+      // reserve dash table to have enough segments during full sync to avoid handling those
+      // ill-formed splits.
+      // TODO: To protect ourselves again such situations we should use random seed
+      // for our dash hash function, thus avoiding the case where someone, on purpose or due to
+      // selective bias will be able to hit our dashtable with items with the same bucket id.
+      assert(it.found());
       (void)it;
 
       if constexpr (USE_VERSION) {
