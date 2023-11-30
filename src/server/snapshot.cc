@@ -349,6 +349,10 @@ void SliceSnapshot::CloseRecordChannel() {
 }
 
 size_t SliceSnapshot::GetTotalBufferCapacity() const {
+  if (serializer_ == nullptr) {
+    return 0;
+  }
+
   return serializer_->GetTotalBufferCapacity();
 }
 
