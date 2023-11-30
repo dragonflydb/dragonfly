@@ -165,6 +165,7 @@ class SinkReplyBuilder {
   void StartAggregate();
   void StopAggregate();
 
+  std::string batch_;
   ::io::Sink* sink_;
   std::error_code ec_;
 
