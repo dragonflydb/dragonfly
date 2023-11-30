@@ -341,6 +341,9 @@ TieredStats TieredStorage::GetStats() const {
 
 void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   PerDb* db = db_arr_[req->db_index()];
+  if (!db) {  // Db was flushed.
+    return;
+  }
   auto& bin_record = db->bin_map[req->bin_index()];
   if (io_res < 0) {
     LOG(ERROR) << "Error writing into ssd file: " << util::detail::SafeErrorMessage(-io_res);
@@ -521,6 +524,7 @@ void TieredStorage::FlushDB(DbIndex db_index) {
   PerDb* db_data = db_arr_[db_index];
   if (!db_data)
     return;
+
   for (auto [offset, len] : db_data->pages) {
     VLOG(2) << "FlushDB free offset " << offset;
     alloc_.Free(offset, len);
