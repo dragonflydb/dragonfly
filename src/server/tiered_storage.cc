@@ -255,6 +255,7 @@ unsigned TieredStorage::InflightWriteRequest::ExternalizeEntries(PerDb::BinRecor
       CHECK(!pit.is_done()) << "TBD";
 
       ExternalizeEntry(item_offset, stats, &pit->second);
+      VLOG(2) << "ExternalizeEntry: " << it->first;
       bin_record->enqueued_entries.erase(it);
     }
   }
@@ -446,6 +447,7 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   }
 
   string key = it->first.ToString();
+  VLOG(2) << "CancelIo: " << key;
   CHECK(bin_record.enqueued_entries.erase(key));
 }
 
