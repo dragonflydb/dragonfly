@@ -997,6 +997,9 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pr
   return parsed;
 }
 
+// Parses a list of arguments (without key) to a CommandList.
+// Returns the CommandList if the parsing completed succefully or std::string
+// to indicate an error
 nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, bool read_only) {
   CommandList result;
 
