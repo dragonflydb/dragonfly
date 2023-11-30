@@ -1165,10 +1165,13 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // let's pass thread id and connection to db_slice for tracking
     int32_t tid = util::ProactorBase::GetIndex();
 
+    DVLOG(2) << "Ready to schedul transaction";
+
     // uint32_t client_id = dfly_cntx->conn()->GetClientId();
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, tid, keys_to_track, args);
     };
+    dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
 
