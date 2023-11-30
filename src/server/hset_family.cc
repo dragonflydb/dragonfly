@@ -1135,7 +1135,10 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendStringArr(*result);
+    if (result->size() == 1)
+      (*cntx)->SendBulkString(result->front());
+    else
+      (*cntx)->SendStringArr(*result);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     (*cntx)->SendNull();
   } else {
