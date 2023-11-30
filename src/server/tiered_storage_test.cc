@@ -93,6 +93,7 @@ TEST_F(TieredStorageTest, DelBeforeOffload) {
   FillExternalKeys(100);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
+  usleep(20000);  // 0.02 milliseconds
   Metrics m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
   EXPECT_LT(m.db_stats[0].tiered_entries, 100);
@@ -104,6 +105,7 @@ TEST_F(TieredStorageTest, DelBeforeOffload) {
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0u);
 
   FillExternalKeys(100);
+  usleep(20000);  // 0.02 milliseconds
   m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
   EXPECT_LT(m.db_stats[0].tiered_entries, 100);
@@ -116,6 +118,8 @@ TEST_F(TieredStorageTest, AddMultiDb) {
   Run({"select", "5"});
   FillExternalKeys(100);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
+
+  usleep(20000);  // 0.02 milliseconds
 
   Metrics m = GetMetrics();
   EXPECT_GT(m.db_stats[1].tiered_entries, 0u);

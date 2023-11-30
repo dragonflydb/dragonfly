@@ -552,6 +552,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   PerDb* db = db_arr_[db_index];
 
   int64_t res = alloc_.Malloc(kBlockLen);
+  VLOG(2) << "FlushPending Malloc:" << res;
   if (res < 0) {
     InitiateGrow(-res);
     return false;
