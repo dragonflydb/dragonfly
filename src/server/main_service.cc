@@ -2352,6 +2352,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
     DCHECK(!conn_state.subscribe_info);
   }
 
+  UnwatchAllKeys(server_cntx);
+
   DeactivateMonitoring(server_cntx);
 
   server_family_.OnClose(server_cntx);
