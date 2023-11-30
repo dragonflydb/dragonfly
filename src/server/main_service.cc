@@ -1169,57 +1169,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, tid, keys_to_track, args);
     };
-
-    // OpResult<bool> remember_key_result =
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
-
-    //(*dfly_cntx)->StartCollection(2, RedisReplyBuilder::CollectionType::PUSH);
-    // std::string inval = "invalidate";
-    //(*dfly_cntx)->SendBulkString(inval);
-    //(*dfly_cntx)->SendStringArr(keys_to_track);
-    //(*dfly_cntx)->SendRET();
-
-    //(*dfly_cntx)->StartCollection(2, RedisReplyBuilder::CollectionType::PUSH);
-    //(*dfly_cntx)->SendBulkString(inval);
-    //(*dfly_cntx)->SendStringArr(keys_to_track);
   }
-
-  /*
-    if (is_read_cmd) {
-
-    OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args_no_cmd);
-    if (!key_index_res) {
-    }
-
-    const auto& key_index = *key_index_res;
-    std::vector<string_view> keys;
-    // Iterate keys and check to which slot they belong.
-    for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
-      string_view key = ArgS(args_no_cmd, i);
-      keys.push_back(key);
-    }
-
-      uint32_t client_id = dfly_cntx->conn()->GetClientId();
-
-       auto cb = [&](Transaction* t, EngineShard* shard) {
-        return OpRememberKey(t->GetOpArgs(shard), client_id, keys, args);
-      };
-
-
-
-      //OpStatus status =
-      //      dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
-      OpResult<bool> remember_key_result = dfly_cntx->transaction->ScheduleSingleHopT(cb);
-
-
-      // send PUSH message to client to invalidate the key
-      (*dfly_cntx)->StartCollection(2, RedisReplyBuilder::CollectionType::PUSH);
-      std::string inval = "invalidate";
-      (*dfly_cntx)->SendBulkString(inval);
-      (*dfly_cntx)->SendStringArr(keys);
-
-    }
-  */
 
   uint64_t end_ns = ProactorBase::GetMonotonicTimeNs();
   request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
