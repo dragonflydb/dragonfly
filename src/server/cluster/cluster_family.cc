@@ -16,7 +16,6 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
-#include "server/cluster/cluster_slot_migration.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -386,6 +385,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
 
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
+  args.remove_prefix(1);  // remove subcommand name
   if (sub_cmd == "GETSLOTINFO") {
     return DflyClusterGetSlotInfo(args, cntx);
   } else if (sub_cmd == "CONFIG") {
@@ -396,13 +396,15 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterFlushSlots(args, cntx);
   } else if (sub_cmd == "START-SLOT-MIGRATION") {
     return DflyClusterStartSlotMigration(args, cntx);
+  } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
+    return DflySlotMigrationStatus(args, cntx);
   }
 
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
 }
 
 void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() != 1) {
+  if (!args.empty()) {
     return (*cntx)->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
   }
   (*cntx)->SendBulkString(server_family_->master_id());
@@ -479,11 +481,11 @@ void WriteFlushSlotsToJournal(const SlotSet& slots) {
 void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder* rb = cntx->reply_builder();
 
-  if (args.size() != 2) {
+  if (args.size() != 1) {
     return rb->SendError(WrongNumArgsError("DFLYCLUSTER CONFIG"));
   }
 
-  string_view json_str = ArgS(args, 1);
+  string_view json_str = ArgS(args, 0);
   optional<JsonType> json = JsonFromString(json_str);
   if (!json.has_value()) {
     LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
@@ -521,18 +523,18 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 }
 
 void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() <= 2) {
+  if (args.size() <= 1) {
     return (*cntx)->SendError(facade::WrongNumArgsError("DFLYCLUSTER GETSLOTINFO"), kSyntaxErrType);
   }
 
-  ToUpper(&args[1]);
-  string_view slots_str = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view slots_str = ArgS(args, 0);
   if (slots_str != "SLOTS") {
     return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
   }
 
   vector<std::pair<SlotId, SlotStats>> slots_stats;
-  for (size_t i = 2; i < args.size(); ++i) {
+  for (size_t i = 1; i < args.size(); ++i) {
     string_view slot_str = ArgS(args, i);
     uint32_t sid;
     if (!absl::SimpleAtoi(slot_str, &sid)) {
@@ -576,8 +578,6 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder* rb = cntx->reply_builder();
 
-  args.remove_prefix(1);  // Removes "FLUSHSLOTS" subcmd string
-
   SlotSet slots;
   slots.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
@@ -594,10 +594,6 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
 }
 
 void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx) {
-  SinkReplyBuilder* rb = cntx->reply_builder();
-
-  args.remove_prefix(1);  // Removes "START-SLOT-MIGRATION" subcmd string
-
   CmdArgParser parser(args);
   auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
   std::vector<SlotRange> slots;
@@ -606,13 +602,48 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
     slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
+  SinkReplyBuilder* rb = cntx->reply_builder();
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return rb->SendError(err->MakeReply());
 
-  ClusterSlotMigration node(std::string(host_ip), port, slots);
-  node.Start(cntx);
+  auto* node = AddMigration(std::string(host_ip), port, std::move(slots));
+  node->Start(cntx);
 
   return rb->SendOk();
+}
+
+void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+  auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
+
+  SinkReplyBuilder* rb = cntx->reply_builder();
+  if (auto err = parser.Error(); err)
+    return rb->SendError(err->MakeReply());
+
+  auto state = [&] {
+    lock_guard lk(migrations_mu_);
+    for (const auto& m : migrations_) {
+      const auto info = m->GetInfo();
+      if (info.host == host_ip && info.port == port) {
+        return info.state;
+      }
+    }
+    return ClusterSlotMigration::C_NO_STATE;
+  }();
+  auto state_str = [state] {
+    switch (state) {
+      case ClusterSlotMigration::C_NO_STATE:
+        return "NO_STATE"sv;
+      case ClusterSlotMigration::C_CONNECTING:
+        return "CONNECTING"sv;
+      case ClusterSlotMigration::C_FULL_SYNC:
+        return "FULL_SYNC"sv;
+      case ClusterSlotMigration::C_STABLE_SYNC:
+        return "STABLE_SYNC"sv;
+    }
+    return "NO_STATE"sv;
+  }();
+  rb->SendSimpleString(state_str);
 }
 
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
@@ -624,6 +655,14 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   } else {
     (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
+}
+
+ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
+                                                  std::vector<ClusterConfig::SlotRange> slots) {
+  lock_guard lk(migrations_mu_);
+  return migrations_
+      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port, std::move(slots)))
+      .get();
 }
 
 void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {

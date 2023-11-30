@@ -50,6 +50,8 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "couldn't greet source "));
 
+  state_ = ClusterSlotMigration::C_CONNECTING;
+
   (*cntx)->SendOk();
 
   return {};
@@ -75,6 +77,11 @@ error_code ClusterSlotMigration::Greet() {
   souce_shards_num_ = get<int64_t>(LastResponseArgs()[0].u);
 
   return error_code{};
+}
+
+ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
+  const auto& ctx = server();
+  return {ctx.host, ctx.port, state_};
 }
 
 }  // namespace dfly
