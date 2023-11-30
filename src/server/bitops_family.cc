@@ -6,11 +6,16 @@
 
 #include <bitset>
 
+#include "base/expected.hpp"
+#include "facade/op_status.h"
+
 extern "C" {
 #include "redis/object.h"
 }
 
+#include "absl/strings/match.h"
 #include "base/logging.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -19,6 +24,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "src/core/overloaded.h"
 #include "util/varz.h"
 
 namespace dfly {
@@ -260,7 +266,7 @@ constexpr uint8_t TurnBitOn(uint8_t on, uint32_t offset) {
   return on |= 1 << offset;
 }
 
-constexpr uint8_t TunBitOff(uint8_t on, uint32_t offset) {
+constexpr uint8_t TurnBitOff(uint8_t on, uint32_t offset) {
   return on &= ~(1 << offset);
 }
 
@@ -268,9 +274,8 @@ bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry) {
   // we need to return the old value after setting the value for offset
   const auto old_value{GetBitValue(*entry, offset)};  // save this as the return value
   auto byte{GetByteValue(*entry, offset)};
-  std::bitset<8> bits{byte};
   const auto bit_index{GetNormalizedBitIndex(offset)};
-  byte = bit_value ? TurnBitOn(byte, bit_index) : TunBitOff(byte, bit_index);
+  byte = bit_value ? TurnBitOn(byte, bit_index) : TurnBitOff(byte, bit_index);
   (*entry)[GetByteIndex(offset)] = byte;
   return old_value;
 }
@@ -302,7 +307,19 @@ class ElementAccess {
   std::string Value() const;
 
   void Commit(std::string_view new_value) const;
+
+  // return nullopt when key exists but it's not encoded as string
+  // return true if key exists and false if it doesn't
+  std::optional<bool> Exists(EngineShard* shard);
 };
+
+std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
+  auto res = shard->db_slice().Find(context_, key_, OBJ_STRING);
+  if (res.status() == OpStatus::WRONG_TYPE) {
+    return {};
+  }
+  return res.status() != OpStatus::KEY_NOTFOUND;
+}
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
   try {
@@ -553,7 +570,7 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 2 || args.size() > 4) {
     return (*cntx)->SendError(kSyntaxErr);
   }
-  // return (*cntx)->SendLong(0);
+
   std::string_view key = ArgS(args, 0);
   bool as_bit = false;
   int64_t start = 0;
@@ -577,13 +594,527 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   HandleOpValueResult(res, cntx);
 }
 
+// GCC yields a wrong warning about uninitialized optional use
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
+enum class EncodingType { UINT, INT, NILL };
+
+struct CommonAttributes {
+  EncodingType type;
+  size_t encoding_bit_size;
+  size_t offset;
+};
+
+// We either return the result of the subcommand (int64_t) or nullopt
+// to represent overflow/underflow failures
+using ResultType = std::optional<int64_t>;
+
+struct Overflow {
+  enum Policy { WRAP, SAT, FAIL };
+
+  // Used to check for unsigned overflow/underflow.
+  // If incr is non zero, we check for overflows in the expression incr + *value
+  // If incr is zero, we check for overflows in the expression *value
+  // If the overflow fails because of Policy::FAIL, it returns false. Otherwise, true.
+  // The result of handling the overflow is stored in the pointer value
+  bool UIntOverflow(int64_t incr, size_t total_bits, int64_t* value) const;
+
+  // Used to check for signed overflow/underflow.
+  // If incr is non zero, we check for overflows in the expression incr + *value
+  // If incr is zero, we check for overflows in the expression *value
+  // If the overflow fails because of Policy::FAIL, it returns false. Otherwise, true.
+  // The result of handling the overflow is stored in the pointer value
+  bool IntOverflow(size_t total_bits, int64_t incr, bool add, int64_t* value) const;
+
+  Policy type = WRAP;
+};
+
+bool Overflow::UIntOverflow(int64_t incr, size_t total_bits, int64_t* value) const {
+  // total up to 63 bits -- we do not support 64 bit unsigned
+  const uint64_t max = (1UL << total_bits) - 1;
+
+  uint64_t incr_value = incr;
+  if (incr_value + *value > max) {
+    switch (type) {
+      case Overflow::WRAP:
+        // safe to do, won't overflow, both incr and value are <= than 2^63 - 1
+        *value = (incr_value + *value) % max;
+        break;
+      case Overflow::SAT:
+        *value = max;
+        break;
+      case Overflow::FAIL:
+        *value = 0;
+        return false;
+    }
+    return true;
+  }
+
+  *value = incr_value + *value;
+  return true;
+}
+
+bool Overflow::IntOverflow(size_t total_bits, int64_t incr, bool add, int64_t* value) const {
+  // This is exactly how redis handles signed overflow and we use the exact same chore
+  const int64_t int_max = std::numeric_limits<int64_t>::max();
+  const int64_t max = (total_bits == 64) ? int_max : ((1L << (total_bits - 1)) - 1);
+  const int64_t min = (-max) - 1;
+  auto switch_overflow = [&](int64_t wrap_case, int64_t sat_case, int64_t i) {
+    switch (type) {
+      case Overflow::WRAP: {
+        uint64_t msb = 1UL << (total_bits - 1);
+        uint64_t a = *value, b = incr;
+        // Perform addition as unsigned so that's defined
+        uint64_t c = a + b;
+        if (total_bits < 64) {
+          uint64_t mask = static_cast<uint64_t>(-1) << total_bits;
+          if (c & msb) {
+            c |= mask;
+          } else {
+            c &= ~mask;
+          }
+        }
+        *value = c;
+        break;
+      }
+      case Overflow::SAT:
+        *value = sat_case;
+        break;
+      case Overflow::FAIL:
+        *value = 0;
+        return false;
+    }
+    return true;
+  };
+
+  // maxincr/minincr can overflow but it won't be an issue because we only use them
+  // after checking 'value' range, so when they are used no overflow
+  // happens. 'uint64_t' cast is there just to prevent undefined behavior on
+  // overflow */
+  int64_t maxincr = static_cast<uint64_t>(max) - *value;
+  int64_t minincr = min - *value;
+
+  // overflow
+  if (*value > max || (total_bits != 64 && incr > maxincr) ||
+      (*value >= 0 && incr > 0 && incr > maxincr)) {
+    return switch_overflow(min, max, 1);
+  }
+
+  // underflow
+  if (*value < min || (total_bits != 64 && incr < minincr) ||
+      (*value < 0 && incr < 0 && incr < minincr)) {
+    return switch_overflow(max, min, -1);
+  }
+
+  *value = *value + incr;
+
+  return true;
+}
+
+class Get {
+ public:
+  explicit Get(CommonAttributes attr) : attr_(attr) {
+  }
+
+  // Apply the GET subcommand to the bitfield bytes.
+  // Return either the subcommand result (int64_t) or empty optional if failed because of
+  // Policy:FAIL
+  ResultType ApplyTo(Overflow ov, const std::string* bitfield);
+
+ private:
+  CommonAttributes attr_;
+};
+
+ResultType Get::ApplyTo(Overflow ov, const std::string* bitfield) {
+  const auto& bytes = *bitfield;
+  const int32_t total_bytes = static_cast<int32_t>(bytes.size());
+  const size_t offset = attr_.offset;
+  auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1);
+
+  uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
+  if (last_byte_offset > total_bytes) {
+    return {};
+  }
+
+  const bool is_negative =
+      CheckBitStatus(GetByteValue(bytes, offset), GetNormalizedBitIndex(offset));
+
+  int64_t result = 0;
+  for (size_t i = 0; i < attr_.encoding_bit_size; ++i) {
+    uint8_t byte{GetByteValue(bytes, lsb)};
+    int32_t index = GetNormalizedBitIndex(lsb);
+    int64_t old_bit = CheckBitStatus(byte, index);
+    result |= old_bit << i;
+    --lsb;
+  }
+
+  if (is_negative && attr_.type == EncodingType::INT && result > 0) {
+    result |= -1L ^ ((1L << attr_.encoding_bit_size) - 1);
+  }
+
+  return result;
+}
+
+class Set {
+ public:
+  explicit Set(CommonAttributes attr, int64_t value) : attr_(attr), set_value_(value) {
+  }
+
+  // Apply the SET subcommand to the bitfield value.
+  // Return either the subcommand result (int64_t) or empty optional if failed because of
+  // Policy:FAIL Updates the bitfield to contain the new value
+  ResultType ApplyTo(Overflow ov, std::string* bitfield);
+
+ private:
+  // Helper function that delegates overflow checking to the Overflow object
+  bool HandleOverflow(Overflow ov);
+
+  CommonAttributes attr_;
+  int64_t set_value_;
+};
+
+ResultType Set::ApplyTo(Overflow ov, std::string* bitfield) {
+  std::string& bytes = *bitfield;
+  const int32_t total_bytes = static_cast<int32_t>(bytes.size());
+  auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1) + 1;
+  if (last_byte_offset > total_bytes) {
+    bytes.resize(last_byte_offset, 0);
+  }
+
+  if (!HandleOverflow(ov)) {
+    return {};
+  }
+
+  uint32_t lsb = attr_.offset + attr_.encoding_bit_size - 1;
+  int64_t old_value = 0;
+
+  for (size_t i = 0; i < attr_.encoding_bit_size; ++i) {
+    bool bit_value = (set_value_ >> i) & 0x01;
+    uint8_t byte{GetByteValue(bytes, lsb)};
+    int32_t index = GetNormalizedBitIndex(lsb);
+    int64_t old_bit = CheckBitStatus(byte, index);
+    byte = bit_value ? TurnBitOn(byte, index) : TurnBitOff(byte, index);
+    bytes[GetByteIndex(lsb)] = byte;
+    old_value |= old_bit << i;
+    --lsb;
+  }
+
+  return old_value;
+}
+
+bool Set::HandleOverflow(Overflow ov) {
+  size_t total_bits = attr_.encoding_bit_size;
+  if (attr_.type == EncodingType::UINT) {
+    return ov.UIntOverflow(0, attr_.encoding_bit_size, &set_value_);
+  }
+
+  return ov.IntOverflow(total_bits, 0, false, &set_value_);
+}
+
+class IncrBy {
+ public:
+  explicit IncrBy(CommonAttributes attr, int64_t val) : attr_(attr), incr_value_(val) {
+  }
+
+  // Apply the INCRBY subcommand to the bitfield value.
+  // Return either the subcommand result (int64_t) or empty optional if failed because of
+  // Policy:FAIL Updates the bitfield to contain the new incremented value
+  ResultType ApplyTo(Overflow ov, std::string* bitfield);
+
+ private:
+  // Helper function that delegates overflow checking to the Overflow object
+  bool HandleOverflow(Overflow ov, int64_t* previous);
+
+  CommonAttributes attr_;
+  int64_t incr_value_;
+};
+
+ResultType IncrBy::ApplyTo(Overflow ov, std::string* bitfield) {
+  std::string& bytes = *bitfield;
+  Get get(attr_);
+  auto res = get.ApplyTo(ov, &bytes);
+
+  if (!res) {
+    Set set(attr_, incr_value_);
+    return set.ApplyTo(ov, &bytes);
+  }
+
+  if (!HandleOverflow(ov, &*res)) {
+    return {};
+  }
+
+  Set set(attr_, *res);
+  set.ApplyTo(ov, &bytes);
+  return *res;
+}
+
+bool IncrBy::HandleOverflow(Overflow ov, int64_t* previous) {
+  if (attr_.type == EncodingType::UINT) {
+    return ov.UIntOverflow(incr_value_, attr_.encoding_bit_size, previous);
+  }
+
+  const size_t total_bits = attr_.encoding_bit_size;
+  return ov.IntOverflow(total_bits, incr_value_, true, previous);
+}
+
+// Subcommand types for each of the subcommands of the BITFIELD command
+using Command = std::variant<Get, Set, Overflow, IncrBy>;
+
+using Result = std::optional<ResultType>;
+
+// Visitor for all the subcommand variants. Calls ApplyTo, to execute the subcommand
+class CommandApplyVisitor {
+ public:
+  explicit CommandApplyVisitor(std::string bitfield) : bitfield_(std::move(bitfield)) {
+  }
+
+  Result operator()(Get get) {
+    return get.ApplyTo(overflow_, &bitfield_);
+  }
+
+  template <typename T> Result operator()(T update) {
+    should_commit_ = true;
+    return update.ApplyTo(overflow_, &bitfield_);
+  }
+
+  Result operator()(Overflow overflow) {
+    overflow_ = overflow;
+    return {};
+  }
+
+  std::string_view Bitfield() const {
+    return bitfield_;
+  }
+
+  bool ShouldCommit() const {
+    return should_commit_;
+  }
+
+ private:
+  // Most recent overflow object encountered. We cache it to make the overflow
+  // policy changes stick among different subcommands
+  Overflow overflow_;
+  // This will be commited if it was updated
+  std::string bitfield_;
+  // If either of the subcommands SET|INCRBY is used we should persist the changes.
+  // Otherwise, we only used a read only subcommand (GET)
+  bool should_commit_ = false;
+};
+
+// A lit of subcommands used in BITFIELD command
+using CommandList = std::vector<Command>;
+
+// Helper class used in the shard cb that abstracts away the iteration and execution of subcommands
+class StateExecutor {
+ public:
+  StateExecutor(ElementAccess access, EngineShard* shard) : access_{access}, shard_(shard) {
+  }
+
+  //  Iterates over all of the parsed subcommands and executes them one by one. At the end,
+  //  if an update subcommand SET|INCRBY was used, commit back the changes via the ElementAccess
+  //  object
+  OpResult<std::vector<ResultType>> Execute(const CommandList& commands);
+
+ private:
+  ElementAccess access_;
+  EngineShard* shard_;
+};
+
+OpResult<std::vector<ResultType>> StateExecutor::Execute(const CommandList& commands) {
+  auto res = access_.Exists(shard_);
+  if (!res) {
+    return {OpStatus::WRONG_TYPE};
+  }
+  std::string value;
+  if (*res) {
+    access_.Find(shard_);
+    value = access_.Value();
+  }
+
+  std::vector<ResultType> results;
+  CommandApplyVisitor visitor(std::move(value));
+  for (auto& command : commands) {
+    auto res = std::visit(visitor, command);
+    if (res) {
+      results.push_back(*res);
+    }
+  }
+
+  if (visitor.ShouldCommit()) {
+    access_.Find(shard_);
+    access_.Commit(visitor.Bitfield());
+  }
+
+  return results;
+}
+
+nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* prser) {
+  CmdArgParser& parser = *prser;
+  CommonAttributes parsed;
+  using nonstd::make_unexpected;
+  if (!parser.HasAtLeast(2)) {
+    return make_unexpected(kSyntaxErr);
+  }
+
+  auto encoding = parser.ToUpper().Next();
+  if (absl::StartsWith(encoding, "U")) {
+    parsed.type = EncodingType::UINT;
+  } else if (absl::StartsWith(encoding, "I")) {
+    parsed.type = EncodingType::INT;
+  } else {
+    return make_unexpected(kSyntaxErr);
+  }
+
+  std::string_view bits = encoding;
+  bits = bits.substr(1);
+
+  if (!absl::SimpleAtoi(bits, &parsed.encoding_bit_size)) {
+    return make_unexpected(kSyntaxErr);
+  }
+
+  if (parsed.encoding_bit_size <= 0 || parsed.encoding_bit_size > 64) {
+    return make_unexpected(
+        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
+        "is.");
+  }
+
+  if (parsed.encoding_bit_size == 64 && parsed.type == EncodingType::UINT) {
+    return make_unexpected(
+        "invalid bitfield type. use something like i16 u8. note that u64 is not supported but i64 "
+        "is.");
+  }
+
+  std::string_view offset_str = parser.Next();
+  bool is_proxy = false;
+  if (absl::StartsWith(offset_str, "#")) {
+    offset_str = offset_str.substr(1);
+    is_proxy = true;
+  }
+  if (!absl::SimpleAtoi(offset_str, &parsed.offset)) {
+    return make_unexpected(kSyntaxErr);
+  }
+  if (is_proxy) {
+    parsed.offset = parsed.offset * parsed.encoding_bit_size;
+  }
+  return parsed;
+}
+
+// Parses a list of arguments (without key) to a CommandList.
+// Returns the CommandList if the parsing completed succefully or std::string
+// to indicate an error
+nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
+  CommandList result;
+
+  using nonstd::make_unexpected;
+
+  CmdArgParser parser(args);
+  while (parser.HasNext()) {
+    if (!parser.HasAtLeast(2)) {
+      return make_unexpected(kSyntaxErr);
+    }
+
+    auto op = parser.ToUpper().Next();
+
+    using namespace std::string_view_literals;
+    if (op == "OVERFLOW"sv) {
+      using pol = Overflow::Policy;
+      auto res = parser.ToUpper().Switch("SAT", pol::SAT, "WRAP", pol::WRAP, "FAIL", pol::FAIL);
+      if (!parser.HasError()) {
+        result.push_back(Overflow{res});
+        continue;
+      }
+      parser.Error();
+      return make_unexpected(kSyntaxErr);
+    }
+
+    auto maybe_attr = ParseCommonAttr(&parser);
+    if (!maybe_attr.has_value()) {
+      return make_unexpected(std::move(maybe_attr.error()));
+    }
+
+    auto attr = maybe_attr.value();
+    if (op == "GET"sv) {
+      result.push_back(Command(Get(attr)));
+      continue;
+    }
+
+    auto value = parser.ToUpper().Next<int64_t>();
+    if (parser.HasError()) {
+      parser.Error();
+      return make_unexpected(kSyntaxErr);
+    }
+
+    if (op == "SET"sv) {
+      result.push_back(Command(Set(attr, value)));
+      continue;
+    }
+
+    if (op == "INCRBY"sv) {
+      result.push_back(Command(IncrBy(attr, value)));
+      continue;
+    }
+    return make_unexpected(kSyntaxErr);
+  }
+
+  return result;
+}
+
+void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx) {
+  const size_t total = results.size();
+  if (total == 0) {
+    (*cntx)->SendNullArray();
+    return;
+  }
+
+  (*cntx)->StartArray(total);
+  for (const auto& elem : results) {
+    if (elem) {
+      (*cntx)->SendLong(*elem);
+      continue;
+    }
+
+    (*cntx)->SendNull();
+  }
+}
+
 void BitField(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendLong(0);
+  if (args.size() == 1) {
+    (*cntx)->SendNullArray();
+    return;
+  }
+  auto key = ArgS(args, 0);
+  auto maybe_ops_list = ParseToCommandList(args.subspan(1));
+
+  if (!maybe_ops_list.has_value()) {
+    cntx->SendError(maybe_ops_list.error());
+    return;
+  }
+  CommandList cmd_list = std::move(maybe_ops_list.value());
+
+  auto cb = [&cmd_list, &key](Transaction* t,
+                              EngineShard* shard) -> OpResult<std::vector<ResultType>> {
+    StateExecutor executor(ElementAccess(key, t->GetOpArgs(shard)), shard);
+    return executor.Execute(cmd_list);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<std::vector<ResultType>> res = trans->ScheduleSingleHopT(std::move(cb));
+
+  if (res == OpStatus::WRONG_TYPE) {
+    cntx->SendError(kWrongTypeErr);
+    return;
+  }
+
+  SendResults(*res, cntx);
 }
 
 void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendLong(0);
+  cntx->SendError("Not Yet Implemented");
+  // return BitField(args, cntx);
 }
+
+#pragma GCC diagnostic pop
 
 void BitOp(CmdArgList args, ConnectionContext* cntx) {
   static const std::array<std::string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
