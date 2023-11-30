@@ -1877,7 +1877,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
 
-  (*cntx)->SendBulkString(info);
+  (*cntx)->SendVerbatimString(info);
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {

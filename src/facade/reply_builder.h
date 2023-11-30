@@ -212,6 +212,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   enum CollectionType { ARRAY, SET, MAP, PUSH };
 
+  enum VerbatimFormat { TXT, MARKDOWN };
+
   using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
 
   RedisReplyBuilder(::io::Sink* stream);
@@ -247,7 +249,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
 
-  void SendRET();
+  void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
 
  protected:
   struct WrappedStrSpan : public StrSpan {

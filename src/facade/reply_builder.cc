@@ -291,12 +291,6 @@ void RedisReplyBuilder::SendProtocolError(std::string_view str) {
   SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
 }
 
-void RedisReplyBuilder::SendRET() {
-  // iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
-  iovec v[1] = {IoVec(kRET)};
-  Send(v, ABSL_ARRAYSIZE(v));
-}
-
 void RedisReplyBuilder::SendSimpleString(std::string_view str) {
   iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
   Send(v, ABSL_ARRAYSIZE(v));
@@ -335,6 +329,32 @@ void RedisReplyBuilder::SendBulkString(std::string_view str) {
   // 3 parts: length, string and CRLF.
   iovec v[3] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
 
+  return Send(v, ABSL_ARRAYSIZE(v));
+}
+
+void RedisReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat format) {
+  if (!is_resp3_)
+    return SendBulkString(str);
+
+  char tmp[absl::numbers_internal::kFastToBufferSize + 3];
+  tmp[0] = '=';
+  // + 4 because format is three byte, and need to be followed by a ":"
+  char* next = absl::numbers_internal::FastIntToBuffer(uint32_t(str.size() + 4), tmp + 1);
+  *next++ = '\r';
+  *next++ = '\n';
+
+  std::string_view lenpref{tmp, size_t(next - tmp)};
+
+  std::string_view format_str;
+  if (format == VerbatimFormat::TXT)
+    format_str = "txt:";
+  else if (format == VerbatimFormat::MARKDOWN)
+    format_str = "mkd:";
+  else {
+    DVLOG(1) << "Unknown verbatim reply format: " << format;
+    return;
+  }
+  iovec v[4] = {IoVec(lenpref), IoVec(format_str), IoVec(str), IoVec(kCRLF)};
   return Send(v, ABSL_ARRAYSIZE(v));
 }
 
