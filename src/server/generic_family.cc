@@ -456,9 +456,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     // According to Redis code we need to
     // 1. Save the value itself - without the key
     // 2. Save footer: this include the RDB version and the CRC value for the message
-    unsigned obj_type = it->second.ObjType();
-    unsigned encoding = it->second.Encoding();
-    auto type = RdbObjectType(obj_type, encoding);
+    auto type = RdbObjectType(it->second);
     DVLOG(1) << "We are going to dump object type: " << type;
     std::error_code ec = serializer.WriteOpcode(type);
     CHECK(!ec);

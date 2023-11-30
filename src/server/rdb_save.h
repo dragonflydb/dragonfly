@@ -25,7 +25,7 @@ typedef struct streamCG streamCG;
 
 namespace dfly {
 
-uint8_t RdbObjectType(unsigned type, unsigned encoding);
+uint8_t RdbObjectType(const PrimeValue& pv);
 
 class EngineShard;
 class Service;

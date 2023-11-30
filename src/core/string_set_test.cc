@@ -448,4 +448,11 @@ TEST_F(StringSetTest, Reserve) {
   }
 }
 
+TEST_F(StringSetTest, IterateEmpty) {
+  for (const auto& s : *ss_) {
+    // We're iterating to make sure there is no crash. However, if we got here, it's a bug
+    CHECK(false) << "Found entry " << s << " in empty set";
+  }
+}
+
 }  // namespace dfly
