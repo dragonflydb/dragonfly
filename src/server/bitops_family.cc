@@ -308,6 +308,8 @@ class ElementAccess {
 
   void Commit(std::string_view new_value) const;
 
+  // return nullopt when key exists but it's not encoded as string
+  // return true if key exists and false if it doesn't
   std::optional<bool> Exists(EngineShard* shard);
 };
 
@@ -604,7 +606,7 @@ struct CommonAttributes {
   size_t offset;
 };
 
-// We either return the result of the subcommand (int64_t) or Nill (empty optional)
+// We either return the result of the subcommand (int64_t) or nullopt
 // to represent overflow/underflow failures
 using ResultType = std::optional<int64_t>;
 
@@ -655,16 +657,25 @@ bool Overflow::UIntOverflow(int64_t incr, size_t total_bits, int64_t* value) con
 
 bool Overflow::IntOverflow(size_t total_bits, int64_t incr, bool add, int64_t* value) const {
   // first check the parsed value is in range
-  const int64_t max = (1UL << total_bits) - 1;
-  const int64_t min = -max - 1;
-  const uint64_t total_elements =
-      total_bits == 63 ? std::numeric_limits<uint64_t>::max() : static_cast<uint64_t>(max) * 2 + 2;
-
+  const int64_t int_max = std::numeric_limits<int64_t>::max();
+  const int64_t max = (total_bits == 64) ? int_max : ((1L << (total_bits - 1)) - 1);
+  const int64_t min = (-max) - 1;
   auto switch_overflow = [&](int64_t wrap_case, int64_t sat_case, int64_t i) {
     switch (type) {
       case Overflow::WRAP: {
-        int64_t res = add ? incr - i : *value % total_elements;
-        *value = wrap_case + res;
+        uint64_t msb = 1UL << (total_bits - 1);
+        uint64_t a = *value, b = incr;
+        // Perform addition as unsigned so that's defined
+        uint64_t c = a + b;
+        if (total_bits < 64) {
+          uint64_t mask = static_cast<uint64_t>(-1) << total_bits;
+          if (c & msb) {
+            c |= mask;
+          } else {
+            c &= ~mask;
+          }
+        }
+        *value = c;
         break;
       }
       case Overflow::SAT:
@@ -677,19 +688,24 @@ bool Overflow::IntOverflow(size_t total_bits, int64_t incr, bool add, int64_t* v
     return true;
   };
 
-  // overflow of the increment value
-  if (*value >= 0 && *value > max - incr) {
+  // These can overflow but it won't be an issue because we only use them after we check below
+  int64_t maxincr = static_cast<uint64_t>(max) - *value;
+  int64_t minincr = min - *value;
+
+  // overflow
+  if (*value > max || (total_bits != 64 && incr > maxincr) ||
+      (*value >= 0 && incr > 0 && incr > maxincr)) {
     return switch_overflow(min, max, 1);
   }
 
-  // underflow of the increment value
-  if (min - incr > *value) {
+  // underflow
+  if (*value < min || (total_bits != 64 && incr < minincr) ||
+      (*value < 0 && incr < 0 && incr < minincr)) {
     return switch_overflow(max, min, -1);
   }
 
-  if (add) {
-    *value = *value + incr;
-  }
+  *value = *value + incr;
+
   return true;
 }
 
@@ -790,7 +806,7 @@ bool Set::HandleOverflow(Overflow ov) {
     return ov.UIntOverflow(0, attr_.encoding_bit_size, &set_value_);
   }
 
-  return ov.IntOverflow(total_bits - 1, 0, false, &set_value_);
+  return ov.IntOverflow(total_bits, 0, false, &set_value_);
 }
 
 class IncrBy {
@@ -805,7 +821,7 @@ class IncrBy {
 
  private:
   // Helper function that delegates overflow checking to the Overflow object
-  bool HandleOverflow(Overflow ov, int64_t& previous);
+  bool HandleOverflow(Overflow ov, int64_t* previous);
 
   CommonAttributes attr_;
   int64_t incr_value_;
@@ -821,7 +837,7 @@ ResultType IncrBy::ApplyTo(Overflow ov, std::string* bitfield) {
     return set.ApplyTo(ov, &bytes);
   }
 
-  if (!HandleOverflow(ov, *res)) {
+  if (!HandleOverflow(ov, &*res)) {
     return {};
   }
 
@@ -830,16 +846,13 @@ ResultType IncrBy::ApplyTo(Overflow ov, std::string* bitfield) {
   return *res;
 }
 
-bool IncrBy::HandleOverflow(Overflow ov, int64_t& previous) {
+bool IncrBy::HandleOverflow(Overflow ov, int64_t* previous) {
   if (attr_.type == EncodingType::UINT) {
-    return ov.UIntOverflow(incr_value_, attr_.encoding_bit_size, &previous);
+    return ov.UIntOverflow(incr_value_, attr_.encoding_bit_size, previous);
   }
 
-  const size_t total_bits = attr_.encoding_bit_size - 1;
-  if (!ov.IntOverflow(total_bits, 0, false, &incr_value_)) {
-    return false;
-  }
-  return ov.IntOverflow(total_bits, incr_value_, true, &previous);
+  const size_t total_bits = attr_.encoding_bit_size;
+  return ov.IntOverflow(total_bits, incr_value_, true, previous);
 }
 
 // Subcommand types for each of the subcommands of the BITFIELD command
@@ -853,16 +866,16 @@ class CommandApplyVisitor {
   explicit CommandApplyVisitor(std::string bitfield) : bitfield_(std::move(bitfield)) {
   }
 
-  Result operator()(Get& get) {
+  Result operator()(Get get) {
     return get.ApplyTo(overflow_, &bitfield_);
   }
 
-  template <typename T> Result operator()(T& update) {
+  template <typename T> Result operator()(T update) {
     should_commit_ = true;
     return update.ApplyTo(overflow_, &bitfield_);
   }
 
-  Result operator()(Overflow& overflow) {
+  Result operator()(Overflow overflow) {
     overflow_ = overflow;
     return {};
   }
@@ -898,14 +911,14 @@ class StateExecutor {
   //  Iterates over all of the parsed subcommands and executes them one by one. At the end,
   //  if an update subcommand SET|INCRBY was used, commit back the changes via the ElementAccess
   //  object
-  OpResult<std::vector<ResultType>> Execute(CommandList& commands);
+  OpResult<std::vector<ResultType>> Execute(const CommandList& commands);
 
  private:
   ElementAccess access_;
   EngineShard* shard_;
 };
 
-OpResult<std::vector<ResultType>> StateExecutor::Execute(CommandList& commands) {
+OpResult<std::vector<ResultType>> StateExecutor::Execute(const CommandList& commands) {
   auto res = access_.Exists(shard_);
   if (!res) {
     return {OpStatus::WRONG_TYPE};
@@ -933,7 +946,8 @@ OpResult<std::vector<ResultType>> StateExecutor::Execute(CommandList& commands) 
   return results;
 }
 
-nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser& parser) {
+nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* prser) {
+  CmdArgParser& parser = *prser;
   CommonAttributes parsed;
   using nonstd::make_unexpected;
   if (!parser.HasAtLeast(2)) {
@@ -1011,7 +1025,7 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
       return make_unexpected(kSyntaxErr);
     }
 
-    auto maybe_attr = ParseCommonAttr(parser);
+    auto maybe_attr = ParseCommonAttr(&parser);
     if (!maybe_attr.has_value()) {
       return make_unexpected(std::move(maybe_attr.error()));
     }

@@ -588,8 +588,11 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-1"}), IntArg(0));
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i1", "0", "-3"}), IntArg(-1));
 
-  // signed 64 bit
   int64_t min = std::numeric_limits<int64_t>::min();
+  Run({"bitfield", "foo", "set", "i8", "0", absl::StrCat(min)});
+  ASSERT_THAT(Run({"bitfield", "foo", "get", "i8", "0"}), IntArg(0));
+
+  // signed 64 bit
   Run({"bitfield", "foo", "set", "i64", "0", absl::StrCat(min)});
   ASSERT_THAT(Run({"bitfield", "foo", "incrby", "i64", "0", "-1"}), IntArg(max));
 
