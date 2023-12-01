@@ -83,6 +83,19 @@ TEST_F(CmdArgParserTest, Check) {
   EXPECT_TRUE(parser.Check("TAG_2").ExpectTail(1));
 }
 
+TEST_F(CmdArgParserTest, NextStatement) {
+  auto parser = Make({"TAG", "tag_2", "tag_3"});
+
+  parser.ICNext("TAG");
+  EXPECT_FALSE(parser.Error());
+
+  parser.ICNext("TAG_2");
+  EXPECT_FALSE(parser.Error());
+
+  parser.ICNext("TAG_2");
+  EXPECT_TRUE(parser.Error());
+}
+
 TEST_F(CmdArgParserTest, CheckTailFail) {
   auto parser = Make({"TAG", "11", "22", "TAG", "33"});
 
