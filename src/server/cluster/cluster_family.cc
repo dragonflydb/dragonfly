@@ -534,6 +534,9 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
     slots_stats.emplace_back(sid, SlotStats{});
   } while (parser.HasNext());
 
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
+
   Mutex mu;
 
   auto cb = [&](auto*) {
@@ -666,6 +669,9 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
     slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
+
+  if (auto err = parser.Error(); err)
+    return (*cntx)->SendError(err->MakeReply());
 
   if (!tl_cluster_config) {
     (*cntx)->SendError(kClusterNotConfigured);
