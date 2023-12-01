@@ -1152,7 +1152,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // notify the client when there is update, see PostUpdate() in db_slice.cc
   if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
     // let's pass thread id and connection to db_slice for tracking
-    int32_t tid = util::ProactorBase::GetIndex();
+    int32_t tid = ProactorBase::me()->GetPoolIndex();
     // uint32_t client_id = dfly_cntx->conn()->GetClientId();
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto keys = t->GetShardArgs(shard->shard_id());
@@ -1162,9 +1162,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
-
-  uint64_t end_ns = ProactorBase::GetMonotonicTimeNs();
-  request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;

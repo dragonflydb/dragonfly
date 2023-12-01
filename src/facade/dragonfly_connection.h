@@ -77,21 +77,10 @@ class Connection : public util::Connection {
                size_t message_len);
   };
 
-
   struct InvalidationMessage {
     std::string_view key;
     bool invalidate_due_to_flush = false;
   };
-
-  struct MonitorMessage : public std::string {};
-
-  struct AclUpdateMessage {
-    std::vector<std::string> username;
-    std::vector<uint32_t> categories;
-    std::vector<std::vector<uint64_t>> commands;
-  };
-
-  struct MigrationRequestMessage {};
 
   // Pipeline message, accumulated command to be execute.d
   struct PipelineMessage {

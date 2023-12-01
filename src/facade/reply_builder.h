@@ -154,7 +154,6 @@ class SinkReplyBuilder {
   bool HasReplied() const;
 
   virtual size_t UsedMemory() const;
-  std::string batch_;
 
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
