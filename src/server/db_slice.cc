@@ -1321,7 +1321,7 @@ void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
   db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 
-void DbSlice::UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info) {
+void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
   for (const auto& [db_indx, key] : exec_info->watched_keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {

@@ -322,7 +322,7 @@ class DbSlice {
                           ConnectionState::ExecInfo* exec_info);
 
   // Unregisted all watched key entries for connection.
-  void UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info);
+  void UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info);
 
   void SetDocDeletionCallback(DocDeletionCallback ddcb);
 

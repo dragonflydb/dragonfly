@@ -633,15 +633,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   DCHECK(dispatch_q_.empty());
 
   service_->OnClose(cc_.get());
-
-  self_.reset();  // Drop manually, no more new references should be created
-
-  stats_->read_buf_capacity -= io_buf_.Capacity();
-
-  // Update num_replicas if this was a replica connection.
-  if (cc_->replica_conn) {
-    --stats_->num_replicas;
-  }
+  DecreaseStatsOnClose();
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
@@ -681,8 +673,6 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
     LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName() << ": " << ec
                  << " " << ec.message();
   }
-
-  --stats_->num_conns;
 }
 
 void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
@@ -850,10 +840,29 @@ void Connection::HandleMigrateRequest() {
   // handles. We can't check above, as the queue might have contained a subscribe request.
   if (cc_->subscriptions == 0) {
     migration_request_ = nullptr;
+
+    DecreaseStatsOnClose();
+
     this->Migrate(dest);
 
-    // We're now running in `dest` thread
-    queue_backpressure_ = &tl_queue_backpressure_;
+    auto update_tl_vars = [this] [[gnu::noinline]] {
+      // The compiler barrier that does not allow reordering memory accesses
+      // to before this function starts. See https://stackoverflow.com/a/75622732
+      asm volatile("");
+
+      queue_backpressure_ = &tl_queue_backpressure_;
+
+      stats_ = service_->GetThreadLocalConnectionStats();
+      ++stats_->num_conns;
+      stats_->read_buf_capacity += io_buf_.Capacity();
+      if (cc_->replica_conn) {
+        ++stats_->num_replicas;
+      }
+    };
+
+    // We're now running in `dest` thread. We use non-inline lambda to force reading new thread's
+    // thread local vars.
+    update_tl_vars();
   }
 
   DCHECK(dispatch_q_.empty());
@@ -1388,6 +1397,16 @@ bool Connection::WeakRef::EnsureMemoryBudget() const {
     return true;
   }
   return false;
+}
+
+void Connection::DecreaseStatsOnClose() {
+  stats_->read_buf_capacity -= io_buf_.Capacity();
+
+  // Update num_replicas if this was a replica connection.
+  if (cc_->replica_conn) {
+    --stats_->num_replicas;
+  }
+  --stats_->num_conns;
 }
 
 }  // namespace facade

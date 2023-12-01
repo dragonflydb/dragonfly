@@ -39,7 +39,8 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
-            cluster/cluster_family.cc acl/user.cc acl/user_registry.cc acl/acl_family.cc
+            cluster/cluster_family.cc cluster/cluster_slot_migration.cc
+            acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)
 
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)

@@ -143,6 +143,10 @@ struct CmdArgParser {
     return std::exchange(error_, {});
   }
 
+  bool HasAtLeast(size_t i) const {
+    return cur_i_ + i <= args_.size() && !error_;
+  }
+
  private:
   template <class T, class... Cases>
   std::optional<std::decay_t<T>> SwitchImpl(std::string_view arg, std::string_view tag, T&& value,
