@@ -523,28 +523,16 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 }
 
 void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() <= 1) {
-    return (*cntx)->SendError(facade::WrongNumArgsError("DFLYCLUSTER GETSLOTINFO"), kSyntaxErrType);
-  }
-
-  ToUpper(&args[0]);
-  string_view slots_str = ArgS(args, 0);
-  if (slots_str != "SLOTS") {
-    return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
-  }
+  CmdArgParser parser(args);
+  parser.ExpectTag("SLOTS");
 
   vector<std::pair<SlotId, SlotStats>> slots_stats;
-  for (size_t i = 1; i < args.size(); ++i) {
-    string_view slot_str = ArgS(args, i);
-    uint32_t sid;
-    if (!absl::SimpleAtoi(slot_str, &sid)) {
-      return (*cntx)->SendError(kInvalidIntErr);
-    }
-    if (sid > ClusterConfig::kMaxSlotNum) {
+  do {
+    auto sid = parser.Next<uint32_t>();
+    if (sid > ClusterConfig::kMaxSlotNum)
       return (*cntx)->SendError("Invalid slot id");
-    }
     slots_stats.emplace_back(sid, SlotStats{});
-  }
+  } while (parser.HasNext());
 
   Mutex mu;
 

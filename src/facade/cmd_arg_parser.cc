@@ -34,7 +34,7 @@ CmdArgParser::CheckProxy::operator bool() const {
   return true;
 }
 
-void CmdArgParser::ExptectTag(std::string_view tag) {
+void CmdArgParser::ExpectTag(std::string_view tag) {
   if (cur_i_ >= args_.size()) {
     Report(OUT_OF_BOUNDS, cur_i_);
     return;
