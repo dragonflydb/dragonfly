@@ -621,15 +621,15 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     return rb->SendError(err->MakeReply());
 
   auto state = [&] {
-    lock_guard lk(migrations_mu_);
-    for (const auto& m : migrations_) {
-      const auto info = m->GetInfo();
-      if (info.host == host_ip && info.port == port) {
+    lock_guard lk(migrations_jobs_mu_);
+    for (const auto& m : migrations_jobs_) {
+      const auto& info = m->GetInfo();
+      if (info.host == host_ip && info.port == port)
         return info.state;
-      }
     }
     return ClusterSlotMigration::C_NO_STATE;
   }();
+
   auto state_str = [state] {
     switch (state) {
       case ClusterSlotMigration::C_NO_STATE:
@@ -641,9 +641,11 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
       case ClusterSlotMigration::C_STABLE_SYNC:
         return "STABLE_SYNC"sv;
     }
-    return "NO_STATE"sv;
+    assert(false);
+    return "UNDEFINED_STATE"sv;
   }();
-  rb->SendSimpleString(state_str);
+
+  return rb->SendSimpleString(state_str);
 }
 
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
@@ -659,8 +661,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
 
 ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
                                                   std::vector<ClusterConfig::SlotRange> slots) {
-  lock_guard lk(migrations_mu_);
-  return migrations_
+  lock_guard lk(migrations_jobs_mu_);
+  return migrations_jobs_
       .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port, std::move(slots)))
       .get();
 }

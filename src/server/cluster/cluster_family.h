@@ -58,8 +58,10 @@ class ClusterFamily {
 
   ServerFamily* server_family_ = nullptr;
 
-  mutable Mutex migrations_mu_;
-  std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_ ABSL_GUARDED_BY(migrations_mu_);
+  mutable Mutex migrations_jobs_mu_;
+  // holds all slot migrations that are currently in progress.
+  std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
+      ABSL_GUARDED_BY(migrations_jobs_mu_);
 };
 
 }  // namespace dfly

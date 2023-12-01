@@ -52,8 +52,6 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
 
   state_ = ClusterSlotMigration::C_CONNECTING;
 
-  (*cntx)->SendOk();
-
   return {};
 }
 
