@@ -305,6 +305,8 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
 
  private:
+  void DecreaseStatsOnClose();
+
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
