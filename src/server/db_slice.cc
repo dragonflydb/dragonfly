@@ -1402,8 +1402,7 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
             continue;
           facade::Connection* conn = it->first->conn();
           DCHECK(conn);
-          facade::Connection::InvalidationMessage x{key};
-          conn->SendInvalidationMessageAsync(x);
+          conn->SendInvalidationMessageAsync({key});
           return;
         }
       };
