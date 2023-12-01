@@ -14,12 +14,7 @@ namespace facade {
 
 // Utility class for easily parsing command options from argument lists.
 struct CmdArgParser {
-  enum ErrorType {
-    OUT_OF_BOUNDS,
-    SHORT_OPT_TAIL,
-    INVALID_INT,
-    INVALID_CASES,
-  };
+  enum ErrorType { OUT_OF_BOUNDS, SHORT_OPT_TAIL, INVALID_INT, INVALID_CASES, INVALID_NEXT };
 
   struct CheckProxy {
     explicit operator bool() const;
@@ -93,6 +88,10 @@ struct CmdArgParser {
     }
   }
 
+  // check next value ignoring case and consume it
+  void ExptectTag(std::string_view tag);
+
+  // Consume next value
   template <class... Cases> auto Switch(Cases&&... cases) {
     if (cur_i_ >= args_.size())
       Report(OUT_OF_BOUNDS, cur_i_);

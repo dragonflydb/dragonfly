@@ -34,6 +34,19 @@ CmdArgParser::CheckProxy::operator bool() const {
   return true;
 }
 
+void CmdArgParser::ExptectTag(std::string_view tag) {
+  if (cur_i_ >= args_.size()) {
+    Report(OUT_OF_BOUNDS, cur_i_);
+    return;
+  }
+
+  auto idx = cur_i_++;
+  auto val = ToSV(args_[idx]);
+  if (!absl::EqualsIgnoreCase(val, tag)) {
+    Report(INVALID_NEXT, idx);
+  }
+}
+
 template <typename T> T CmdArgParser::Num(size_t idx) {
   auto arg = SafeSV(idx);
   T out;
