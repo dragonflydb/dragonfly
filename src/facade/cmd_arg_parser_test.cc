@@ -86,13 +86,13 @@ TEST_F(CmdArgParserTest, Check) {
 TEST_F(CmdArgParserTest, NextStatement) {
   auto parser = Make({"TAG", "tag_2", "tag_3"});
 
-  parser.ICNext("TAG");
+  parser.ExptectTag("TAG");
   EXPECT_FALSE(parser.Error());
 
-  parser.ICNext("TAG_2");
+  parser.ExptectTag("TAG_2");
   EXPECT_FALSE(parser.Error());
 
-  parser.ICNext("TAG_2");
+  parser.ExptectTag("TAG_2");
   EXPECT_TRUE(parser.Error());
 }
 
