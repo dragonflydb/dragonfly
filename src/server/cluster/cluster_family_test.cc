@@ -438,11 +438,10 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfoInvalid) {
-  constexpr string_view kTooFewArgs =
-      "ERR wrong number of arguments for 'dflycluster getslotinfo' command";
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo"}), ErrArg(kTooFewArgs));
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "s"}), ErrArg(kTooFewArgs));
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots"}), ErrArg(kTooFewArgs));
+  constexpr string_view kErr = "ERR syntax error";
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo"}), ErrArg(kErr));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "s"}), ErrArg(kErr));
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots"}), ErrArg(kErr));
 }
 
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
