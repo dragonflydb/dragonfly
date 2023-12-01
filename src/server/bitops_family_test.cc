@@ -557,6 +557,10 @@ TEST_F(BitOpsFamilyTest, BitFieldParsing) {
   ASSERT_THAT(Run({"bitfield", "foo", "set", "u64", "0", "0"}), expected_error);
   ASSERT_THAT(Run({"bitfield", "foo", "set", "u65", "0", "0"}), expected_error);
   ASSERT_THAT(Run({"bitfield", "foo", "set", "i65", "0", "0"}), expected_error);
+
+  expected_error = ErrArg("BITFIELD_RO only supports the GET subcommand");
+  ASSERT_THAT(Run({"bitfield_ro", "foo", "set", "u1", "0", "0"}), expected_error);
+  ASSERT_THAT(Run({"bitfield_ro", "foo", "incrby", "i64", "0", "15"}), expected_error);
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldCreate) {

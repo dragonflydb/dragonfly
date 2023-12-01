@@ -1003,7 +1003,7 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pr
 // Parses a list of arguments (without key) to a CommandList.
 // Returns the CommandList if the parsing completed succefully or std::string
 // to indicate an error
-nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
+nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, bool read_only) {
   CommandList result;
 
   using nonstd::make_unexpected;
@@ -1018,6 +1018,9 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
 
     using namespace std::string_view_literals;
     if (op == "OVERFLOW"sv) {
+      if (read_only) {
+        make_unexpected("BITFIELD_RO only supports the GET subcommand");
+      }
       using pol = Overflow::Policy;
       auto res = parser.ToUpper().Switch("SAT", pol::SAT, "WRAP", pol::WRAP, "FAIL", pol::FAIL);
       if (!parser.HasError()) {
@@ -1037,6 +1040,10 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args) {
     if (op == "GET"sv) {
       result.push_back(Command(Get(attr)));
       continue;
+    }
+
+    if (read_only) {
+      return make_unexpected("BITFIELD_RO only supports the GET subcommand");
     }
 
     auto value = parser.ToUpper().Next<int64_t>();
@@ -1078,13 +1085,13 @@ void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx
   }
 }
 
-void BitField(CmdArgList args, ConnectionContext* cntx) {
+void BitFieldGeneric(CmdArgList args, bool read_only, ConnectionContext* cntx) {
   if (args.size() == 1) {
     (*cntx)->SendNullArray();
     return;
   }
   auto key = ArgS(args, 0);
-  auto maybe_ops_list = ParseToCommandList(args.subspan(1));
+  auto maybe_ops_list = ParseToCommandList(args.subspan(1), read_only);
 
   if (!maybe_ops_list.has_value()) {
     cntx->SendError(maybe_ops_list.error());
@@ -1109,9 +1116,12 @@ void BitField(CmdArgList args, ConnectionContext* cntx) {
   SendResults(*res, cntx);
 }
 
+void BitField(CmdArgList args, ConnectionContext* cntx) {
+  BitFieldGeneric(args, false, cntx);
+}
+
 void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendError("Not Yet Implemented");
-  // return BitField(args, cntx);
+  BitFieldGeneric(args, true, cntx);
 }
 
 #pragma GCC diagnostic pop
