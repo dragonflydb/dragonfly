@@ -821,8 +821,13 @@ void Connection::HandleMigrateRequest() {
 
     DecreaseStatsOnClose();
 
-    auto update_tl_vars = [this] __attribute__((noinline)) {
+    this->Migrate(dest);
+
+    auto update_tl_vars = [this] [[gnu::noinline]] {
+      // The compiler barrier that does not allow reordering memory accesses
+      // to before this function starts. See https://stackoverflow.com/a/75622732
       asm volatile("");
+
       queue_backpressure_ = &tl_queue_backpressure_;
 
       stats_ = service_->GetThreadLocalConnectionStats();
@@ -832,10 +837,9 @@ void Connection::HandleMigrateRequest() {
         ++stats_->num_replicas;
       }
     };
-    this->Migrate(dest);
 
-    // We're now running in `dest` thread. We use non-inline lambda to make sure that
-    // thread local variables have not been loaded into a register before we migrated.
+    // We're now running in `dest` thread. We use non-inline lambda to force reading new thread's
+    // thread local vars.
     update_tl_vars();
   }
 
