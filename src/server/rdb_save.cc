@@ -902,6 +902,8 @@ class RdbSaver::Impl {
     SliceSnapshot::DbRecord record_holder;
   };
 
+  void CleanShardSnapshots();
+
  public:
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
@@ -979,7 +981,11 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
   DCHECK(producers_len > 0 || channel_.IsClosing());
 }
 
-RdbSaver::Impl::~Impl() {
+void RdbSaver::Impl::CleanShardSnapshots() {
+  if (shard_snapshots_.empty()) {
+    return;
+  }
+
   auto cb = [this](ShardId sid) {
     // Destroy SliceSnapshot in target thread, as it registers itself in a thread local set.
     shard_snapshots_[sid].reset();
@@ -988,8 +994,12 @@ RdbSaver::Impl::~Impl() {
   if (shard_snapshots_.size() == 1) {
     cb(0);
   } else {
-    shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+    shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
   }
+}
+
+RdbSaver::Impl::~Impl() {
+  CleanShardSnapshots();
 }
 
 error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) {
