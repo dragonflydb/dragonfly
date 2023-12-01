@@ -923,11 +923,15 @@ class RdbSaver::Impl {
     SliceSnapshot::DbRecord record_holder;
   };
 
+  void CleanShardSnapshots();
+
  public:
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
   Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
        SaveMode save_mode, io::Sink* sink);
+
+  ~Impl();
 
   void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
   void StartIncrementalSnapshotting(Context* cntx, EngineShard* shard, LSN start_lsn);
@@ -996,6 +1000,27 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
   }
 
   DCHECK(producers_len > 0 || channel_.IsClosing());
+}
+
+void RdbSaver::Impl::CleanShardSnapshots() {
+  if (shard_snapshots_.empty()) {
+    return;
+  }
+
+  auto cb = [this](ShardId sid) {
+    // Destroy SliceSnapshot in target thread, as it registers itself in a thread local set.
+    shard_snapshots_[sid].reset();
+  };
+
+  if (shard_snapshots_.size() == 1) {
+    cb(0);
+  } else {
+    shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+  }
+}
+
+RdbSaver::Impl::~Impl() {
+  CleanShardSnapshots();
 }
 
 error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) {
