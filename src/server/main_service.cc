@@ -1151,24 +1151,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // start tracking updates to the keys in this read command
   // notify the client when there is update, see PostUpdate() in db_slice.cc
   if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
-    OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args_no_cmd);
-    if (!key_index_res)
-      return (*cntx)->SendError(key_index_res.status());
-
-    const auto& key_index = *key_index_res;
-    vector<string_view> keys_to_track;
-    for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
-      string_view key = ArgS(args_no_cmd, i);
-      keys_to_track.push_back(key);
-    }
-
     // let's pass thread id and connection to db_slice for tracking
     int32_t tid = util::ProactorBase::GetIndex();
-
-    DVLOG(2) << "Ready to schedul transaction";
-
     // uint32_t client_id = dfly_cntx->conn()->GetClientId();
     auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto keys = t->GetShardArgs(shard->shard_id());
+      vector<string_view> keys_to_track{keys.begin(), keys.end()};
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, tid, keys_to_track, args);
     };
     dfly_cntx->transaction->Refurbish();
