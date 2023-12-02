@@ -471,10 +471,9 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
         const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
 
         if (vparams.use_hnsw)
-          vector_index =
-              make_unique<HnswVectorIndex>(vparams.dim, vparams.sim, vparams.capacity, mr);
+          vector_index = make_unique<HnswVectorIndex>(vparams, mr);
         else
-          vector_index = make_unique<FlatVectorIndex>(vparams.dim, vparams.sim, mr);
+          vector_index = make_unique<FlatVectorIndex>(vparams, mr);
 
         indices_[field_ident] = std::move(vector_index);
         break;

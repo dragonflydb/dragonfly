@@ -72,6 +72,8 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(Run({"ft.dropindex", "idx-2"}), "OK");
   EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::UnorderedElementsAre("idx-1", "idx-3"));
 
+  EXPECT_THAT(Run({"ft.create", "idx-1"}), ErrArg("Index already exists"));
+
   EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Unknown Index name"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
