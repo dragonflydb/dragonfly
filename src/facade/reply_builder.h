@@ -256,8 +256,6 @@ class RedisReplyBuilder : public SinkReplyBuilder {
  private:
   void SendStringArrInternal(WrappedStrSpan arr, CollectionType type);
 
-  const char* NullString();
-
   bool is_resp3_ = false;
 };
 

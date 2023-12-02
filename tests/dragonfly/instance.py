@@ -1,3 +1,4 @@
+import dataclasses
 import time
 import subprocess
 import aiohttp
@@ -120,6 +121,8 @@ class DflyInstance:
         self._wait_for_server()
 
     def _wait_for_server(self):
+        if self.params.existing_port:
+            return
         # Give Dragonfly time to start and detect possible failure causes
         # Gdb starts slowly
         delay = START_DELAY if not self.params.gdb else START_GDB_DELAY
@@ -312,7 +315,7 @@ class DflyInstanceFactory:
         self.params = params
         self.instances = []
 
-    def create(self, **kwargs) -> DflyInstance:
+    def create(self, existing_port=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("use_zset_tree", None)
@@ -322,11 +325,15 @@ class DflyInstanceFactory:
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
 
-        instance = DflyInstance(self.params, args)
+        if existing_port is not None:
+            params = dataclasses.replace(self.params, existing_port=existing_port)
+        else:
+            params = self.params
+        instance = DflyInstance(params, args)
         self.instances.append(instance)
         return instance
 
-    def start_all(self, instances):
+    def start_all(self, instances: List[DflyInstance]):
         """Start multiple instances in parallel"""
         for instance in instances:
             instance._start()

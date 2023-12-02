@@ -104,6 +104,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     factory.stop_all()
 
 
+# Differs from df_factory in that its scope is function
 @pytest.fixture(scope="function")
 def df_local_factory(df_factory: DflyInstanceFactory):
     factory = DflyInstanceFactory(df_factory.params, df_factory.args)
