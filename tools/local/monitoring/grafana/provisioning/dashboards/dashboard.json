@@ -103,9 +103,10 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "targets": [
         {
           "datasource": {
@@ -189,9 +190,10 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "auto",
+        "wideLayout": true
       },
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "targets": [
         {
           "datasource": {
@@ -282,7 +284,7 @@
         "showThresholdLabels": false,
         "showThresholdMarkers": true
       },
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "targets": [
         {
           "datasource": {
@@ -350,7 +352,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -456,7 +458,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -470,13 +472,15 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
+          "editorMode": "code",
           "exemplar": true,
-          "expr": "dragonfly_memory_used_bytes{instance=~\"$instance\"} ",
+          "expr": "dragonfly_used_memory_rss_bytes{instance=~\"$instance\"}",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "used",
+          "legendFormat": "rss",
           "metric": "",
+          "range": true,
           "refId": "A",
           "step": 240,
           "target": ""
@@ -486,6 +490,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
+          "editorMode": "code",
           "exemplar": true,
           "expr": "dragonfly_memory_max_bytes{instance=~\"$instance\"} ",
           "format": "time_series",
@@ -493,7 +498,42 @@
           "interval": "",
           "intervalFactor": 2,
           "legendFormat": "max",
+          "range": true,
           "refId": "B",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "dragonfly_memory_unaccounted_bytes{instance=~\"$instance\"} ",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "unaccounted",
+          "range": true,
+          "refId": "D",
+          "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "exemplar": true,
+          "expr": "dragonfly_memory_used_bytes{instance=~\"$instance\"} ",
+          "format": "time_series",
+          "hide": false,
+          "interval": "",
+          "intervalFactor": 2,
+          "legendFormat": "data",
+          "range": true,
+          "refId": "C",
           "step": 240
         }
       ],
@@ -574,7 +614,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -690,7 +730,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -791,7 +831,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -912,7 +952,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "pointradius": 5,
       "points": false,
       "renderer": "flot",
@@ -1033,7 +1073,7 @@
         "alertThreshold": true
       },
       "percentage": false,
-      "pluginVersion": "9.3.6",
+      "pluginVersion": "10.2.2",
       "pointradius": 2,
       "points": false,
       "renderer": "flot",
@@ -1144,8 +1184,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1244,8 +1283,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1300,9 +1338,8 @@
       "type": "timeseries"
     }
   ],
-  "refresh": "",
-  "schemaVersion": 37,
-  "style": "dark",
+  "refresh": "5s",
+  "schemaVersion": 38,
   "tags": [
     "prometheus",
     "dragonfly"
@@ -1313,7 +1350,7 @@
         "current": {
           "selected": false,
           "text": "Prometheus",
-          "value": "Prometheus"
+          "value": "PBFA97CFB590B2093"
         },
         "hide": 0,
         "includeAll": false,
@@ -1328,7 +1365,12 @@
         "type": "datasource"
       },
       {
-        "current": {},
+        "current": {
+          "isNone": true,
+          "selected": false,
+          "text": "None",
+          "value": ""
+        },
         "datasource": {
           "uid": "$DS_PROMETHEUS"
         },
@@ -1353,7 +1395,12 @@
         "useTags": false
       },
       {
-        "current": {},
+        "current": {
+          "isNone": true,
+          "selected": false,
+          "text": "None",
+          "value": ""
+        },
         "datasource": {
           "uid": "$DS_PROMETHEUS"
         },
@@ -1378,7 +1425,11 @@
         "useTags": false
       },
       {
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "host.docker.internal:6379",
+          "value": "host.docker.internal:6379"
+        },
         "datasource": {
           "uid": "$DS_PROMETHEUS"
         },
@@ -1406,7 +1457,7 @@
     ]
   },
   "time": {
-    "from": "now-15m",
+    "from": "now-5m",
     "to": "now"
   },
   "timepicker": {
@@ -1437,6 +1488,6 @@
   "timezone": "browser",
   "title": "Dragonfly Dashboard",
   "uid": "xDLNRKUWz",
-  "version": 1,
+  "version": 3,
   "weekStart": ""
 }

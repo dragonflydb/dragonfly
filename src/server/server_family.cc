@@ -835,7 +835,15 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
+void PrintPrometheusMetrics(const Metrics& m, const map<string, size_t>& mem_stats,
+                            StringResponse* resp) {
+  auto append_if_exists = [&](const string& key, string_view name) {
+    auto it = mem_stats.find(key);
+    if (it != mem_stats.end()) {
+      AppendMetricWithoutLabels(name, "", it->second, MetricType::GAUGE, &resp->body());
+    }
+  };
+
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
@@ -870,6 +878,10 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                            << sdata_res.error().message();
   }
+  append_if_exists("connections.total_bytes", "memory_connections_bytes");
+  append_if_exists("replication.connections.total_bytes", "memory_replication_bytes");
+  append_if_exists("serialization", "memory_serialization_bytes");
+  append_if_exists("unaccounted", "memory_unaccounted_bytes");
 
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
@@ -958,8 +970,11 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
   // https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
+    MemoryCmd cmd(this, nullptr);
+    auto mem_stats = cmd.GetMemoryStats();
+
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
-    PrintPrometheusMetrics(this->GetMetrics(), &resp);
+    PrintPrometheusMetrics(this->GetMetrics(), mem_stats, &resp);
 
     return send->Invoke(std::move(resp));
   };

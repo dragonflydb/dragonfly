@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <map>
+#include <string>
+
 #include "server/conn_context.h"
 
 namespace dfly {
@@ -15,6 +18,8 @@ class MemoryCmd {
   MemoryCmd(ServerFamily* owner, ConnectionContext* cntx);
 
   void Run(CmdArgList args);
+
+  std::map<std::string, size_t> GetMemoryStats() const;
 
  private:
   void Stats();

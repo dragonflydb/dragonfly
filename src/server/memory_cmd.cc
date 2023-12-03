@@ -221,46 +221,46 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
 }
 
 void PushMemoryUsageStats(const base::IoBuf::MemoryUsage& mem, string_view prefix, size_t total,
-                          vector<pair<string, size_t>>* stats) {
-  stats->push_back({absl::StrCat(prefix, ".total_bytes"), total});
-  stats->push_back({absl::StrCat(prefix, ".consumed_bytes"), mem.consumed});
-  stats->push_back({absl::StrCat(prefix, ".pending_input_bytes"), mem.input_length});
-  stats->push_back({absl::StrCat(prefix, ".pending_output_bytes"), mem.append_length});
+                          map<string, size_t>* stats) {
+  stats->insert({absl::StrCat(prefix, ".total_bytes"), total});
+  stats->insert({absl::StrCat(prefix, ".consumed_bytes"), mem.consumed});
+  stats->insert({absl::StrCat(prefix, ".pending_input_bytes"), mem.input_length});
+  stats->insert({absl::StrCat(prefix, ".pending_output_bytes"), mem.append_length});
 }
 
 }  // namespace
 
-void MemoryCmd::Stats() {
-  vector<pair<string, size_t>> stats;
-  stats.reserve(25);
+map<string, size_t> MemoryCmd::GetMemoryStats() const {
+  map<string, size_t> stats;
   auto server_metrics = owner_->GetMetrics();
 
   // RSS
-  stats.push_back({"rss_bytes", rss_mem_current.load(memory_order_relaxed)});
-  stats.push_back({"rss_peak_bytes", rss_mem_peak.load(memory_order_relaxed)});
+  size_t rss = rss_mem_current.load(memory_order_relaxed);
+  stats.insert({"rss_bytes", rss});
+  stats.insert({"rss_peak_bytes", rss_mem_peak.load(memory_order_relaxed)});
 
   // Used by DbShards and DashTable
-  stats.push_back({"data_bytes", used_mem_current.load(memory_order_relaxed)});
-  stats.push_back({"data_peak_bytes", used_mem_peak.load(memory_order_relaxed)});
+  size_t data = used_mem_current.load(memory_order_relaxed);
+  stats.insert({"data_bytes", data});
+  stats.insert({"data_peak_bytes", used_mem_peak.load(memory_order_relaxed)});
 
   ConnectionMemoryUsage connection_memory = GetConnectionMemoryUsage(owner_);
 
   // Connection stats, excluding replication connections
-  stats.push_back({"connections.count", connection_memory.connection_count});
-  stats.push_back({"connections.direct_bytes", connection_memory.connection_size});
-  PushMemoryUsageStats(connection_memory.connections_memory, "connections",
-                       connection_memory.connections_memory.GetTotalSize() +
-                           connection_memory.pipelined_bytes + connection_memory.connection_size,
+  stats.insert({"connections.count", connection_memory.connection_count});
+  stats.insert({"connections.direct_bytes", connection_memory.connection_size});
+  size_t connection_total = connection_memory.connections_memory.GetTotalSize() +
+                            connection_memory.pipelined_bytes + connection_memory.connection_size;
+  PushMemoryUsageStats(connection_memory.connections_memory, "connections", connection_total,
                        &stats);
-  stats.push_back({"connections.pipeline_bytes", connection_memory.pipelined_bytes});
+  stats.insert({"connections.pipeline_bytes", connection_memory.pipelined_bytes});
 
   // Replication connection stats
-  stats.push_back(
-      {"replication.connections_count", connection_memory.replication_connection_count});
-  stats.push_back({"replication.direct_bytes", connection_memory.replication_connection_size});
-  PushMemoryUsageStats(connection_memory.replication_memory, "replication",
-                       connection_memory.replication_memory.GetTotalSize() +
-                           connection_memory.replication_connection_size,
+  stats.insert({"replication.connections_count", connection_memory.replication_connection_count});
+  stats.insert({"replication.direct_bytes", connection_memory.replication_connection_size});
+  size_t replication_total = connection_memory.replication_memory.GetTotalSize() +
+                             connection_memory.replication_connection_size;
+  PushMemoryUsageStats(connection_memory.replication_memory, "replication", replication_total,
                        &stats);
 
   atomic<size_t> serialization_memory = 0;
@@ -268,8 +268,19 @@ void MemoryCmd::Stats() {
       [&](auto*) { serialization_memory.fetch_add(SliceSnapshot::GetThreadLocalMemoryUsage()); });
 
   // Serialization stats, including both replication-related serialization and saving to RDB files.
-  stats.push_back({"serialization", serialization_memory.load()});
+  size_t serialization_total = serialization_memory.load();
+  stats.insert({"serialization", serialization_total});
 
+  size_t accounted = data + connection_total + replication_total + serialization_total;
+  if (accounted <= rss) {
+    stats.insert({"unaccounted", rss - accounted});
+  }
+
+  return stats;
+}
+
+void MemoryCmd::Stats() {
+  auto stats = GetMemoryStats();
   (*cntx_)->StartCollection(stats.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : stats) {
     (*cntx_)->SendBulkString(k);
