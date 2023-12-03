@@ -91,7 +91,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 
     // Verify json path is correct
     if (type == DocIndex::JSON && !IsValidJsonPath(field)) {
-      (*cntx)->SendError("Bad json path: " + string{field});
+      cntx->SendError("Bad json path: " + string{field});
       return nullopt;
     }
 
@@ -105,7 +105,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     string_view type_str = parser.Next();
     auto type = ParseSearchFieldType(type_str);
     if (!type) {
-      (*cntx)->SendError("Invalid field type: " + string{type_str});
+      cntx->SendError("Invalid field type: " + string{type_str});
       return nullopt;
     }
 
@@ -114,7 +114,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     if (*type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
       if (!parser.HasError() && vector_params.dim == 0) {
-        (*cntx)->SendError("Knn vector dimension cannot be zero");
+        cntx->SendError("Knn vector dimension cannot be zero");
         return nullopt;
       }
       params = std::move(vector_params);
@@ -148,7 +148,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     schema.field_names[field_info.short_name] = field_ident;
 
   if (auto err = parser.Error(); err) {
-    (*cntx)->SendError(err->MakeReply());
+    cntx->SendError(err->MakeReply());
     return nullopt;
   }
 
@@ -206,7 +206,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   }
 
   if (auto err = parser.Error(); err) {
-    (*cntx)->SendError(err->MakeReply());
+    cntx->SendError(err->MakeReply());
     return nullopt;
   }
 
@@ -214,11 +214,12 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
-  (*cntx)->SendBulkString(doc.key);
-  (*cntx)->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendBulkString(doc.key);
+  rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : doc.values) {
-    (*cntx)->SendBulkString(k);
-    (*cntx)->SendBulkString(v);
+    rb->SendBulkString(k);
+    rb->SendBulkString(v);
   }
 }
 
@@ -236,8 +237,9 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
   bool ids_only = params.IdsOnly();
   size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
 
-  (*cntx)->StartArray(reply_size);
-  (*cntx)->SendLong(total_count);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(reply_size);
+  rb->SendLong(total_count);
 
   size_t sent = 0;
   size_t to_skip = params.limit_offset;
@@ -253,7 +255,7 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
         return;
 
       if (ids_only)
-        (*cntx)->SendBulkString(serialized_doc.key);
+        rb->SendBulkString(serialized_doc.key);
       else
         SendSerializedDoc(serialized_doc, cntx);
     }
@@ -291,12 +293,12 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
     agg.alias = "";
 
   facade::SinkReplyBuilder::ReplyAggregator agg_reply{cntx->reply_builder()};
-
-  (*cntx)->StartArray(reply_size);
-  (*cntx)->SendLong(min(total, agg_limit));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(reply_size);
+  cntx->SendLong(min(total, agg_limit));
   for (auto* doc : absl::MakeSpan(docs).subspan(start_idx, result_count)) {
     if (ids_only) {
-      (*cntx)->SendBulkString(doc->key);
+      rb->SendBulkString(doc->key);
       continue;
     }
 
@@ -325,7 +327,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
     // PREFIX count prefix [prefix ...]
     if (parser.Check("PREFIX").ExpectTail(2)) {
       if (size_t num = parser.Next<size_t>(); num != 1)
-        return (*cntx)->SendError("Multiple prefixes are not supported");
+        return cntx->SendError("Multiple prefixes are not supported");
       index.prefix = string(parser.Next());
       continue;
     }
@@ -344,7 +346,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   cntx->transaction->Schedule();
 
@@ -373,7 +375,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
       },
       true);
 
-  (*cntx)->SendOk();
+  cntx->SendOk();
 }
 
 void SearchFamily::FtDropIndex(CmdArgList args, ConnectionContext* cntx) {
@@ -389,8 +391,8 @@ void SearchFamily::FtDropIndex(CmdArgList args, ConnectionContext* cntx) {
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
-    return (*cntx)->SendError("-Unknown Index name");
-  return (*cntx)->SendOk();
+    return cntx->SendError("-Unknown Index name");
+  return cntx->SendOk();
 }
 
 void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
@@ -411,7 +413,7 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
 
   if (num_notfound > 0u)
-    return (*cntx)->SendError("Unknown Index name");
+    return cntx->SendError("Unknown Index name");
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -423,22 +425,23 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  (*cntx)->StartCollection(4, RedisReplyBuilder::MAP);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartCollection(4, RedisReplyBuilder::MAP);
 
-  (*cntx)->SendSimpleString("index_name");
-  (*cntx)->SendSimpleString(idx_name);
+  cntx->SendSimpleString("index_name");
+  cntx->SendSimpleString(idx_name);
 
-  (*cntx)->SendSimpleString("index_definition");
+  cntx->SendSimpleString("index_definition");
   {
-    (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
-    (*cntx)->SendSimpleString("key_type");
-    (*cntx)->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
-    (*cntx)->SendSimpleString("prefix");
-    (*cntx)->SendSimpleString(info.base_index.prefix);
+    rb->StartCollection(2, RedisReplyBuilder::MAP);
+    cntx->SendSimpleString("key_type");
+    cntx->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
+    cntx->SendSimpleString("prefix");
+    cntx->SendSimpleString(info.base_index.prefix);
   }
 
-  (*cntx)->SendSimpleString("attributes");
-  (*cntx)->StartArray(schema.fields.size());
+  cntx->SendSimpleString("attributes");
+  rb->StartArray(schema.fields.size());
   for (const auto& [field_ident, field_info] : schema.fields) {
     vector<string> info;
 
@@ -453,11 +456,11 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
     if (field_info.flags & search::SchemaField::SORTABLE)
       info.push_back("SORTABLE");
 
-    (*cntx)->SendSimpleStrArr(info);
+    rb->SendSimpleStrArr(info);
   }
 
-  (*cntx)->SendSimpleString("num_docs");
-  (*cntx)->SendLong(total_num_docs);
+  cntx->SendSimpleString("num_docs");
+  cntx->SendLong(total_num_docs);
 }
 
 void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
@@ -470,8 +473,8 @@ void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
       names = es->search_indices()->GetIndexNames();
     return OpStatus::OK;
   });
-
-  (*cntx)->SendStringArr(names);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendStringArr(names);
 }
 
 void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
@@ -485,7 +488,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   search::SearchAlgorithm search_algo;
   search::SortOption* sort_opt = params->sort_option.has_value() ? &*params->sort_option : nullptr;
   if (!search_algo.Init(query_str, &params->query_params, sort_opt))
-    return (*cntx)->SendError("Query syntax error");
+    return cntx->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
@@ -500,11 +503,11 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   });
 
   if (index_not_found.load())
-    return (*cntx)->SendError(string{index_name} + ": no such index");
+    return cntx->SendError(string{index_name} + ": no such index");
 
   for (const auto& res : docs) {
     if (res.error)
-      return (*cntx)->SendError(std::move(*res.error));
+      return cntx->SendError(*res.error);
   }
 
   if (auto agg = search_algo.HasAggregation(); agg)
@@ -524,7 +527,7 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   search::SearchAlgorithm search_algo;
   search::SortOption* sort_opt = params->sort_option.has_value() ? &*params->sort_option : nullptr;
   if (!search_algo.Init(query_str, &params->query_params, sort_opt))
-    return (*cntx)->SendError("Query syntax error");
+    return cntx->SendError("Query syntax error");
 
   search_algo.EnableProfiling();
 
@@ -552,24 +555,24 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   });
 
   auto took = absl::Now() - start;
-
-  (*cntx)->StartArray(results.size() + 1);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(results.size() + 1);
 
   // General stats
-  (*cntx)->StartCollection(3, RedisReplyBuilder::MAP);
-  (*cntx)->SendBulkString("took");
-  (*cntx)->SendLong(absl::ToInt64Microseconds(took));
-  (*cntx)->SendBulkString("hits");
-  (*cntx)->SendLong(total_docs);
-  (*cntx)->SendBulkString("serialized");
-  (*cntx)->SendLong(total_serialized);
+  rb->StartCollection(3, RedisReplyBuilder::MAP);
+  rb->SendBulkString("took");
+  rb->SendLong(absl::ToInt64Microseconds(took));
+  rb->SendBulkString("hits");
+  rb->SendLong(total_docs);
+  rb->SendBulkString("serialized");
+  rb->SendLong(total_serialized);
 
   // Per-shard stats
   for (const auto& [profile, shard_took] : results) {
-    (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
-    (*cntx)->SendBulkString("took");
-    (*cntx)->SendLong(absl::ToInt64Microseconds(shard_took));
-    (*cntx)->SendBulkString("tree");
+    rb->StartCollection(2, RedisReplyBuilder::MAP);
+    rb->SendBulkString("took");
+    rb->SendLong(absl::ToInt64Microseconds(shard_took));
+    rb->SendBulkString("tree");
 
     for (size_t i = 0; i < profile.events.size(); i++) {
       const auto& event = profile.events[i];
@@ -583,13 +586,13 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
       }
 
       if (children > 0)
-        (*cntx)->StartArray(2);
+        rb->StartArray(2);
 
-      (*cntx)->SendSimpleString(
+      cntx->SendSimpleString(
           absl::StrFormat("t=%-10u n=%-10u %s", event.micros, event.num_processed, event.descr));
 
       if (children > 0)
-        (*cntx)->StartArray(children);
+        rb->StartArray(children);
     }
   }
 }

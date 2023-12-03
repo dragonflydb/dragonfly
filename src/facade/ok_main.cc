@@ -24,7 +24,7 @@ thread_local ConnectionStats tl_stats;
 class OkService : public ServiceInterface {
  public:
   void DispatchCommand(CmdArgList args, ConnectionContext* cntx) final {
-    (*cntx)->SendOk();
+    cntx->SendOk();
   }
 
   size_t DispatchManyCommands(absl::Span<CmdArgList> args_lists, ConnectionContext* cntx) final {

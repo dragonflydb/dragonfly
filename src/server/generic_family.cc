@@ -687,24 +687,25 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
       mc_builder->SendSimpleString("DELETED");
     }
   } else {
-    (*cntx)->SendLong(del_cnt);
+    cntx->SendLong(del_cnt);
   }
 }
 
 void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
-    return (*cntx)->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
+    return cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
   // We synchronously block here until the engine sends us the payload and notifies that
   // the I/O operation has been processed.
   if (args.size() == 0) {
-    return (*cntx)->SendSimpleString("PONG");
+    return cntx->SendSimpleString("PONG");
   } else {
     string_view arg = ArgS(args, 0);
     DVLOG(2) << "Ping " << arg;
 
-    return (*cntx)->SendBulkString(arg);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendBulkString(arg);
   }
 }
 
@@ -725,7 +726,7 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  return (*cntx)->SendLong(result.load(memory_order_acquire));
+  return cntx->SendLong(result.load(memory_order_acquire));
 }
 
 void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
@@ -735,9 +736,9 @@ void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
 
   OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
   if (status == OpStatus::OK)
-    (*cntx)->SendLong(1);
+    cntx->SendLong(1);
   else
-    (*cntx)->SendLong(0);
+    cntx->SendLong(0);
 }
 
 std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, ConnectionContext* cntx) {
@@ -754,16 +755,16 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, Connecti
     } else if (arg_sv == "LT") {
       flags |= ExpireFlags::EXPIRE_LT;
     } else {
-      (*cntx)->SendError(absl::StrCat("Unsupported option: ", arg_sv));
+      cntx->SendError(absl::StrCat("Unsupported option: ", arg_sv));
       return nullopt;
     }
   }
   if ((flags & ExpireFlags::EXPIRE_NX) && (flags & ~ExpireFlags::EXPIRE_NX)) {
-    (*cntx)->SendError("NX and XX, GT or LT options at the same time are not compatible");
+    cntx->SendError("NX and XX, GT or LT options at the same time are not compatible");
     return nullopt;
   }
   if ((flags & ExpireFlags::EXPIRE_GT) && (flags & ExpireFlags::EXPIRE_LT)) {
-    (*cntx)->SendError("GT and LT options at the same time are not compatible");
+    cntx->SendError("GT and LT options at the same time are not compatible");
     return nullopt;
   }
   return flags;
@@ -775,11 +776,11 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   if (int_arg > kMaxExpireDeadlineSec || int_arg < -kMaxExpireDeadlineSec) {
-    return (*cntx)->SendError(InvalidExpireTime(cntx->cid->name()));
+    return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
   int_arg = std::max<int64_t>(int_arg, -1);
@@ -794,7 +795,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
-  (*cntx)->SendLong(status == OpStatus::OK);
+  cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
@@ -803,7 +804,7 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max<int64_t>(int_arg, 0L);
@@ -820,9 +821,9 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return (*cntx)->SendError(kExpiryOutOfRange);
+    return cntx->SendError(kExpiryOutOfRange);
   } else {
-    (*cntx)->SendLong(status == OpStatus::OK);
+    cntx->SendLong(status == OpStatus::OK);
   }
 }
 
@@ -841,9 +842,10 @@ void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cntx);
   } while (cursor != 0 && keys.size() < output_limit);
 
-  (*cntx)->StartArray(keys.size());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(keys.size());
   for (const auto& k : keys) {
-    (*cntx)->SendBulkString(k);
+    rb->SendBulkString(k);
   }
 }
 
@@ -853,7 +855,7 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, 0L);
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
@@ -871,9 +873,9 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return (*cntx)->SendError(kExpiryOutOfRange);
+    return cntx->SendError(kExpiryOutOfRange);
   } else {
-    (*cntx)->SendLong(status == OpStatus::OK);
+    cntx->SendLong(status == OpStatus::OK);
   }
 }
 
@@ -883,7 +885,7 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
   int_arg = std::max<int64_t>(int_arg, 0L);
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
@@ -899,9 +901,9 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OUT_OF_RANGE) {
-    return (*cntx)->SendError(kExpiryOutOfRange);
+    return cntx->SendError(kExpiryOutOfRange);
   } else {
-    (*cntx)->SendLong(status == OpStatus::OK);
+    cntx->SendLong(status == OpStatus::OK);
   }
 }
 
@@ -925,7 +927,7 @@ void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
   DVLOG(2) << "Stick ts " << transaction->txid();
 
   uint32_t match_cnt = result.load(memory_order_relaxed);
-  (*cntx)->SendLong(match_cnt);
+  cntx->SendLong(match_cnt);
 }
 
 // Used to conditionally store double score
@@ -1045,11 +1047,11 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
     } else if (arg == "LIMIT") {
       int offset, limit;
       if (i + 2 >= args.size()) {
-        return (*cntx)->SendError(kSyntaxErr);
+        return cntx->SendError(kSyntaxErr);
       }
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &offset) ||
           !absl::SimpleAtoi(ArgS(args, i + 2), &limit)) {
-        return (*cntx)->SendError(kInvalidIntErr);
+        return cntx->SendError(kInvalidIntErr);
       }
       bounds = {offset, limit};
       i += 2;
@@ -1062,10 +1064,11 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       });
 
   if (fetch_result.status() == OpStatus::WRONG_TYPE)
-    return (*cntx)->SendError("One or more scores can't be converted into double");
+    return cntx->SendError("One or more scores can't be converted into double");
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (!fetch_result.ok())
-    return (*cntx)->SendEmptyArray();
+    return rb->SendEmptyArray();
 
   auto result_type = fetch_result.type();
   auto sort_call = [cntx, bounds, reversed, result_type](auto& entries) {
@@ -1089,11 +1092,12 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
     }
 
     bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-    (*cntx)->StartCollection(std::distance(start_it, end_it),
-                             is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->StartCollection(std::distance(start_it, end_it),
+                        is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
 
     for (auto it = start_it; it != end_it; ++it) {
-      (*cntx)->SendBulkString(it->key);
+      rb->SendBulkString(it->key);
     }
   };
   std::visit(std::move(sort_call), fetch_result.value());
@@ -1104,15 +1108,15 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
   std::string_view serialized_value = ArgS(args, 2);
   int rdb_version = 0;
   if (!VerifyFooter(serialized_value, &rdb_version)) {
-    return (*cntx)->SendError("ERR DUMP payload version or checksum are wrong");
+    return cntx->SendError("ERR DUMP payload version or checksum are wrong");
   }
 
   OpResult<RestoreArgs> restore_args = RestoreArgs::TryFrom(args);
   if (!restore_args) {
     if (restore_args.status() == OpStatus::OUT_OF_RANGE) {
-      return (*cntx)->SendError("Invalid IDLETIME value, must be >= 0");
+      return cntx->SendError("Invalid IDLETIME value, must be >= 0");
     } else {
-      return (*cntx)->SendError(restore_args.status());
+      return cntx->SendError(restore_args.status());
     }
   }
 
@@ -1124,18 +1128,18 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     if (result.value()) {
-      return (*cntx)->SendOk();
+      return cntx->SendOk();
     } else {
-      return (*cntx)->SendError("Bad data format");
+      return cntx->SendError("Bad data format");
     }
   } else {
     switch (result.status()) {
       case OpStatus::KEY_EXISTS:
-        return (*cntx)->SendError("BUSYKEY: key name already exists.");
+        return cntx->SendError("BUSYKEY: key name already exists.");
       case OpStatus::WRONG_TYPE:
-        return (*cntx)->SendError("Bad data format");
+        return cntx->SendError("Bad data format");
       default:
-        return (*cntx)->SendError(result.status());
+        return cntx->SendError(result.status());
     }
   }
 }
@@ -1151,11 +1155,11 @@ void GenericFamily::FieldTtl(CmdArgList args, ConnectionContext* cntx) {
   OpResult<long> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
     return;
   }
 
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
@@ -1164,15 +1168,15 @@ void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
   int64_t target_db;
 
   if (!absl::SimpleAtoi(target_db_sv, &target_db)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   if (target_db < 0 || target_db >= absl::GetFlag(FLAGS_dbnum)) {
-    return (*cntx)->SendError(kDbIndOutOfRangeErr);
+    return cntx->SendError(kDbIndOutOfRangeErr);
   }
 
   if (target_db == cntx->db_index()) {
-    return (*cntx)->SendError("source and destination objects are the same");
+    return cntx->SendError("source and destination objects are the same");
   }
 
   OpStatus res = OpStatus::SKIPPED;
@@ -1194,23 +1198,23 @@ void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHop(std::move(cb));
   // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
-  (*cntx)->SendLong(res == OpStatus::OK);
+  cntx->SendLong(res == OpStatus::OK);
 }
 
 void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> st = RenameGeneric(args, false, cntx);
-  (*cntx)->SendError(st.status());
+  cntx->SendError(st.status());
 }
 
 void GenericFamily::RenameNx(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> st = RenameGeneric(args, true, cntx);
   OpStatus status = st.status();
   if (status == OpStatus::OK) {
-    (*cntx)->SendLong(1);
+    cntx->SendLong(1);
   } else if (status == OpStatus::KEY_EXISTS) {
-    (*cntx)->SendLong(0);
+    cntx->SendLong(0);
   } else {
-    (*cntx)->SendError(status);
+    cntx->SendError(status);
   }
 }
 
@@ -1230,18 +1234,18 @@ void GenericFamily::TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUni
 
   if (result) {
     long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
-    (*cntx)->SendLong(ttl);
+    cntx->SendLong(ttl);
     return;
   }
 
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
-      (*cntx)->SendLong(-2);
+      cntx->SendLong(-2);
       break;
     default:
       LOG_IF(ERROR, result.status() != OpStatus::SKIPPED)
           << "Unexpected status " << result.status();
-      (*cntx)->SendLong(-1);
+      cntx->SendLong(-1);
       break;
   }
 }
@@ -1250,13 +1254,13 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   int64_t index;
   if (!absl::SimpleAtoi(key, &index)) {
-    return (*cntx)->SendError(kInvalidDbIndErr);
+    return cntx->SendError(kInvalidDbIndErr);
   }
   if (ClusterConfig::IsEnabled() && index != 0) {
-    return (*cntx)->SendError("SELECT is not allowed in cluster mode");
+    return cntx->SendError("SELECT is not allowed in cluster mode");
   }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
-    return (*cntx)->SendError(kDbIndOutOfRangeErr);
+    return cntx->SendError(kDbIndOutOfRangeErr);
   }
   cntx->conn_state.db_index = index;
   auto cb = [index](EngineShard* shard) {
@@ -1265,7 +1269,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   };
   shard_set->RunBriefInParallel(std::move(cb));
 
-  return (*cntx)->SendOk();
+  return cntx->SendOk();
 }
 
 void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
@@ -1275,12 +1279,13 @@ void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     DVLOG(1) << "Dump " << trans->DebugId() << ": " << key << ", dump size "
              << result.value().size();
-    (*cntx)->SendBulkString(*result);
+    rb->SendBulkString(*result);
   } else {
-    (*cntx)->SendNull();
+    rb->SendNull();
   }
 }
 
@@ -1297,9 +1302,9 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   };
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (!result) {
-    (*cntx)->SendSimpleString("none");
+    cntx->SendSimpleString("none");
   } else {
-    (*cntx)->SendSimpleString(ObjTypeName(result.value()));
+    cntx->SendSimpleString(ObjTypeName(result.value()));
   }
 }
 
@@ -1311,9 +1316,10 @@ void GenericFamily::Time(CmdArgList args, ConnectionContext* cntx) {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }
 
-  (*cntx)->StartArray(2);
-  (*cntx)->SendLong(now_usec / 1000000);
-  (*cntx)->SendLong(now_usec % 1000000);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(2);
+  cntx->SendLong(now_usec / 1000000);
+  cntx->SendLong(now_usec % 1000000);
 }
 
 OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_dest,
@@ -1349,7 +1355,8 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  return (*cntx)->SendBulkString(key);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  return rb->SendBulkString(key);
 }
 
 void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
@@ -1357,13 +1364,13 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return (*cntx)->SendError("invalid cursor");
+    return cntx->SendError("invalid cursor");
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
-    return (*cntx)->SendError(ops.status());
+    return cntx->SendError(ops.status());
   }
 
   ScanOpts scan_op = ops.value();
@@ -1371,11 +1378,12 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   StringVec keys;
   cursor = ScanGeneric(cursor, scan_op, &keys, cntx);
 
-  (*cntx)->StartArray(2);
-  (*cntx)->SendBulkString(absl::StrCat(cursor));
-  (*cntx)->StartArray(keys.size());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(2);
+  rb->SendBulkString(absl::StrCat(cursor));
+  rb->StartArray(keys.size());
   for (const auto& k : keys) {
-    (*cntx)->SendBulkString(k);
+    rb->SendBulkString(k);
   }
 }
 

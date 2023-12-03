@@ -138,11 +138,11 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   subscriptions = 0;
 }
 
-RedisReplyBuilder* ConnectionContext::operator->() {
-  CHECK(Protocol::REDIS == protocol());
+// RedisReplyBuilder* ConnectionContext::operator->() {
+//   CHECK(Protocol::REDIS == protocol());
 
-  return static_cast<RedisReplyBuilder*>(rbuilder_.get());
-}
+//   return static_cast<RedisReplyBuilder*>(rbuilder_.get());
+// }
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, uint32_t acl_categories)

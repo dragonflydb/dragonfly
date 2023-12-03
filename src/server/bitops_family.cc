@@ -500,17 +500,17 @@ template <typename T> void HandleOpValueResult(const OpResult<T>& result, Connec
                 "we are only handling types that are integral types in the return types from "
                 "here");
   if (result) {
-    (*cntx)->SendLong(result.value());
+    cntx->SendLong(result.value());
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        (*cntx)->SendError(kWrongTypeErr);
+        cntx->SendError(kWrongTypeErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        (*cntx)->SendError(kOutOfMemory);
+        cntx->SendError(kOutOfMemory);
         break;
       default:
-        (*cntx)->SendLong(0);  // in case we don't have the value we should just send 0
+        cntx->SendLong(0);  // in case we don't have the value we should just send 0
         break;
     }
   }
@@ -523,7 +523,7 @@ void BitPos(CmdArgList args, ConnectionContext* cntx) {
   // See details at https://redis.io/commands/bitpos/
 
   if (args.size() < 1 || args.size() > 5) {
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   std::string_view key = ArgS(args, 0);
@@ -534,21 +534,21 @@ void BitPos(CmdArgList args, ConnectionContext* cntx) {
   bool as_bit = false;
 
   if (!absl::SimpleAtoi(ArgS(args, 1), &value)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   if (args.size() >= 3) {
     if (!absl::SimpleAtoi(ArgS(args, 2), &start)) {
-      return (*cntx)->SendError(kInvalidIntErr);
+      return cntx->SendError(kInvalidIntErr);
     }
     if (args.size() >= 4) {
       if (!absl::SimpleAtoi(ArgS(args, 3), &end)) {
-        return (*cntx)->SendError(kInvalidIntErr);
+        return cntx->SendError(kInvalidIntErr);
       }
 
       if (args.size() >= 5) {
         if (!ToUpperAndGetAsBit(args, 4, &as_bit)) {
-          return (*cntx)->SendError(kSyntaxErr);
+          return cntx->SendError(kSyntaxErr);
         }
       }
     }
@@ -568,7 +568,7 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   // Please note that if the key don't exists, it would return 0
 
   if (args.size() == 2 || args.size() > 4) {
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   std::string_view key = ArgS(args, 0);
@@ -578,11 +578,11 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() >= 3) {
     if (absl::SimpleAtoi(ArgS(args, 1), &start) == 0 ||
         absl::SimpleAtoi(ArgS(args, 2), &end) == 0) {
-      return (*cntx)->SendError(kInvalidIntErr);
+      return cntx->SendError(kInvalidIntErr);
     }
     if (args.size() == 4) {
       if (!ToUpperAndGetAsBit(args, 3, &as_bit)) {
-        return (*cntx)->SendError(kSyntaxErr);
+        return cntx->SendError(kSyntaxErr);
       }
     }
   }
@@ -1068,26 +1068,28 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
 }
 
 void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   const size_t total = results.size();
   if (total == 0) {
-    (*cntx)->SendNullArray();
+    rb->SendNullArray();
     return;
   }
 
-  (*cntx)->StartArray(total);
+  rb->StartArray(total);
   for (const auto& elem : results) {
     if (elem) {
-      (*cntx)->SendLong(*elem);
+      cntx->SendLong(*elem);
       continue;
     }
 
-    (*cntx)->SendNull();
+    rb->SendNull();
   }
 }
 
 void BitFieldGeneric(CmdArgList args, bool read_only, ConnectionContext* cntx) {
   if (args.size() == 1) {
-    (*cntx)->SendNullArray();
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendNullArray();
     return;
   }
   auto key = ArgS(args, 0);
@@ -1136,7 +1138,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
                               [&op](auto val) { return op == val; });
 
   if (illegal || (op == NOT_OP_NAME && args.size() > 3)) {
-    return (*cntx)->SendError(kSyntaxErr);  // too many arguments
+    return cntx->SendError(kSyntaxErr);  // too many arguments
   }
 
   // Multi shard access - read only
@@ -1166,7 +1168,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
   // Second phase - save to targe key if successful
   if (!joined_results) {
     cntx->transaction->Conclude();
-    (*cntx)->SendError(joined_results.status());
+    cntx->SendError(joined_results.status());
     return;
   } else {
     auto op_result = joined_results.value();
@@ -1187,7 +1189,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
     };
 
     cntx->transaction->Execute(std::move(store_cb), true);
-    (*cntx)->SendLong(op_result.size());
+    cntx->SendLong(op_result.size());
   }
 }
 
@@ -1199,7 +1201,7 @@ void GetBit(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
 
   if (!absl::SimpleAtoi(ArgS(args, 1), &offset)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return ReadValueBitsetAt(t->GetOpArgs(shard), key, offset);
@@ -1218,7 +1220,7 @@ void SetBit(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
 
   if (!absl::SimpleAtoi(ArgS(args, 1), &offset) || !absl::SimpleAtoi(ArgS(args, 2), &value)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
