@@ -149,8 +149,11 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
   return {dim_, sim_};
 }
 
-FlatVectorIndex::FlatVectorIndex(size_t dim, VectorSimilarity sim, PMR_NS::memory_resource* mr)
-    : BaseVectorIndex{dim, sim}, entries_{mr} {
+FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
+                                 PMR_NS::memory_resource* mr)
+    : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
+  DCHECK(!params.use_hnsw);
+  entries_.reserve(params.capacity * params.dim);
 }
 
 void FlatVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
@@ -174,8 +177,10 @@ const float* FlatVectorIndex::Get(DocId doc) const {
 }
 
 struct HnswlibAdapter {
-  HnswlibAdapter(size_t dim, VectorSimilarity sim, size_t cap)
-      : space_{MakeSpace(dim, sim)}, world_{GetSpacePtr(), cap} {
+  HnswlibAdapter(const SchemaField::VectorParams& params)
+      : space_{MakeSpace(params.dim, params.sim)}, world_{GetSpacePtr(), params.capacity,
+                                                          params.hnsw_m, 200,
+                                                          100,           true} {
   }
 
   void Add(float* data, DocId id) {
@@ -235,9 +240,9 @@ struct HnswlibAdapter {
   hnswlib::HierarchicalNSW<float> world_;
 };
 
-HnswVectorIndex::HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity,
-                                 PMR_NS::memory_resource*)
-    : BaseVectorIndex{dim, sim}, adapter_{make_unique<HnswlibAdapter>(dim, sim, capacity)} {
+HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource*)
+    : BaseVectorIndex{params.dim, params.sim}, adapter_{make_unique<HnswlibAdapter>(params)} {
+  DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
 }
 

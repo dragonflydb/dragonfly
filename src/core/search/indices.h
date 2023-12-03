@@ -15,6 +15,9 @@
 #include "core/search/base.h"
 #include "core/search/compressed_sorted_set.h"
 
+// TODO: move core field definitions out of big header
+#include "core/search/search.h"
+
 namespace dfly::search {
 
 // Index for integer fields.
@@ -104,7 +107,7 @@ struct BaseVectorIndex : public BaseIndex {
 // Index for vector fields.
 // Only supports lookup by id.
 struct FlatVectorIndex : public BaseVectorIndex {
-  FlatVectorIndex(size_t dim, VectorSimilarity sim, PMR_NS::memory_resource* mr);
+  FlatVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -118,7 +121,7 @@ struct FlatVectorIndex : public BaseVectorIndex {
 struct HnswlibAdapter;
 
 struct HnswVectorIndex : public BaseVectorIndex {
-  HnswVectorIndex(size_t dim, VectorSimilarity sim, size_t capacity, PMR_NS::memory_resource* mr);
+  HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;

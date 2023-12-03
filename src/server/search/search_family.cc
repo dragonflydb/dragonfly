@@ -46,36 +46,39 @@ bool IsValidJsonPath(string_view path) {
 }
 
 search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
-  size_t dim = 0;
-  auto sim = search::VectorSimilarity::L2;
-  size_t capacity = 1000;
+  search::SchemaField::VectorParams params{};
 
-  bool use_hnsw = parser->ToUpper().Switch("HNSW", true, "FLAT", false);
+  params.use_hnsw = parser->ToUpper().Switch("HNSW", true, "FLAT", false);
   size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
     parser->ToUpper();
 
     if (parser->Check("DIM").ExpectTail(1)) {
-      dim = parser->Next<size_t>();
+      params.dim = parser->Next<size_t>();
       continue;
     }
 
     if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
-      sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
-                           search::VectorSimilarity::COSINE);
+      params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
+                                  search::VectorSimilarity::COSINE);
       continue;
     }
 
     if (parser->Check("INITIAL_CAP").ExpectTail(1)) {
-      capacity = parser->Next<size_t>();
+      params.capacity = parser->Next<size_t>();
+      continue;
+    }
+
+    if (parser->Check("M").ExpectTail(1)) {
+      params.hnsw_m = parser->Next<size_t>();
       continue;
     }
 
     parser->Skip(2);
   }
 
-  return {use_hnsw, dim, sim, capacity};
+  return params;
 }
 
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
@@ -343,11 +346,32 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return (*cntx)->SendError(err->MakeReply());
 
+  cntx->transaction->Schedule();
+
+  // Check if index already exists
+  atomic_uint exists_cnt = 0;
+  cntx->transaction->Execute(
+      [idx_name, &exists_cnt](auto* tx, auto* es) {
+        if (es->search_indices()->GetIndex(idx_name) != nullptr)
+          exists_cnt.fetch_add(1, std::memory_order_relaxed);
+        return OpStatus::OK;
+      },
+      false);
+
+  DCHECK(exists_cnt == 0u || exists_cnt == shard_set->size());
+
+  if (exists_cnt.load(memory_order_relaxed) > 0) {
+    cntx->transaction->Conclude();
+    return (*cntx)->SendError("Index already exists");
+  }
+
   auto idx_ptr = make_shared<DocIndex>(move(index));
-  cntx->transaction->ScheduleSingleHop([idx_name, idx_ptr](auto* tx, auto* es) {
-    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
-    return OpStatus::OK;
-  });
+  cntx->transaction->Execute(
+      [idx_name, idx_ptr](auto* tx, auto* es) {
+        es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
+        return OpStatus::OK;
+      },
+      true);
 
   (*cntx)->SendOk();
 }
