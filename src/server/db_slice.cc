@@ -67,7 +67,7 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     stats.tiered_entries--;
     stats.tiered_size -= size;
     TieredStorage* tiered = shard->tiered_storage();
-    tiered->Free(offset, size, table->index);
+    tiered->Free(offset, size);
   }
   if (pv.HasIoPending()) {
     TieredStorage* tiered = shard->tiered_storage();
@@ -616,12 +616,22 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     CreateDb(db_ind);
     db_arr_[db_ind]->trans_locks.swap(db_ptr->trans_locks);
 
-    if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
-      tiered->FlushDB(db_ptr->index);
-    }
-    db_ptr.reset();
-    mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+    auto cb = [this, db_ptr = std::move(db_ptr)]() mutable {
+      if (shard_owner()->tiered_storage()) {
+        for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
+          if (it->second.IsExternal() || it->second.HasIoPending()) {
+            PerformDeletion(it, shard_owner(), db_ptr.get());
+          }
+        }
+      }
 
+      DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
+
+      db_ptr.reset();
+      mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+    };
+
+    fb2::Fiber("flush_db", std::move(cb)).Detach();
     return;
   }
 
@@ -629,9 +639,6 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     if (db_arr_[i]) {
       InvalidateDbWatches(i);
     }
-  }
-  if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
-    tiered->FlushAll();
   }
 
   auto all_dbs = std::move(db_arr_);
@@ -645,9 +652,23 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 
   // Explicitly drop reference counted pointers in place.
   // If snapshotting is currently in progress, they will keep alive until it finishes.
-  for (auto& db : all_dbs)
-    db.reset();
-  mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+  auto cb = [this, all_dbs = std::move(all_dbs)]() mutable {
+    for (auto& db_ptr : all_dbs) {
+      if (shard_owner()->tiered_storage()) {
+        for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
+          if (it->second.IsExternal() || it->second.HasIoPending()) {
+            PerformDeletion(it, shard_owner(), db_ptr.get());
+          }
+        }
+      }
+      DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
+      db_ptr.reset();
+    }
+
+    mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+  };
+  fb2::Fiber("flush_all", std::move(cb)).Detach();
+  return;
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {
@@ -927,7 +948,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
       // After this code executes, the external blob is lost.
       TieredStorage* tiered = shard_owner()->tiered_storage();
       auto [offset, size] = it->second.GetExternalSlice();
-      tiered->Free(offset, size, db_ind);
+      tiered->Free(offset, size);
       it->second.Reset();
 
       stats->tiered_entries -= 1;

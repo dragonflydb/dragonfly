@@ -122,10 +122,6 @@ struct TieredStorage::PerDb {
   };
 
   BinRecord bin_map[kSmallBinLen];
-
-  // Map page offset to page size. We track all db allocted offsets
-  // inorder to free all the allocated offsets during flushdb and flushall.
-  absl::flat_hash_map<int64, size_t> pages;
 };
 
 class TieredStorage::InflightWriteRequest {
@@ -309,19 +305,16 @@ std::error_code TieredStorage::Read(size_t offset, size_t len, char* dest) {
   return io_mgr_.Read(offset, io::MutableBytes{reinterpret_cast<uint8_t*>(dest), len});
 }
 
-void TieredStorage::Free(size_t offset, size_t len, DbIndex db_index) {
+void TieredStorage::Free(size_t offset, size_t len) {
   if (offset % kBlockLen == 0) {
     alloc_.Free(offset, len);
-    db_arr_[db_index]->pages.erase(offset);
   } else {
     uint32_t offs_page = offset / kBlockLen;
     auto it = page_refcnt_.find(offs_page);
     CHECK(it != page_refcnt_.end()) << offs_page;
     CHECK_GT(it->second, 0u);
-
     if (--it->second == 0) {
       alloc_.Free(offs_page * kBlockLen, kBlockLen);
-      db_arr_[db_index]->pages.erase(offs_page * kBlockLen);
       page_refcnt_.erase(it);
     }
   }
@@ -349,7 +342,6 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   if (io_res < 0) {
     LOG(ERROR) << "Error writing into ssd file: " << util::detail::SafeErrorMessage(-io_res);
     alloc_.Free(req->page_index() * kBlockLen, kBlockLen);
-    db->pages.erase(req->page_index() * kBlockLen);
     req->Undo(&bin_record, &db_slice_);
     ++stats_.aborted_write_cnt;
   } else {
@@ -359,7 +351,6 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
     if (entries_serialized == 0) {  // aborted
       ++stats_.aborted_write_cnt;
       alloc_.Free(req->page_index() * kBlockLen, kBlockLen);
-      db->pages.erase(req->page_index() * kBlockLen);
     } else {  // succeeded.
       VLOG(2) << "page_refcnt emplace " << req->page_index();
       auto res = page_refcnt_.emplace(req->page_index(), entries_serialized);
@@ -443,9 +434,6 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   size_t blob_len = prime_value.Size();
 
   if (blob_len > kMaxSmallBin) {
-    // TBD
-    // alloc_.Free(req.offset, req.blob_len);
-    // db_arr_[db_index]->pages.erase(req.offset);
     return;
   }
 
@@ -474,8 +462,6 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
     InitiateGrow(-res);
     return;
   }
-  PerDb* db = db_arr_[db_index];
-  db->pages.emplace(res, blob_len);
 
   constexpr size_t kMask = kBlockAlignment - 1;
   size_t page_size = (blob_len + kMask) & (~kMask);
@@ -504,8 +490,9 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
 
   auto cb = [this, req = std::move(req), db_index](int io_res) {
     PrimeIterator it = req.pt->Find(req.key);
-    // In case entry was deleted, CancelIo/FlushDb was called and the resouces were already freed.
+    // In case entry was deleted, free allocated.
     if (it.is_done()) {
+      alloc_.Free(req.offset, req.blob_len);
       return;
     }
 
@@ -516,7 +503,6 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
       LOG(ERROR) << "Error writing to ssd storage " << util::detail::SafeErrorMessage(-io_res);
       it->second.SetIoPending(false);
       alloc_.Free(req.offset, req.blob_len);
-      db_arr_[db_index]->pages.erase(req.offset);
       return;
     }
 
@@ -528,35 +514,6 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   io_mgr_.WriteAsync(res, string_view{block_ptr, page_size}, std::move(cb));
 }
 
-void TieredStorage::FlushDB(DbIndex db_index) {
-  VLOG(2) << "FlushDB " << db_index;
-  PerDb* db_data = db_arr_[db_index];
-  if (!db_data)
-    return;
-
-  for (auto [offset, len] : db_data->pages) {
-    VLOG(2) << "FlushDB free offset " << offset;
-    alloc_.Free(offset, len);
-
-    if (len == kBlockLen) {
-      uint32_t offs_page = offset / kBlockLen;
-      auto it = page_refcnt_.find(offs_page);
-      if (it != page_refcnt_.end()) {
-        VLOG(2) << "FlushDB page_refcnt_ erase page offset " << offs_page;
-        page_refcnt_.erase(it);
-      }
-    }
-  }
-  delete db_data;
-  db_arr_[db_index] = nullptr;
-}
-
-void TieredStorage::FlushAll() {
-  for (size_t i = 0; i < db_arr_.size(); ++i) {
-    FlushDB(i);
-  }
-}
-
 bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   PerDb* db = db_arr_[db_index];
 
@@ -566,7 +523,6 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
     InitiateGrow(-res);
     return false;
   }
-  db->pages.emplace(res, kBlockLen);
 
   DCHECK_EQ(res % kBlockLen, 0u);
 

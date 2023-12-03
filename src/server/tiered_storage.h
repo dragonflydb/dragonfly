@@ -37,13 +37,11 @@ class TieredStorage {
     return val.size() >= kMinBlobLen;
   }
 
-  void Free(size_t offset, size_t len, DbIndex db_index);
+  void Free(size_t offset, size_t len);
 
   void Shutdown();
 
   TieredStats GetStats() const;
-  void FlushDB(DbIndex db_index);
-  void FlushAll();
 
  private:
   class InflightWriteRequest;
