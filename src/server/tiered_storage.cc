@@ -342,6 +342,7 @@ TieredStats TieredStorage::GetStats() const {
 void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   PerDb* db = db_arr_[req->db_index()];
   if (!db) {  // Db was flushed.
+    delete req;
     return;
   }
   auto& bin_record = db->bin_map[req->bin_index()];
@@ -365,7 +366,6 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
       CHECK(res.second);
     }
   }
-
   delete req;
   --num_active_requests_;
   VLOG_IF(2, num_active_requests_ == 0) << "Finished active requests";
@@ -432,7 +432,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
 
 void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   DCHECK_EQ(OBJ_STRING, it->second.ObjType());
-
+  VLOG(2) << "CancelIo: " << it->first.ToString();
   auto& prime_value = it->second;
 
   DCHECK(!prime_value.IsExternal());
@@ -441,6 +441,14 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   prime_value.SetIoPending(false);  // remove io flag.
   PerDb* db = db_arr_[db_index];
   size_t blob_len = prime_value.Size();
+
+  if (blob_len > kMaxSmallBin) {
+    // TBD
+    // alloc_.Free(req.offset, req.blob_len);
+    // db_arr_[db_index]->pages.erase(req.offset);
+    return;
+  }
+
   unsigned bin_index = SmallToBin(blob_len);
   auto& bin_record = db->bin_map[bin_index];
   auto pending_it = bin_record.pending_entries.find(it->first);
@@ -450,7 +458,6 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   }
 
   string key = it->first.ToString();
-  VLOG(2) << "CancelIo: " << key;
   CHECK(bin_record.enqueued_entries.erase(key));
 }
 
@@ -497,10 +504,12 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
 
   auto cb = [this, req = std::move(req), db_index](int io_res) {
     PrimeIterator it = req.pt->Find(req.key);
-    CHECK(!it.is_done());
+    // In case entry was deleted, CancelIo/FlushDb was called and the resouces were already freed.
+    if (it.is_done()) {
+      return;
+    }
 
-    // TODO: what happens when if the entry was deleted meanwhile
-    // or it has been serialized again?
+    // TODO: what happens if the entry was serialized again?
     CHECK(it->second.HasIoPending()) << "TBD: fix inconsistencies";
 
     if (io_res < 0) {
@@ -595,7 +604,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   auto cb = [this, req](int io_res) { this->FinishIoRequest(io_res, req); };
 
   ++num_active_requests_;
-  io_mgr_.WriteAsync(file_offset, req->block(), move(cb));
+  io_mgr_.WriteAsync(file_offset, req->block(), std::move(cb));
   ++stats_.tiered_writes;
 
   bin_record.pending_entries.clear();
