@@ -35,6 +35,10 @@ constexpr unsigned kConvFlags =
 
 DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
+const char* NullString(bool resp3) {
+  return resp3 ? "_\r\n" : "$-1\r\n";
+}
+
 }  // namespace
 
 SinkReplyBuilder::MGetResponse::~MGetResponse() {
@@ -303,15 +307,8 @@ void RedisReplyBuilder::SendSetSkipped() {
   SendNull();
 }
 
-const char* RedisReplyBuilder::NullString() {
-  if (is_resp3_) {
-    return "_\r\n";
-  }
-  return "$-1\r\n";
-}
-
 void RedisReplyBuilder::SendNull() {
-  iovec v[] = {IoVec(NullString())};
+  iovec v[] = {IoVec(NullString(is_resp3_))};
 
   Send(v, ABSL_ARRAYSIZE(v));
 }
@@ -379,18 +376,82 @@ void RedisReplyBuilder::SendDouble(double val) {
 }
 
 void RedisReplyBuilder::SendMGetResponse(MGetResponse resp) {
-  string res = absl::StrCat("*", resp.resp_arr.size(), kCRLF);
-  for (size_t i = 0; i < resp.resp_arr.size(); ++i) {
-    const auto& item = resp.resp_arr[i];
-    if (item) {
-      StrAppend(&res, "$", item->value.size(), kCRLF);
-      res.append(item->value).append(kCRLF);
+  DCHECK(!resp.resp_arr.empty());
+
+  size_t size = resp.resp_arr.size();
+
+  size_t vec_len = std::min<size_t>(32, size);
+
+  constexpr size_t kBatchLen = 32 * 2 + 2;  // (blob_size, blob) * 32 + 2 spares
+  iovec vec_batch[kBatchLen];
+
+  // for all the meta data to fill the vec batch. 10 digits for the blob size and 6 for
+  // $, \r, \n, \r, \n
+  absl::FixedArray<char, 64> meta((vec_len + 2) * 16);  // 2 for header and next item meta data.
+
+  char* next = meta.data();
+  char* cur_meta = next;
+  *next++ = '*';
+  next = absl::numbers_internal::FastIntToBuffer(size, next);
+  *next++ = '\r';
+  *next++ = '\n';
+
+  unsigned vec_indx = 0;
+  const char* nullstr = NullString(is_resp3_);
+  size_t nulllen = strlen(nullstr);
+  auto get_pending_metabuf = [&] { return string_view{cur_meta, size_t(next - cur_meta)}; };
+
+  for (unsigned i = 0; i < size; ++i) {
+    DCHECK_GE(meta.end() - next, 16);  // We have at least 16 bytes for the meta data.
+    if (resp.resp_arr[i]) {
+      string_view blob = resp.resp_arr[i]->value;
+
+      *next++ = '$';
+      next = absl::numbers_internal::FastIntToBuffer(blob.size(), next);
+      *next++ = '\r';
+      *next++ = '\n';
+      DCHECK_GT(next - cur_meta, 0);
+
+      vec_batch[vec_indx++] = IoVec(get_pending_metabuf());
+      vec_batch[vec_indx++] = IoVec(blob);
+      cur_meta = next;  // we combine the CRLF with the next item meta data.
+      *next++ = '\r';
+      *next++ = '\n';
     } else {
-      res.append(NullString());
+      memcpy(next, nullstr, nulllen);
+      next += nulllen;
+    }
+
+    if (vec_indx >= (kBatchLen - 2) || (meta.end() - next < 16)) {
+      // we have space for at least one iovec because in the worst case we reached (kBatchLen - 3)
+      // and then filled 2 vectors in the previous iteration.
+      DCHECK_LE(vec_indx, kBatchLen - 1);
+
+      // if we do not have enough space in the meta buffer, we add the meta data to the
+      // vector batch and reset it.
+      if (meta.end() - next < 16) {
+        vec_batch[vec_indx++] = IoVec(get_pending_metabuf());
+        next = meta.data();
+        cur_meta = next;
+      }
+
+      Send(vec_batch, vec_indx);
+      if (ec_)
+        return;
+
+      vec_indx = 0;
+      size_t meta_len = next - cur_meta;
+      memcpy(meta.data(), cur_meta, meta_len);
+      cur_meta = meta.data();
+      next = cur_meta + meta_len;
     }
   }
 
-  SendRaw(res);
+  if (next - cur_meta > 0) {
+    vec_batch[vec_indx++] = IoVec(get_pending_metabuf());
+  }
+  if (vec_indx > 0)
+    Send(vec_batch, vec_indx);
 }
 
 void RedisReplyBuilder::SendSimpleStrArr(StrSpan arr) {

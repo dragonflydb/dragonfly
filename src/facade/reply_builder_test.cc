@@ -101,9 +101,6 @@ class RedisReplyBuilderTest : public testing::Test {
     }
   };
 
-  static void SetUpTestSuite() {
-  }
-
   void SetUp() {
     sink_.Clear();
     builder_.reset(new RedisReplyBuilder(&sink_));
@@ -207,7 +204,7 @@ RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-TEST_F(RedisReplyBuilderTest, TestMessageSend) {
+TEST_F(RedisReplyBuilderTest, MessageSend) {
   // Test each message that is "sent" to the sink
   builder_->SendOk();
   ASSERT_EQ(TakePayload(), kOKMessage);
@@ -328,7 +325,7 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
   }
 }
 
-TEST_F(RedisReplyBuilderTest, TestStringMessage) {
+TEST_F(RedisReplyBuilderTest, StringMessage) {
   // This would test a message that contain a string in it
   // For string this is simple, any string message should start with + and ends with \r\n
   // there can never be more than single \r\n in it as well as no special chars
@@ -351,7 +348,7 @@ TEST_F(RedisReplyBuilderTest, TestStringMessage) {
   }
 }
 
-TEST_F(RedisReplyBuilderTest, TestEmptyArray) {
+TEST_F(RedisReplyBuilderTest, EmptyArray) {
   // This test would build an array and try sending it over the "wire"
   // The array starts with the '*', then the number of elements in the array
   // then "\r\n", then each element inside is encoded accordingly
@@ -370,7 +367,7 @@ TEST_F(RedisReplyBuilderTest, TestEmptyArray) {
   ASSERT_EQ(str(), empty_array);
 }
 
-TEST_F(RedisReplyBuilderTest, TestStrArray) {
+TEST_F(RedisReplyBuilderTest, StrArray) {
   std::vector<std::string_view> string_vector{"hello", "world", "111", "@3#$^&*~"};
   builder_->StartArray(string_vector.size());
   std::size_t expected_size = kCRLF.size() + 2;
@@ -572,7 +569,7 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithErrorString) {
   ASSERT_THAT(parsing_output.args, ElementsAre(message));
 }
 
-TEST_F(RedisReplyBuilderTest, TestInt) {
+TEST_F(RedisReplyBuilderTest, Int) {
   // message in the form of ":0\r\n" and ":1000\r\n"
   // this message just starts with ':' and ends with \r\n
   // and the payload must be successfully parsed into int type
@@ -588,7 +585,7 @@ TEST_F(RedisReplyBuilderTest, TestInt) {
   ASSERT_THAT(parsing_output.args, ElementsAre(IntArg(kPayloadInt)));
 }
 
-TEST_F(RedisReplyBuilderTest, TestDouble) {
+TEST_F(RedisReplyBuilderTest, Double) {
   // There is no direct support for double types in RESP
   // to send this, it is sent as bulk string
   const std::string_view kPayloadStr = "23.456";
@@ -607,7 +604,7 @@ TEST_F(RedisReplyBuilderTest, TestDouble) {
   ASSERT_THAT(parsing_output.args, ElementsAre(kPayloadStr));
 }
 
-TEST_F(RedisReplyBuilderTest, TestMixedTypeArray) {
+TEST_F(RedisReplyBuilderTest, MixedTypeArray) {
   // For arrays, we can send an array that contains more than a single type (string/bulk
   // string/simple string/null..) In this test we are verifying that this is actually working. note
   // that this is not part of class RedisReplyBuilder API
@@ -661,7 +658,7 @@ TEST_F(RedisReplyBuilderTest, TestMixedTypeArray) {
                   ArgType(RespExpr::STRING), ArgType(RespExpr::STRING), ArgType(RespExpr::STRING)));
 }
 
-TEST_F(RedisReplyBuilderTest, TestBatchMode) {
+TEST_F(RedisReplyBuilderTest, BatchMode) {
   // Test that when the batch mode is enabled, we are getting the same correct results
   builder_->SetBatchMode(true);
   // Some random values and sizes
@@ -702,21 +699,21 @@ TEST_F(RedisReplyBuilderTest, TestBatchMode) {
                           absl::StrCat(kBulkStringStart, "0"), std::string_view{}));
 }
 
-TEST_F(RedisReplyBuilderTest, TestResp3Double) {
+TEST_F(RedisReplyBuilderTest, Resp3Double) {
   builder_->SetResp3(true);
   builder_->SendDouble(5.5);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(str(), ",5.5\r\n");
 }
 
-TEST_F(RedisReplyBuilderTest, TestResp3NullString) {
+TEST_F(RedisReplyBuilderTest, Resp3NullString) {
   builder_->SetResp3(true);
   builder_->SendNull();
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "_\r\n");
 }
 
-TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsMap) {
+TEST_F(RedisReplyBuilderTest, SendStringArrayAsMap) {
   const std::vector<std::string> map_array{"k1", "v1", "k2", "v2"};
 
   builder_->SetResp3(false);
@@ -732,7 +729,7 @@ TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsMap) {
       << "SendStringArrayAsMap Resp3 Failed.";
 }
 
-TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsSet) {
+TEST_F(RedisReplyBuilderTest, SendStringArrayAsSet) {
   const std::vector<std::string> set_array{"e1", "e2", "e3"};
 
   builder_->SetResp3(false);
@@ -748,7 +745,7 @@ TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsSet) {
       << "SendStringArrayAsSet Resp3 Failed.";
 }
 
-TEST_F(RedisReplyBuilderTest, TestSendScoredArray) {
+TEST_F(RedisReplyBuilderTest, SendScoredArray) {
   const std::vector<std::pair<std::string, double>> scored_array{
       {"e1", 1.1}, {"e2", 2.2}, {"e3", 3.3}};
 
@@ -779,7 +776,7 @@ TEST_F(RedisReplyBuilderTest, TestSendScoredArray) {
       << "Resp3 WITHSCORES failed.";
 }
 
-TEST_F(RedisReplyBuilderTest, TestSendMGetResponse) {
+TEST_F(RedisReplyBuilderTest, SendMGetResponse) {
   SinkReplyBuilder::MGetResponse resp = MakeMGetResponse({"v1", nullopt, "v3"});
 
   builder_->SetResp3(false);
@@ -796,7 +793,34 @@ TEST_F(RedisReplyBuilderTest, TestSendMGetResponse) {
       << "Resp3 SendMGetResponse failed.";
 }
 
-TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
+TEST_F(RedisReplyBuilderTest, MGetLarge) {
+  vector<optional<string>> strs;
+  for (int i = 0; i < 100; i++) {
+    strs.emplace_back(string(1000, 'a'));
+  }
+  SinkReplyBuilder::MGetResponse resp = MakeMGetResponse(strs);
+  builder_->SetResp3(false);
+  builder_->SendMGetResponse(std::move(resp));
+  string expected = "*100\r\n";
+  for (unsigned i = 0; i < 100; i++) {
+    absl::StrAppend(&expected, "$1000\r\n", string(1000, 'a'), "\r\n");
+  }
+  ASSERT_EQ(TakePayload(), expected);
+
+  strs.clear();
+  for (int i = 0; i < 200; i++) {
+    strs.emplace_back(nullopt);
+  }
+  resp = MakeMGetResponse(strs);
+  builder_->SendMGetResponse(std::move(resp));
+  expected = "*200\r\n";
+  for (unsigned i = 0; i < 200; i++) {
+    absl::StrAppend(&expected, "$-1\r\n");
+  }
+  ASSERT_EQ(TakePayload(), expected);
+}
+
+TEST_F(RedisReplyBuilderTest, BasicCapture) {
   using namespace std;
   string_view kTestSws[] = {"a1"sv, "a2"sv, "a3"sv, "a4"sv};
 
