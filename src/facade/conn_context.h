@@ -36,11 +36,6 @@ class ConnectionContext {
     return protocol_;
   }
 
-  // A convenient proxy for redis interface.
-  // Use with caution -- should only be used only
-  // in execution paths that are Redis *only*
-  // RedisReplyBuilder* operator->();
-
   SinkReplyBuilder* reply_builder() {
     return rbuilder_.get();
   }
