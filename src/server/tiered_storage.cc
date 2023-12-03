@@ -334,10 +334,6 @@ TieredStats TieredStorage::GetStats() const {
 
 void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   PerDb* db = db_arr_[req->db_index()];
-  if (!db) {  // Db was flushed.
-    delete req;
-    return;
-  }
   auto& bin_record = db->bin_map[req->bin_index()];
   if (io_res < 0) {
     LOG(ERROR) << "Error writing into ssd file: " << util::detail::SafeErrorMessage(-io_res);
@@ -370,18 +366,18 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   // Relevant only for OBJ_STRING, see CHECK above.
   size_t blob_len = it->second.Size();
 
-  if (db_arr_.size() <= db_index) {
-    db_arr_.resize(db_index + 1);
-  }
-  if (db_arr_[db_index] == nullptr) {
-    db_arr_[db_index] = new PerDb;
-  }
-
   if (blob_len > kMaxSmallBin) {
     if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
       WriteSingle(db_index, it, blob_len);
     }  // otherwise skip
     return error_code{};
+  }
+
+  if (db_arr_.size() <= db_index) {
+    db_arr_.resize(db_index + 1);
+  }
+  if (db_arr_[db_index] == nullptr) {
+    db_arr_[db_index] = new PerDb;
   }
 
   PerDb* db = db_arr_[db_index];
