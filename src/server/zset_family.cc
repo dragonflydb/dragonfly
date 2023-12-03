@@ -2533,7 +2533,7 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (rb) {
+  if (result) {
     rb->SendLong(*result);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();
