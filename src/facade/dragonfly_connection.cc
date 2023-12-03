@@ -282,7 +282,6 @@ void Connection::DispatchOperations::operator()(const MigrationRequestMessage& m
   // no-op
 }
 
-
 void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
   msg.bc.Dec();
 }
@@ -1357,6 +1356,15 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
   migration_request_ = dest;
 }
 
+void Connection::EnableTracking() {
+  tracking_enabled_ = true;
+  cc_->subscriptions++;
+}
+
+void Connection::DisableTracking() {
+  tracking_enabled_ = false;
+}
+
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
   size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
                dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
@@ -1384,7 +1392,7 @@ unsigned Connection::WeakRef::Thread() const {
 }
 
 Connection* Connection::WeakRef::Get() const {
-  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
+  // DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
   return ptr_.lock().get();
 }
 

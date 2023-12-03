@@ -1140,7 +1140,10 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     else
       (*cntx)->SendStringArr(*result);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    (*cntx)->SendNull();
+    if (args.size() == 1)
+      (*cntx)->SendNull();
+    else
+      (*cntx)->SendEmptyArray();
   } else {
     (*cntx)->SendError(result.status());
   }

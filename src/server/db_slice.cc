@@ -1364,20 +1364,22 @@ void DbSlice::ResetUpdateEvents() {
 // todo: perhaps we need to limit the total number of entry in the tracking
 // table so that we have a way to limit the amount of memory used for
 // client tracking
-void DbSlice::TrackKeys(ConnectionContext* cntx, int32_t tid,
+void DbSlice::TrackKeys(facade::Connection::WeakRef conn, int32_t tid,
                         const std::vector<std::string_view>& keys) {
   DVLOG(2) << "Start tracking the following keys for thread ID: " << tid
-           << ", client ID: " << cntx->conn()->GetClientId();
+           << ", client ID: " << conn.Get()->GetClientId();
+  if (conn.Get() == nullptr)
+    return;
+
   for (auto key : keys) {
     // std::string_view k = key;
     std::string k{key.begin(), key.end()};
     DVLOG(2) << "  " << k;
+    std::pair<facade::Connection::WeakRef, int32_t> p{conn, tid};
     if (client_tracking_map_.find(k) == client_tracking_map_.end()) {
-      std::pair<ConnectionContext*, int32_t> p{cntx, tid};
-      absl::flat_hash_set<std::pair<ConnectionContext*, int32_t>, Hash> tracker_set{p};
+      absl::flat_hash_set<std::pair<facade::Connection::WeakRef, int32_t>, Hash> tracker_set{p};
       client_tracking_map_.insert({k, tracker_set});
     } else {
-      std::pair<ConnectionContext*, int32_t> p{cntx, tid};
       client_tracking_map_[k].insert(p);
     }
   }
@@ -1389,10 +1391,10 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
     // notify all the clients.
     auto& client_set = client_tracking_map_[k];
     DVLOG(2) << "Garbage collect clients that are no longer tracking... ";
-    auto is_not_tracking = [](std::pair<ConnectionContext*, int32_t> p) {
-      return (!p.first->conn()->IsTrackingOn());
+    auto is_closed_or_not_tracking = [](std::pair<facade::Connection::WeakRef, int32_t> p) {
+      return ((p.first.Get() == nullptr) || (!p.first.Get()->IsTrackingOn()));
     };
-    absl::erase_if(client_set, is_not_tracking);
+    absl::erase_if(client_set, is_closed_or_not_tracking);
     DVLOG(2) << "Number of clients left: " << client_set.size();
 
     if (!client_set.empty()) {
@@ -1400,8 +1402,10 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
         for (auto it = client_set.begin(); it != client_set.end(); ++it) {
           if ((unsigned int)it->second != idx)
             continue;
-          facade::Connection* conn = it->first->conn();
-          DCHECK(conn);
+
+          facade::Connection* conn = it->first.Get();
+          if (conn == nullptr)
+            continue;
           conn->SendInvalidationMessageAsync({key});
           return;
         }

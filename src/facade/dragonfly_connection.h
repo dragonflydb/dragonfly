@@ -164,6 +164,12 @@ class Connection : public util::Connection {
     // Ensure owner thread's memory budget. If expired, skips and returns false. Thread-safe.
     bool EnsureMemoryBudget() const;
 
+    bool operator==(const WeakRef rhs) const {
+      auto rhs_ptr = rhs.ptr_.lock();
+      auto lhs_ptr = ptr_.lock();
+      return (rhs_ptr == lhs_ptr);
+    };
+
    private:
     friend class Connection;
 
@@ -257,13 +263,11 @@ class Connection : public util::Connection {
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
 
-  void EnableTracking() {
-    tracking_enabled_ = true;
-  }
+  // Set the flag to enable client side tracking
+  void EnableTracking();
 
-  void DisableTracking() {
-    tracking_enabled_ = false;
-  }
+  // Set the flag to disable client side tracking
+  void DisableTracking();
 
   bool IsTrackingOn() const {
     return tracking_enabled_;

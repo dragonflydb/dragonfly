@@ -334,7 +334,8 @@ class DbSlice {
   }
 
   // Start tracking keys for the client with client_id
-  void TrackKeys(ConnectionContext*, int32_t, const std::vector<std::string_view>&);
+  // void TrackKeys(ConnectionContext*, int32_t, const std::vector<std::string_view>&);
+  void TrackKeys(facade::Connection::WeakRef, int32_t, const std::vector<std::string_view>&);
 
   // Send invalidatoin message when a key being tracked is updated/deleted.
   // A connection that has been closed will be garbage collected along the way.
@@ -392,17 +393,13 @@ class DbSlice {
   DocDeletionCallback doc_del_cb_;
 
   struct Hash {
-    size_t operator()(const std::pair<ConnectionContext*, int32_t>& p) const {
-      // return std::hash<int32_t>()(p.second);
-      return std::hash<uint32_t>()(p.first->conn()->GetClientId());
+    size_t operator()(const std::pair<facade::Connection::WeakRef, int32_t>& p) const {
+      return std::hash<uint32_t>()(p.first.Get()->GetClientId());
     }
   };
 
-  // maps keys to the IDs of the clients that are tracking this key.
-  // absl::flat_hash_map<std::string_view, absl::flat_hash_set<std::pair<ConnectionContext*,
-  // int32_t>, Hash> > client_tracking_map_;
   absl::flat_hash_map<std::string,
-                      absl::flat_hash_set<std::pair<ConnectionContext*, int32_t>, Hash>>
+                      absl::flat_hash_set<std::pair<facade::Connection::WeakRef, int32_t>, Hash>>
       client_tracking_map_;
 };
 

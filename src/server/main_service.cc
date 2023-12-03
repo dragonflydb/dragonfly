@@ -1043,7 +1043,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 OpResult<bool> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, uint32_t tid,
                            vector<string_view>& keys, CmdArgList args) {
   auto& db_slice = op_args.shard->db_slice();
-  db_slice.TrackKeys(cntx, tid, keys);
+  db_slice.TrackKeys(cntx->conn()->Borrow(), tid, keys);
   return true;
 }
 
