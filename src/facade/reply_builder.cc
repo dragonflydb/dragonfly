@@ -263,6 +263,10 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
+bool RedisReplyBuilder::IsResp3() const {
+  return is_resp3_;
+}
+
 void RedisReplyBuilder::SetResp3(bool is_resp3) {
   is_resp3_ = is_resp3;
 }

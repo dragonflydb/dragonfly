@@ -1264,15 +1264,19 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "TRACKING" && args.size() == 2) {
-    ToUpper(&args[1]);
-    string_view switch_state = ArgS(args, 1);
-    if (switch_state == "ON") {
-      cntx->conn()->EnableTracking();
-      return (*cntx)->SendOk();
-    } else if (switch_state == "OFF") {
-      cntx->conn()->DisableTracking();
-      // todo: the client id in tracking table will be garbage collected.
-      return (*cntx)->SendOk();
+    if ((*cntx)->IsResp3()) {
+      ToUpper(&args[1]);
+      string_view switch_state = ArgS(args, 1);
+      if (switch_state == "ON") {
+        cntx->conn()->EnableTracking();
+        return (*cntx)->SendOk();
+      } else if (switch_state == "OFF") {
+        cntx->conn()->DisableTracking();
+        return (*cntx)->SendOk();
+      }
+    } else {
+      LOG_FIRST_N(ERROR, 10)
+          << "Client tracking is currently not supported in RESP2, please use RESP3.";
     }
   }
 
