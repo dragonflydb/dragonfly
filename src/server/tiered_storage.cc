@@ -426,13 +426,14 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   DCHECK(prime_value.HasIoPending());
 
   prime_value.SetIoPending(false);  // remove io flag.
-  PerDb* db = db_arr_[db_index];
+
   size_t blob_len = prime_value.Size();
 
   if (blob_len > kMaxSmallBin) {
     return;
   }
 
+  PerDb* db = db_arr_[db_index];
   unsigned bin_index = SmallToBin(blob_len);
   auto& bin_record = db->bin_map[bin_index];
   auto pending_it = bin_record.pending_entries.find(it->first);

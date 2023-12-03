@@ -163,11 +163,29 @@ TEST_F(TieredStorageTest, FlushAllAfterSet) {
   EXPECT_LT(m.db_stats[0].tiered_entries, 100);
 }
 
-TEST_F(TieredStorageTest, AddBigValuse) {
+TEST_F(TieredStorageTest, AddBigValues) {
   FillExternalKeys(100, 5000);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
   Run({"flushall"});
+  Metrics m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 0u);
+
+  FillExternalKeys(100, 5000);
+  EXPECT_EQ(100, CheckedInt({"dbsize"}));
+
+  usleep(20000);  // 0.02 milliseconds
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 100);
+}
+
+TEST_F(TieredStorageTest, DelBigValues) {
+  FillExternalKeys(100, 5000);
+  EXPECT_EQ(100, CheckedInt({"dbsize"}));
+
+  for (unsigned i = 0; i < 100; ++i) {
+    Run({"del", StrCat("k", i)});
+  }
   Metrics m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0u);
 
