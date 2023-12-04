@@ -28,9 +28,50 @@ Fully compatible with Redis and Memcached APIs, Dragonfly requires no code chang
 
 ## <a name="benchmarks"><a/>Benchmarks
 
+We first compare Dragonfly with Redis on `m5.large` instance which is commonly used to run Redis
+due to its single-threaded architecture. The benchmark program runs from another
+load-test instance (c5n) in the same AZ using `memtier_benchmark  -c 20 --test-time 100 -t 4 -d 256 --distinct-client-seed`
+
+Dragonfly shows a comparable performance:
+
+1. SETs (`--ratio 1:0`):
+
+|  Redis                                   |      DF                                |
+| -----------------------------------------|----------------------------------------|
+| QPS: 159K, P99.9: 1.16ms, P99: 0.82ms    | QPS:173K, P99.9: 1.26ms, P99: 0.9ms    |
+|                                          |                                        |
+
+2. GETs (`--ratio 0:1`):
+
+|  Redis                                  |      DF                                |
+| ----------------------------------------|----------------------------------------|
+| QPS: 194K, P99.9: 0.8ms, P99: 0.65ms    | QPS: 191K, P99.9: 0.95ms, P99: 0.8ms   |
+
+The benchmark above shows that the algorithmic layer inside DF that allows it to scale vertically
+does not take a large toll when running single-threaded.
+
+However, if we take a bit stronger instance (m5.xlarge), the gap between DF and Redis starts growing.
+(`memtier_benchmark  -c 20 --test-time 100 -t 6 -d 256 --distinct-client-seed`):
+1. SETs (`--ratio 1:0`):
+
+|  Redis                                  |      DF                                |
+| ----------------------------------------|----------------------------------------|
+| QPS: 190K, P99.9: 2.45ms, P99: 0.97ms   |  QPS: 279K , P99.9: 1.95ms, P99: 1.48  |
+
+2. GETs (`--ratio 0:1`):
+
+|  Redis                                  |      DF                                |
+| ----------------------------------------|----------------------------------------|
+| QPS: 220K, P99.9: 0.98ms , P99: 0.8ms   |  QPS: 305K, P99.9: 1.03ms, P99: 0.87ms |
+
+
+Dragonfly throughput capacity continues to grow with instance size,
+while single-threaded Redis is bottlenecked on CPU and reaches local maxima in terms of performance.
+
 <img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
-In benchmarks, Dragonfly showed a 25X increase in throughput compared to Redis, crossing 3.8M QPS on c6gn.16xlarge.
+If we compare Dragonfly and Redis on the most network-capable instance c6gn.16xlarge,
+Dragonfly showed a 25X increase in throughput compared to Redis single process, crossing 3.8M QPS.
 
 Dragonfly's 99th percentile latency metrics at its peak throughput:
 
