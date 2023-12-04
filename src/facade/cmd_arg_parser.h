@@ -89,7 +89,7 @@ struct CmdArgParser {
   }
 
   // check next value ignoring case and consume it
-  void ExptectTag(std::string_view tag);
+  void ExpectTag(std::string_view tag);
 
   // Consume next value
   template <class... Cases> auto Switch(Cases&&... cases) {

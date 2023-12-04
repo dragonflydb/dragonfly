@@ -8,6 +8,7 @@
 
 #include "facade/conn_context.h"
 #include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_slot_migration.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -46,13 +47,21 @@ class ClusterFamily {
   void DflyClusterMyId(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx);
+  void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
 
   void MigrationConf(CmdArgList args, ConnectionContext* cntx);
+  ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
+                                     std::vector<ClusterConfig::SlotRange> slots);
 
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   ServerFamily* server_family_ = nullptr;
+
+  mutable Mutex migrations_jobs_mu_;
+  // holds all slot migrations that are currently in progress.
+  std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
+      ABSL_GUARDED_BY(migrations_jobs_mu_);
 };
 
 }  // namespace dfly
