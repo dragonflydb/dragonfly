@@ -598,6 +598,9 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
     return rb->SendError(err->MakeReply());
 
   auto* node = AddMigration(std::string(host_ip), port, std::move(slots));
+  if (!node) {
+    return rb->SendError("Can't start the migration, another one is in progress");
+  }
   node->Start(cntx);
 
   return rb->SendOk();
@@ -653,6 +656,11 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
 ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
                                                   std::vector<ClusterConfig::SlotRange> slots) {
   lock_guard lk(migrations_jobs_mu_);
+  for (const auto& mj : migrations_jobs_) {
+    if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
+      return nullptr;
+    }
+  }
   return migrations_jobs_
       .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port, std::move(slots)))
       .get();

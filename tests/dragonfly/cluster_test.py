@@ -761,5 +761,18 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     )
     assert "CONNECTING" == status
 
+    try:
+        await c_nodes_admin[1].execute_command(
+            "DFLYCLUSTER",
+            "START-SLOT-MIGRATION",
+            "127.0.0.1",
+            str(nodes[0].admin_port),
+            "5000",
+            "5200",
+        )
+        assert False, "Should not be able to start slot migration"
+    except redis.exceptions.ResponseError as e:
+        assert e.args[0] == "Can't start the migration, another one is in progress"
+
     await c_nodes_admin[0].close()
     await c_nodes_admin[1].close()
