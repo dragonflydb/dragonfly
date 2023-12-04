@@ -43,6 +43,8 @@ class TieredStorage {
 
   TieredStats GetStats() const;
 
+  void CancelAllIo(DbIndex db_index);
+
  private:
   class InflightWriteRequest;
 

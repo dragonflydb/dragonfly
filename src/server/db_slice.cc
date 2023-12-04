@@ -615,11 +615,14 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     DCHECK(!db);
     CreateDb(db_ind);
     db_arr_[db_ind]->trans_locks.swap(db_ptr->trans_locks);
+    if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
+      tiered->CancelAllIo(db_ind);
+    }
 
     auto cb = [this, db_ptr = std::move(db_ptr)]() mutable {
       if (shard_owner()->tiered_storage()) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-          if (it->second.IsExternal() || it->second.HasIoPending()) {
+          if (it->second.IsExternal()) {
             PerformDeletion(it, shard_owner(), db_ptr.get());
           }
         }
@@ -648,6 +651,9 @@ void DbSlice::FlushDb(DbIndex db_ind) {
       CreateDb(i);
       db_arr_[i]->trans_locks.swap(all_dbs[i]->trans_locks);
     }
+    if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
+      tiered->CancelAllIo(i);
+    }
   }
 
   // Explicitly drop reference counted pointers in place.
@@ -656,7 +662,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     for (auto& db_ptr : all_dbs) {
       if (shard_owner()->tiered_storage()) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-          if (it->second.IsExternal() || it->second.HasIoPending()) {
+          if (it->second.IsExternal()) {
             PerformDeletion(it, shard_owner(), db_ptr.get());
           }
         }

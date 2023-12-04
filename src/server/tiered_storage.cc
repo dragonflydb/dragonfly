@@ -110,6 +110,7 @@ struct TieredStorage::PerDb {
   PerDb(const PerDb&) = delete;
   PerDb& operator=(const PerDb&) = delete;
   PerDb() = default;
+  void Clear();
 
   using InflightMap = absl::flat_hash_map<string_view, InflightWriteRequest*>;
 
@@ -123,6 +124,13 @@ struct TieredStorage::PerDb {
 
   BinRecord bin_map[kSmallBinLen];
 };
+
+void TieredStorage::PerDb::Clear() {
+  for (size_t i = 0; i < kSmallBinLen; ++i) {
+    bin_map[i].pending_entries.clear();
+    bin_map[i].enqueued_entries.clear();
+  }
+}
 
 class TieredStorage::InflightWriteRequest {
  public:
@@ -444,6 +452,18 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
 
   string key = it->first.ToString();
   CHECK(bin_record.enqueued_entries.erase(key));
+}
+
+void TieredStorage::CancelAllIo(DbIndex db_index) {
+  VLOG(2) << "CancelAllIo " << db_index;
+  if (db_index >= db_arr_.size()) {
+    return;
+  }
+  PerDb* db = db_arr_[db_index];
+  if (db) {
+    VLOG(2) << "Clear db " << db_index;
+    db->Clear();
+  }
 }
 
 bool IsObjFitToUnload(const PrimeValue& pv) {
