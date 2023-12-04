@@ -660,15 +660,17 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   // If snapshotting is currently in progress, they will keep alive until it finishes.
   auto cb = [this, all_dbs = std::move(all_dbs)]() mutable {
     for (auto& db_ptr : all_dbs) {
-      if (shard_owner()->tiered_storage()) {
-        for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-          if (it->second.IsExternal()) {
-            PerformDeletion(it, shard_owner(), db_ptr.get());
+      if (db_ptr) {
+        if (shard_owner()->tiered_storage()) {
+          for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
+            if (it->second.IsExternal()) {
+              PerformDeletion(it, shard_owner(), db_ptr.get());
+            }
           }
         }
+        DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
+        db_ptr.reset();
       }
-      DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
-      db_ptr.reset();
     }
 
     mi_heap_collect(ServerState::tlocal()->data_heap(), true);
