@@ -277,7 +277,7 @@ void TieredStorage::InflightWriteRequest::Undo(PerDb::BinRecord* bin_record, DbS
       // TODO: what happens when if the entry was deleted meanwhile
       // or it has been serialized again?
       CHECK(pit->second.HasIoPending()) << "TBD: fix inconsistencies";
-
+      VLOG(2) << "Undo key:" << pkey;
       pit->second.SetIoPending(false);
 
       bin_record->enqueued_entries.erase(it);
@@ -400,6 +400,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   // TODO: we need to track in stats all the cases where we omit offloading attempt.
   CHECK_LT(bin_record.pending_entries.size(), max_entries);
 
+  VLOG(2) << "ScheduleOffload:" << it->first.ToString();
   bin_record.pending_entries.insert(it->first);
   it->second.SetIoPending(true);
 
@@ -419,6 +420,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   if (!flush_succeeded) {
     // we could not flush because I/O is saturated, so lets remove the last item.
     bin_record.pending_entries.erase(it->first.AsRef());
+    it->second.SetIoPending(false);
     ++stats_.flush_skip_cnt;
   }
 
@@ -446,6 +448,7 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   auto& bin_record = db->bin_map[bin_index];
   auto pending_it = bin_record.pending_entries.find(it->first);
   if (pending_it != bin_record.pending_entries.end()) {
+    VLOG(2) << "CancelIo from pending: " << it->first.ToString();
     bin_record.pending_entries.erase(pending_it);
     return;
   }
@@ -571,7 +574,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
     }
 
     req->Add(it->first, it->second);
-    VLOG(2) << "add to enqueued_entries" << req->entries().back();
+    VLOG(2) << "add to enqueued_entries: " << req->entries().back();
     auto res = bin_record.enqueued_entries.emplace(req->entries().back(), req);
     CHECK(res.second);
   }
