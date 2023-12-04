@@ -451,6 +451,7 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   }
 
   string key = it->first.ToString();
+  VLOG(2) << "CancelIo from enqueue: " << key;
   CHECK(bin_record.enqueued_entries.erase(key));
 }
 
@@ -570,6 +571,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
     }
 
     req->Add(it->first, it->second);
+    VLOG(2) << "add to enqueued_entries" << req->entries().back();
     auto res = bin_record.enqueued_entries.emplace(req->entries().back(), req);
     CHECK(res.second);
   }
