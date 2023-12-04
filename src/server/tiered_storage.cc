@@ -455,8 +455,8 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   CHECK(bin_record.enqueued_entries.erase(key));
 }
 
-void TieredStorage::CancelAllIo(DbIndex db_index) {
-  VLOG(2) << "CancelAllIo " << db_index;
+void TieredStorage::CancelAllIos(DbIndex db_index) {
+  VLOG(2) << "CancelAllIos " << db_index;
   if (db_index >= db_arr_.size()) {
     return;
   }
