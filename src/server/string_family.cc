@@ -861,7 +861,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cntx->SendError(kWrongTypeErr);
+        rb->SendError(kWrongTypeErr);
         break;
       default:
         DVLOG(1) << "GET " << key << " nil";
@@ -890,7 +890,7 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cntx->SendError(kWrongTypeErr);
+        rb->SendError(kWrongTypeErr);
         break;
       default:
         DVLOG(1) << "GET " << key << " nil";
@@ -999,7 +999,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
 
   switch (result.status()) {
     case OpStatus::WRONG_TYPE:
-      cntx->SendError(kWrongTypeErr);
+      rb->SendError(kWrongTypeErr);
       break;
     default:
       DVLOG(1) << "GET " << key << " nil";
@@ -1453,7 +1453,7 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
     array[4] = reset_after_s;
 
     for (const auto& v : array) {
-      cntx->SendLong(v);
+      rb->SendLong(v);
     }
   } else {
     switch (result.status()) {

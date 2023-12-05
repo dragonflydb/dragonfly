@@ -1318,8 +1318,8 @@ void GenericFamily::Time(CmdArgList args, ConnectionContext* cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(2);
-  cntx->SendLong(now_usec / 1000000);
-  cntx->SendLong(now_usec % 1000000);
+  rb->SendLong(now_usec / 1000000);
+  rb->SendLong(now_usec % 1000000);
 }
 
 OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_dest,

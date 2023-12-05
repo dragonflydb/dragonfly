@@ -232,7 +232,7 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
     rb->SendBulkString(topic.value());
   else
     rb->SendNull();
-  SendLong(count);
+  rb->SendLong(count);
 }
 
 size_t ConnectionContext::UsedMemory() const {

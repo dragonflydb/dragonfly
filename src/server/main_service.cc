@@ -1601,7 +1601,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   BorrowedInterpreter interpreter{cntx};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
-    return cntx->SendError(res.error().Format(), facade::kScriptErrType);
+    return rb->SendError(res.error().Format(), facade::kScriptErrType);
 
   string sha{std::move(res.value())};
 

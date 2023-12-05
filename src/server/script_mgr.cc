@@ -111,7 +111,7 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
   auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(res.size());
   for (uint8_t v : res) {
-    cntx->SendLong(v);
+    rb->SendLong(v);
   }
   return;
 }
@@ -131,7 +131,7 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
 
   auto res = Insert(body, interpreter);
   if (!res)
-    return cntx->SendError(res.error().Format());
+    return rb->SendError(res.error().Format());
 
   // Schedule empty callback inorder to journal command via transaction framework.
   cntx->transaction->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });

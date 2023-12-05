@@ -765,7 +765,7 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
       break;
 
     default:
-      cntx->SendError(result.status());
+      rb->SendError(result.status());
       break;
   }
 }
@@ -805,7 +805,7 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return cntx->SendError(op_res.status());
+      return rb->SendError(op_res.status());
       break;
   }
 }
@@ -847,7 +847,7 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return cntx->SendError(op_res.status());
+      return rb->SendError(op_res.status());
       break;
   }
 }
@@ -1020,7 +1020,7 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
     rb->StartArray(result->size());
     const auto& array = result.value();
     for (const auto& v : array) {
-      cntx->SendLong(v);
+      rb->SendLong(v);
     }
   }
 }

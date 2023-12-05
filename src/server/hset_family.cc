@@ -827,7 +827,7 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -847,7 +847,7 @@ void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
       rb->SendNull();
     } else {
-      cntx->SendError(result.status());
+      rb->SendError(result.status());
     }
   }
 }
@@ -970,7 +970,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(k);
     }
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1145,7 +1145,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 

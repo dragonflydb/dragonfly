@@ -1725,16 +1725,16 @@ void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_
     if (zparams.flags & ZADD_IN_INCR)
       rb->SendNull();
     else
-      cntx->SendLong(0);
+      rb->SendLong(0);
   } else if (add_result.status() == OpStatus::SKIPPED) {
     rb->SendNull();
   } else if (add_result->is_nan) {
-    cntx->SendError(kScoreNaN);
+    rb->SendError(kScoreNaN);
   } else {
     if (zparams.flags & ZADD_IN_INCR) {
       rb->SendDouble(add_result->new_score);
     } else {
-      cntx->SendLong(add_result->num_updated);
+      rb->SendLong(add_result->num_updated);
     }
   }
 }
@@ -1998,7 +1998,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (add_result->is_nan) {
-    return cntx->SendError(kScoreNaN);
+    return rb->SendError(kScoreNaN);
   }
 
   rb->SendDouble(add_result->new_score);
@@ -2371,7 +2371,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -2386,7 +2386,7 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    cntx->SendError(kWrongTypeErr);
+    rb->SendError(kWrongTypeErr);
   } else if (!result) {
     rb->SendNull();
   } else {
@@ -2443,7 +2443,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(k);
     }
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -2538,7 +2538,7 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 

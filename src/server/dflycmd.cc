@@ -105,8 +105,6 @@ DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 }
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-
   DCHECK_GE(args.size(), 1u);
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -143,7 +141,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return ReplicaOffset(args, cntx);
   }
 
-  rb->SendError(kSyntaxErr);
+  cntx->SendError(kSyntaxErr);
 }
 
 #if 0

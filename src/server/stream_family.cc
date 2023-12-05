@@ -2340,13 +2340,13 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         }
 
         rb->SendBulkString("length");
-        cntx->SendLong(sinfo->length);
+        rb->SendLong(sinfo->length);
 
         rb->SendBulkString("radix-tree-keys");
-        cntx->SendLong(sinfo->radix_tree_keys);
+        rb->SendLong(sinfo->radix_tree_keys);
 
         rb->SendBulkString("radix-tree-nodes");
-        cntx->SendLong(sinfo->radix_tree_nodes);
+        rb->SendLong(sinfo->radix_tree_nodes);
 
         rb->SendBulkString("last-generated-id");
         rb->SendBulkString(StreamIdRepr(sinfo->last_generated_id));
@@ -2355,7 +2355,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         rb->SendBulkString(StreamIdRepr(sinfo->max_deleted_entry_id));
 
         rb->SendBulkString("entries-added");
-        cntx->SendLong(sinfo->entries_added);
+        rb->SendLong(sinfo->entries_added);
 
         rb->SendBulkString("recorded-first-entry-id");
         rb->SendBulkString(StreamIdRepr(sinfo->recorded_first_entry_id));
@@ -2386,19 +2386,19 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
             rb->SendBulkString("entries-read");
             if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
-              cntx->SendLong(ginfo.entries_read);
+              rb->SendLong(ginfo.entries_read);
             } else {
               rb->SendNull();
             }
             rb->SendBulkString("lag");
             if (ginfo.lag != SCG_INVALID_LAG) {
-              cntx->SendLong(ginfo.lag);
+              rb->SendLong(ginfo.lag);
             } else {
               rb->SendNull();
             }
 
             rb->SendBulkString("pel-count");
-            cntx->SendLong(ginfo.pel_count);
+            rb->SendLong(ginfo.pel_count);
 
             rb->SendBulkString("pending");
             rb->StartArray(ginfo.stream_nack_vec.size());
@@ -2406,8 +2406,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
               rb->StartArray(4);
               rb->SendBulkString(StreamIdRepr(pending_info.pel_id));
               rb->SendBulkString(pending_info.consumer_name);
-              cntx->SendLong(pending_info.delivery_time);
-              cntx->SendLong(pending_info.delivery_count);
+              rb->SendLong(pending_info.delivery_time);
+              rb->SendLong(pending_info.delivery_count);
             }
 
             rb->SendBulkString("consumers");
@@ -2419,10 +2419,10 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
               rb->SendBulkString(consumer_info.name);
 
               rb->SendBulkString("seen-time");
-              cntx->SendLong(consumer_info.seen_time);
+              rb->SendLong(consumer_info.seen_time);
 
               rb->SendBulkString("pel-count");
-              cntx->SendLong(consumer_info.pel_count);
+              rb->SendLong(consumer_info.pel_count);
 
               rb->SendBulkString("pending");
               if (consumer_info.pending.size() == 0) {
@@ -2434,14 +2434,14 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
                 rb->StartArray(3);
 
                 rb->SendBulkString(StreamIdRepr(pending.pel_id));
-                cntx->SendLong(pending.delivery_time);
-                cntx->SendLong(pending.delivery_count);
+                rb->SendLong(pending.delivery_time);
+                rb->SendLong(pending.delivery_count);
               }
             }
           }
         } else {
           rb->SendBulkString("groups");
-          cntx->SendLong(sinfo->groups);
+          rb->SendLong(sinfo->groups);
 
           rb->SendBulkString("first-entry");
           if (sinfo->first_entry.kv_arr.size() != 0) {
@@ -2471,7 +2471,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         }
         return;
       }
-      return cntx->SendError(sinfo.status());
+      return rb->SendError(sinfo.status());
     } else if (sub_cmd == "CONSUMERS") {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
@@ -2489,19 +2489,19 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           rb->SendBulkString("name");
           rb->SendBulkString(consumer_info.name);
           rb->SendBulkString("pending");
-          cntx->SendLong(consumer_info.pel_count);
+          rb->SendLong(consumer_info.pel_count);
           rb->SendBulkString("idle");
-          cntx->SendLong(consumer_info.idle);
+          rb->SendLong(consumer_info.idle);
         }
         return;
       }
       if (result.status() == OpStatus::INVALID_VALUE) {
-        return cntx->SendError(NoGroupError(stream_name, group_name));
+        return rb->SendError(NoGroupError(stream_name, group_name));
       }
-      return cntx->SendError(result.status());
+      return rb->SendError(result.status());
     }
   }
-  return cntx->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
+  return rb->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
 void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
@@ -2603,7 +2603,7 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendEmptyArray();
     }
     rb->StartArray(4);
-    cntx->SendLong(res.count);
+    rb->SendLong(res.count);
     rb->SendBulkString(StreamIdRepr(res.start));
     rb->SendBulkString(StreamIdRepr(res.end));
     rb->StartArray(res.consumer_list.size());
@@ -2611,7 +2611,7 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
     for (auto& [consumer_name, count] : res.consumer_list) {
       rb->StartArray(2);
       rb->SendBulkString(consumer_name);
-      cntx->SendLong(count);
+      rb->SendLong(count);
     }
   } else {
     const auto& res = std::get<PendingExtendedResultList>(result);
@@ -2624,8 +2624,8 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
       rb->StartArray(4);
       rb->SendBulkString(StreamIdRepr(item.start));
       rb->SendBulkString(item.consumer_name);
-      cntx->SendLong(item.elapsed);
-      cntx->SendLong(item.delivery_count);
+      rb->SendLong(item.elapsed);
+      rb->SendLong(item.delivery_count);
     }
   }
 }
@@ -2897,7 +2897,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
         // We are simply mimicking Redis' error message here.
         // However, we could actually report more precise error message.
         cntx->transaction->Conclude();
-        cntx->SendError(NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
+        rb->SendError(NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
         return;
       }
 
@@ -2932,7 +2932,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
         string error_msg =
             NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option");
         cntx->transaction->Conclude();
-        cntx->SendError(error_msg);
+        rb->SendError(error_msg);
         return;
       }
     }
@@ -3155,7 +3155,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     return rb->SendEmptyArray();
   }
-  return cntx->SendError(result.status());
+  return rb->SendError(result.status());
 }
 
 void StreamFamily::XAck(CmdArgList args, ConnectionContext* cntx) {

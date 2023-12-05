@@ -295,7 +295,7 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
   facade::SinkReplyBuilder::ReplyAggregator agg_reply{cntx->reply_builder()};
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(reply_size);
-  cntx->SendLong(min(total, agg_limit));
+  rb->SendLong(min(total, agg_limit));
   for (auto* doc : absl::MakeSpan(docs).subspan(start_idx, result_count)) {
     if (ids_only) {
       rb->SendBulkString(doc->key);
@@ -364,7 +364,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
     cntx->transaction->Conclude();
-    return (*cntx)->SendError("Index already exists");
+    return cntx->SendError("Index already exists");
   }
 
   auto idx_ptr = make_shared<DocIndex>(move(index));
@@ -428,19 +428,19 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartCollection(4, RedisReplyBuilder::MAP);
 
-  cntx->SendSimpleString("index_name");
-  cntx->SendSimpleString(idx_name);
+  rb->SendSimpleString("index_name");
+  rb->SendSimpleString(idx_name);
 
-  cntx->SendSimpleString("index_definition");
+  rb->SendSimpleString("index_definition");
   {
     rb->StartCollection(2, RedisReplyBuilder::MAP);
-    cntx->SendSimpleString("key_type");
-    cntx->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
-    cntx->SendSimpleString("prefix");
-    cntx->SendSimpleString(info.base_index.prefix);
+    rb->SendSimpleString("key_type");
+    rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
+    rb->SendSimpleString("prefix");
+    rb->SendSimpleString(info.base_index.prefix);
   }
 
-  cntx->SendSimpleString("attributes");
+  rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
   for (const auto& [field_ident, field_info] : schema.fields) {
     vector<string> info;
@@ -459,8 +459,8 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
     rb->SendSimpleStrArr(info);
   }
 
-  cntx->SendSimpleString("num_docs");
-  cntx->SendLong(total_num_docs);
+  rb->SendSimpleString("num_docs");
+  rb->SendLong(total_num_docs);
 }
 
 void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
@@ -588,7 +588,7 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
       if (children > 0)
         rb->StartArray(2);
 
-      cntx->SendSimpleString(
+      rb->SendSimpleString(
           absl::StrFormat("t=%-10u n=%-10u %s", event.micros, event.num_processed, event.descr));
 
       if (children > 0)

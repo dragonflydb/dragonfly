@@ -1193,14 +1193,14 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<vector<JsonType>> result = trans->ScheduleSingleHopT(move(cb));
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     rb->StartArray(result->size());
     for (const auto& it : *result) {
       SendJsonValue(rb, it);
     }
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1504,7 +1504,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1568,9 +1568,8 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<vector<StringVec>> result = trans->ScheduleSingleHopT(move(cb));
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     rb->StartArray(result->size());
     for (auto& it : *result) {
       if (it.empty()) {
@@ -1580,7 +1579,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1842,7 +1841,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     if (result == facade::OpStatus::KEY_NOTFOUND) {
       rb->SendNull();  // Match Redis
     } else {
-      cntx->SendError(result.status());
+      rb->SendError(result.status());
     }
   }
 }
