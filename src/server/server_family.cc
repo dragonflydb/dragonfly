@@ -1328,7 +1328,7 @@ void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
 
   string result = absl::StrJoin(client_info, "\n");
   result.append("\n");
-  return (*cntx)->SendBulkString(result);
+  return (*cntx)->SendVerbatimString(result);
 }
 
 void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {

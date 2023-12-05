@@ -394,7 +394,7 @@ class DbSlice {
 
   struct Hash {
     size_t operator()(const std::pair<facade::Connection::WeakRef, int32_t>& p) const {
-      return std::hash<uint32_t>()(p.first.Get()->GetClientId());
+      return std::hash<uint32_t>()(p.first.GetClientId());
     }
   };
 

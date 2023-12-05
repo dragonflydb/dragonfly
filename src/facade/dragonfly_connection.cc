@@ -1384,7 +1384,7 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
                              unsigned thread)
-    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread} {
+    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread}, client_id_{ptr->GetClientId()} {
 }
 
 unsigned Connection::WeakRef::Thread() const {
@@ -1394,6 +1394,10 @@ unsigned Connection::WeakRef::Thread() const {
 Connection* Connection::WeakRef::Get() const {
   // DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
   return ptr_.lock().get();
+}
+
+uint32_t Connection::WeakRef::GetClientId() const {
+  return client_id_;
 }
 
 bool Connection::WeakRef::EnsureMemoryBudget() const {

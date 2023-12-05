@@ -1159,8 +1159,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       vector<string_view> keys_to_track{keys.begin(), keys.end()};
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, tid, keys_to_track, args);
     };
-    dfly_cntx->transaction->Refurbish();
-    dfly_cntx->transaction->ScheduleSingleHopT(cb);
+
+    if (dfly_cntx->transaction == nullptr) {
+      DVLOG(2) << "transaction is a nullptr";
+    } else {
+      DVLOG(2) << "transaction is not a nullptr";
+      dfly_cntx->transaction->Refurbish();
+      dfly_cntx->transaction->ScheduleSingleHopT(cb);
+    }
   }
 
   if (!dispatching_in_multi) {
@@ -1477,6 +1483,9 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->protocol() == facade::Protocol::REDIS)
     (*cntx)->SendOk();
   using facade::SinkReplyBuilder;
+
+  if (cntx->conn()->IsTrackingOn())
+    cntx->conn()->DisableTracking();
 
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
@@ -2432,7 +2441,7 @@ void Service::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
   *registry
-      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
+      << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
       << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
       << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)

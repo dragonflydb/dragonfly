@@ -161,6 +161,8 @@ class Connection : public util::Connection {
     // Can only be called from connection's thread.
     Connection* Get() const;
 
+    uint32_t GetClientId() const;
+
     // Ensure owner thread's memory budget. If expired, skips and returns false. Thread-safe.
     bool EnsureMemoryBudget() const;
 
@@ -178,6 +180,7 @@ class Connection : public util::Connection {
     std::weak_ptr<Connection> ptr_;
     QueueBackpressure* backpressure_;
     unsigned thread_;
+    uint32_t client_id_;
   };
 
  public:
