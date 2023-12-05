@@ -46,6 +46,19 @@ static_assert(kPrimeSegmentSize == 32288);
 // 24576
 static_assert(kExpireSegmentSize == 23528);
 
+void AddTypeMemoryUsage(unsigned type, int64_t delta, DbTableStats* stats) {
+  DCHECK_NE(stats, nullptr);
+
+  if (type >= stats->memory_usage_by_type.size()) {
+    LOG_FIRST_N(WARNING, 1) << "Encountered unknown type when aggregating per-type memory: "
+                            << type;
+    DCHECK(false) << "Unsupported type " << type;
+    return;
+  }
+
+  stats->memory_usage_by_type[type] += delta;
+}
+
 void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
                      DbTable* table) {
   if (!exp_it.is_done()) {
@@ -72,7 +85,9 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
 
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
-  stats.obj_memory_usage -= (del_it->first.MallocUsed() + value_heap_size);
+  int64_t delta = del_it->first.MallocUsed() + value_heap_size;
+  stats.obj_memory_usage -= delta;
+  AddTypeMemoryUsage(pv.ObjType(), -delta, &stats);
   if (pv.ObjType() == OBJ_STRING) {
     stats.strval_memory_usage -= value_heap_size;
   } else if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
@@ -234,7 +249,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 96);
+  static_assert(kDbSz == 224);
 
   DbTableStats::operator+=(o);
 
@@ -476,7 +491,9 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
   if (inserted) {  // new entry
     db.stats.inline_keys += it->first.IsInline();
-    db.stats.obj_memory_usage += it->first.MallocUsed();
+    int64_t delta = it->first.MallocUsed();
+    db.stats.obj_memory_usage += delta;
+    AddTypeMemoryUsage(it->second.ObjType(), delta, &db.stats);
 
     events_.garbage_collected = db.prime.garbage_collected();
     events_.stash_unloaded = db.prime.stash_unloaded();
@@ -520,8 +537,9 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       }
 
       // Keep the entry but reset the object.
-      size_t value_heap_size = existing->second.MallocUsed();
+      int64_t value_heap_size = existing->second.MallocUsed();
       db.stats.obj_memory_usage -= value_heap_size;
+      AddTypeMemoryUsage(it->second.ObjType(), -value_heap_size, &db.stats);
 
       existing->second.Reset();
       events_.expired_keys++;
@@ -918,9 +936,10 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
     ccb.second(db_ind, ChangeReq{it});
   }
 
-  size_t value_heap_size = it->second.MallocUsed();
+  int64_t value_heap_size = it->second.MallocUsed();
   auto* stats = MutableStats(db_ind);
   stats->obj_memory_usage -= value_heap_size;
+  AddTypeMemoryUsage(it->second.ObjType(), -value_heap_size, stats);
   stats->update_value_amount -= value_heap_size;
 
   if (it->second.ObjType() == OBJ_STRING) {
@@ -948,8 +967,9 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
 void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing) {
   DbTableStats* stats = MutableStats(db_ind);
 
-  size_t value_heap_size = it->second.MallocUsed();
+  int64_t value_heap_size = it->second.MallocUsed();
   stats->obj_memory_usage += value_heap_size;
+  AddTypeMemoryUsage(it->second.ObjType(), value_heap_size, stats);
   if (it->second.ObjType() == OBJ_STRING)
     stats->strval_memory_usage += value_heap_size;
   if (existing)

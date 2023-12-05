@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
@@ -871,6 +872,20 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                            << sdata_res.error().message();
   }
 
+  DbStats total;
+  for (const auto& db_stats : m.db_stats) {
+    total += db_stats;
+  }
+
+  for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+    size_t mem = total.memory_usage_by_type[type];
+    if (mem > 0) {
+      AppendMetricWithoutLabels(
+          absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), "", mem,
+          MetricType::GAUGE, &resp->body());
+    }
+  }
+
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
@@ -1614,6 +1629,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     // are not accounted for to avoid complex computations. In some cases, when number of members
     // is known we approximate their allocations by taking 16 bytes per member.
     append("object_used_memory", total.obj_memory_usage);
+
+    for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+      size_t mem = total.memory_usage_by_type[type];
+      if (mem > 0) {
+        append(absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), mem);
+      }
+    }
     append("table_used_memory", total.table_mem_usage);
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);

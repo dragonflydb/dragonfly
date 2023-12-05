@@ -19,7 +19,7 @@ unsigned kInitSegmentLog = 3;
 
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats);
-  static_assert(kDbSz == 64);
+  static_assert(kDbSz == 192);
 
   ADD(inline_keys);
   ADD(obj_memory_usage);
@@ -29,6 +29,10 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   ADD(listpack_bytes);
   ADD(tiered_entries);
   ADD(tiered_size);
+
+  for (size_t i = 0; i < o.memory_usage_by_type.size(); ++i) {
+    memory_usage_by_type[i] += o.memory_usage_by_type[i];
+  }
 
   return *this;
 }
@@ -44,7 +48,8 @@ SlotStats& SlotStats::operator+=(const SlotStats& o) {
 
 DbTable::DbTable(PMR_NS::memory_resource* mr)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
-      expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr),
+      expire(0, detail::ExpireTablePolicy{}, mr),
+      mcflag(0, detail::ExpireTablePolicy{}, mr),
       top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}) {
   if (ClusterConfig::IsEnabled()) {
     slots_stats.resize(ClusterConfig::kMaxSlotNum + 1);

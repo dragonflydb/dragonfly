@@ -241,6 +241,8 @@ class CompactObj {
   unsigned Encoding() const;
   unsigned ObjType() const;
 
+  static std::string_view ObjTypeToString(unsigned type);
+
   void* RObjPtr() const {
     return u_.r_obj.inner_obj();
   }
