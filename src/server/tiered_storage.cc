@@ -108,10 +108,18 @@ struct PrimeHasher {
 };
 
 struct SingleRequest {
-  char* block_ptr = nullptr;
-  PrimeTable* pt = nullptr;
-  size_t blob_len = 0;
-  off_t offset = 0;
+  SingleRequest(size_t blob_len, int64 offset, string key)
+      : blob_len(blob_len), offset(offset), key(std::move(key)) {
+    constexpr size_t kMask = kBlockAlignment - 1;
+    page_size = (blob_len + kMask) & (~kMask);
+    DCHECK_GE(page_size, blob_len);
+    DCHECK_EQ(0u, page_size % kBlockAlignment);
+    block_ptr = (char*)mi_malloc_aligned(page_size, kBlockAlignment);
+  }
+  char* block_ptr;
+  size_t blob_len;
+  size_t page_size;
+  off_t offset;
   string key;
   bool cancel = false;
 };
@@ -120,7 +128,7 @@ struct TieredStorage::PerDb {
   PerDb(const PerDb&) = delete;
   PerDb& operator=(const PerDb&) = delete;
   PerDb() = default;
-  void Clear();
+  void CancelAll();
 
   using InflightMap = absl::flat_hash_map<string_view, InflightWriteRequest*>;
 
@@ -131,20 +139,21 @@ struct TieredStorage::PerDb {
     // Entries that were scheduled to write but have not completed yet.
     InflightMap enqueued_entries;
   };
-  absl::flat_hash_map<string_view, SingleRequest*> single_enqueued_entries;
+  // Big bin entries that were scheduled to write but have not completed yet.
+  absl::flat_hash_map<string_view, SingleRequest*> bigbin_enqueued_entries;
 
   BinRecord bin_map[kSmallBinLen];
 };
 
-void TieredStorage::PerDb::Clear() {
+void TieredStorage::PerDb::CancelAll() {
   for (size_t i = 0; i < kSmallBinLen; ++i) {
     bin_map[i].pending_entries.clear();
     bin_map[i].enqueued_entries.clear();
   }
-  for (auto& req : single_enqueued_entries) {
+  for (auto& req : bigbin_enqueued_entries) {
     req.second->cancel = true;
   }
-  single_enqueued_entries.clear();
+  bigbin_enqueued_entries.clear();
 }
 
 class TieredStorage::InflightWriteRequest {
@@ -456,10 +465,10 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
   prime_value.SetIoPending(false);  // remove io flag.
 
   size_t blob_len = prime_value.Size();
-
+  PerDb* db = db_arr_[db_index];
   if (blob_len > kMaxSmallBin) {
     string key = it->first.ToString();
-    auto& enqueued_entries = db_arr_[db_index]->single_enqueued_entries;
+    auto& enqueued_entries = db->bigbin_enqueued_entries;
     auto entry_it = enqueued_entries.find(key);
     CHECK(entry_it != enqueued_entries.end());
     entry_it->second->cancel = true;
@@ -467,7 +476,6 @@ void TieredStorage::CancelIo(DbIndex db_index, PrimeIterator it) {
     return;
   }
 
-  PerDb* db = db_arr_[db_index];
   unsigned bin_index = SmallToBin(blob_len);
   auto& bin_record = db->bin_map[bin_index];
   auto pending_it = bin_record.pending_entries.find(it->first);
@@ -490,7 +498,7 @@ void TieredStorage::CancelAllIos(DbIndex db_index) {
   PerDb* db = db_arr_[db_index];
   if (db) {
     VLOG(2) << "Clear db " << db_index;
-    db->Clear();
+    db->CancelAll();
   }
 }
 
@@ -508,30 +516,18 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
     return;
   }
 
-  constexpr size_t kMask = kBlockAlignment - 1;
-  size_t page_size = (blob_len + kMask) & (~kMask);
+  SingleRequest* req = new SingleRequest(blob_len, res, it->first.ToString());
 
-  DCHECK_GE(page_size, blob_len);
-  DCHECK_EQ(0u, page_size % kBlockAlignment);
-
-  char* block_ptr = (char*)mi_malloc_aligned(page_size, kBlockAlignment);
-
-  SingleRequest* req = new SingleRequest();
-
-  req->blob_len = blob_len;
-  req->offset = res;
-  req->key = it->first.ToString();
-  req->pt = db_slice_.GetTables(db_index).first;
-  req->block_ptr = block_ptr;
-
-  auto emplace_res = db_arr_[db_index]->single_enqueued_entries.emplace(req->key, req);
+  auto& enqueued_entries = db_arr_[db_index]->bigbin_enqueued_entries;
+  auto emplace_res = enqueued_entries.emplace(req->key, req);
   CHECK(emplace_res.second);
 
-  it->second.GetString(block_ptr);
+  it->second.GetString(req->block_ptr);
   it->second.SetIoPending(true);
 
   auto cb = [this, req, db_index](int io_res) {
-    PrimeIterator it = req->pt->Find(req->key);
+    PrimeTable* pt = db_slice_.GetTables(db_index).first;
+    PrimeIterator it = pt->Find(req->key);
     absl::Cleanup cleanup = [this, req]() {
       mi_free(req->block_ptr);
       delete req;
@@ -544,7 +540,7 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
     }
     CHECK(it->second.HasIoPending());
 
-    auto& enqueued_entries = db_arr_[db_index]->single_enqueued_entries;
+    auto& enqueued_entries = db_arr_[db_index]->bigbin_enqueued_entries;
     auto req_it = enqueued_entries.find(req->key);
     CHECK(req_it != enqueued_entries.end());
     CHECK_EQ(req_it->second, req);
@@ -563,7 +559,7 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   };
   ++num_active_requests_;
 
-  io_mgr_.WriteAsync(res, string_view{block_ptr, page_size}, std::move(cb));
+  io_mgr_.WriteAsync(res, string_view{req->block_ptr, req->page_size}, std::move(cb));
 }
 
 bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
