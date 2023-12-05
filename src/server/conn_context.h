@@ -186,7 +186,6 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
-  void CancelBlocking();           // Cancel an ongoing blocking transaction if there is one.
 
   size_t UsedMemory() const override;
 

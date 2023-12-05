@@ -117,12 +117,6 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-void ConnectionContext::CancelBlocking() {
-  if (transaction) {
-    transaction->CancelBlocking();
-  }
-}
-
 vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add, bool to_reply,
                                      ConnectionContext* conn) {
   vector<unsigned> result(to_reply ? args.size() : 0, 0);

@@ -2823,10 +2823,8 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
   auto tp = (opts.timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts.timeout)
                            : Transaction::time_point::max();
 
-  bool wait_succeeded = cntx->transaction->WaitOnWatch(tp, std::move(wcb));
-  if (!wait_succeeded) {
+  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
     return rb->SendNullArray();
-  }
 
   // Resolve the entry in the woken key. Note this must not use OpRead since
   // only the shard that contains the woken key blocks for the awoken

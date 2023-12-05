@@ -281,9 +281,8 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
 
   auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
 
-  bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
-  if (!wait_succeeded)
-    return OpStatus::TIMED_OUT;
+  if (auto status = trans->WaitOnWatch(limit_tp, std::move(wcb)); status != OpStatus::OK)
+    return status;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {

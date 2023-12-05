@@ -1447,7 +1447,8 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
   owner->RegisterBreakHook([res, this](uint32_t) {
-    res->CancelBlocking();
+    if (res->transaction)
+      res->transaction->CancelBlocking(nullptr);
     this->server_family().BreakOnShutdown();
   });
 
