@@ -113,6 +113,8 @@ vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view chan
 void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<Subscriber>* out) {
   out->reserve(out->size() + src.size());
   for (const auto [cntx, thread_id] : src) {
+    // `cntx` is expected to be valid as it unregisters itself from the channel_store before
+    // closing.
     CHECK(cntx->conn_state.subscribe_info);
     Subscriber sub{cntx->conn()->Borrow(), pattern};
     out->push_back(std::move(sub));

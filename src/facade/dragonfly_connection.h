@@ -156,17 +156,28 @@ class Connection : public util::Connection {
     // Can only be called from connection's thread.
     Connection* Get() const;
 
+    // Returns thue if the reference expired. Thread-safe.
+    bool IsExpired() const;
+
+    // Returns client id.Thread-safe.
+    uint32_t GetClientId() const;
+
     // Ensure owner thread's memory budget. If expired, skips and returns false. Thread-safe.
     bool EnsureMemoryBudget() const;
+
+    bool operator<(const WeakRef& other);
+    bool operator==(const WeakRef& other);
 
    private:
     friend class Connection;
 
-    WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread);
+    WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread,
+            uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
     QueueBackpressure* backpressure_;
     unsigned thread_;
+    uint32_t client_id_;
   };
 
  public:

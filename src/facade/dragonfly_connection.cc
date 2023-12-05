@@ -1190,7 +1190,7 @@ Connection::WeakRef Connection::Borrow() {
   DCHECK(self_);
   DCHECK_GT(cc_->subscriptions, 0);
 
-  return WeakRef(self_, queue_backpressure_, socket_->proactor()->GetPoolIndex());
+  return WeakRef(self_, queue_backpressure_, socket_->proactor()->GetPoolIndex(), id_);
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1376,8 +1376,8 @@ void Connection::DecreaseStatsOnClose() {
 }
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
-                             unsigned thread)
-    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread} {
+                             unsigned thread, uint32_t client_id)
+    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread}, client_id_{client_id} {
 }
 
 unsigned Connection::WeakRef::Thread() const {
@@ -1389,6 +1389,14 @@ Connection* Connection::WeakRef::Get() const {
   return ptr_.lock().get();
 }
 
+bool Connection::WeakRef::IsExpired() const {
+  return ptr_.expired();
+}
+
+uint32_t Connection::WeakRef::GetClientId() const {
+  return client_id_;
+}
+
 bool Connection::WeakRef::EnsureMemoryBudget() const {
   // Simple optimization: If a connection was closed, don't check memory budget.
   if (!ptr_.expired()) {
@@ -1398,6 +1406,14 @@ bool Connection::WeakRef::EnsureMemoryBudget() const {
     return true;
   }
   return false;
+}
+
+bool Connection::WeakRef::operator<(const WeakRef& other) {
+  return client_id_ < other.client_id_;
+}
+
+bool Connection::WeakRef::operator==(const WeakRef& other) {
+  return client_id_ == other.client_id_;
 }
 
 }  // namespace facade
