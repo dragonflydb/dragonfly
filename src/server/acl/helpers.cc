@@ -318,4 +318,26 @@ ParseAclSetUser<std::vector<std::string_view>&>(std::vector<std::string_view>&,
 
 template std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser<CmdArgList>(
     CmdArgList args, const CommandRegistry& registry, bool hashed, bool has_all_keys);
+
+std::string AclKeysToString(const AclKeys& keys) {
+  if (keys.all_keys) {
+    return "~*";
+  }
+  std::string result;
+  for (auto& glob : keys.key_globs) {
+    auto& [pattern, op] = glob;
+    if (op == KeyOp::READ_WRITE) {
+      absl::StrAppend(&result, "~", pattern, " ");
+      continue;
+    }
+    std::string op_str = (op == KeyOp::READ) ? "R" : "W";
+    absl::StrAppend(&result, "%", op_str, "~", pattern, " ");
+  }
+
+  if (!result.empty()) {
+    result.pop_back();
+  }
+  return result;
+}
+
 }  // namespace dfly::acl

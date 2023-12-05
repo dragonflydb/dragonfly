@@ -461,7 +461,7 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string status = user.IsActive() ? "on" : "off";
   auto pass = user.Password();
 
-  (*cntx)->StartArray(6);
+  (*cntx)->StartArray(8);
 
   (*cntx)->SendSimpleString("flags");
   const size_t total_elements = (pass != "nopass") ? 1 : 2;
@@ -482,6 +482,14 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string acl = absl::StrCat(AclCatToString(user.AclCategory()), " ",
                                  AclCommandToString(user.AclCommandsRef()));
   (*cntx)->SendSimpleString(acl);
+
+  (*cntx)->SendSimpleString("keys");
+  std::string keys = AclKeysToString(user.Keys());
+  if (!keys.empty()) {
+    (*cntx)->SendSimpleString(keys);
+  } else {
+    (*cntx)->SendEmptyArray();
+  }
 }
 
 void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
