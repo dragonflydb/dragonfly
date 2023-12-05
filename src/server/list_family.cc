@@ -366,9 +366,9 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", key, " by ",
                       op_args.tx->DebugId());
     }
-  } else {
-    es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, true);
   }
+
+  es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
