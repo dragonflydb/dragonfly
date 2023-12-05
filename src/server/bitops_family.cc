@@ -1078,7 +1078,7 @@ void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx
   rb->StartArray(total);
   for (const auto& elem : results) {
     if (elem) {
-      cntx->SendLong(*elem);
+      rb->SendLong(*elem);
       continue;
     }
 

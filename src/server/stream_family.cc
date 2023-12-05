@@ -2271,27 +2271,27 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           rb->SendBulkString("name");
           rb->SendBulkString(ginfo.name);
           rb->SendBulkString("consumers");
-          cntx->SendLong(ginfo.consumer_size);
+          rb->SendLong(ginfo.consumer_size);
           rb->SendBulkString("pending");
-          cntx->SendLong(ginfo.pending_size);
+          rb->SendLong(ginfo.pending_size);
           rb->SendBulkString("last-delivered-id");
           rb->SendBulkString(last_id);
           rb->SendBulkString("entries-read");
           if (ginfo.entries_read != SCG_INVALID_ENTRIES_READ) {
-            cntx->SendLong(ginfo.entries_read);
+            rb->SendLong(ginfo.entries_read);
           } else {
             rb->SendNull();
           }
           rb->SendBulkString("lag");
           if (ginfo.lag != SCG_INVALID_LAG) {
-            cntx->SendLong(ginfo.lag);
+            rb->SendLong(ginfo.lag);
           } else {
             rb->SendNull();
           }
         }
         return;
       }
-      return cntx->SendError(result.status());
+      return rb->SendError(result.status());
     } else if (sub_cmd == "STREAM") {
       int full = 0;
       size_t count = 10;  // default count for xinfo streams

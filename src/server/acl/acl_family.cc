@@ -430,7 +430,7 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
     cmd_registry_->Traverse(cb);
     rb->StartArray(results.size());
     for (const auto& command : results) {
-      cntx->SendSimpleString(command);
+      rb->SendSimpleString(command);
     }
 
     return;

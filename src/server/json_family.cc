@@ -109,7 +109,7 @@ void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& r
           rb->SendDouble(*it);
         } else {
           static_assert(is_integral_v<T>, "Integral required.");
-          cntx->SendLong(*it);
+          rb->SendLong(*it);
         }
       } else {
         rb->SendNull();
@@ -1698,7 +1698,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
       rb->SendNullArray();
     } else {
-      cntx->SendError(result.status());
+      rb->SendError(result.status());
     }
   }
 }

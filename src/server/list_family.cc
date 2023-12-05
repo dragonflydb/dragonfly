@@ -1013,7 +1013,7 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
     if (result->empty()) {
       rb->SendNull();
     } else {
-      cntx->SendLong((*result)[0]);
+      rb->SendLong((*result)[0]);
     }
   } else {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
@@ -1043,7 +1043,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
-    cntx->SendError(result.status());
+    rb->SendError(result.status());
   } else {
     rb->SendNull();
   }
@@ -1226,7 +1226,7 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
+      return rb->SendError(kWrongTypeErr);
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     default:
@@ -1286,7 +1286,7 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();
     case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
+      return rb->SendError(kWrongTypeErr);
     default:;
   }
 

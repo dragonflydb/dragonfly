@@ -1332,10 +1332,10 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
       unsigned(timeout * 1000));
   cntx->conn_state.is_blocking = false;
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {
     DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
     CHECK(popped_array->size() == 1);
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     rb->StartArray(3);
     rb->SendBulkString(*popped_key);
     rb->SendBulkString(popped_array->front().first);
@@ -1343,10 +1343,9 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   }
 
   DVLOG(1) << "result for " << transaction->DebugId() << " is " << popped_key.status();
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
+      return rb->SendError(kWrongTypeErr);
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     default:
