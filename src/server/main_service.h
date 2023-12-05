@@ -48,8 +48,8 @@ class Service : public facade::ServiceInterface {
   void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  void DispatchManyCommands(absl::Span<CmdArgList> args_list,
-                            facade::ConnectionContext* cntx) final;
+  size_t DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                              facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
   bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* reply_cntx,
@@ -73,7 +73,6 @@ class Service : public facade::ServiceInterface {
                                            facade::Connection* owner) final;
 
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
-  void AwaitOnPauseDispatch() final;
 
   std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
   const CommandId* FindCmd(std::string_view) const;

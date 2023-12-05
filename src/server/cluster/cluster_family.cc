@@ -508,9 +508,17 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     before = tl_cluster_config->GetOwnedSlots();
   }
 
-  auto cb = [&](util::ProactorBase* pb) { tl_cluster_config = new_config; };
+  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn()};
+  auto cb = [&tracker, &new_config](util::ProactorBase* pb) {
+    tl_cluster_config = new_config;
+    tracker.TrackOnThread();
+  };
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
   DCHECK(tl_cluster_config != nullptr);
+
+  if (!tracker.Wait(absl::Seconds(1))) {
+    LOG(WARNING) << "Cluster config change timed out";
+  }
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {

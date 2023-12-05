@@ -155,8 +155,8 @@ class Connection : public util::Connection {
   void SendAclUpdateAsync(AclUpdateMessage msg);
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
-  // decrement it once finished.
-  void SendCheckpoint(util::fb2::BlockingCounter bc);
+  // decrement it once finished. It ignore_paused is true, paused dispatches are ignored.
+  void SendCheckpoint(util::fb2::BlockingCounter bc, bool ignore_paused = false);
 
   // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
   // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
@@ -347,6 +347,8 @@ class Connection : public util::Connection {
   // Connection migration vars, see RequestAsyncMigration() above.
   bool migration_enabled_;
   util::fb2::ProactorBase* migration_request_ = nullptr;
+
+  bool skip_next_squashing_ = false;  // Forcefully skip next squashing
 
   // Pooled pipeline messages per-thread
   // Aggregated while handling pipelines, gradually released while handling regular commands.

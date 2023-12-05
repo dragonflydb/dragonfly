@@ -427,7 +427,10 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
-  if (!sf_->AwaitCurrentDispatches(timeout_dur, cntx->conn())) {
+  facade::DispatchTracker tracker{sf_->GetListeners(), cntx->conn()};
+  tracker.TrackAll();
+
+  if (!tracker.Wait(timeout_dur)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
   }

@@ -1134,22 +1134,6 @@ void ServerFamily::CancelBlockingCommands() {
   }
 }
 
-bool ServerFamily::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer) {
-  vector<Fiber> fibers;
-  bool successful = true;
-
-  for (auto* listener : listeners_) {
-    fibers.push_back(MakeFiber([listener, timeout, issuer, &successful]() {
-      successful &= listener->AwaitCurrentDispatches(timeout, issuer);
-    }));
-  }
-
-  for (auto& fb : fibers)
-    fb.JoinIfNeeded();
-
-  return successful;
-}
-
 string GetPassword() {
   string flag = GetFlag(FLAGS_requirepass);
   if (!flag.empty()) {
@@ -1306,30 +1290,27 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(err->MakeReply());
   }
 
-  // Pause dispatch commands before updating client puase state, and enable dispatch after updating
-  // pause state. This will unsure that when we after changing the state all running commands will
-  // read the new pause state, and we will not pause client in the middle of a transaction.
-  service_.proactor_pool().Await([](util::ProactorBase* pb) {
-    ServerState& etl = *ServerState::tlocal();
-    etl.SetPauseDispatch(true);
+  // Set global pause state and track commands that are running when the pause state is flipped.
+  // Exlude already paused commands from the busy count.
+  DispatchTracker tracker{GetListeners(), cntx->conn(), true /* ignore paused commands */};
+  service_.proactor_pool().Await([&tracker, pause_state](util::ProactorBase* pb) {
+    // Commands don't suspend before checking the pause state, so
+    // it's impossible to deadlock on waiting for a command that will be paused.
+    tracker.TrackOnThread();
+    ServerState::tlocal()->SetPauseState(pause_state, true);
   });
 
   // TODO handle blocking commands
+  // Wait for all busy commands to finish running before replying to guarantee
+  // that no more (write) operations will occur.
   const absl::Duration kDispatchTimeout = absl::Seconds(1);
-  if (!AwaitCurrentDispatches(kDispatchTimeout, cntx->conn())) {
-    LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << kDispatchTimeout;
-    service_.proactor_pool().Await([](util::ProactorBase* pb) {
-      ServerState& etl = *ServerState::tlocal();
-      etl.SetPauseDispatch(false);
+  if (!tracker.Wait(kDispatchTimeout)) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
+    service_.proactor_pool().Await([pause_state](util::ProactorBase* pb) {
+      ServerState::tlocal()->SetPauseState(pause_state, false);
     });
     return (*cntx)->SendError("Failed to pause all running clients");
   }
-
-  service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-    ServerState& etl = *ServerState::tlocal();
-    etl.SetPauseState(pause_state, true);
-    etl.SetPauseDispatch(false);
-  });
 
   // We should not expire/evict keys while clients are puased.
   shard_set->RunBriefInParallel(

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/base/internal/spinlock.h>
+#include <absl/time/time.h>
 
 #include <memory>
 #include <system_error>
@@ -22,6 +23,7 @@ typedef struct ssl_ctx_st SSL_CTX;
 namespace facade {
 
 class ServiceInterface;
+class Connection;
 
 class Listener : public util::ListenerInterface {
  public:
@@ -77,6 +79,32 @@ class Listener : public util::ListenerInterface {
 
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
+};
+
+// Dispatch tracker allows tracking the dispatch state of connections and blocking until all
+// detected busy connections finished dispatching. Ignores issuer connection.
+//
+// Mostly used to detect when global state changes (takeover, pause, cluster config update) are
+// visible to all commands and no commands are still running according to the old state / config.
+class DispatchTracker {
+ public:
+  DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer = nullptr,
+                  bool ignore_paused = false);
+
+  void TrackAll();       // Track busy connection on all threads
+  void TrackOnThread();  // Track busy connections on current thread
+
+  // Wait until all tracked connections finished dispatching.
+  // Returns true on success, false if timeout was reached.
+  bool Wait(absl::Duration timeout);
+
+ private:
+  void Handle(unsigned thread_index, util::Connection* conn);
+
+  std::vector<facade::Listener*> listeners_;
+  facade::Connection* issuer_;
+  util::fb2::BlockingCounter bc_{0};
+  bool ignore_paused_;
 };
 
 }  // namespace facade

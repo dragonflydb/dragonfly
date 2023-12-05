@@ -231,11 +231,7 @@ class ServerState {  // public struct - to allow initialization.
   // @is_write controls whether the command is a write command or not.
   void AwaitPauseState(bool is_write);
 
-  // Toggle a boolean indicating whether the server should temporarily pause or allow dispatching
-  // new commands.
-  void SetPauseDispatch(bool pause);
-  // Awaits until dispatching new commands is allowed as determinded by SetPauseDispatch function
-  void AwaitOnPauseDispatch();
+  bool IsPaused() const;
 
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
@@ -260,8 +256,6 @@ class ServerState {  // public struct - to allow initialization.
   // notified when the break is over.
   int client_pauses_[2] = {};
   EventCount client_pause_ec_;
-  bool pause_dispatch_ = false;
-  EventCount pause_dispatch_ec_;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;

@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "absl/functional/bind_front.h"
 #include "facade/tls_error.h"
 
 #ifdef DFLY_USE_SSL
@@ -234,32 +235,6 @@ void Listener::PreAcceptLoop(util::ProactorBase* pb) {
   per_thread_.resize(pool()->size());
 }
 
-bool Listener::AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer) {
-  // Fill blocking counter with ongoing dispatches
-  util::fb2::BlockingCounter bc{0};
-  this->TraverseConnections([bc, issuer](unsigned thread_index, util::Connection* conn) {
-    if (conn != issuer)
-      static_cast<Connection*>(conn)->SendCheckpoint(bc);
-  });
-
-  auto cancelled = make_shared<bool>(false);
-
-  // TODO: Add wait with timeout or polling to helio (including cancel flag)
-  util::MakeFiber([bc, cancelled = weak_ptr{cancelled}, start = absl::Now(), timeout]() mutable {
-    while (!cancelled.expired()) {
-      if (absl::Now() - start > timeout) {
-        VLOG(1) << "AwaitCurrentDispatches timed out";
-        *cancelled.lock() = true;  // same thread, no promotion race
-        bc.Cancel();
-      }
-      ThisFiber::SleepFor(10ms);
-    }
-  }).Detach();
-
-  bc.Wait();
-  return !*cancelled;
-}
-
 bool Listener::IsPrivilegedInterface() const {
   return role_ == Role::PRIVILEGED;
 }
@@ -276,8 +251,10 @@ void Listener::PreShutdown() {
   // This shouldn't take a long time: All clients should reject incoming commands
   // at this stage since we're in SHUTDOWN mode.
   // If a command is running for too long we give up and proceed.
-  const absl::Duration kDispatchShutdownTimeout = absl::Milliseconds(10);
-  if (!AwaitCurrentDispatches(kDispatchShutdownTimeout, nullptr)) {
+  DispatchTracker tracker{{this}};
+  tracker.TrackAll();
+
+  if (!tracker.Wait(absl::Milliseconds(10))) {
     LOG(WARNING) << "Some commands are still being dispatched but didn't conclude in time. "
                     "Proceeding in shutdown.";
   }
@@ -394,6 +371,32 @@ ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
   }
 
   return pp->at(res_id);
+}
+
+DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
+                                 facade::Connection* issuer, bool ignore_paused)
+    : listeners_{listeners.begin(), listeners.end()},
+      issuer_{issuer},
+      ignore_paused_{ignore_paused} {
+}
+
+void DispatchTracker::TrackOnThread() {
+  for (auto* listener : listeners_)
+    listener->TraverseConnectionsOnThread(absl::bind_front(&DispatchTracker::Handle, this));
+}
+
+bool DispatchTracker::Wait(absl::Duration duration) {
+  return bc_.WaitFor(absl::ToChronoMilliseconds(duration));
+}
+
+void DispatchTracker::TrackAll() {
+  for (auto* listener : listeners_)
+    listener->TraverseConnections(absl::bind_front(&DispatchTracker::Handle, this));
+}
+
+void DispatchTracker::Handle(unsigned thread_index, util::Connection* conn) {
+  if (auto* fconn = static_cast<facade::Connection*>(conn); fconn != issuer_)
+    fconn->SendCheckpoint(bc_, ignore_paused_);
 }
 
 }  // namespace facade

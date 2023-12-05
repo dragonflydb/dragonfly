@@ -1056,12 +1056,21 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool under_script = bool(dfly_cntx->conn_state.script_info);
   bool under_multi = dfly_cntx->conn_state.exec_info.IsRunning();
+  bool dispatching_in_multi = under_script || under_multi;
 
-  if (VLOG_IS_ON(2) &&
-      cntx->conn()) {  // owner may not exists in case of this being called from replica context
-    const char* lua = under_script ? "LUA " : "";
-    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << lua << args
-              << " in dbid=" << dfly_cntx->conn_state.db_index;
+  if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
+    LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
+              << args << " in dbid=" << dfly_cntx->conn_state.db_index;
+  }
+
+  if (!dispatching_in_multi) {  // Don't interrupt running multi commands
+    bool is_write = (cid->opt_mask() & CO::WRITE);
+    is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
+    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+
+    cntx->paused = true;
+    etl.AwaitPauseState(is_write);
+    cntx->paused = false;
   }
 
   etl.RecordCmd();
@@ -1097,8 +1106,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
-
-  bool dispatching_in_multi = under_script || under_multi;
 
   if (dispatching_in_multi) {
     DCHECK(dfly_cntx->transaction);
@@ -1183,14 +1190,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   ServerState& etl = *ServerState::tlocal();
 
-  string_view cmd_name(cid->name());
-  bool is_write = (cid->opt_mask() & CO::WRITE) || cmd_name == "PUBLISH" || cmd_name == "EVAL" ||
-                  cmd_name == "EVALSHA";
-  if (cmd_name == "EXEC" && cntx->conn_state.exec_info.is_write) {
-    is_write = true;
-  }
-  etl.AwaitPauseState(is_write);
-
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
   // enabled on them - see https://redis.io/commands/monitor/
@@ -1221,13 +1220,15 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   return true;
 }
 
-void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
-                                   facade::ConnectionContext* cntx) {
+size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+                                     facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
+
+  size_t dispatched = 0;
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1244,8 +1245,14 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     dfly_cntx->transaction = dist_trans.get();
     MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds), dfly_cntx, this, true, false);
     dfly_cntx->transaction = nullptr;
+
+    dispatched += stored_cmds.size();
     stored_cmds.clear();
   };
+
+  // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
+  if (dfly::ServerState::tlocal()->IsPaused())
+    return 0;
 
   for (auto args : args_list) {
     ToUpper(&args[0]);
@@ -1272,14 +1279,21 @@ void Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     // Squash accumulated commands
     perform_squash();
 
+    // Stop accumulating when a pause is requested, fall back to regular dispatch
+    if (dfly::ServerState::tlocal()->IsPaused())
+      break;
+
     // Dispatch non squashed command only after all squshed commands were executed and replied
     DispatchCommand(args, cntx);
+    dispatched++;
   }
 
   perform_squash();
 
   if (dist_trans)
     dist_trans->UnlockMulti();
+
+  return dispatched;
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -1416,10 +1430,6 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
 facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
   return ServerState::tl_connection_stats();
-}
-
-void Service::AwaitOnPauseDispatch() {
-  ServerState::tlocal()->AwaitOnPauseDispatch();
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {

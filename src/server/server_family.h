@@ -184,7 +184,7 @@ class ServerFamily {
     return dfly_cmd_.get();
   }
 
-  const std::vector<facade::Listener*>& GetListeners() const {
+  absl::Span<facade::Listener* const> GetListeners() const {
     return listeners_;
   }
 
@@ -197,9 +197,6 @@ class ServerFamily {
   void BreakOnShutdown();
 
   void CancelBlockingCommands();
-
-  // Wait until all current dispatches finish, returns true on success, false if timeout was reached
-  bool AwaitCurrentDispatches(absl::Duration timeout, util::Connection* issuer);
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);
