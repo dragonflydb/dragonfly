@@ -64,12 +64,14 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
     const std::string password = pass == "nopass" ? "nopass" : PrettyPrintSha(pass);
     const std::string acl_cat = AclCatToString(user.AclCategory());
     const std::string acl_commands = AclCommandToString(user.AclCommandsRef());
-    const std::string maybe_space = acl_commands.empty() ? "" : " ";
+    const std::string maybe_space_com = acl_commands.empty() ? "" : " ";
+    const std::string acl_keys = AclKeysToString(user.Keys());
+    const std::string maybe_space = acl_keys.empty() ? "" : " ";
 
     using namespace std::string_view_literals;
 
     absl::StrAppend(&buffer, username, " ", user.IsActive() ? "on "sv : "off "sv, password, " ",
-                    acl_cat, maybe_space, acl_commands);
+                    acl_cat, maybe_space_com, acl_commands, maybe_space, acl_keys);
 
     (*cntx)->SendSimpleString(buffer);
   }
