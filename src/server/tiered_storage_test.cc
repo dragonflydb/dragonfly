@@ -176,7 +176,7 @@ TEST_F(TieredStorageTest, AddBigValues) {
 
   usleep(20000);  // 0.02 milliseconds
   m = GetMetrics();
-  EXPECT_EQ(m.db_stats[0].tiered_entries, 100);
+  EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
 }
 
 TEST_F(TieredStorageTest, DelBigValues) {
@@ -194,7 +194,7 @@ TEST_F(TieredStorageTest, DelBigValues) {
 
   usleep(20000);  // 0.02 milliseconds
   m = GetMetrics();
-  EXPECT_EQ(m.db_stats[0].tiered_entries, 100);
+  EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
 }
 
 }  // namespace dfly
