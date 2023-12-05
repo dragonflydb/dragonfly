@@ -38,11 +38,19 @@ std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
 
 template <typename T>
 std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-    T args, const CommandRegistry& registry, bool hashed = false);
+    T args, const CommandRegistry& registry, bool hashed = false, bool has_all_keys = false);
 
 using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
 
 MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
                                              std::string_view file_contents);
 
+struct ParseKeyResult {
+  std::string glob;
+  KeyOp op;
+  bool all_keys{false};
+  bool reset_keys{false};
+};
+
+std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command);
 }  // namespace dfly::acl
