@@ -269,10 +269,6 @@ void RedisReplyBuilder::SetResp3(bool is_resp3) {
   is_resp3_ = is_resp3;
 }
 
-bool RedisReplyBuilder::IsResp3() const {
-  return is_resp3_;
-}
-
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   VLOG(1) << "Error: " << str;
 
