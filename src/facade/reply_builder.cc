@@ -339,18 +339,17 @@ void RedisReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat 
   *next++ = '\r';
   *next++ = '\n';
 
-  std::string_view lenpref{tmp, size_t(next - tmp)};
-
-  std::string_view format_str;
   if (format == VerbatimFormat::TXT)
-    format_str = "txt:";
+    strcpy(next, "txt:");
   else if (format == VerbatimFormat::MARKDOWN)
-    format_str = "mkd:";
+    strcpy(next, "mkd:");
   else {
     DVLOG(1) << "Unknown verbatim reply format: " << format;
     return;
   }
-  iovec v[4] = {IoVec(lenpref), IoVec(format_str), IoVec(str), IoVec(kCRLF)};
+  next += 4;
+  std::string_view lenpref{tmp, size_t(next - tmp)};
+  iovec v[4] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
   return Send(v, ABSL_ARRAYSIZE(v));
 }
 
