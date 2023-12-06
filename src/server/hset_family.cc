@@ -1141,9 +1141,16 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    rb->SendStringArr(*result);
+    if ((result->size() == 1) && (args.size() == 1))
+      rb->SendBulkString(result->front());
+    else {
+      rb->SendStringArr(*result, facade::RedisReplyBuilder::MAP);
+    }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    rb->SendNull();
+    if (args.size() == 1)
+      rb->SendNull();
+    else
+      rb->SendEmptyArray();
   } else {
     rb->SendError(result.status());
   }
