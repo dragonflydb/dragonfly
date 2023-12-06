@@ -349,7 +349,7 @@ void RedisReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat 
   }
   next += 4;
   std::string_view lenpref{tmp, size_t(next - tmp)};
-  iovec v[4] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
+  iovec v[3] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
   return Send(v, ABSL_ARRAYSIZE(v));
 }
 
