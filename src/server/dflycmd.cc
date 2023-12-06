@@ -105,8 +105,6 @@ DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 }
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-
   DCHECK_GE(args.size(), 1u);
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -143,7 +141,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return ReplicaOffset(args, cntx);
   }
 
-  rb->SendError(kSyntaxErr);
+  cntx->SendError(kSyntaxErr);
 }
 
 #if 0
@@ -395,7 +393,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   parser.Next();
   float timeout = parser.Next<float>();
   if (timeout < 0) {
-    return (*cntx)->SendError("timeout is negative");
+    return cntx->SendError("timeout is negative");
   }
 
   bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
@@ -403,7 +401,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   string_view sync_id_str = parser.Next<std::string_view>();
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str << " time out:" << timeout;
 
@@ -479,7 +477,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
     return rb->SendError("Takeover failed!");
   }
-  (*cntx)->SendOk();
+  cntx->SendOk();
 
   if (save_flag) {
     VLOG(1) << "Save snapshot after Takeover.";
