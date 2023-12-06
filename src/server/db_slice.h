@@ -62,6 +62,42 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  class AutoPostUpdate {
+   public:
+    AutoPostUpdate();
+    AutoPostUpdate(AutoPostUpdate&& o);
+    AutoPostUpdate& operator=(AutoPostUpdate&& o);
+    ~AutoPostUpdate();
+
+    void Run();
+    void Cancel();
+
+   private:
+    enum class DestructorAction {
+      kDoNothing,
+      kRun,
+    };
+
+    // Wrap members in a struct to auto generate operator=
+    struct Fields {
+      DestructorAction action = DestructorAction::kDoNothing;
+
+      DbSlice* db_slice = nullptr;
+      DbIndex db_ind = 0;
+      PrimeIterator it;
+      std::string_view key;
+      bool key_existed = false;
+
+      // TODO: Add heap size here, and only update memory in d'tor
+    };
+
+    AutoPostUpdate(const Fields& fields);
+
+    friend class DbSlice;
+
+    Fields fields_ = {};
+  };
+
   struct Stats {
     // DbStats db;
     std::vector<DbStats> db_stats;
@@ -149,6 +185,15 @@ class DbSlice {
 
   OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
                                unsigned req_obj_type) const;
+
+  struct ItAndUpdater {
+    PrimeIterator it;
+    AutoPostUpdate post_updater;
+  };
+  OpResult<ItAndUpdater> FindV2(const Context& cntx, std::string_view key, unsigned req_obj_type);
+
+  OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
+                                            unsigned req_obj_type) const;
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
   std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
@@ -259,6 +304,7 @@ class DbSlice {
   size_t DbSize(DbIndex db_ind) const;
 
   // Callback functions called upon writing to the existing key.
+  // TODO: Remove these (or make them private) once the V2 API is the only API.
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
                   bool existing_entry = true);

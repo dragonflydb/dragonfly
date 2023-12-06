@@ -334,6 +334,77 @@ auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) 
   return it;
 }
 
+DbSlice::AutoPostUpdate::AutoPostUpdate() {
+}
+
+DbSlice::AutoPostUpdate::AutoPostUpdate(AutoPostUpdate&& o) {
+  *this = std::move(o);
+}
+
+DbSlice::AutoPostUpdate& DbSlice::AutoPostUpdate::operator=(AutoPostUpdate&& o) {
+  fields_ = o.fields_;
+  o.fields_ = {};  // Reset all fields
+  return *this;
+}
+
+DbSlice::AutoPostUpdate::~AutoPostUpdate() {
+  Run();
+}
+
+void DbSlice::AutoPostUpdate::Run() {
+  if (fields_.action == DestructorAction::kDoNothing) {
+    return;
+  }
+
+  // Check that AutoPostUpdate does not run after a key was removed.
+  // If this CHECK() failed for you, it probably means that you deleted a key while having an auto
+  // updater in scope. You'll probably want to call Run() (or Cancel() - but be careful).
+  DCHECK(IsValid(fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key)))
+      << "Key was removed before PostUpdate() - this is a bug!";
+
+  DCHECK(fields_.action == DestructorAction::kRun);
+  CHECK_NE(fields_.db_slice, nullptr);
+
+  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.it, fields_.key, fields_.key_existed);
+  Cancel();  // Reset to not run again
+}
+
+void DbSlice::AutoPostUpdate::Cancel() {
+  *this = {};
+}
+
+DbSlice::AutoPostUpdate::AutoPostUpdate(const Fields& fields) : fields_(fields) {
+  DCHECK(fields_.action == DestructorAction::kRun);
+  fields_.db_slice->PreUpdate(fields_.db_ind, fields_.it);
+}
+
+OpResult<DbSlice::ItAndUpdater> DbSlice::FindV2(const Context& cntx, string_view key,
+                                                unsigned req_obj_type) {
+  // TODO: Call an internal find version that does not handle post updates
+  auto it = FindExt(cntx, key).first;
+
+  if (!IsValid(it))
+    return OpStatus::KEY_NOTFOUND;
+
+  if (it->second.ObjType() != req_obj_type) {
+    return OpStatus::WRONG_TYPE;
+  }
+
+  return {{it, AutoPostUpdate(
+                   {AutoPostUpdate::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
+}
+
+auto DbSlice::FindReadOnly(const Context& cntx, string_view key, unsigned req_obj_type) const
+    -> OpResult<PrimeConstIterator> {
+  auto res = Find(cntx, key, req_obj_type);
+  if (res.ok()) {
+    PrimeConstIterator it = res.value();
+    return it;
+  } else {
+    return res.status();
+  }
+}
+
 pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
   pair<PrimeIterator, ExpireIterator> res;
 

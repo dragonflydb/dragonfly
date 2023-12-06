@@ -80,7 +80,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   size_t range_len = start + value.size();
 
   if (range_len == 0) {
-    auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+    auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (it_res) {
       return it_res.value()->second.Size();
     } else {
@@ -183,12 +183,12 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindV2(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }
 
-  return ExtendExisting(op_args, *it_res, key, val, prepend);
+  return ExtendExisting(op_args, it_res->it, key, val, prepend);
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = false,

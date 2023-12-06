@@ -372,16 +372,15 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return *this;
   }
 
-  detail::IteratorPair<Key_t, Value_t> operator->() {
+  auto operator->() const {
     auto* seg = owner_->segment_[seg_id_];
-    return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                seg->Value(bucket_id_, slot_id_)};
-  }
-
-  const detail::IteratorPair<Key_t, Value_t> operator->() const {
-    auto* seg = owner_->segment_[seg_id_];
-    return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                seg->Value(bucket_id_, slot_id_)};
+    if constexpr (IsConst) {
+      return detail::IteratorPair<const Key_t, const Value_t>{seg->Key(bucket_id_, slot_id_),
+                                                              seg->Value(bucket_id_, slot_id_)};
+    } else {
+      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
+                                                  seg->Value(bucket_id_, slot_id_)};
+    }
   }
 
   // Make it self-contained. Does not need container::end().

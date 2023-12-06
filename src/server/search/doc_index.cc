@@ -213,7 +213,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   size_t expired_count = 0;
   for (size_t i = 0; i < search_results.ids.size(); i++) {
     auto key = key_index_.Get(search_results.ids[i]);
-    auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
+    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 
     if (!it || !IsValid(*it)) {  // Item must have expired
       expired_count++;

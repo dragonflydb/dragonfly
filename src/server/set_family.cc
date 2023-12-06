@@ -695,20 +695,18 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ArgSlice&
                          bool journal_rewrite) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
-  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = db_slice.FindV2(op_args.db_cntx, key, OBJ_SET);
   if (!find_res) {
     return find_res.status();
   }
 
-  db_slice.PreUpdate(op_args.db_cntx.db_index, *find_res);
-
-  CompactObj& co = find_res.value()->second;
+  CompactObj& co = find_res->it->second;
   auto [removed, isempty] = RemoveSet(op_args.db_cntx, vals, &co);
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, *find_res, key);
+  find_res->post_updater.Run();
 
   if (isempty) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, find_res.value()));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, find_res->it));
   }
   if (journal_rewrite && op_args.shard->journal()) {
     vector<string_view> mapped(vals.size() + 1);
@@ -749,7 +747,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
 
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
-    OpResult<PrimeIterator> res = es->db_slice().Find(t->GetDbContext(), k, OBJ_SET);
+    OpResult<PrimeConstIterator> res = es->db_slice().FindReadOnly(t->GetDbContext(), k, OBJ_SET);
     if (res && index == 0) {  // successful src find.
       DCHECK(!res->is_done());
       const CompactObj& val = res.value()->second;
@@ -815,10 +813,10 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
   absl::flat_hash_set<string> uniques;
 
   for (string_view key : keys) {
-    OpResult<PrimeIterator> find_res =
-        op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
     if (find_res) {
-      PrimeValue& pv = find_res.value()->second;
+      const PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
         StringSet* ss = (StringSet*)pv.RObjPtr();
         ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
@@ -843,14 +841,15 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!keys.empty());
   DVLOG(1) << "OpDiff from " << keys.front();
   EngineShard* es = op_args.shard;
-  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, keys.front(), OBJ_SET);
+  OpResult<PrimeConstIterator> find_res =
+      es->db_slice().FindReadOnly(op_args.db_cntx, keys.front(), OBJ_SET);
 
   if (!find_res) {
     return find_res.status();
   }
 
   absl::flat_hash_set<string> uniques;
-  PrimeValue& pv = find_res.value()->second;
+  const PrimeValue& pv = find_res.value()->second;
   if (IsDenseEncoding(pv)) {
     StringSet* ss = (StringSet*)pv.RObjPtr();
     ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
@@ -864,7 +863,8 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!uniques.empty());  // otherwise the key would not exist.
 
   for (size_t i = 1; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> diff_res = es->db_slice().Find(op_args.db_cntx, keys[i], OBJ_SET);
+    OpResult<PrimeConstIterator> diff_res =
+        es->db_slice().FindReadOnly(op_args.db_cntx, keys[i], OBJ_SET);
     if (!diff_res) {
       if (diff_res.status() == OpStatus::WRONG_TYPE) {
         return OpStatus::WRONG_TYPE;
@@ -901,12 +901,12 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 
   StringVec result;
   if (keys.size() == 1) {
-    OpResult<PrimeIterator> find_res =
-        es->db_slice().Find(t->GetDbContext(), keys.front(), OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        es->db_slice().FindReadOnly(t->GetDbContext(), keys.front(), OBJ_SET);
     if (!find_res)
       return find_res.status();
 
-    PrimeValue& pv = find_res.value()->second;
+    const PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
       ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
@@ -926,7 +926,8 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   OpStatus status = OpStatus::OK;
 
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->GetDbContext(), keys[i], OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        es->db_slice().FindReadOnly(t->GetDbContext(), keys[i], OBJ_SET);
     if (!find_res) {
       if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND ||
           find_res.status() != OpStatus::KEY_NOTFOUND) {
@@ -976,7 +977,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 // count - how many elements to pop.
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = db_slice.FindV2(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
@@ -984,7 +985,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   if (count == 0)
     return result;
 
-  PrimeIterator it = find_res.value();
+  PrimeIterator it = find_res->it;
   size_t slen = it->second.Size();
 
   /* CASE 1:
@@ -1003,6 +1004,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     });
 
     // Delete the set as it is now empty
+    find_res->post_updater.Run();
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
 
     // Replicate as DEL.
@@ -1011,7 +1013,6 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     }
   } else {
     SetType st{it->second.RObjPtr(), it->second.Encoding()};
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     if (st.second == kEncodingIntSet) {
       intset* is = (intset*)st.first;
       int64_t val = 0;
@@ -1035,20 +1036,19 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
       std::copy(result.begin(), result.end(), mapped.begin() + 1);
       RecordJournal(op_args, "SREM"sv, mapped);
     }
-
-    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
   }
   return result;
 }
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
-  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
+  OpResult<PrimeConstIterator> find_res =
+      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res)
     return find_res.status();
 
-  PrimeIterator it = find_res.value();
+  PrimeConstIterator it = find_res.value();
   StringVec res;
 
   if (it->second.Encoding() == kEncodingIntSet) {
@@ -1094,7 +1094,8 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   string_view val = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
 
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
@@ -1125,7 +1126,8 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
   memberships.reserve(vals.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
       FindInSet(memberships, t->GetDbContext(), st, vals);
@@ -1191,7 +1193,8 @@ void SCard(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
     }
@@ -1366,12 +1369,13 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     StringVec result;
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
     }
 
-    PrimeValue& pv = find_res.value()->second;
+    const PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
       ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));

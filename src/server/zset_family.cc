@@ -186,6 +186,7 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
                                    size_t member_len) {
   auto& db_slice = op_args.shard->db_slice();
   if (zparams.flags & ZADD_IN_XX) {
+    // XXX TODO: Replace once AddOrFindV2() exists
     return db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
   }
 
@@ -1273,9 +1274,9 @@ bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::Range
 
 ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bool is_max) {
   auto& db_slice = shard->db_slice();
-  auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_ZSET);
+  auto it_res = db_slice.FindV2(t->GetDbContext(), key, OBJ_ZSET);
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
-  PrimeIterator it = *it_res;
+  PrimeIterator it = it_res->it;
 
   ZSetFamily::RangeParams range_params;
   range_params.reverse = is_max;
@@ -1291,12 +1292,12 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   IntervalVisitor iv{Action::POP, range_spec.params, &pv};
   std::visit(iv, range_spec.interval);
 
-  db_slice.PostUpdate(t->GetDbIndex(), *it_res, key);
+  it_res->post_updater.Run();
 
   auto zlen = pv.Size();
   if (zlen == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
-    CHECK(db_slice.Del(t->GetDbIndex(), *it_res));
+    CHECK(db_slice.Del(t->GetDbIndex(), it_res->it));
   }
 
   OpArgs op_args = t->GetOpArgs(shard);
