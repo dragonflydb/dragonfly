@@ -78,8 +78,7 @@ class User final {
   // its respective ID within the commands vector.
   static size_t Selector(std::string_view);
 
-  AclKeys Keys() const;
-  const AclKeys& KeysRef() const;
+  const AclKeys& Keys() const;
 
  private:
   // For ACL categories
@@ -97,7 +96,7 @@ class User final {
   void SetPasswordHash(std::string_view password, bool is_hashed);
 
   // For ACL key globs
-  void SetKeyGlobs(std::vector<UpdateKey> keys);
+  void SetKeyGlobs(std::vector<UpdateKey>&& keys);
 
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64

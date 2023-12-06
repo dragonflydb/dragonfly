@@ -134,15 +134,11 @@ std::string_view User::Password() const {
   return password_hash_ ? *password_hash_ : default_pass;
 }
 
-AclKeys User::Keys() const {
+const AclKeys& User::Keys() const {
   return keys_;
 }
 
-const AclKeys& User::KeysRef() const {
-  return keys_;
-}
-
-void User::SetKeyGlobs(std::vector<UpdateKey> keys) {
+void User::SetKeyGlobs(std::vector<UpdateKey>&& keys) {
   for (auto& key : keys) {
     if (key.all_keys) {
       keys_.key_globs.clear();
