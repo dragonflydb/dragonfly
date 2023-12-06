@@ -374,10 +374,12 @@ ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
 }
 
 DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
-                                 facade::Connection* issuer, bool ignore_paused)
+                                 facade::Connection* issuer, bool ignore_paused,
+                                 bool ignore_blocked)
     : listeners_{listeners.begin(), listeners.end()},
       issuer_{issuer},
-      ignore_paused_{ignore_paused} {
+      ignore_paused_{ignore_paused},
+      ignore_blocked_{ignore_blocked} {
 }
 
 void DispatchTracker::TrackOnThread() {
@@ -396,7 +398,7 @@ void DispatchTracker::TrackAll() {
 
 void DispatchTracker::Handle(unsigned thread_index, util::Connection* conn) {
   if (auto* fconn = static_cast<facade::Connection*>(conn); fconn != issuer_)
-    fconn->SendCheckpoint(bc_, ignore_paused_);
+    fconn->SendCheckpoint(bc_, ignore_paused_, ignore_blocked_);
 }
 
 }  // namespace facade

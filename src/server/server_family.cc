@@ -1144,9 +1144,11 @@ void ServerFamily::BreakOnShutdown() {
 
 void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> status_cb) {
   auto cb = [status_cb](unsigned thread_index, util::Connection* conn) {
-    if (auto fc = static_cast<facade::Connection*>(conn)->cntx(); fc) {
-      if (auto* tx = static_cast<ConnectionContext*>(fc)->transaction; tx)
-        tx->CancelBlocking(status_cb);
+    if (auto fcntx = static_cast<facade::Connection*>(conn)->cntx(); fcntx) {
+      auto* cntx = static_cast<ConnectionContext*>(fcntx);
+      if (cntx->transaction && cntx->blocked) {
+        cntx->transaction->CancelBlocking(status_cb);
+      }
     }
   };
 

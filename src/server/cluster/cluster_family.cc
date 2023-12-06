@@ -514,15 +514,17 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     before = tl_cluster_config->GetOwnedSlots();
   }
 
-  auto blocking_status_cb = [&new_config](ArgSlice keys) {
+  // Ignore paused commands because we filter them with CancelBlockingOnThread
+  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
+                          true /* ignore blocked */};
+
+  auto blocking_filter = [&new_config](ArgSlice keys) {
     bool moved = any_of(keys.begin(), keys.end(), [&](auto k) { return !new_config->IsMySlot(k); });
-    /// TODO: Don't cancel non-replaced keys once dispatch tracker supports ignoring blocking
-    return moved ? OpStatus::KEY_MOVED : OpStatus::CANCELLED;
+    return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
   };
 
-  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn()};
-  auto cb = [this, &tracker, &new_config, blocking_status_cb](util::ProactorBase* pb) {
-    server_family_->CancelBlockingOnThread(blocking_status_cb);
+  auto cb = [this, &tracker, &new_config, blocking_filter](util::ProactorBase* pb) {
+    server_family_->CancelBlockingOnThread(blocking_filter);
     tl_cluster_config = new_config;
     tracker.TrackOnThread();
   };

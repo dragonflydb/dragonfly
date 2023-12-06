@@ -2408,7 +2408,7 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   if (server_cntx->conn_state.subscribe_info)
     buf[index++] = 'P';
 
-  if (server_cntx->conn_state.is_blocking)
+  if (server_cntx->blocked)
     buf[index++] = 'b';
 
   if (index) {
