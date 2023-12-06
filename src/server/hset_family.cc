@@ -1134,11 +1134,21 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
   if (result) {
     if ((result->size() == 1) && (args.size() == 1))
       (*cntx)->SendBulkString(result->front());
-    else
-      (*cntx)->SendStringArr(*result);
+    else {
+      if (((*cntx)->IsResp3()) && (args.size() == 3)) {  // has withvalues
+        (*cntx)->StartArray(result->size() / 2);
+        for (unsigned int i = 0; i < result->size() / 2; ++i) {
+          StringVec sv{(*result)[i * 2], (*result)[i * 2 + 1]};
+          (*cntx)->SendStringArr(sv);
+        }
+      } else {
+        (*cntx)->SendStringArr(*result);
+      }
+    }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)
       (*cntx)->SendNull();
