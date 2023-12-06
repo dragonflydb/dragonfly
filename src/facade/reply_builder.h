@@ -217,6 +217,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   RedisReplyBuilder(::io::Sink* stream);
 
   void SetResp3(bool is_resp3);
+  bool IsResp3() const;
 
   void SendError(std::string_view str, std::string_view type = {}) override;
   using SinkReplyBuilder::SendError;
