@@ -332,7 +332,7 @@ void RedisReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat 
   if (!is_resp3_)
     return SendBulkString(str);
 
-  char tmp[absl::numbers_internal::kFastToBufferSize + 3];
+  char tmp[absl::numbers_internal::kFastToBufferSize + 7];
   tmp[0] = '=';
   // + 4 because format is three byte, and need to be followed by a ":"
   char* next = absl::numbers_internal::FastIntToBuffer(uint32_t(str.size() + 4), tmp + 1);
