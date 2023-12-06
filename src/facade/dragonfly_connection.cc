@@ -316,6 +316,10 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
 
+  // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
+  // We use it for reference counting and accessing `this` (without managing it).
+  self_ = {std::make_shared<std::monostate>(), this};
+
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
   // still using it.
@@ -1176,9 +1180,19 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
   // connections
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
+  CHECK_EQ(self_.use_count(), 1u);    // references cache our thread and backpressure
   CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
 
   listener()->Migrate(this, dest);
+}
+
+Connection::WeakRef Connection::Borrow() {
+  DCHECK(self_);
+  // If the connection is unaware of subscriptions, it could migrate threads, making this call
+  // unsafe. All external mechanisms that borrow references should register subscriptions.
+  DCHECK_GT(cc_->subscriptions, 0);
+
+  return WeakRef(self_, queue_backpressure_, socket_->proactor()->GetPoolIndex(), id_);
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1290,10 +1304,6 @@ void Connection::RecycleMessage(MessageHandle msg) {
   }
 }
 
-void Connection::EnsureAsyncMemoryBudget() {
-  queue_backpressure_->EnsureBelowLimit();
-}
-
 std::string Connection::LocalBindStr() const {
   if (socket_->IsUDS())
     return "unix-domain-socket";
@@ -1365,6 +1375,51 @@ void Connection::DecreaseStatsOnClose() {
     --stats_->num_replicas;
   }
   --stats_->num_conns;
+}
+
+Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
+                             unsigned thread, uint32_t client_id)
+    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread}, client_id_{client_id} {
+}
+
+unsigned Connection::WeakRef::Thread() const {
+  return thread_;
+}
+
+Connection* Connection::WeakRef::Get() const {
+  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
+  // The connection can only be deleted on this thread, so
+  // this pointer is valid until the next suspension.
+  // Note: keeping a shared_ptr doesn't prolong the lifetime because
+  // it doesn't manage the underlying connection. See definition of `self_`.
+  return ptr_.lock().get();
+}
+
+bool Connection::WeakRef::IsExpired() const {
+  return ptr_.expired();
+}
+
+uint32_t Connection::WeakRef::GetClientId() const {
+  return client_id_;
+}
+
+bool Connection::WeakRef::EnsureMemoryBudget() const {
+  // Simple optimization: If a connection was closed, don't check memory budget.
+  if (!ptr_.expired()) {
+    // We don't rely on the connection ptr staying valid because we only access
+    // the threads backpressure
+    backpressure_->EnsureBelowLimit();
+    return true;
+  }
+  return false;
+}
+
+bool Connection::WeakRef::operator<(const WeakRef& other) {
+  return client_id_ < other.client_id_;
+}
+
+bool Connection::WeakRef::operator==(const WeakRef& other) {
+  return client_id_ == other.client_id_;
 }
 
 }  // namespace facade
