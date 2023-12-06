@@ -318,7 +318,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
   // We use it for reference counting and accessing `this` (without managing it).
-  self_ = {std::make_shared<std::monostate>(std::monostate{}), this};
+  self_ = {std::make_shared<std::monostate>(), this};
 
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
@@ -1188,6 +1188,8 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
 
 Connection::WeakRef Connection::Borrow() {
   DCHECK(self_);
+  // If the connection is unaware of subscriptions, it could migrate threads, making this call
+  // unsafe. All external mechanisms that borrow references should register subscriptions.
   DCHECK_GT(cc_->subscriptions, 0);
 
   return WeakRef(self_, queue_backpressure_, socket_->proactor()->GetPoolIndex(), id_);
@@ -1386,6 +1388,10 @@ unsigned Connection::WeakRef::Thread() const {
 
 Connection* Connection::WeakRef::Get() const {
   DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
+  // The connection can only be deleted on this thread, so
+  // this pointer is valid until the next suspension.
+  // Note: keeping a shared_ptr doesn't prolong the lifetime because
+  // it doesn't manage the underlying connection. See definition of `self_`.
   return ptr_.lock().get();
 }
 

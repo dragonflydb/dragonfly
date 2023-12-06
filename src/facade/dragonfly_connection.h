@@ -153,7 +153,8 @@ class Connection : public util::Connection {
     unsigned Thread() const;
 
     // Get pointer to connection if still valid, nullptr if expired.
-    // Can only be called from connection's thread.
+    // Can only be called from connection's thread. Validity is guaranteed
+    // only until the next suspension point.
     Connection* Get() const;
 
     // Returns thue if the reference expired. Thread-safe.
