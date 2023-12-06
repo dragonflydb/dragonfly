@@ -25,18 +25,12 @@ bool Matches(string_view pattern, string_view channel) {
 
 }  // namespace
 
-ChannelStore::Subscriber::Subscriber(ConnectionContext* cntx, uint32_t tid)
-    : conn_cntx(cntx), borrow_token(cntx->conn_state.subscribe_info->borrow_token), thread_id(tid) {
-}
-
-ChannelStore::Subscriber::Subscriber(uint32_t tid)
-    : conn_cntx(nullptr), borrow_token(0), thread_id(tid) {
-}
-
 bool ChannelStore::Subscriber::ByThread(const Subscriber& lhs, const Subscriber& rhs) {
-  if (lhs.thread_id == rhs.thread_id)
-    return (lhs.conn_cntx != nullptr) < (rhs.conn_cntx != nullptr);
-  return lhs.thread_id < rhs.thread_id;
+  return ByThreadId(lhs, rhs.Thread());
+}
+
+bool ChannelStore::Subscriber::ByThreadId(const Subscriber& lhs, const unsigned thread) {
+  return lhs.Thread() < thread;
 }
 
 ChannelStore::UpdatablePointer::UpdatablePointer(const UpdatablePointer& other) {
@@ -119,13 +113,11 @@ vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view chan
 void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<Subscriber>* out) {
   out->reserve(out->size() + src.size());
   for (const auto [cntx, thread_id] : src) {
+    // `cntx` is expected to be valid as it unregisters itself from the channel_store before
+    // closing.
     CHECK(cntx->conn_state.subscribe_info);
-
-    Subscriber s(cntx, thread_id);
-    s.pattern = pattern;
-    s.borrow_token.Inc();
-
-    out->push_back(std::move(s));
+    Subscriber sub{cntx->conn()->Borrow(), pattern};
+    out->push_back(std::move(sub));
   }
 }
 

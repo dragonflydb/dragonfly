@@ -1083,10 +1083,10 @@ void SAdd(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return (*cntx)->SendLong(result.value());
+    return cntx->SendLong(result.value());
   }
 
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 void SIsMember(CmdArgList args, ConnectionContext* cntx) {
@@ -1107,9 +1107,9 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   switch (result.status()) {
     case OpStatus::OK:
-      return (*cntx)->SendLong(1);
+      return cntx->SendLong(1);
     default:
-      return (*cntx)->SendLong(0);
+      return cntx->SendLong(0);
   }
 }
 
@@ -1134,14 +1134,15 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
     return find_res.status();
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   if (result == OpStatus::KEY_NOTFOUND) {
     memberships.assign(vals.size(), "0");
-    return (*cntx)->SendStringArr(memberships);
+    return rb->SendStringArr(memberships);
   } else if (result == OpStatus::OK) {
-    return (*cntx)->SendStringArr(memberships);
+    return rb->SendStringArr(memberships);
   }
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 void SMove(CmdArgList args, ConnectionContext* cntx) {
@@ -1156,11 +1157,11 @@ void SMove(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<unsigned> result = mover.Commit(cntx->transaction);
   if (!result) {
-    return (*cntx)->SendError(result.status());
+    return cntx->SendError(result.status());
     return;
   }
 
-  (*cntx)->SendLong(result.value());
+  cntx->SendLong(result.value());
 }
 
 void SRem(CmdArgList args, ConnectionContext* cntx) {
@@ -1178,11 +1179,11 @@ void SRem(CmdArgList args, ConnectionContext* cntx) {
 
   switch (result.status()) {
     case OpStatus::WRONG_TYPE:
-      return (*cntx)->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     case OpStatus::OK:
-      return (*cntx)->SendLong(result.value());
+      return cntx->SendLong(result.value());
     default:
-      return (*cntx)->SendLong(0);
+      return cntx->SendLong(0);
   }
 }
 
@@ -1202,11 +1203,11 @@ void SCard(CmdArgList args, ConnectionContext* cntx) {
 
   switch (result.status()) {
     case OpStatus::OK:
-      return (*cntx)->SendLong(result.value());
+      return cntx->SendLong(result.value());
     case OpStatus::WRONG_TYPE:
-      return (*cntx)->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     default:
-      return (*cntx)->SendLong(0);
+      return cntx->SendLong(0);
   }
 }
 
@@ -1216,7 +1217,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
     string_view arg = ArgS(args, 1);
     if (!absl::SimpleAtoi(arg, &count)) {
-      (*cntx)->SendError(kInvalidIntErr);
+      cntx->SendError(kInvalidIntErr);
       return;
     }
   }
@@ -1225,22 +1226,23 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
     return OpPop(t->GetOpArgs(shard), key, count);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1) {  // SPOP key
       if (result.status() == OpStatus::KEY_NOTFOUND) {
-        (*cntx)->SendNull();
+        rb->SendNull();
       } else {
         DCHECK_EQ(1u, result.value().size());
-        (*cntx)->SendBulkString(result.value().front());
+        rb->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+      rb->SendStringArr(*result, RedisReplyBuilder::SET);
     }
     return;
   }
 
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 void SDiff(CmdArgList args, ConnectionContext* cntx) {
@@ -1263,7 +1265,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
-    (*cntx)->SendError(rsv.status());
+    cntx->SendError(rsv.status());
     return;
   }
 
@@ -1271,7 +1273,8 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.script_info) {  // sort under script
     sort(arr.begin(), arr.end());
   }
-  (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendStringArr(arr, RedisReplyBuilder::SET);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1311,7 +1314,7 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
     cntx->transaction->Conclude();
-    (*cntx)->SendError(rsv.status());
+    cntx->SendError(rsv.status());
     return;
   }
 
@@ -1325,7 +1328,7 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  (*cntx)->SendLong(result.size());
+  cntx->SendLong(result.size());
 }
 
 void SMembers(CmdArgList args, ConnectionContext* cntx) {
@@ -1339,9 +1342,10 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(svec.begin(), svec.end());
     }
-    (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendStringArr(*result, RedisReplyBuilder::SET);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1353,10 +1357,10 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
   int count = is_count ? parser.Next<int>() : 1;
 
   if (parser.HasNext())
-    return (*cntx)->SendError(WrongNumArgsError("SRANDMEMBER"));
+    return cntx->SendError(WrongNumArgsError("SRANDMEMBER"));
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   const unsigned ucount = std::abs(count);
 
@@ -1385,7 +1389,7 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (count < 0 && !result->empty()) {
       for (auto i = result->size(); i < ucount; ++i) {
@@ -1393,15 +1397,15 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
         result->push_back(result->front());
       }
     }
-    (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+    rb->SendStringArr(*result, RedisReplyBuilder::SET);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      (*cntx)->SendStringArr(StringVec(), RedisReplyBuilder::SET);
+      rb->SendStringArr(StringVec(), RedisReplyBuilder::SET);
     } else {
-      (*cntx)->SendNull();
+      rb->SendNull();
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1421,9 +1425,10 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1451,7 +1456,7 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
   if (!result) {
     cntx->transaction->Conclude();
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
     return;
   }
 
@@ -1464,20 +1469,20 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  (*cntx)->SendLong(result->size());
+  cntx->SendLong(result->size());
 }
 
 void SInterCard(CmdArgList args, ConnectionContext* cntx) {
   unsigned num_keys;
   if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
 
   unsigned limit = 0;
   if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
     if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
-      return (*cntx)->SendError("limit can't be negative");
+      return cntx->SendError("limit can't be negative");
   } else if (args.size() > (num_keys + 1))
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1489,7 +1494,7 @@ void SInterCard(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SvArray> result =
       InterResultVec(result_set, cntx->transaction->GetUniqueShardCnt(), limit);
 
-  return (*cntx)->SendLong(result->size());
+  return cntx->SendLong(result->size());
 }
 
 void SUnion(CmdArgList args, ConnectionContext* cntx) {
@@ -1509,9 +1514,10 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
-    (*cntx)->SendError(unionset.status());
+    cntx->SendError(unionset.status());
   }
 }
 
@@ -1538,7 +1544,7 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   ResultSetView unionset = UnionResultVec(result_set);
   if (!unionset) {
     cntx->transaction->Conclude();
-    (*cntx)->SendError(unionset.status());
+    cntx->SendError(unionset.status());
     return;
   }
 
@@ -1553,7 +1559,7 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  (*cntx)->SendLong(result.size());
+  cntx->SendLong(result.size());
 }
 
 void SScan(CmdArgList args, ConnectionContext* cntx) {
@@ -1563,19 +1569,19 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return (*cntx)->SendError("invalid cursor");
+    return cntx->SendError("invalid cursor");
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
   if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
-    return (*cntx)->SendError(ops.status());
+    return cntx->SendError(ops.status());
   }
 
   ScanOpts scan_op = ops.value();
@@ -1584,16 +1590,17 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
-    (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString(absl::StrCat(cursor));
-    (*cntx)->StartArray(result->size());  // Within scan the return page is of type array
+    rb->StartArray(2);
+    rb->SendBulkString(absl::StrCat(cursor));
+    rb->StartArray(result->size());  // Within scan the return page is of type array
     for (const auto& k : *result) {
-      (*cntx)->SendBulkString(k);
+      rb->SendBulkString(k);
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1605,7 +1612,7 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   vector<string_view> vals(args.size() - 2);
@@ -1621,10 +1628,10 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return (*cntx)->SendLong(result.value());
+    return cntx->SendLong(result.value());
   }
 
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 }  // namespace
