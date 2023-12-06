@@ -1275,7 +1275,7 @@ void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
 
   string result = absl::StrJoin(client_info, "\n");
   result.append("\n");
-  return (*cntx)->SendBulkString(result);
+  return (*cntx)->SendVerbatimString(result);
 }
 
 void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
@@ -1825,7 +1825,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
 
-  (*cntx)->SendBulkString(info);
+  //(*cntx)->SendBulkString(info);
+  (*cntx)->SendVerbatimString(info);
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
