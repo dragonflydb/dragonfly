@@ -611,7 +611,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
   pair<PrimeIterator, bool> add_res;
 
   if (opts.no_mkstream) {
-    // XXX TODO: Replace with FindV2() once AddOrFindV2() is implemented
+    // TODO(#2252): Replace with FindMutable() once AddOrFindMutable() is implemented
     auto res_it = db_slice.Find(op_args.db_cntx, opts.key, OBJ_STREAM);
     if (!res_it) {
       return res_it.status();
@@ -1129,7 +1129,7 @@ struct CreateOpts {
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  // XXX TODO Replace with FindV2() once AddNewV2() is implemented
+  // TODO(#2252): Replace with FindMutable() once new AddNew() is implemented
   OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
@@ -1176,7 +1176,7 @@ struct FindGroupResult {
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  auto res_it = db_slice.FindV2(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -1464,7 +1464,7 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
 OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  auto res_it = db_slice.FindV2(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -1503,7 +1503,7 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
 OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<streamID> ids) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  auto res_it = db_slice.FindV2(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -1933,7 +1933,7 @@ void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
 OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  auto res_it = db_slice.FindV2(op_args.db_cntx, opts.key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
   if (!res_it) {
     if (res_it.status() == OpStatus::KEY_NOTFOUND) {
       return 0;

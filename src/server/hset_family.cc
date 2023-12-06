@@ -343,13 +343,12 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
   DCHECK(!values.empty());
 
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindV2(op_args.db_cntx, key, OBJ_HASH);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res)
     return it_res.status();
 
-  auto& [it, _] = *it_res;
-  PrimeValue& pv = it->second;
+  PrimeValue& pv = it_res->it->second;
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
   unsigned deleted = 0;
@@ -1098,8 +1097,9 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
       }
 
       if (string_map->Empty()) {
-        // XXX TODO remove by key?
-        // db_slice.Del(db_context.db_index, *it_res);
+        auto it_mutable = db_slice.FindMutable(db_context, key, OBJ_HASH);
+        it_mutable->post_updater.Run();
+        db_slice.Del(db_context.db_index, it_mutable->it);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {

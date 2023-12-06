@@ -695,7 +695,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ArgSlice&
                          bool journal_rewrite) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
-  auto find_res = db_slice.FindV2(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
   if (!find_res) {
     return find_res.status();
   }
@@ -977,7 +977,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 // count - how many elements to pop.
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count) {
   auto& db_slice = op_args.shard->db_slice();
-  auto find_res = db_slice.FindV2(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 

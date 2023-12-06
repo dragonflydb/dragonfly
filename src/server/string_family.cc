@@ -154,10 +154,7 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, 
   else
     new_val = absl::StrCat(slice, val);
 
-  auto& db_slice = shard->db_slice();
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
 
   return new_val.size();
 }
@@ -170,6 +167,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
   if (inserted) {
     it->second.SetString(val);
+    // TODO(#2252): We currently only call PostUpdate() (no PreUpdate()), make sure this is fixed
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
 
     return val.size();
@@ -178,12 +176,15 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  return ExtendExisting(op_args, it, key, val, prepend);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  size_t res = ExtendExisting(op_args, it, key, val, prepend);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
+  return res;
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindV2(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }

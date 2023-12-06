@@ -146,7 +146,7 @@ error_code JsonReplace(JsonType& instance, string_view path, JsonReplaceCb callb
 
 OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_view path,
                      JsonReplaceCb callback, JsonReplaceVerify verify_op = JsonReplaceVerifyNoOp) {
-  auto it_res = op_args.shard->db_slice().FindV2(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok()) {
     return it_res.status();
   }
@@ -169,6 +169,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
   // Make sure that we don't have other internal issue with the operation
   OpStatus res = verify_op(json_entry);
   if (res == OpStatus::OK) {
+    it_res->post_updater.Run();
     op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, entry_it->second);
   }
 

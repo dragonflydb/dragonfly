@@ -186,7 +186,7 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
                                    size_t member_len) {
   auto& db_slice = op_args.shard->db_slice();
   if (zparams.flags & ZADD_IN_XX) {
-    // XXX TODO: Replace once AddOrFindV2() exists
+    // TODO(#2252): Replace once AddOrFindMutable() exists
     return db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
   }
 
@@ -1275,7 +1275,7 @@ bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::Range
 
 ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bool is_max) {
   auto& db_slice = shard->db_slice();
-  auto it_res = db_slice.FindV2(t->GetDbContext(), key, OBJ_ZSET);
+  auto it_res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_ZSET);
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
   PrimeIterator it = it_res->it;
 
@@ -1382,7 +1382,7 @@ vector<ScoredMap> OpFetch(EngineShard* shard, Transaction* t) {
 auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
     -> OpResult<ScoredArray> {
   auto& db_slice = op_args.shard->db_slice();
-  auto res_it = db_slice.FindV2(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1439,7 +1439,7 @@ auto OpRanges(const std::vector<ZSetFamily::ZRangeSpec>& range_specs, const OpAr
 OpResult<unsigned> OpRemRange(const OpArgs& op_args, string_view key,
                               const ZSetFamily::ZRangeSpec& range_spec) {
   auto& db_slice = op_args.shard->db_slice();
-  auto res_it = db_slice.FindV2(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1602,7 +1602,7 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
 
 OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, ArgSlice members) {
   auto& db_slice = op_args.shard->db_slice();
-  auto res_it = db_slice.FindV2(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 

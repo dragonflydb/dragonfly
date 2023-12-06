@@ -88,7 +88,7 @@ class DbSlice {
       std::string_view key;
       bool key_existed = false;
 
-      // TODO: Add heap size here, and only update memory in d'tor
+      // TODO(#2252): Add heap size here, and only update memory in d'tor
     };
 
     AutoPostUpdate(const Fields& fields);
@@ -183,6 +183,7 @@ class DbSlice {
     return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
+  // TODO(#2252): Remove this in favor of FindMutable() / FindReadOnly()
   OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
                                unsigned req_obj_type) const;
 
@@ -190,7 +191,8 @@ class DbSlice {
     PrimeIterator it;
     AutoPostUpdate post_updater;
   };
-  OpResult<ItAndUpdater> FindV2(const Context& cntx, std::string_view key, unsigned req_obj_type);
+  OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
+                                     unsigned req_obj_type);
 
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                             unsigned req_obj_type) const;
@@ -304,7 +306,7 @@ class DbSlice {
   size_t DbSize(DbIndex db_ind) const;
 
   // Callback functions called upon writing to the existing key.
-  // TODO: Remove these (or make them private) once the V2 API is the only API.
+  //  TODO(#2252): Remove these (or make them private)
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
                   bool existing_entry = true);

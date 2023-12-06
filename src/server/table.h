@@ -29,7 +29,6 @@ using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>
 using PrimeIterator = PrimeTable::iterator;
 using PrimeConstIterator = PrimeTable::const_iterator;
 using ExpireIterator = ExpireTable::iterator;
-using ExpireConstIterator = ExpireTable::const_iterator;
 
 inline bool IsValid(PrimeIterator it) {
   return !it.is_done();
@@ -40,10 +39,6 @@ inline bool IsValid(ExpireIterator it) {
 }
 
 inline bool IsValid(PrimeConstIterator it) {
-  return !it.is_done();
-}
-
-inline bool IsValid(ExpireConstIterator it) {
   return !it.is_done();
 }
 

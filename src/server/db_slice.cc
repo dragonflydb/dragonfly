@@ -378,9 +378,9 @@ DbSlice::AutoPostUpdate::AutoPostUpdate(const Fields& fields) : fields_(fields) 
   fields_.db_slice->PreUpdate(fields_.db_ind, fields_.it);
 }
 
-OpResult<DbSlice::ItAndUpdater> DbSlice::FindV2(const Context& cntx, string_view key,
-                                                unsigned req_obj_type) {
-  // TODO: Call an internal find version that does not handle post updates
+OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
+                                                     unsigned req_obj_type) {
+  // TODO(#2252): Call an internal find version that does not handle post updates
   auto it = FindExt(cntx, key).first;
 
   if (!IsValid(it))
