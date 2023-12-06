@@ -114,7 +114,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -509,11 +509,12 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   auto& db_slice = shard->db_slice();
 
   SinkReplyBuilder::MGetResponse response(args.size());
-  absl::InlinedVector<PrimeIterator, 32> iters(args.size());
+  absl::InlinedVector<PrimeConstIterator, 32> iters(args.size());
 
   size_t total_size = 0;
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_STRING);
+    OpResult<PrimeConstIterator> it_res =
+        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -524,7 +525,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   char* next = response.storage_list->data;
 
   for (size_t i = 0; i < args.size(); ++i) {
-    PrimeIterator it = iters[i];
+    PrimeConstIterator it = iters[i];
     if (it.is_done())
       continue;
 
@@ -1292,7 +1293,8 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_STRING);
+    OpResult<PrimeConstIterator> it_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 

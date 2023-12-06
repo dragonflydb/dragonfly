@@ -481,7 +481,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 }
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 

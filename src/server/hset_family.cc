@@ -388,7 +388,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     }
   }
 
-  // db_slice.PostUpdate(op_args.db_cntx.db_index, *it_res, key);
+  it_res->post_updater.Run();
 
   if (!key_remove)
     op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
@@ -397,7 +397,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     if (enc == kEncodingListPack) {
       stats->listpack_blob_cnt--;
     }
-    // db_slice.Del(op_args.db_cntx.db_index, *it_res); // GOOD!
+    db_slice.Del(op_args.db_cntx.db_index, it_res->it);
   } else if (enc == kEncodingListPack) {
     stats->listpack_bytes += lpBytes((uint8_t*)pv.RObjPtr());
   }
