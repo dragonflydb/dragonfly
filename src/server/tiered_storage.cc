@@ -91,6 +91,7 @@ static size_t ExternalizeEntry(size_t item_offset, DbTableStats* stats, PrimeVal
   stats->obj_memory_usage -= heap_size;
   if (entry->ObjType() == OBJ_STRING)
     stats->strval_memory_usage -= heap_size;
+  stats->AddTypeMemoryUsage(entry->ObjType(), -heap_size);
 
   entry->SetExternal(item_offset, item_size);
 

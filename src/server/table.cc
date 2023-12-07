@@ -17,6 +17,17 @@ namespace dfly {
 // It should be const, but we override this variable in our tests so that they run faster.
 unsigned kInitSegmentLog = 3;
 
+void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
+  if (type >= memory_usage_by_type.size()) {
+    LOG_FIRST_N(WARNING, 1) << "Encountered unknown type when aggregating per-type memory: "
+                            << type;
+    DCHECK(false) << "Unsupported type " << type;
+    return;
+  }
+
+  memory_usage_by_type[type] += delta;
+}
+
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats);
   static_assert(kDbSz == 192);

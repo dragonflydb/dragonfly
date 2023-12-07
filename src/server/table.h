@@ -62,6 +62,9 @@ struct DbTableStats {
 
   std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
 
+  // Mostly used internally, exposed for tiered storage.
+  void AddTypeMemoryUsage(unsigned type, int64_t delta);
+
   DbTableStats& operator+=(const DbTableStats& o);
 };
 
