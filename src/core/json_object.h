@@ -8,6 +8,10 @@
 #include <optional>
 #include <string_view>
 
+extern "C" {
+#include "redis/redis_aux.h"
+}
+
 // Note about this file - once we have the issue with jsonpath in jsoncons resolved
 // we would add the implementation for the allocator here as well. Right now this
 // file is a little bit empty, but for external "users" such as json_family they
@@ -17,10 +21,6 @@ namespace jsoncons {
 struct sorted_policy;
 template <typename CharT, typename Policy, typename Allocator> class basic_json;
 }  // namespace jsoncons
-
-// the last one in object.h is OBJ_STREAM and it is 6,
-// this will add enough place for Redis types to grow
-constexpr unsigned OBJ_JSON = 15;
 
 namespace dfly {
 

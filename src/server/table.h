@@ -51,7 +51,6 @@ struct DbTableStats {
   // Object memory usage besides hash-table capacity.
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
-  size_t strval_memory_usage = 0;
 
   // how much we we increased or decreased the existing entries.
   ssize_t update_value_amount = 0;
@@ -59,6 +58,11 @@ struct DbTableStats {
   size_t listpack_bytes = 0;
   size_t tiered_entries = 0;
   size_t tiered_size = 0;
+
+  std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
+
+  // Mostly used internally, exposed for tiered storage.
+  void AddTypeMemoryUsage(unsigned type, int64_t delta);
 
   DbTableStats& operator+=(const DbTableStats& o);
 };
