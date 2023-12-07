@@ -60,7 +60,7 @@ struct DbTableStats {
   size_t tiered_entries = 0;
   size_t tiered_size = 0;
 
-  std::array<size_t, OBJ_COUNT> memory_usage_by_type = {};
+  std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
 
   DbTableStats& operator+=(const DbTableStats& o);
 };
