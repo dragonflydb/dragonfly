@@ -177,10 +177,11 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
   if (to_reply) {
     for (size_t i = 0; i < result.size(); ++i) {
       const char* action[2] = {"unsubscribe", "subscribe"};
-      (*this)->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-      (*this)->SendBulkString(action[to_add]);
-      (*this)->SendBulkString(ArgS(args, i));
-      (*this)->SendLong(result[i]);
+      auto rb = static_cast<RedisReplyBuilder*>(reply_builder());
+      rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+      rb->SendBulkString(action[to_add]);
+      rb->SendBulkString(ArgS(args, i));
+      rb->SendLong(result[i]);
     }
   }
 }
@@ -224,13 +225,14 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply) {
 void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
                                                         std::optional<string_view> topic,
                                                         unsigned count) {
-  (*this)->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-  (*this)->SendBulkString(action);
+  auto rb = static_cast<RedisReplyBuilder*>(reply_builder());
+  rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+  rb->SendBulkString(action);
   if (topic.has_value())
-    (*this)->SendBulkString(topic.value());
+    rb->SendBulkString(topic.value());
   else
-    (*this)->SendNull();
-  (*this)->SendLong(count);
+    rb->SendNull();
+  rb->SendLong(count);
 }
 
 size_t ConnectionContext::UsedMemory() const {

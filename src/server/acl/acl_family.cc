@@ -50,13 +50,14 @@ AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
 }
 
 void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendError("Wrong number of arguments for acl command");
+  cntx->SendError("Wrong number of arguments for acl command");
 }
 
 void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  (*cntx)->StartArray(registry.size());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(registry.size());
 
   for (const auto& [username, user] : registry) {
     std::string buffer = "user ";
@@ -71,7 +72,7 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
     absl::StrAppend(&buffer, username, " ", user.IsActive() ? "on "sv : "off "sv, password, " ",
                     acl_cat, maybe_space, acl_commands);
 
-    (*cntx)->SendSimpleString(buffer);
+    cntx->SendSimpleString(buffer);
   }
 }
 
@@ -97,7 +98,7 @@ using facade::ErrorReply;
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
   auto req = ParseAclSetUser(args.subspan(1), *cmd_registry_);
-  auto error_case = [cntx](ErrorReply&& error) { (*cntx)->SendError(error); };
+  auto error_case = [cntx](ErrorReply&& error) { cntx->SendError(std::move(error)); };
   auto update_case = [username, cntx, this](User::UpdateRequest&& req) {
     auto user_with_lock = registry_->MaybeAddAndUpdateWithLock(username, std::move(req));
     if (user_with_lock.exists) {
@@ -313,7 +314,7 @@ void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
 
 void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
-    (*cntx)->SendError(facade::OpStatus::OUT_OF_RANGE);
+    cntx->SendError(facade::OpStatus::OUT_OF_RANGE);
   }
 
   size_t max_output = 10;
@@ -322,12 +323,12 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
     if (absl::EqualsIgnoreCase(option, "RESET")) {
       pool_->AwaitFiberOnAll(
           [](auto index, auto* context) { ServerState::tlocal()->acl_log.Reset(); });
-      (*cntx)->SendOk();
+      cntx->SendOk();
       return;
     }
 
     if (!absl::SimpleAtoi(facade::ToSV(args[0]), &max_output)) {
-      (*cntx)->SendError("Invalid count");
+      cntx->SendError("Invalid count");
       return;
     }
   }
@@ -342,32 +343,33 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
     total_entries += log.size();
   }
 
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
   if (total_entries == 0) {
-    (*cntx)->SendEmptyArray();
+    rb->SendEmptyArray();
     return;
   }
 
-  (*cntx)->StartArray(total_entries);
-  auto print_element = [cntx](const auto& entry) {
-    (*cntx)->StartArray(12);
-    (*cntx)->SendSimpleString("reason");
+  rb->StartArray(total_entries);
+  auto print_element = [rb](const auto& entry) {
+    rb->StartArray(12);
+    rb->SendSimpleString("reason");
     using Reason = AclLog::Reason;
     std::string_view reason = entry.reason == Reason::COMMAND ? "COMMAND" : "AUTH";
-    (*cntx)->SendSimpleString(reason);
-    (*cntx)->SendSimpleString("object");
-    (*cntx)->SendSimpleString(entry.object);
-    (*cntx)->SendSimpleString("username");
-    (*cntx)->SendSimpleString(entry.username);
-    (*cntx)->SendSimpleString("age-seconds");
+    rb->SendSimpleString(reason);
+    rb->SendSimpleString("object");
+    rb->SendSimpleString(entry.object);
+    rb->SendSimpleString("username");
+    rb->SendSimpleString(entry.username);
+    rb->SendSimpleString("age-seconds");
     auto now_diff = std::chrono::system_clock::now() - entry.entry_creation;
     auto secs = std::chrono::duration_cast<std::chrono::seconds>(now_diff);
     auto left_over = now_diff - std::chrono::duration_cast<std::chrono::microseconds>(secs);
     auto age = absl::StrCat(secs.count(), ".", left_over.count());
-    (*cntx)->SendSimpleString(absl::StrCat(age));
-    (*cntx)->SendSimpleString("client-info");
-    (*cntx)->SendSimpleString(entry.client_info);
-    (*cntx)->SendSimpleString("timestamp-created");
-    (*cntx)->SendLong(entry.entry_creation.time_since_epoch().count());
+    rb->SendSimpleString(absl::StrCat(age));
+    rb->SendSimpleString("client-info");
+    rb->SendSimpleString(entry.client_info);
+    rb->SendSimpleString("timestamp-created");
+    rb->SendLong(entry.entry_creation.time_since_epoch().count());
   };
 
   auto n_way_minimum = [](const auto& logs) {
@@ -394,15 +396,16 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
 void AclFamily::Users(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  (*cntx)->StartArray(registry.size());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(registry.size());
   for (const auto& [username, _] : registry) {
-    (*cntx)->SendSimpleString(username);
+    rb->SendSimpleString(username);
   }
 }
 
 void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
-    (*cntx)->SendError(facade::OpStatus::SYNTAX_ERR);
+    cntx->SendError(facade::OpStatus::SYNTAX_ERR);
     return;
   }
 
@@ -411,7 +414,7 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
     std::string_view category = facade::ToSV(args[0]);
     if (!CATEGORY_INDEX_TABLE.contains(category)) {
       auto error = absl::StrCat("Unkown category: ", category);
-      (*cntx)->SendError(error);
+      cntx->SendError(error);
       return;
     }
 
@@ -423,10 +426,11 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
       }
     };
 
+    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
     cmd_registry_->Traverse(cb);
-    (*cntx)->StartArray(results.size());
+    rb->StartArray(results.size());
     for (const auto& command : results) {
-      (*cntx)->SendSimpleString(command);
+      rb->SendSimpleString(command);
     }
 
     return;
@@ -439,10 +443,11 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  (*cntx)->StartArray(total_categories);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(total_categories);
   for (auto& elem : REVERSE_CATEGORY_INDEX_TABLE) {
     if (elem != "_RESERVED") {
-      (*cntx)->SendSimpleString(elem);
+      rb->SendSimpleString(elem);
     }
   }
 }
@@ -453,39 +458,40 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   const auto& registry = registry_with_lock.registry;
   if (!registry.contains(username)) {
     auto error = absl::StrCat("User: ", username, " does not exists!");
-    (*cntx)->SendError(error);
+    cntx->SendError(error);
     return;
   }
   auto& user = registry.find(username)->second;
   std::string status = user.IsActive() ? "on" : "off";
   auto pass = user.Password();
 
-  (*cntx)->StartArray(6);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(6);
 
-  (*cntx)->SendSimpleString("flags");
+  rb->SendSimpleString("flags");
   const size_t total_elements = (pass != "nopass") ? 1 : 2;
-  (*cntx)->StartArray(total_elements);
-  (*cntx)->SendSimpleString(status);
+  rb->StartArray(total_elements);
+  rb->SendSimpleString(status);
   if (total_elements == 2) {
-    (*cntx)->SendSimpleString(pass);
+    rb->SendSimpleString(pass);
   }
 
-  (*cntx)->SendSimpleString("passwords");
+  rb->SendSimpleString("passwords");
   if (pass != "nopass") {
-    (*cntx)->SendSimpleString(pass);
+    rb->SendSimpleString(pass);
   } else {
-    (*cntx)->SendEmptyArray();
+    rb->SendEmptyArray();
   }
-  (*cntx)->SendSimpleString("commands");
+  rb->SendSimpleString("commands");
 
   std::string acl = absl::StrCat(AclCatToString(user.AclCategory()), " ",
                                  AclCommandToString(user.AclCommandsRef()));
-  (*cntx)->SendSimpleString(acl);
+  rb->SendSimpleString(acl);
 }
 
 void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
   if (args.length() > 1) {
-    (*cntx)->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
+    cntx->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
     return;
   }
   uint32_t random_bits = 256;
@@ -493,7 +499,7 @@ void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
     auto requested_bits = facade::ArgS(args, 0);
 
     if (!absl::SimpleAtoi(requested_bits, &random_bits) || random_bits == 0 || random_bits > 4096) {
-      return (*cntx)->SendError(
+      return cntx->SendError(
           "ACL GENPASS argument must be the number of bits for the output password, a positive "
           "number up to 4096");
     }
@@ -508,7 +514,7 @@ void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {
 
   response.resize(result_length);
 
-  (*cntx)->SendSimpleString(response);
+  cntx->SendSimpleString(response);
 }
 
 void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
@@ -517,7 +523,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   const auto& registry = registry_with_lock.registry;
   if (!registry.contains(username)) {
     auto error = absl::StrCat("User: ", username, " does not exists!");
-    (*cntx)->SendError(error);
+    cntx->SendError(error);
     return;
   }
 
@@ -526,18 +532,18 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   auto* cid = cmd_registry_->Find(command);
   if (!cid) {
     auto error = absl::StrCat("Command: ", command, " does not exists!");
-    (*cntx)->SendError(error);
+    cntx->SendError(error);
     return;
   }
 
   const auto& user = registry.find(username)->second;
   if (IsUserAllowedToInvokeCommandGeneric(user.AclCategory(), user.AclCommandsRef(), *cid)) {
-    (*cntx)->SendOk();
+    cntx->SendOk();
     return;
   }
 
   auto error = absl::StrCat("User: ", username, " is not allowed to execute command: ", command);
-  (*cntx)->SendError(error);
+  cntx->SendError(error);
 }
 
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);

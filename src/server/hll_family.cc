@@ -32,20 +32,20 @@ template <typename T> void HandleOpValueResult(const OpResult<T>& result, Connec
                 "we are only handling types that are integral types in the return types from "
                 "here");
   if (result) {
-    (*cntx)->SendLong(result.value());
+    cntx->SendLong(result.value());
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        (*cntx)->SendError(kWrongTypeErr);
+        cntx->SendError(kWrongTypeErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        (*cntx)->SendError(kOutOfMemory);
+        cntx->SendError(kOutOfMemory);
         break;
       case OpStatus::INVALID_VALUE:
-        (*cntx)->SendError(HllFamily::kInvalidHllErr);
+        cntx->SendError(HllFamily::kInvalidHllErr);
         break;
       default:
-        (*cntx)->SendLong(0);  // in case we don't have the value we should just send 0
+        cntx->SendLong(0);  // in case we don't have the value we should just send 0
         break;
     }
   }
@@ -275,9 +275,9 @@ void PFMerge(CmdArgList args, ConnectionContext* cntx) {
   OpResult<int> result = PFMergeInternal(args, cntx);
   if (result.ok()) {
     if (result.value() == 0) {
-      (*cntx)->SendOk();
+      cntx->SendOk();
     } else {
-      (*cntx)->SendError(HllFamily::kInvalidHllErr);
+      cntx->SendError(HllFamily::kInvalidHllErr);
     }
   } else {
     HandleOpValueResult(result, cntx);
