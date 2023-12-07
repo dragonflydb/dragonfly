@@ -75,9 +75,7 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   int64_t delta = del_it->first.MallocUsed() + value_heap_size;
   stats.obj_memory_usage -= delta;
   stats.AddTypeMemoryUsage(pv.ObjType(), -delta);
-  if (pv.ObjType() == OBJ_STRING) {
-    stats.strval_memory_usage -= value_heap_size;
-  } else if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
+  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
   } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
     --stats.listpack_blob_cnt;
@@ -236,7 +234,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 224);
+  static_assert(kDbSz == 216);
 
   DbTableStats::operator+=(o);
 
@@ -930,7 +928,6 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   stats->update_value_amount -= value_heap_size;
 
   if (it->second.ObjType() == OBJ_STRING) {
-    stats->strval_memory_usage -= value_heap_size;
     if (it->second.IsExternal()) {
       // We assume here that the operation code either loaded the entry into memory
       // before calling to PreUpdate or it does not need to read it at all.
@@ -957,8 +954,6 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   int64_t value_heap_size = it->second.MallocUsed();
   stats->obj_memory_usage += value_heap_size;
   stats->AddTypeMemoryUsage(it->second.ObjType(), value_heap_size);
-  if (it->second.ObjType() == OBJ_STRING)
-    stats->strval_memory_usage += value_heap_size;
   if (existing)
     stats->update_value_amount += value_heap_size;
 

@@ -1640,7 +1640,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
-    append("strval_bytes", total.strval_memory_usage);
+    append("strval_bytes", total.memory_usage_by_type[OBJ_STRING]);
     append("updateval_amount", total.update_value_amount);
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
