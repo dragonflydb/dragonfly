@@ -90,23 +90,14 @@ std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command) {
 
   auto op = KeyOp::READ_WRITE;
 
-  if (absl::StartsWith(command, "%")) {
-    if (command.size() < 3) {
-      return {};
-    }
-
-    if (!(command.substr(1, 2) == "RW")) {
-      if (command[1] == 'R') {
-        op = KeyOp::READ;
-      } else if (command[1] == 'W') {
-        op = KeyOp::WRITE;
-      } else {
-        return {};
-      }
-      command = command.substr(2);
-    } else {
-      command = command.substr(3);
-    }
+  if (absl::StartsWith(command, "%RW")) {
+    command = command.substr(3);
+  } else if (absl::StartsWith(command, "%R")) {
+    op = KeyOp::READ;
+    command = command.substr(2);
+  } else if (absl::StartsWith(command, "%W")) {
+    op = KeyOp::WRITE;
+    command = command.substr(2);
   }
 
   if (!absl::StartsWith(command, "~")) {
