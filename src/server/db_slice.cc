@@ -69,6 +69,10 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     TieredStorage* tiered = shard->tiered_storage();
     tiered->Free(offset, size);
   }
+  if (pv.HasIoPending()) {
+    TieredStorage* tiered = shard->tiered_storage();
+    tiered->CancelIo(table->index, del_it);
+  }
 
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
@@ -601,60 +605,56 @@ void DbSlice::FlushSlots(SlotSet slot_ids) {
   }).Detach();
 }
 
-void DbSlice::FlushDb(DbIndex db_ind) {
+void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   // TODO: to add preeemptiveness by yielding inside clear.
+  DbTableArray flush_db_arr(db_arr_.size());
+  for (DbIndex index : indexes) {
+    auto& db = db_arr_[index];
+    CHECK(db);
+    InvalidateDbWatches(index);
+    flush_db_arr[index] = std::move(db);
 
-  if (db_ind != kDbAll) {
-    auto& db = db_arr_[db_ind];
-    if (db) {
-      InvalidateDbWatches(db_ind);
+    CreateDb(index);
+    db_arr_[index]->trans_locks.swap(flush_db_arr[index]->trans_locks);
+    if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
+      tiered->CancelAllIos(index);
     }
+  }
 
-    auto db_ptr = std::move(db);
-    DCHECK(!db);
-    CreateDb(db_ind);
-    db_arr_[db_ind]->trans_locks.swap(db_ptr->trans_locks);
-
-    auto cb = [this, db_ptr = std::move(db_ptr)]() mutable {
-      if (db_ptr->stats.tiered_entries > 0) {
+  auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
+    for (auto& db_ptr : flush_db_arr) {
+      if (db_ptr && db_ptr->stats.tiered_entries > 0) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
           if (it->second.IsExternal()) {
             PerformDeletion(it, shard_owner(), db_ptr.get());
           }
         }
+
+        DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
+        db_ptr.reset();
       }
+    }
+    mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+  };
 
-      DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
+  fb2::Fiber("flush_dbs", std::move(cb)).Detach();
+}
 
-      db_ptr.reset();
-      mi_heap_collect(ServerState::tlocal()->data_heap(), true);
-    };
-
-    fb2::Fiber("flush_db", std::move(cb)).Detach();
-
+void DbSlice::FlushDb(DbIndex db_ind) {
+  if (db_ind != kDbAll) {
+    // Flush a single database if a specific index is provided
+    FlushDbIndexes({db_ind});
     return;
   }
 
-  for (size_t i = 0; i < db_arr_.size(); i++) {
+  std::vector<DbIndex> indexes;
+  indexes.reserve(db_arr_.size());
+  for (DbIndex i = 0; i < db_arr_.size(); ++i) {
     if (db_arr_[i]) {
-      InvalidateDbWatches(i);
+      indexes.push_back(i);
     }
   }
-
-  auto all_dbs = std::move(db_arr_);
-  db_arr_.resize(all_dbs.size());
-  for (size_t i = 0; i < db_arr_.size(); ++i) {
-    if (all_dbs[i]) {
-      CreateDb(i);
-      db_arr_[i]->trans_locks.swap(all_dbs[i]->trans_locks);
-    }
-  }
-
-  // Explicitly drop reference counted pointers in place.
-  // If snapshotting is currently in progress, they will keep alive until it finishes.
-  for (auto& db : all_dbs)
-    db.reset();
-  mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+  FlushDbIndexes(indexes);
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {
@@ -1205,7 +1205,7 @@ finish:
 void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
-    db.reset(new DbTable{owner_->memory_resource()});
+    db.reset(new DbTable{owner_->memory_resource(), db_ind});
   }
 }
 

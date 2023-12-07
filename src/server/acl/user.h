@@ -23,6 +23,13 @@ class User final {
  public:
   enum class Sign : int8_t { PLUS, MINUS };
 
+  struct UpdateKey {
+    std::string key;
+    KeyOp op;
+    bool all_keys = false;
+    bool reset_keys = false;
+  };
+
   struct UpdateRequest {
     std::optional<std::string> password{};
 
@@ -36,6 +43,11 @@ class User final {
     using CommandsValueType = std::tuple<Sign, size_t /*index*/, uint64_t /*bit*/>;
     using CommandsUpdateType = std::vector<CommandsValueType>;
     CommandsUpdateType commands;
+
+    // keys
+    std::vector<UpdateKey> keys;
+    bool reset_all_keys{false};
+    bool allow_all_keys{false};
   };
 
   /* Used for default user
@@ -66,6 +78,8 @@ class User final {
   // its respective ID within the commands vector.
   static size_t Selector(std::string_view);
 
+  const AclKeys& Keys() const;
+
  private:
   // For ACL categories
   void SetAclCategories(uint32_t cat);
@@ -81,6 +95,9 @@ class User final {
   // For passwords
   void SetPasswordHash(std::string_view password, bool is_hashed);
 
+  // For ACL key globs
+  void SetKeyGlobs(std::vector<UpdateKey>&& keys);
+
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64
   std::optional<std::string> password_hash_;
@@ -91,8 +108,8 @@ class User final {
   // on how this mapping is built during the startup/registration of commands
   std::vector<uint64_t> commands_;
 
-  // we have at least 221 commands including a bunch of subcommands
-  //  LARGE_BITFIELD_DATATYPE acl_commands_;
+  // Glob patterns for the keys that a user is allowed to read/write
+  AclKeys keys_;
 
   // if the user is on/off
   bool is_active_{false};

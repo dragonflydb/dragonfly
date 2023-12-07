@@ -77,6 +77,30 @@ TEST_F(JsonTest, Errors) {
   EXPECT_FALSE(decoder.is_valid());
 }
 
+TEST_F(JsonTest, Path) {
+  std::error_code ec;
+  json j1 = R"({"field" : 1, "field-dash": 2})"_json;
+
+  auto expr = jsonpath::make_expression<json>("$.field", ec);
+  EXPECT_FALSE(ec);
+
+  expr.evaluate(j1, [](const std::string& path, const json& val) {
+    ASSERT_EQ("$", path);
+    ASSERT_EQ(1, val.as<int>());
+  });
+
+  expr = jsonpath::make_expression<json>("$.field-dash", ec);
+  EXPECT_TRUE(ec);  // can not parse '-'
+
+  ec = {};
+  expr = jsonpath::make_expression<json>("$.'field-dash'", ec);
+  ASSERT_FALSE(ec);
+  expr.evaluate(j1, [](const std::string& path, const json& val) {
+    ASSERT_EQ("$", path);
+    ASSERT_EQ(2, val.as<int>());
+  });
+}
+
 TEST_F(JsonTest, Delete) {
   json j1 = R"({"c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2]})"_json;
 
