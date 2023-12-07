@@ -249,6 +249,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   PrimeIterator dest_it;
   bool new_key = false;
   try {
+    src_res->post_updater.Run();
     tie(dest_it, new_key) = db_slice.AddOrFind(op_args.db_cntx, dest);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;

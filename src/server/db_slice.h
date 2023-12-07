@@ -88,6 +88,7 @@ class DbSlice {
       std::string_view key;
       bool key_existed = false;
 
+      size_t db_size = 0;
       // TODO(#2252): Add heap size here, and only update memory in d'tor
     };
 
