@@ -1277,7 +1277,7 @@ void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
   string result = absl::StrJoin(client_info, "\n");
   result.append("\n");
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  return rb->SendBulkString(result);
+  return rb->SendVerbatimString(result);
 }
 
 void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
@@ -1827,7 +1827,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(info);
+  rb->SendVerbatimString(info);
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {

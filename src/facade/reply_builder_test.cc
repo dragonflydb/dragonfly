@@ -913,6 +913,26 @@ TEST_F(RedisReplyBuilderTest, FormatDouble) {
   EXPECT_STREQ("1e-23", format(1e-23));
 }
 
+TEST_F(RedisReplyBuilderTest, VerbatimString) {
+  // test resp3
+  std::string str = "A simple string!";
+
+  builder_->SetResp3(true);
+  builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::TXT);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "=20\r\ntxt:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
+
+  builder_->SetResp3(true);
+  builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::MARKDOWN);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "=20\r\nmkd:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
+
+  builder_->SetResp3(false);
+  builder_->SendVerbatimString(str);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "$16\r\nA simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
+}
+
 static void BM_FormatDouble(benchmark::State& state) {
   vector<double> values;
   char buf[64];
