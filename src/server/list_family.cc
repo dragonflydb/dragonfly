@@ -262,7 +262,9 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     dest_it->second.ImportRObj(obj);
 
     // Insertion of dest could invalidate src_it. Find it again.
-    src_it = db_slice.GetTables(op_args.db_cntx.db_index).first->Find(src);
+    src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
+    src_it = src_res->it;
+    DCHECK(IsValid(src_it));
   } else {
     if (dest_it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;

@@ -342,8 +342,9 @@ DbSlice::AutoPostUpdate::AutoPostUpdate(AutoPostUpdate&& o) {
 }
 
 DbSlice::AutoPostUpdate& DbSlice::AutoPostUpdate::operator=(AutoPostUpdate&& o) {
+  Run();
   fields_ = o.fields_;
-  o.fields_ = {};  // Reset all fields
+  o.Cancel();
   return *this;
 }
 
@@ -370,7 +371,7 @@ void DbSlice::AutoPostUpdate::Run() {
 }
 
 void DbSlice::AutoPostUpdate::Cancel() {
-  *this = {};
+  this->fields_ = {};
 }
 
 DbSlice::AutoPostUpdate::AutoPostUpdate(const Fields& fields) : fields_(fields) {
