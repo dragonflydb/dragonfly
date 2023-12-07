@@ -261,6 +261,10 @@ class Connection : public util::Connection {
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
 
+  void SetClientTrackingSwitch(bool is_on);
+
+  bool IsTrackingOn() const;
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
@@ -400,6 +404,9 @@ class Connection : public util::Connection {
 
   // Per-thread queue backpressure structs.
   static thread_local QueueBackpressure tl_queue_backpressure_;
+
+  // a flag indicating whether the client has turned on client tracking.
+  bool tracking_enabled_ = false;
 };
 
 }  // namespace facade

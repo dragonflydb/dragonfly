@@ -1465,6 +1465,9 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendOk();
   using facade::SinkReplyBuilder;
 
+  // turn off tracking for this client
+  cntx->conn()->SetClientTrackingSwitch(false);
+
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
 
