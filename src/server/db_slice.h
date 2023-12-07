@@ -344,6 +344,7 @@ class DbSlice {
                                                      bool force_update) noexcept(false);
 
   void FlushSlotsFb(const SlotSet& slot_ids);
+  void FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
   void InvalidateDbWatches(DbIndex db_indx);
