@@ -49,6 +49,10 @@ void User::Update(UpdateRequest&& req) {
     UnsetAclCommands(index, bit_index);
   }
 
+  if (!req.keys.empty()) {
+    SetKeyGlobs(std::move(req.keys));
+  }
+
   if (req.is_active) {
     SetIsActive(*req.is_active);
   }
@@ -128,6 +132,24 @@ static const std::string_view default_pass = "nopass";
 
 std::string_view User::Password() const {
   return password_hash_ ? *password_hash_ : default_pass;
+}
+
+const AclKeys& User::Keys() const {
+  return keys_;
+}
+
+void User::SetKeyGlobs(std::vector<UpdateKey>&& keys) {
+  for (auto& key : keys) {
+    if (key.all_keys) {
+      keys_.key_globs.clear();
+      keys_.all_keys = true;
+    } else if (key.reset_keys) {
+      keys_.key_globs.clear();
+      keys_.all_keys = false;
+    } else {
+      keys_.key_globs.push_back({std::move(key.key), key.op});
+    }
+  }
 }
 
 }  // namespace dfly::acl
