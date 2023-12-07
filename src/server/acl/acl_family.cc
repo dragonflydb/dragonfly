@@ -357,7 +357,14 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->StartArray(12);
     (*cntx)->SendSimpleString("reason");
     using Reason = AclLog::Reason;
-    std::string_view reason = entry.reason == Reason::COMMAND ? "COMMAND" : "AUTH";
+    std::string reason;
+    if (entry.reason == Reason::COMMAND) {
+      reason = "COMMAND";
+    } else if (entry.reason == Reason::KEY) {
+      reason = "KEY";
+    } else {
+      reason = "AUTH";
+    }
     (*cntx)->SendSimpleString(reason);
     (*cntx)->SendSimpleString("object");
     (*cntx)->SendSimpleString(entry.object);
@@ -544,8 +551,10 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   }
 
   const auto& user = registry.find(username)->second;
-  if (IsUserAllowedToInvokeCommandGeneric(user.AclCategory(), user.AclCommandsRef(), {{}, true}, {},
-                                          *cid)) {
+  const bool is_allowed = IsUserAllowedToInvokeCommandGeneric(
+                              user.AclCategory(), user.AclCommandsRef(), {{}, true}, {}, *cid)
+                              .first;
+  if (is_allowed) {
     (*cntx)->SendOk();
     return;
   }

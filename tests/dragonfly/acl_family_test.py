@@ -394,6 +394,18 @@ async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert 2 == len(res)
 
+    res = await async_client.execute_command("ACL LOG RESET")
+    await async_client.execute_command("ACL SETUSER elon resetkeys ~foo")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("SET bar val")
+
+    res = await async_client.execute_command("ACL LOG")
+    assert 1 == len(res)
+    assert res[0]["reason"] == "KEY"
+    assert res[0]["object"] == "SET"
+    assert res[0]["username"] == "elon"
+
 
 @pytest.mark.asyncio
 @dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass"})

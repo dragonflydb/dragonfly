@@ -12,10 +12,9 @@
 
 namespace dfly::acl {
 
-bool IsUserAllowedToInvokeCommandGeneric(uint32_t acl_cat,
-                                         const std::vector<uint64_t>& acl_commands,
-                                         const AclKeys& keys, CmdArgList tail_args,
-                                         const facade::CommandId& id);
+std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
+    uint32_t acl_cat, const std::vector<uint64_t>& acl_commands, const AclKeys& keys,
+    CmdArgList tail_args, const facade::CommandId& id);
 
 bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const facade::CommandId& id,
                                   CmdArgList tail_args);

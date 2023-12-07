@@ -21,22 +21,20 @@ namespace dfly::acl {
     return true;
   }
 
-  const auto is_authed = IsUserAllowedToInvokeCommandGeneric(cntx.acl_categories, cntx.acl_commands,
-                                                             cntx.keys, tail_args, id);
+  const auto [is_authed, reason] = IsUserAllowedToInvokeCommandGeneric(
+      cntx.acl_categories, cntx.acl_commands, cntx.keys, tail_args, id);
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
-    using Reason = acl::AclLog::Reason;
-    log.Add(cntx, std::string(id.name()), Reason::COMMAND);
+    log.Add(cntx, std::string(id.name()), reason);
   }
 
   return is_authed;
 }
 
-[[nodiscard]] bool IsUserAllowedToInvokeCommandGeneric(uint32_t acl_cat,
-                                                       const std::vector<uint64_t>& acl_commands,
-                                                       const AclKeys& keys, CmdArgList tail_args,
-                                                       const facade::CommandId& id) {
+[[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
+    uint32_t acl_cat, const std::vector<uint64_t>& acl_commands, const AclKeys& keys,
+    CmdArgList tail_args, const facade::CommandId& id) {
   const auto cat_credentials = id.acl_categories();
   const size_t index = id.GetFamily();
   const uint64_t command_mask = id.GetBitIndex();
@@ -79,7 +77,7 @@ namespace dfly::acl {
   const bool command =
       (acl_cat & cat_credentials) != 0 || (acl_commands[index] & command_mask) != 0;
 
-  return command && key_allowed;
+  return {command && key_allowed, !command ? AclLog::Reason::COMMAND : AclLog::Reason::KEY};
 }
 
 }  // namespace dfly::acl
