@@ -1171,7 +1171,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
 struct FindGroupResult {
   stream* s = nullptr;
   streamCG* cg = nullptr;
-  DbSlice::AutoPostUpdate post_updater;
+  DbSlice::AutoUpdater post_updater;
 };
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;

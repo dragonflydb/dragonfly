@@ -334,30 +334,30 @@ auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) 
   return it;
 }
 
-DbSlice::AutoPostUpdate::AutoPostUpdate() {
+DbSlice::AutoUpdater::AutoUpdater() {
 }
 
-DbSlice::AutoPostUpdate::AutoPostUpdate(AutoPostUpdate&& o) {
+DbSlice::AutoUpdater::AutoUpdater(AutoUpdater&& o) {
   *this = std::move(o);
 }
 
-DbSlice::AutoPostUpdate& DbSlice::AutoPostUpdate::operator=(AutoPostUpdate&& o) {
+DbSlice::AutoUpdater& DbSlice::AutoUpdater::operator=(AutoUpdater&& o) {
   Run();
   fields_ = o.fields_;
   o.Cancel();
   return *this;
 }
 
-DbSlice::AutoPostUpdate::~AutoPostUpdate() {
+DbSlice::AutoUpdater::~AutoUpdater() {
   Run();
 }
 
-void DbSlice::AutoPostUpdate::Run() {
+void DbSlice::AutoUpdater::Run() {
   if (fields_.action == DestructorAction::kDoNothing) {
     return;
   }
 
-  // Check that AutoPostUpdate does not run after a key was removed.
+  // Check that AutoUpdater does not run after a key was removed.
   // If this CHECK() failed for you, it probably means that you deleted a key while having an auto
   // updater in scope. You'll probably want to call Run() (or Cancel() - but be careful).
   DCHECK(IsValid(fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key)))
@@ -370,11 +370,11 @@ void DbSlice::AutoPostUpdate::Run() {
   Cancel();  // Reset to not run again
 }
 
-void DbSlice::AutoPostUpdate::Cancel() {
+void DbSlice::AutoUpdater::Cancel() {
   this->fields_ = {};
 }
 
-DbSlice::AutoPostUpdate::AutoPostUpdate(const Fields& fields) : fields_(fields) {
+DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   DCHECK(fields_.action == DestructorAction::kRun);
   fields_.db_slice->PreUpdate(fields_.db_ind, fields_.it);
 }
@@ -391,8 +391,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
     return OpStatus::WRONG_TYPE;
   }
 
-  return {{it, AutoPostUpdate(
-                   {AutoPostUpdate::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
+  return {
+      {it, AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
 }
 
 auto DbSlice::FindReadOnly(const Context& cntx, string_view key, unsigned req_obj_type) const

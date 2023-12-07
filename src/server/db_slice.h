@@ -62,12 +62,12 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
-  class AutoPostUpdate {
+  class AutoUpdater {
    public:
-    AutoPostUpdate();
-    AutoPostUpdate(AutoPostUpdate&& o);
-    AutoPostUpdate& operator=(AutoPostUpdate&& o);
-    ~AutoPostUpdate();
+    AutoUpdater();
+    AutoUpdater(AutoUpdater&& o);
+    AutoUpdater& operator=(AutoUpdater&& o);
+    ~AutoUpdater();
 
     void Run();
     void Cancel();
@@ -91,7 +91,7 @@ class DbSlice {
       // TODO(#2252): Add heap size here, and only update memory in d'tor
     };
 
-    AutoPostUpdate(const Fields& fields);
+    AutoUpdater(const Fields& fields);
 
     friend class DbSlice;
 
@@ -189,7 +189,7 @@ class DbSlice {
 
   struct ItAndUpdater {
     PrimeIterator it;
-    AutoPostUpdate post_updater;
+    AutoUpdater post_updater;
   };
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
                                      unsigned req_obj_type);
