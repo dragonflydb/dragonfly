@@ -607,33 +607,30 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   DbTableArray flush_db_arr(db_arr_.size());
   for (DbIndex index : indexes) {
     auto& db = db_arr_[index];
-    if (db) {
-      InvalidateDbWatches(index);
-      flush_db_arr[index] = std::move(db);
+    CHECK(db);
+    InvalidateDbWatches(index);
+    flush_db_arr[index] = std::move(db);
 
-      CreateDb(index);
-      db_arr_[index]->trans_locks.swap(flush_db_arr[index]->trans_locks);
-      if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
-        tiered->CancelAllIos(index);
-      }
+    CreateDb(index);
+    db_arr_[index]->trans_locks.swap(flush_db_arr[index]->trans_locks);
+    if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
+      tiered->CancelAllIos(index);
     }
   }
 
   auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
     for (auto& db_ptr : flush_db_arr) {
-      if (db_ptr) {
-        if (db_ptr->stats.tiered_entries > 0) {
-          for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-            if (it->second.IsExternal()) {
-              PerformDeletion(it, shard_owner(), db_ptr.get());
-            }
+      if (db_ptr && db_ptr->stats.tiered_entries > 0) {
+        for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
+          if (it->second.IsExternal()) {
+            PerformDeletion(it, shard_owner(), db_ptr.get());
           }
         }
+
         DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
         db_ptr.reset();
       }
     }
-
     mi_heap_collect(ServerState::tlocal()->data_heap(), true);
   };
 
@@ -648,6 +645,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   }
 
   std::vector<DbIndex> indexes;
+  indexes.reserve(db_arr_.size());
   for (DbIndex i = 0; i < db_arr_.size(); ++i) {
     if (db_arr_[i]) {
       indexes.push_back(i);
