@@ -325,6 +325,9 @@ class DashTable<_Key, _Value, Policy>::Iterator {
  public:
   using iterator_category = std::forward_iterator_tag;
   using difference_type = std::ptrdiff_t;
+  using IteratorPairType =
+      std::conditional_t<IsConst, detail::IteratorPair<const Key_t, const Value_t>,
+                         detail::IteratorPair<Key_t, Value_t>>;
 
   // Copy constructor from iterator to const_iterator.
   template <bool TIsConst = IsConst, bool TIsSingleB,
@@ -372,15 +375,9 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return *this;
   }
 
-  auto operator->() const {
+  IteratorPairType operator->() const {
     auto* seg = owner_->segment_[seg_id_];
-    if constexpr (IsConst) {
-      return detail::IteratorPair<const Key_t, const Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                              seg->Value(bucket_id_, slot_id_)};
-    } else {
-      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                  seg->Value(bucket_id_, slot_id_)};
-    }
+    return {seg->Key(bucket_id_, slot_id_), seg->Value(bucket_id_, slot_id_)};
   }
 
   // Make it self-contained. Does not need container::end().

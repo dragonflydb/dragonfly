@@ -397,12 +397,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 auto DbSlice::FindReadOnly(const Context& cntx, string_view key, unsigned req_obj_type) const
     -> OpResult<PrimeConstIterator> {
   auto res = Find(cntx, key, req_obj_type);
-  if (res.ok()) {
-    PrimeConstIterator it = res.value();
-    return it;
-  } else {
-    return res.status();
-  }
+  return res.ok() ? OpResult<PrimeConstIterator>(res.value()) : res.status();
 }
 
 pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
