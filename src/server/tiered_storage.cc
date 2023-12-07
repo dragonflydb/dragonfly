@@ -148,6 +148,9 @@ struct TieredStorage::PerDb {
 void TieredStorage::PerDb::CancelAll() {
   for (size_t i = 0; i < kSmallBinLen; ++i) {
     bin_map[i].pending_entries.clear();
+    // It is safe to clear enqueued_entries, because when we will finish writing to disk
+    // InflightWriteRequest::ExternalizeEntries will be executed and it will undo the externalize of
+    // the entries and free the allocated page.
     bin_map[i].enqueued_entries.clear();
   }
   for (auto& req : bigbin_enqueued_entries) {
@@ -444,7 +447,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   }
 
   if (!flush_succeeded) {
-    VLOG(2) << "flush_falied remove entry: " << it->first.ToString();
+    VLOG(2) << "flush failed remove entry: " << it->first.ToString();
     // we could not flush because I/O is saturated, so lets remove the last item.
     bin_record.pending_entries.erase(it->first.AsRef());
     it->second.SetIoPending(false);
@@ -527,17 +530,21 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
 
   auto cb = [this, req, db_index](int io_res) {
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
-    PrimeIterator it = pt->Find(req->key);
+
     absl::Cleanup cleanup = [this, req]() {
       mi_free(req->block_ptr);
       delete req;
       --num_active_requests_;
     };
-    // In case entry was deleted or request was canceled free allocated.
-    if (it.is_done() || req->cancel) {
+
+    // In case entry was canceled free allocated.
+    if (req->cancel) {
       alloc_.Free(req->offset, req->blob_len);
       return;
     }
+
+    PrimeIterator it = pt->Find(req->key);
+    CHECK(!it.is_done());
     CHECK(it->second.HasIoPending());
 
     auto& enqueued_entries = db_arr_[db_index]->bigbin_enqueued_entries;

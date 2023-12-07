@@ -647,9 +647,13 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     return;
   }
 
-  std::vector<DbIndex> all_indexes(db_arr_.size());
-  std::iota(all_indexes.begin(), all_indexes.end(), 0);
-  FlushDbIndexes(all_indexes);
+  std::vector<DbIndex> indexes;
+  for (DbIndex i = 0; i < db_arr_.size(); ++i) {
+    if (db_arr_[i]) {
+      indexes.push_back(i);
+    }
+  }
+  FlushDbIndexes(indexes);
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {
