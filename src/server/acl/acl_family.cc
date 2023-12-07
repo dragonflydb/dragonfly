@@ -180,12 +180,14 @@ std::string AclFamily::RegistryToString() const {
         pass == "nopass" ? "nopass " : absl::StrCat("#", PrettyPrintSha(pass, true), " ");
     const std::string acl_cat = AclCatToString(user.AclCategory());
     const std::string acl_commands = AclCommandToString(user.AclCommandsRef());
-    const std::string maybe_space = acl_commands.empty() ? "" : " ";
+    const std::string maybe_space_com = acl_commands.empty() ? "" : " ";
+    const std::string acl_keys = AclKeysToString(user.Keys());
+    const std::string maybe_space = acl_keys.empty() ? "" : " ";
 
     using namespace std::string_view_literals;
 
     absl::StrAppend(&result, command, username, " ", user.IsActive() ? "ON "sv : "OFF "sv, password,
-                    acl_cat, maybe_space, acl_commands, "\n");
+                    acl_cat, maybe_space_com, acl_commands, maybe_space, acl_keys, "\n");
   }
 
   if (!result.empty()) {
