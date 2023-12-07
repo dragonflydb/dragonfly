@@ -924,23 +924,25 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
 static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
                                                       const ConnectionContext* cntx,
-                                                      string_view error_msg) {
+                                                      string_view error_msg, CmdArgList tail_args) {
   // If we are on a squashed context we need to use the owner, because the
   // context we are operating on is a stub and the acl username is not copied
   // See: MultiCommandSquasher::SquashedHopCb
   if (cntx->conn_state.squashing_info)
     cntx = cntx->conn_state.squashing_info->owner;
 
-  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
+  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
     return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
   }
   return nullopt;
 }
 
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
-                                                     const ConnectionContext* cntx) {
+                                                     const ConnectionContext* cntx,
+                                                     CmdArgList tail_args) {
   // TODO: Move OOM check here
-  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC");
+  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
+                                   tail_args);
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
@@ -1037,7 +1039,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{status};
   }
 
-  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
+  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
@@ -1183,7 +1185,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  if (auto err = VerifyCommandExecution(cid, cntx); err) {
+  if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
     (*cntx)->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }

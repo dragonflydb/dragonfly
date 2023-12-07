@@ -92,6 +92,14 @@ class CommandId : public facade::CommandId {
 
   bool IsTransactional() const;
 
+  bool IsReadOnly() const {
+    return opt_mask_ & CO::CommandOpt::READONLY;
+  }
+
+  bool IsWriteOnly() const {
+    return opt_mask_ & CO::CommandOpt::WRITE;
+  }
+
   static const char* OptName(CO::CommandOpt fl);
 
   CommandId&& SetHandler(Handler f) && {
