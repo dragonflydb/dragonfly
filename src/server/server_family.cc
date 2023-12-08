@@ -1200,6 +1200,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       auto cred = registry->GetCredentials(username);
       cntx->acl_categories = cred.acl_categories;
       cntx->acl_commands = cred.acl_commands;
+      cntx->keys = std::move(cred.keys);
       cntx->authenticated = true;
       return cntx->SendOk();
     }
