@@ -78,7 +78,7 @@ namespace dfly::acl {
 
   bool keys_allowed = true;
   if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
-    const auto& keys_index = DetermineKeys(&id, tail_args).value();
+    const auto keys_index = DetermineKeys(&id, tail_args).value();
     const size_t end = keys_index.end;
     if (keys_index.bonus) {
       auto target = facade::ToSV(tail_args[*keys_index.bonus]);
