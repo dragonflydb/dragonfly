@@ -1362,7 +1362,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     return;
 
   // Only write commands and/or no-key-transactional commands are logged
-  if ((cid_->IsWriteOnly()) == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
+  if (cid_->IsWriteOnly() == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
   // If autojournaling was disabled and not re-enabled, skip it

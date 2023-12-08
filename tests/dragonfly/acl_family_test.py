@@ -331,13 +331,13 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
 
     await client.execute_command("ACL SETUSER roy ON >mypass +@STRING +HSET")
     await client.execute_command("ACL SETUSER shahar >mypass +@SET")
-    await client.execute_command("ACL SETUSER vlad +@STRING")
+    await client.execute_command("ACL SETUSER vlad +@STRING ~foo ~bar*")
 
     result = await client.execute_command("ACL LIST")
     assert 4 == len(result)
     assert "user roy on ea71c25a7a60224 +@STRING +HSET" in result
     assert "user shahar off ea71c25a7a60224 +@SET" in result
-    assert "user vlad off nopass +@STRING" in result
+    assert "user vlad off nopass +@STRING ~foo ~bar*" in result
     assert "user default on nopass +@ALL +ALL ~*" in result
 
     result = await client.execute_command("ACL DELUSER shahar")
@@ -350,8 +350,8 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     result = await client.execute_command("ACL LIST")
     assert 3 == len(result)
     assert "user roy on ea71c25a7a60224 +@STRING +HSET" in result
-    assert "user vlad off nopass +@STRING" in result
-    assert "user default on nopass +@ALL +ALL" in result
+    assert "user vlad off nopass +@STRING ~foo ~bar*" in result
+    assert "user default on nopass +@ALL +ALL ~*" in result
 
     await client.close()
 

@@ -96,6 +96,7 @@ namespace dfly::acl {
       }
     }
   }
+
   return keys_allowed;
 }
 
