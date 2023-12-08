@@ -678,6 +678,12 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
     for (const auto& scmd : exec_info.body) {
       transactional |= scmd.Cid()->IsTransactional();
       contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
+
+      // We can't run no-key-transactional commands in lock-ahead mode currently,
+      // because it means we have to schedule on all shards
+      if (scmd.Cid()->opt_mask() & CO::NO_KEY_TRANSACTIONAL)
+        contains_global = true;
+
       if (contains_global)
         break;
     }
