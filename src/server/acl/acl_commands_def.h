@@ -72,7 +72,7 @@ inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABL
     {"READ", READ},
     {"WRITE", WRITE},
     {"SET", SET},
-    {"SORTED_SET", SORTEDSET},
+    {"SORTEDSET", SORTEDSET},
     {"LIST", LIST},
     {"HASH", HASH},
     {"STRING", STRING},
@@ -99,7 +99,7 @@ inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABL
 // bit 1 at index 1
 // bit n at index n
 inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
-    "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTED_SET", "LIST",        "HASH",
+    "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTEDSET",  "LIST",        "HASH",
     "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",     "PUBSUB",      "ADMIN",
     "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
     "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",

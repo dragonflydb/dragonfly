@@ -496,7 +496,7 @@ async def test_acl_keys(async_client):
     assert "OK" == await async_client.execute_command("SET barsomething val")
     assert "OK" == await async_client.execute_command("SET dragon val")
 
-    await async_client.execute_command("ACL SETUSER mrkeys ON >mrkeys allkeys")
+    await async_client.execute_command("ACL SETUSER mrkeys ON >mrkeys allkeys +@sortedset")
     assert "OK" == await async_client.execute_command("SET random rand")
 
     await async_client.execute_command(
@@ -510,3 +510,10 @@ async def test_acl_keys(async_client):
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command("GET bar")
     assert "OK" == await async_client.execute_command("SET bar val")
+
+    await async_client.execute_command("ACL SETUSER mrkeys resetkeys ~bar* +@sortedset")
+    assert 1 == await async_client.execute_command("ZADD barz1 1 val1")
+    assert 1 == await async_client.execute_command("ZADD barz2 1 val2")
+    # reject because bonus key does not match
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("ZUNIONSTORE destkey 2 barz1 barz2")

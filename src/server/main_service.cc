@@ -962,7 +962,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
-  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
+  bool is_write_cmd = cid->IsWriteOnly();
   bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   // Check if the command is allowed to execute under this global state
@@ -1066,7 +1066,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   if (!dispatching_in_multi) {  // Don't interrupt running multi commands
-    bool is_write = (cid->opt_mask() & CO::WRITE);
+    bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
 
@@ -1090,7 +1090,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-    if (stored_cmd.Cid()->opt_mask() & CO::WRITE) {
+    if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return cntx->SendSimpleString("QUEUED");
