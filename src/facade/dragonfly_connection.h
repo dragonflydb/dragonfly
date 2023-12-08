@@ -168,7 +168,6 @@ class Connection : public util::Connection {
 
     bool operator<(const WeakRef& other);
     bool operator==(const WeakRef& other) const;
-    // bool operator==(const WeakRef other) const;
 
    private:
     friend class Connection;
