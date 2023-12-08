@@ -98,20 +98,21 @@ JsonExpression ParseJsonPath(string_view path, error_code* ec) {
 
 template <typename T>
 void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& result) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result->empty()) {
-    (*cntx)->SendNullArray();
+    rb->SendNullArray();
   } else {
-    (*cntx)->StartArray(result->size());
+    rb->StartArray(result->size());
     for (auto& it : *result) {
       if (it.has_value()) {
         if constexpr (is_floating_point_v<T>) {
-          (*cntx)->SendDouble(*it);
+          rb->SendDouble(*it);
         } else {
           static_assert(is_integral_v<T>, "Integral required.");
-          (*cntx)->SendLong(*it);
+          rb->SendLong(*it);
         }
       } else {
-        (*cntx)->SendNull();
+        rb->SendNull();
       }
     }
   }
@@ -362,30 +363,30 @@ size_t CountJsonFields(const JsonType& j) {
   return res;
 }
 
-void SendJsonValue(ConnectionContext* cntx, const JsonType& j) {
+void SendJsonValue(RedisReplyBuilder* rb, const JsonType& j) {
   if (j.is_double()) {
-    (*cntx)->SendDouble(j.as_double());
+    rb->SendDouble(j.as_double());
   } else if (j.is_number()) {
-    (*cntx)->SendLong(j.as_integer<long>());
+    rb->SendLong(j.as_integer<long>());
   } else if (j.is_bool()) {
-    (*cntx)->SendSimpleString(j.as_bool() ? "true" : "false");
+    rb->SendSimpleString(j.as_bool() ? "true" : "false");
   } else if (j.is_null()) {
-    (*cntx)->SendNull();
+    rb->SendNull();
   } else if (j.is_string()) {
-    (*cntx)->SendSimpleString(j.as_string_view());
+    rb->SendSimpleString(j.as_string_view());
   } else if (j.is_object()) {
-    (*cntx)->StartArray(j.size() + 1);
-    (*cntx)->SendSimpleString("{");
+    rb->StartArray(j.size() + 1);
+    rb->SendSimpleString("{");
     for (const auto& item : j.object_range()) {
-      (*cntx)->StartArray(2);
-      (*cntx)->SendSimpleString(item.key());
-      SendJsonValue(cntx, item.value());
+      rb->StartArray(2);
+      rb->SendSimpleString(item.key());
+      SendJsonValue(rb, item.value());
     }
   } else if (j.is_array()) {
-    (*cntx)->StartArray(j.size() + 1);
-    (*cntx)->SendSimpleString("[");
+    rb->StartArray(j.size() + 1);
+    rb->SendSimpleString("[");
     for (const auto& item : j.array_range()) {
-      SendJsonValue(cntx, item);
+      SendJsonValue(rb, item);
     }
   }
 }
@@ -1146,7 +1147,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     } else if (absl::EqualsIgnoreCase(operation_opts, "XX")) {
       is_xx_condition = true;
     } else {
-      (*cntx)->SendError(kSyntaxErr);
+      cntx->SendError(kSyntaxErr);
       return;
     }
   }
@@ -1157,15 +1158,15 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<bool> result = trans->ScheduleSingleHopT(move(cb));
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (*result) {
-      (*cntx)->SendSimpleString("OK");
+      rb->SendSimpleString("OK");
     } else {
-      (*cntx)->SendNull();
+      rb->SendNull();
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1181,7 +1182,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1192,13 +1193,14 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<vector<JsonType>> result = trans->ScheduleSingleHopT(move(cb));
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    (*cntx)->StartArray(result->size());
+    rb->StartArray(result->size());
     for (const auto& it : *result) {
-      SendJsonValue(cntx, it);
+      SendJsonValue(rb, it);
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1208,22 +1210,23 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   // The 'MEMORY' sub-command is not supported yet, calling to operation function should be added
   // here.
   if (absl::EqualsIgnoreCase(command, "help")) {
-    (*cntx)->StartArray(2);
-    (*cntx)->SendSimpleString(
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->StartArray(2);
+    rb->SendSimpleString(
         "JSON.DEBUG FIELDS <key> <path> - report number of fields in the JSON element.");
-    (*cntx)->SendSimpleString("JSON.DEBUG HELP - print help message.");
+    rb->SendSimpleString("JSON.DEBUG HELP - print help message.");
     return;
 
   } else if (absl::EqualsIgnoreCase(command, "fields")) {
     func = &OpFields;
 
   } else {
-    (*cntx)->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
+    cntx->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
     return;
   }
 
   if (args.size() < 3) {
-    (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()), facade::kSyntaxErrType);
+    cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), facade::kSyntaxErrType);
     return;
   }
 
@@ -1234,7 +1237,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1248,7 +1251,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1261,7 +1264,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1298,12 +1301,13 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  (*cntx)->StartArray(results.size());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(results.size());
   for (auto& it : results) {
     if (!it) {
-      (*cntx)->SendNull();
+      rb->SendNull();
     } else {
-      (*cntx)->SendBulkString(*it);
+      rb->SendBulkString(*it);
     }
   }
 }
@@ -1317,18 +1321,18 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
   optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
   if (!search_value) {
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
   if (search_value->is_object() || search_value->is_array()) {
-    (*cntx)->SendError(kWrongTypeErr);
+    cntx->SendError(kWrongTypeErr);
     return;
   }
 
@@ -1336,7 +1340,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() >= 4) {
     if (!absl::SimpleAtoi(ArgS(args, 3), &start_index)) {
       VLOG(1) << "Failed to convert the start index to numeric" << ArgS(args, 3);
-      (*cntx)->SendError(kInvalidIntErr);
+      cntx->SendError(kInvalidIntErr);
       return;
     }
   }
@@ -1345,7 +1349,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() >= 5) {
     if (!absl::SimpleAtoi(ArgS(args, 4), &end_index)) {
       VLOG(1) << "Failed to convert the stop index to numeric" << ArgS(args, 4);
-      (*cntx)->SendError(kInvalidIntErr);
+      cntx->SendError(kInvalidIntErr);
       return;
     }
   }
@@ -1361,7 +1365,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1372,7 +1376,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
 
   if (!absl::SimpleAtoi(ArgS(args, 2), &index)) {
     VLOG(1) << "Failed to convert the following value to numeric: " << ArgS(args, 2);
-    (*cntx)->SendError(kInvalidIntErr);
+    cntx->SendError(kInvalidIntErr);
     return;
   }
 
@@ -1380,7 +1384,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
   for (size_t i = 3; i < args.size(); i++) {
     optional<JsonType> val = JsonFromString(ArgS(args, i));
     if (!val) {
-      (*cntx)->SendError(kSyntaxErr);
+      cntx->SendError(kSyntaxErr);
       return;
     }
 
@@ -1396,7 +1400,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1407,7 +1411,7 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
   for (size_t i = 2; i < args.size(); ++i) {
     optional<JsonType> converted_val = JsonFromString(ArgS(args, i));
     if (!converted_val) {
-      (*cntx)->SendError(kSyntaxErr);
+      cntx->SendError(kSyntaxErr);
       return;
     }
     append_values.emplace_back(converted_val);
@@ -1422,7 +1426,7 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1434,18 +1438,18 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
 
   if (!absl::SimpleAtoi(ArgS(args, 2), &start_index)) {
     VLOG(1) << "Failed to parse array start index";
-    (*cntx)->SendError(kInvalidIntErr);
+    cntx->SendError(kInvalidIntErr);
     return;
   }
 
   if (!absl::SimpleAtoi(ArgS(args, 3), &stop_index)) {
     VLOG(1) << "Failed to parse array stop index";
-    (*cntx)->SendError(kInvalidIntErr);
+    cntx->SendError(kInvalidIntErr);
     return;
   }
 
   if (stop_index < 0) {
-    (*cntx)->SendError(kInvalidIntErr);
+    cntx->SendError(kInvalidIntErr);
     return;
   }
 
@@ -1458,7 +1462,7 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1479,7 +1483,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1489,17 +1493,18 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<vector<OptString>> result = trans->ScheduleSingleHopT(move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    (*cntx)->StartArray(result->size());
+    rb->StartArray(result->size());
     for (auto& it : *result) {
       if (!it) {
-        (*cntx)->SendNull();
+        rb->SendNull();
       } else {
-        (*cntx)->SendSimpleString(*it);
+        rb->SendSimpleString(*it);
       }
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1515,9 +1520,9 @@ void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
   OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1540,7 +1545,7 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1553,7 +1558,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1563,18 +1568,18 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<vector<StringVec>> result = trans->ScheduleSingleHopT(move(cb));
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    (*cntx)->StartArray(result->size());
+    rb->StartArray(result->size());
     for (auto& it : *result) {
       if (it.empty()) {
-        (*cntx)->SendNullArray();
+        rb->SendNullArray();
       } else {
-        (*cntx)->SendStringArr(it);
+        rb->SendStringArr(it);
       }
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1591,7 +1596,7 @@ void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
-  (*cntx)->SendLong(*result);
+  cntx->SendLong(*result);
 }
 
 void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
@@ -1601,7 +1606,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
 
   double dnum;
   if (!ParseDouble(num, &dnum)) {
-    (*cntx)->SendError(kWrongTypeErr);
+    cntx->SendError(kWrongTypeErr);
     return;
   }
 
@@ -1613,9 +1618,9 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    (*cntx)->SendSimpleString(*result);
+    cntx->SendSimpleString(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1626,7 +1631,7 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
 
   double dnum;
   if (!ParseDouble(num, &dnum)) {
-    (*cntx)->SendError(kWrongTypeErr);
+    cntx->SendError(kWrongTypeErr);
     return;
   }
 
@@ -1638,9 +1643,9 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    (*cntx)->SendSimpleString(*result);
+    cntx->SendSimpleString(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1658,7 +1663,7 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1671,7 +1676,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1681,19 +1686,19 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<vector<string>> result = trans->ScheduleSingleHopT(move(cb));
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (result->empty()) {
       // When vector is empty, the path doesn't exist in the corresponding json.
-      (*cntx)->SendNull();
+      rb->SendNull();
     } else {
-      (*cntx)->SendStringArr(*result);
+      rb->SendStringArr(*result);
     }
   } else {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
-      (*cntx)->SendNullArray();
+      rb->SendNullArray();
     } else {
-      (*cntx)->SendError(result.status());
+      rb->SendError(result.status());
     }
   }
 }
@@ -1707,7 +1712,7 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1721,7 +1726,7 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1734,7 +1739,7 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1748,7 +1753,7 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1761,7 +1766,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -1775,7 +1780,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     PrintOptVec(cntx, result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1812,7 +1817,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
       expr = ParseJsonPath(expr_str, &ec);
       if (ec) {
         LOG(WARNING) << "path '" << expr_str << "': Invalid JSONPath syntax: " << ec.message();
-        return (*cntx)->SendError(kSyntaxErr);
+        return cntx->SendError(kSyntaxErr);
       }
     }
 
@@ -1820,7 +1825,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   bool should_format = (indent || new_line || space);
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1829,14 +1834,14 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    (*cntx)->SendBulkString(*result);
+    rb->SendBulkString(*result);
   } else {
     if (result == facade::OpStatus::KEY_NOTFOUND) {
-      (*cntx)->SendNull();  // Match Redis
+      rb->SendNull();  // Match Redis
     } else {
-      (*cntx)->SendError(result.status());
+      rb->SendError(result.status());
     }
   }
 }

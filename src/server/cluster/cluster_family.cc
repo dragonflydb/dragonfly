@@ -107,46 +107,48 @@ void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
       "HELP",
       "    Prints this help.",
   };
-  return (*cntx)->SendSimpleStrArr(help_arr);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  return rb->SendSimpleStrArr(help_arr);
 }
 
 namespace {
 void ClusterShardsImpl(const ClusterShards& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-shards/
   constexpr unsigned int kEntrySize = 4;
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   auto WriteNode = [&](const Node& node, string_view role) {
     constexpr unsigned int kNodeSize = 14;
-    (*cntx)->StartArray(kNodeSize);
-    (*cntx)->SendBulkString("id");
-    (*cntx)->SendBulkString(node.id);
-    (*cntx)->SendBulkString("endpoint");
-    (*cntx)->SendBulkString(node.ip);
-    (*cntx)->SendBulkString("ip");
-    (*cntx)->SendBulkString(node.ip);
-    (*cntx)->SendBulkString("port");
-    (*cntx)->SendLong(node.port);
-    (*cntx)->SendBulkString("role");
-    (*cntx)->SendBulkString(role);
-    (*cntx)->SendBulkString("replication-offset");
-    (*cntx)->SendLong(0);
-    (*cntx)->SendBulkString("health");
-    (*cntx)->SendBulkString("online");
+    rb->StartArray(kNodeSize);
+    rb->SendBulkString("id");
+    rb->SendBulkString(node.id);
+    rb->SendBulkString("endpoint");
+    rb->SendBulkString(node.ip);
+    rb->SendBulkString("ip");
+    rb->SendBulkString(node.ip);
+    rb->SendBulkString("port");
+    rb->SendLong(node.port);
+    rb->SendBulkString("role");
+    rb->SendBulkString(role);
+    rb->SendBulkString("replication-offset");
+    rb->SendLong(0);
+    rb->SendBulkString("health");
+    rb->SendBulkString("online");
   };
 
-  (*cntx)->StartArray(config.size());
+  rb->StartArray(config.size());
   for (const auto& shard : config) {
-    (*cntx)->StartArray(kEntrySize);
-    (*cntx)->SendBulkString("slots");
+    rb->StartArray(kEntrySize);
+    rb->SendBulkString("slots");
 
-    (*cntx)->StartArray(shard.slot_ranges.size() * 2);
+    rb->StartArray(shard.slot_ranges.size() * 2);
     for (const auto& slot_range : shard.slot_ranges) {
-      (*cntx)->SendLong(slot_range.start);
-      (*cntx)->SendLong(slot_range.end);
+      rb->SendLong(slot_range.start);
+      rb->SendLong(slot_range.end);
     }
 
-    (*cntx)->SendBulkString("nodes");
-    (*cntx)->StartArray(1 + shard.replicas.size());
+    rb->SendBulkString("nodes");
+    rb->StartArray(1 + shard.replicas.size());
     WriteNode(shard.master, "master");
     for (const auto& replica : shard.replicas) {
       WriteNode(replica, "replica");
@@ -161,19 +163,20 @@ void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
   } else if (tl_cluster_config != nullptr) {
     return ClusterShardsImpl(tl_cluster_config->GetConfig(), cntx);
   } else {
-    return (*cntx)->SendError(kClusterNotConfigured);
+    return cntx->SendError(kClusterNotConfigured);
   }
 }
 
 namespace {
 void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-slots/
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   auto WriteNode = [&](const Node& node) {
     constexpr unsigned int kNodeSize = 3;
-    (*cntx)->StartArray(kNodeSize);
-    (*cntx)->SendBulkString(node.ip);
-    (*cntx)->SendLong(node.port);
-    (*cntx)->SendBulkString(node.id);
+    rb->StartArray(kNodeSize);
+    rb->SendBulkString(node.ip);
+    rb->SendLong(node.port);
+    rb->SendBulkString(node.id);
   };
 
   unsigned int slot_ranges = 0;
@@ -181,14 +184,14 @@ void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
     slot_ranges += shard.slot_ranges.size();
   }
 
-  (*cntx)->StartArray(slot_ranges);
+  rb->StartArray(slot_ranges);
   for (const auto& shard : config) {
     for (const auto& slot_range : shard.slot_ranges) {
       const unsigned int array_size =
           /* slot-start, slot-end */ 2 + /* master */ 1 + /* replicas */ shard.replicas.size();
-      (*cntx)->StartArray(array_size);
-      (*cntx)->SendLong(slot_range.start);
-      (*cntx)->SendLong(slot_range.end);
+      rb->StartArray(array_size);
+      rb->SendLong(slot_range.start);
+      rb->SendLong(slot_range.end);
       WriteNode(shard.master);
       for (const auto& replica : shard.replicas) {
         WriteNode(replica);
@@ -204,7 +207,7 @@ void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
   } else if (tl_cluster_config != nullptr) {
     return ClusterSlotsImpl(tl_cluster_config->GetConfig(), cntx);
   } else {
-    return (*cntx)->SendError(kClusterNotConfigured);
+    return cntx->SendError(kClusterNotConfigured);
   }
 }
 
@@ -247,7 +250,8 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
     }
   }
 
-  return (*cntx)->SendBulkString(result);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  return rb->SendBulkString(result);
 }
 }  // namespace
 
@@ -257,7 +261,7 @@ void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
   } else if (tl_cluster_config != nullptr) {
     return ClusterNodesImpl(tl_cluster_config->GetConfig(), server_family_->master_id(), cntx);
   } else {
-    return (*cntx)->SendError(kClusterNotConfigured);
+    return cntx->SendError(kClusterNotConfigured);
   }
 }
 
@@ -309,7 +313,8 @@ void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
   append("cluster_stats_messages_pong_received", 1);
   append("cluster_stats_messages_meet_received", 0);
   append("cluster_stats_messages_received", 1);
-  (*cntx)->SendBulkString(msg);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendBulkString(msg);
 }
 }  // namespace
 
@@ -325,11 +330,11 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
 
 void ClusterFamily::KeySlot(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() != 2) {
-    return (*cntx)->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
+    return cntx->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
   }
 
   SlotId id = ClusterConfig::KeySlot(ArgS(args, 1));
-  return (*cntx)->SendLong(id);
+  return cntx->SendLong(id);
 }
 
 void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
@@ -340,7 +345,7 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (!ClusterConfig::IsEnabledOrEmulated()) {
-    return (*cntx)->SendError(kClusterDisabled);
+    return cntx->SendError(kClusterDisabled);
   }
 
   if (sub_cmd == "HELP") {
@@ -356,31 +361,31 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "KEYSLOT") {
     return KeySlot(args, cntx);
   } else {
-    return (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "CLUSTER"), facade::kSyntaxErrType);
+    return cntx->SendError(facade::UnknownSubCmd(sub_cmd, "CLUSTER"), facade::kSyntaxErrType);
   }
 }
 
 void ClusterFamily::ReadOnly(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsEmulated()) {
-    return (*cntx)->SendError(kClusterDisabled);
+    return cntx->SendError(kClusterDisabled);
   }
-  (*cntx)->SendOk();
+  cntx->SendOk();
 }
 
 void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsEmulated()) {
-    return (*cntx)->SendError(kClusterDisabled);
+    return cntx->SendError(kClusterDisabled);
   }
-  (*cntx)->SendOk();
+  cntx->SendOk();
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsEnabledOrEmulated()) {
-    return (*cntx)->SendError(kClusterDisabled);
+    return cntx->SendError(kClusterDisabled);
   }
 
   if (cntx->conn() && !cntx->conn()->IsPrivileged()) {
-    return (*cntx)->SendError(kDflyClusterCmdPort);
+    return cntx->SendError(kDflyClusterCmdPort);
   }
 
   ToUpper(&args[0]);
@@ -400,14 +405,15 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflySlotMigrationStatus(args, cntx);
   }
 
-  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
+  return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
 }
 
 void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
   if (!args.empty()) {
-    return (*cntx)->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
+    return cntx->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
   }
-  (*cntx)->SendBulkString(server_family_->master_id());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendBulkString(server_family_->master_id());
 }
 
 namespace {
@@ -533,17 +539,18 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
   parser.ExpectTag("SLOTS");
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   vector<std::pair<SlotId, SlotStats>> slots_stats;
   do {
     auto sid = parser.Next<uint32_t>();
     if (sid > ClusterConfig::kMaxSlotNum)
-      return (*cntx)->SendError("Invalid slot id");
+      return rb->SendError("Invalid slot id");
     slots_stats.emplace_back(sid, SlotStats{});
   } while (parser.HasNext());
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return rb->SendError(err->MakeReply());
 
   Mutex mu;
 
@@ -560,36 +567,34 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
-  (*cntx)->StartArray(slots_stats.size());
+  rb->StartArray(slots_stats.size());
 
   for (const auto& slot_data : slots_stats) {
-    (*cntx)->StartArray(7);
-    (*cntx)->SendLong(slot_data.first);
-    (*cntx)->SendBulkString("key_count");
-    (*cntx)->SendLong(static_cast<long>(slot_data.second.key_count));
-    (*cntx)->SendBulkString("total_reads");
-    (*cntx)->SendLong(static_cast<long>(slot_data.second.total_reads));
-    (*cntx)->SendBulkString("total_writes");
-    (*cntx)->SendLong(static_cast<long>(slot_data.second.total_writes));
+    rb->StartArray(7);
+    rb->SendLong(slot_data.first);
+    rb->SendBulkString("key_count");
+    rb->SendLong(static_cast<long>(slot_data.second.key_count));
+    rb->SendBulkString("total_reads");
+    rb->SendLong(static_cast<long>(slot_data.second.total_reads));
+    rb->SendBulkString("total_writes");
+    rb->SendLong(static_cast<long>(slot_data.second.total_writes));
   }
 }
 
 void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx) {
-  SinkReplyBuilder* rb = cntx->reply_builder();
-
   SlotSet slots;
   slots.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
     unsigned slot;
     if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
-      return rb->SendError(kSyntaxErrType);
+      return cntx->SendError(kSyntaxErrType);
     }
     slots.insert(static_cast<SlotId>(slot));
   }
 
   DeleteSlots(slots);
 
-  return rb->SendOk();
+  return cntx->SendOk();
 }
 
 void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx) {
@@ -601,26 +606,24 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
     slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  SinkReplyBuilder* rb = cntx->reply_builder();
   if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   auto* node = AddMigration(std::string(host_ip), port, std::move(slots));
   if (!node) {
-    return rb->SendError("Can't start the migration, another one is in progress");
+    return cntx->SendError("Can't start the migration, another one is in progress");
   }
   node->Start(cntx);
 
-  return rb->SendOk();
+  return cntx->SendOk();
 }
 
 void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
   auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
 
-  SinkReplyBuilder* rb = cntx->reply_builder();
   if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   auto state = [&] {
     lock_guard lk(migrations_jobs_mu_);
@@ -647,7 +650,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     return "UNDEFINED_STATE"sv;
   }();
 
-  return rb->SendSimpleString(state_str);
+  return cntx->SendSimpleString(state_str);
 }
 
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
@@ -657,7 +660,7 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   if (sub_cmd == "CONF") {
     MigrationConf(args, cntx);
   } else {
-    (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
+    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
 }
 
@@ -687,10 +690,10 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   } while (parser.HasNext());
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   if (!tl_cluster_config) {
-    (*cntx)->SendError(kClusterNotConfigured);
+    cntx->SendError(kClusterNotConfigured);
     return;
   }
 
@@ -699,7 +702,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
       if (!tl_cluster_config->IsMySlot(i)) {
         VLOG(1) << "Invalid migration slot " << i << " in range " << migration_range.start << ':'
                 << migration_range.end;
-        (*cntx)->SendError("Invalid slots range");
+        cntx->SendError("Invalid slots range");
         return;
       }
     }
@@ -707,7 +710,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->conn()->SetName("slot_migration_ctrl");
 
-  (*cntx)->SendLong(shard_set->size());
+  cntx->SendLong(shard_set->size());
   return;
 }
 
