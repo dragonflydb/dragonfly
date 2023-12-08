@@ -33,7 +33,7 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
 
   auto check_connection_error = [this, &cntx](error_code ec, const char* msg) -> error_code {
     if (ec) {
-      (*cntx)->SendError(absl::StrCat(msg, ec.message()));
+      cntx->SendError(absl::StrCat(msg, ec.message()));
     }
     return ec;
   };

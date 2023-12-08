@@ -251,7 +251,8 @@ void DebugCmd::Run(CmdArgList args) {
         "HELP",
         "    Prints this help.",
     };
-    return (*cntx_)->SendSimpleStrArr(help_arr);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+    return rb->SendSimpleStrArr(help_arr);
   }
 
   VLOG(1) << "subcmd " << subcmd;
@@ -298,7 +299,7 @@ void DebugCmd::Run(CmdArgList args) {
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
-  return (*cntx_)->SendError(reply, kSyntaxErrType);
+  return cntx_->SendError(reply, kSyntaxErrType);
 }
 
 void DebugCmd::Reload(CmdArgList args) {
@@ -312,7 +313,7 @@ void DebugCmd::Reload(CmdArgList args) {
     if (opt == "NOSAVE") {
       save = false;
     } else {
-      return (*cntx_)->SendError("DEBUG RELOAD only supports the NOSAVE options.");
+      return cntx_->SendError("DEBUG RELOAD only supports the NOSAVE options.");
     }
   }
 
@@ -322,7 +323,7 @@ void DebugCmd::Reload(CmdArgList args) {
 
     GenericError ec = sf_.DoSave();
     if (ec) {
-      return (*cntx_)->SendError(ec.Format());
+      return cntx_->SendError(ec.Format());
     }
   }
 
@@ -335,24 +336,25 @@ void DebugCmd::Replica(CmdArgList args) {
   ToUpper(&args[0]);
   string_view opt = ArgS(args, 0);
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   if (opt == "PAUSE" || opt == "RESUME") {
     sf_.PauseReplication(opt == "PAUSE");
-    return (*cntx_)->SendOk();
+    return rb->SendOk();
   } else if (opt == "OFFSET") {
     const auto offset_info = sf_.GetReplicaOffsetInfo();
     if (offset_info) {
-      (*cntx_)->StartArray(2);
-      (*cntx_)->SendBulkString(offset_info.value().sync_id);
-      (*cntx_)->StartArray(offset_info.value().flow_offsets.size());
+      rb->StartArray(2);
+      rb->SendBulkString(offset_info.value().sync_id);
+      rb->StartArray(offset_info.value().flow_offsets.size());
       for (uint64_t offset : offset_info.value().flow_offsets) {
-        (*cntx_)->SendLong(offset);
+        rb->SendLong(offset);
       }
       return;
     } else {
-      return (*cntx_)->SendError("I am master");
+      return rb->SendError("I am master");
     }
   }
-  return (*cntx_)->SendError(UnknownSubCmd("replica", "DEBUG"));
+  return rb->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
 void DebugCmd::Load(string_view filename) {
@@ -389,22 +391,22 @@ void DebugCmd::Load(string_view filename) {
     ec = fut_ec.get();
     if (ec) {
       LOG(INFO) << "Could not load file " << ec.message();
-      return (*cntx_)->SendError(ec.message());
+      return cntx_->SendError(ec.message());
     }
   }
 
-  (*cntx_)->SendOk();
+  cntx_->SendOk();
 }
 
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args) {
   if (args.size() < 2 || args.size() > 8) {
-    (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
+    cntx_->SendError(UnknownSubCmd("populate", "DEBUG"));
     return nullopt;
   }
 
   PopulateOptions options;
   if (!absl::SimpleAtoi(ArgS(args, 1), &options.total_count)) {
-    (*cntx_)->SendError(kUintErr);
+    cntx_->SendError(kUintErr);
     return nullopt;
   }
 
@@ -414,7 +416,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
 
   if (args.size() > 3) {
     if (!absl::SimpleAtoi(ArgS(args, 3), &options.val_size)) {
-      (*cntx_)->SendError(kUintErr);
+      cntx_->SendError(kUintErr);
       return nullopt;
     }
   }
@@ -426,7 +428,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
       options.populate_random_values = true;
     } else if (str == "SLOTS") {
       if (args.size() < index + 3) {
-        (*cntx_)->SendError(kSyntaxErr);
+        cntx_->SendError(kSyntaxErr);
         return nullopt;
       }
 
@@ -443,19 +445,19 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
 
       auto start = parse_slot(ArgS(args, ++index));
       if (start.status() != facade::OpStatus::OK) {
-        (*cntx_)->SendError(start.status());
+        cntx_->SendError(start.status());
         return nullopt;
       }
       auto end = parse_slot(ArgS(args, ++index));
       if (end.status() != facade::OpStatus::OK) {
-        (*cntx_)->SendError(end.status());
+        cntx_->SendError(end.status());
         return nullopt;
       }
       options.slot_range = ClusterConfig::SlotRange{.start = static_cast<SlotId>(start.value()),
                                                     .end = static_cast<SlotId>(end.value())};
 
     } else {
-      (*cntx_)->SendError(kSyntaxErr);
+      cntx_->SendError(kSyntaxErr);
       return nullopt;
     }
   }
@@ -491,7 +493,7 @@ void DebugCmd::Populate(CmdArgList args) {
   for (auto& fb : fb_arr)
     fb.Join();
 
-  (*cntx_)->SendOk();
+  cntx_->SendOk();
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
@@ -607,7 +609,7 @@ void DebugCmd::Inspect(string_view key) {
   string resp;
 
   if (!res.found) {
-    (*cntx_)->SendError(kKeyNotFoundErr);
+    cntx_->SendError(kKeyNotFoundErr);
     return;
   }
 
@@ -625,7 +627,7 @@ void DebugCmd::Inspect(string_view key) {
   if (res.lock_status != ObjInfo::NONE) {
     StrAppend(&resp, " lock:", res.lock_status == ObjInfo::X ? "x" : "s");
   }
-  (*cntx_)->SendSimpleString(resp);
+  cntx_->SendSimpleString(resp);
 }
 
 void DebugCmd::Watched() {
@@ -647,12 +649,13 @@ void DebugCmd::Watched() {
     }
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   shard_set->RunBlockingInParallel(cb);
-  (*cntx_)->StartArray(4);
-  (*cntx_)->SendBulkString("awaked");
-  (*cntx_)->SendStringArr(awaked_trans);
-  (*cntx_)->SendBulkString("watched");
-  (*cntx_)->SendStringArr(watched_keys);
+  rb->StartArray(4);
+  rb->SendBulkString("awaked");
+  rb->SendStringArr(awaked_trans);
+  rb->SendBulkString("watched");
+  rb->SendStringArr(watched_keys);
 }
 
 void DebugCmd::TxAnalysis() {
@@ -708,8 +711,8 @@ void DebugCmd::TxAnalysis() {
 
   shard_set->RunBriefInParallel(cb);
 
-  (*cntx_)->SendSimpleString(absl::StrCat("queue_len:", queue_len.load(),
-                                          "armed: ", armed_cnt.load(), " free:", free_cnt.load()));
+  cntx_->SendSimpleString(absl::StrCat("queue_len:", queue_len.load(), "armed: ", armed_cnt.load(),
+                                       " free:", free_cnt.load()));
 }
 
 void DebugCmd::ObjHist() {
@@ -735,7 +738,8 @@ void DebugCmd::ObjHist() {
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
-  (*cntx_)->SendBulkString(result);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  rb->SendBulkString(result);
 }
 
 void DebugCmd::Stacktrace() {
@@ -744,7 +748,7 @@ void DebugCmd::Stacktrace() {
     std::unique_lock lk(m);
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
-  (*cntx_)->SendOk();
+  cntx_->SendOk();
 }
 
 void DebugCmd::Shards() {
@@ -798,8 +802,8 @@ void DebugCmd::Shards() {
 
 #undef ADD_STAT
 #undef MAXMIN_STAT
-
-  (*cntx_)->SendBulkString(out);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  rb->SendBulkString(out);
 }
 
 }  // namespace dfly
