@@ -8,6 +8,7 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <numeric>
 #include <variant>
 
 #include "absl/strings/str_cat.h"
@@ -205,9 +206,12 @@ size_t Connection::MessageHandle::UsedMemory() const {
       return msg.capacity();
     }
     size_t operator()(const AclUpdateMessagePtr& msg) {
-      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(string) +
-             msg->commands.capacity() * sizeof(vector<int>) +
-             msg->categories.capacity() * sizeof(uint32_t);
+      size_t key_cap = std::accumulate(
+          msg->keys.key_globs.begin(), msg->keys.key_globs.end(), 0, [](auto acc, auto& str) {
+            return acc + (str.first.capacity() * sizeof(char)) + sizeof(str.second);
+          });
+      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(char) +
+             msg->commands.capacity() * sizeof(uint64_t) + key_cap;
     }
     size_t operator()(const MigrationRequestMessage& msg) {
       return 0;
@@ -240,11 +244,10 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
   if (self->cntx()) {
-    for (size_t id = 0; id < msg.username.size(); ++id) {
-      if (msg.username[id] == self->cntx()->authed_username) {
-        self->cntx()->acl_categories = msg.categories[id];
-        self->cntx()->acl_commands = msg.commands[id];
-      }
+    if (msg.username == self->cntx()->authed_username) {
+      self->cntx()->acl_categories = msg.categories;
+      self->cntx()->acl_commands = msg.commands;
+      self->cntx()->keys = msg.keys;
     }
   }
 }

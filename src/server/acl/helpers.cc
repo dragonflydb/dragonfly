@@ -79,6 +79,38 @@ std::string PrettyPrintSha(std::string_view pass, bool all) {
   return absl::BytesToHexString(pass.substr(0, 15)).substr(0, 15);
 };
 
+std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command) {
+  if (absl::EqualsIgnoreCase(command, "ALLKEYS") || command == "~*") {
+    return ParseKeyResult{"", {}, true};
+  }
+
+  if (absl::EqualsIgnoreCase(command, "RESETKEYS")) {
+    return ParseKeyResult{"", {}, false, true};
+  }
+
+  auto op = KeyOp::READ_WRITE;
+
+  if (absl::StartsWith(command, "%RW")) {
+    command = command.substr(3);
+  } else if (absl::StartsWith(command, "%R")) {
+    op = KeyOp::READ;
+    command = command.substr(2);
+  } else if (absl::StartsWith(command, "%W")) {
+    op = KeyOp::WRITE;
+    command = command.substr(2);
+  }
+
+  if (!absl::StartsWith(command, "~")) {
+    return {};
+  }
+
+  auto key = command.substr(1);
+  if (key.empty()) {
+    return {};
+  }
+  return ParseKeyResult{std::string(key), op};
+}
+
 std::optional<std::string> MaybeParsePassword(std::string_view command, bool hashed) {
   if (command == "nopass") {
     return std::string(command);
@@ -190,7 +222,7 @@ using facade::ErrorReply;
 template <typename T>
 std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
                                                               const CommandRegistry& registry,
-                                                              bool hashed) {
+                                                              bool hashed, bool has_all_keys) {
   User::UpdateRequest req;
 
   for (auto& arg : args) {
@@ -202,6 +234,26 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
       req.is_hashed = hashed;
       continue;
     }
+
+    if (auto res = MaybeParseAclKey(facade::ToSV(arg)); res) {
+      auto& [glob, op, all_keys, reset_keys] = *res;
+      if ((has_all_keys && !all_keys && !reset_keys) ||
+          (req.allow_all_keys && !all_keys && !reset_keys)) {
+        return ErrorReply(
+            "Error in ACL SETUSER modifier '~tmp': Adding a pattern after the * pattern (or the "
+            "'allkeys' flag) is not valid and does not have any effect. Try 'resetkeys' to start "
+            "with an empty list of patterns");
+      }
+
+      req.allow_all_keys = all_keys;
+      req.reset_all_keys = reset_keys;
+      if (reset_keys) {
+        has_all_keys = false;
+      }
+      req.keys.push_back({std::move(glob), op, all_keys, reset_keys});
+      continue;
+    }
+
     std::string buffer;
     std::string_view command;
     if constexpr (std::is_same_v<T, facade::CmdArgList>) {
@@ -252,8 +304,9 @@ using facade::CmdArgList;
 
 template std::variant<User::UpdateRequest, ErrorReply>
 ParseAclSetUser<std::vector<std::string_view>&>(std::vector<std::string_view>&,
-                                                const CommandRegistry& registry, bool hashed);
+                                                const CommandRegistry& registry, bool hashed,
+                                                bool has_all_keys);
 
 template std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser<CmdArgList>(
-    CmdArgList args, const CommandRegistry& registry, bool hashed);
+    CmdArgList args, const CommandRegistry& registry, bool hashed, bool has_all_keys);
 }  // namespace dfly::acl

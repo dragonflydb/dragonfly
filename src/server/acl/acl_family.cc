@@ -76,16 +76,14 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void AclFamily::StreamUpdatesToAllProactorConnections(const std::vector<std::string>& user,
-                                                      const std::vector<uint32_t>& update_cat,
-                                                      const NestedVector& update_commands) {
-  auto update_cb = [&user, &update_cat, &update_commands]([[maybe_unused]] size_t id,
-                                                          util::Connection* conn) {
+void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user, uint32_t update_cat,
+                                                      const Commands& update_commands,
+                                                      const AclKeys& update_keys) {
+  auto update_cb = [&]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    DCHECK(user.size() == update_cat.size());
     connection->SendAclUpdateAsync(
-        facade::Connection::AclUpdateMessage{user, update_cat, update_commands});
+        facade::Connection::AclUpdateMessage{user, update_cat, update_commands, update_keys});
   };
 
   if (main_listener_) {
@@ -97,14 +95,20 @@ using facade::ErrorReply;
 
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
-  auto req = ParseAclSetUser(args.subspan(1), *cmd_registry_);
-  auto error_case = [cntx](ErrorReply&& error) { cntx->SendError(std::move(error)); };
-  auto update_case = [username, cntx, this](User::UpdateRequest&& req) {
-    auto user_with_lock = registry_->MaybeAddAndUpdateWithLock(username, std::move(req));
-    if (user_with_lock.exists) {
-      StreamUpdatesToAllProactorConnections({std::string(username)},
-                                            {user_with_lock.user.AclCategory()},
-                                            {user_with_lock.user.AclCommands()});
+  auto reg = registry_->GetRegistryWithWriteLock();
+  const bool exists = reg.registry.contains(username);
+  const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
+
+  auto req = ParseAclSetUser(args.subspan(1), *cmd_registry_, false, has_all_keys);
+
+  auto error_case = [cntx](ErrorReply&& error) { cntx->SendError(error); };
+
+  auto update_case = [username, &reg, cntx, this, exists](User::UpdateRequest&& req) {
+    auto& user = reg.registry[username];
+    user.Update(std::move(req));
+    if (exists) {
+      StreamUpdatesToAllProactorConnections(std::string(username), user.AclCategory(),
+                                            user.AclCommands(), user.Keys());
     }
     cntx->SendOk();
   };
@@ -273,13 +277,10 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
     EvictOpenConnectionsOnAllProactorsWithRegistry(registry);
     registry.clear();
   }
-  std::vector<uint32_t> categories;
-  NestedVector commands;
+
   for (size_t i = 0; i < usernames.size(); ++i) {
     auto& user = registry[usernames[i]];
     user.Update(std::move(requests[i]));
-    categories.push_back(user.AclCategory());
-    commands.push_back(user.AclCommands());
   }
 
   if (!registry.contains("default")) {

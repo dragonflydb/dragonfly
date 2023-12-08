@@ -138,7 +138,7 @@ const AclKeys& User::Keys() const {
   return keys_;
 }
 
-void User::SetKeyGlobs(std::vector<UpdateKey>&& keys) {
+void User::SetKeyGlobs(std::vector<UpdateKey> keys) {
   for (auto& key : keys) {
     if (key.all_keys) {
       keys_.key_globs.clear();
