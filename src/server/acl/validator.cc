@@ -35,6 +35,10 @@ namespace dfly::acl {
   return is_authed;
 }
 
+// GCC yields a wrong warning about uninitialized optional use
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
 [[nodiscard]] bool IsUserAllowedToInvokeCommandGeneric(uint32_t acl_cat,
                                                        const std::vector<uint64_t>& acl_commands,
                                                        const AclKeys& keys, CmdArgList tail_args,
@@ -94,5 +98,7 @@ namespace dfly::acl {
   }
   return keys_allowed;
 }
+
+#pragma GCC diagnostic pop
 
 }  // namespace dfly::acl
