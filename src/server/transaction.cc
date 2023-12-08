@@ -31,7 +31,7 @@ constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
 }  // namespace
 
 IntentLock::Mode Transaction::Mode() const {
-  return (cid_->IsReadOnly()) ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
+  return cid_->IsReadOnly() ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
 }
 
 /**
