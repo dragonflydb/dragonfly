@@ -1012,7 +1012,6 @@ string ServerFamily::GetReplicaMasterId() const {
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
   dfly_cmd_->OnClose(cntx);
-  cntx->conn()->SetClientTrackingSwitch(false);
 }
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {

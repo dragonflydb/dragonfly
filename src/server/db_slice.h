@@ -336,7 +336,7 @@ class DbSlice {
   }
 
   // Track keys for the client represented by the the weak reference to its connection.
-  void TrackKeys(const facade::Connection::WeakRef&, const std::vector<std::string_view>&);
+  void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
  private:
   // Releases a single key. `key` must have been normalized by GetLockKey().

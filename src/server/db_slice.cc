@@ -1338,8 +1338,7 @@ void DbSlice::ResetUpdateEvents() {
   events_.update = 0;
 }
 
-void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn,
-                        const std::vector<std::string_view>& keys) {
+void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice& keys) {
   if (conn.IsExpired()) {
     DVLOG(2) << "Connection expired, exiting TrackKey function.";
     return;
@@ -1348,16 +1347,9 @@ void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn,
   DVLOG(2) << "Start tracking keys for client ID: " << conn.GetClientId()
            << " with thread ID: " << conn.Thread();
   for (auto key : keys) {
-    if (client_tracking_map_.find(key) == client_tracking_map_.end()) {
-      DVLOG(2) << "The key " << key << " has not been tracked by any client.";
-      DVLOG(2) << "Creating a new entry in the tracking table for this key.";
-      absl::flat_hash_set<facade::Connection::WeakRef, Hash> tracking_client_set{conn};
-      client_tracking_map_[key] = tracking_client_set;
-    } else {
-      DVLOG(2) << "The key " << key << " exists in the client tracking table.";
-      DVLOG(2) << "Inserting client ID " << conn.GetClientId() << " into its tracking client set: ";
-      client_tracking_map_[key].insert(conn);
-    }
+    DVLOG(2) << "Inserting client ID " << conn.GetClientId()
+             << " into the tracking client set of key " << key;
+    client_tracking_map_[key].insert(conn);
   }
 }
 

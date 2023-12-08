@@ -1040,8 +1040,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
 }
 
-OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx,
-                           const vector<string_view>& keys) {
+OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
   auto& db_slice = op_args.shard->db_slice();
   db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
   return OpStatus::OK;
@@ -1159,8 +1158,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto keys = t->GetShardArgs(shard->shard_id());
-      vector<string_view> keys_to_track{keys.begin(), keys.end()};
-      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys_to_track);
+      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
     };
 
     dfly_cntx->transaction->Refurbish();
@@ -1484,10 +1482,6 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->protocol() == facade::Protocol::REDIS)
     cntx->SendOk();
   using facade::SinkReplyBuilder;
-
-  // turn off tracking for this client
-  cntx->conn()->SetClientTrackingSwitch(false);
-
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
 
@@ -2385,6 +2379,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   DeactivateMonitoring(server_cntx);
 
   server_family_.OnClose(server_cntx);
+
+  cntx->conn()->SetClientTrackingSwitch(false);
 }
 
 string Service::GetContextInfo(facade::ConnectionContext* cntx) {
