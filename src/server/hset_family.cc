@@ -709,19 +709,20 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
 
   OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     bool is_map = (getall_mask == (VALUES | FIELDS));
-    (*cntx)->SendStringArr(absl::Span<const string>{*result},
-                           is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
+    rb->SendStringArr(absl::Span<const string>{*result},
+                      is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
 // HSETEX key tll_sec field value field value ...
 void HSetEx(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() % 2 != 0) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
+    return cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
   }
 
   string_view key = ArgS(args, 0);
@@ -730,7 +731,7 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   args.remove_prefix(2);
@@ -743,9 +744,9 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -761,9 +762,9 @@ void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -774,9 +775,9 @@ void HSetFamily::HLen(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -790,9 +791,9 @@ void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -806,26 +807,27 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<vector<OptStr>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-
-    (*cntx)->StartArray(result->size());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->StartArray(result->size());
     for (const auto& val : *result) {
       if (val) {
-        (*cntx)->SendBulkString(*val);
+        rb->SendBulkString(*val);
       } else {
-        (*cntx)->SendNull();
+        rb->SendNull();
       }
     }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
 
-    (*cntx)->StartArray(args.size());
+    rb->StartArray(args.size());
     for (unsigned i = 0; i < args.size(); ++i) {
-      (*cntx)->SendNull();
+      rb->SendNull();
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -837,14 +839,15 @@ void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
     return OpGet(t->GetOpArgs(shard), key, field);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendBulkString(*result);
+    rb->SendBulkString(*result);
   } else {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
-      (*cntx)->SendNull();
+      rb->SendNull();
     } else {
-      (*cntx)->SendError(result.status());
+      rb->SendError(result.status());
     }
   }
 }
@@ -856,7 +859,7 @@ void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
   int64_t ival = 0;
 
   if (!absl::SimpleAtoi(incrs, &ival)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   IncrByParam param{ival};
@@ -868,17 +871,17 @@ void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    (*cntx)->SendLong(get<int64_t>(param));
+    cntx->SendLong(get<int64_t>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        (*cntx)->SendError("hash value is not an integer");
+        cntx->SendError("hash value is not an integer");
         break;
       case OpStatus::OUT_OF_RANGE:
-        (*cntx)->SendError(kIncrOverflow);
+        cntx->SendError(kIncrOverflow);
         break;
       default:
-        (*cntx)->SendError(status);
+        cntx->SendError(status);
         break;
     }
   }
@@ -891,7 +894,7 @@ void HSetFamily::HIncrByFloat(CmdArgList args, ConnectionContext* cntx) {
   double dval = 0;
 
   if (!absl::SimpleAtod(incrs, &dval)) {
-    return (*cntx)->SendError(kInvalidFloatErr);
+    return cntx->SendError(kInvalidFloatErr);
   }
 
   IncrByParam param{dval};
@@ -903,14 +906,15 @@ void HSetFamily::HIncrByFloat(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    (*cntx)->SendDouble(get<double>(param));
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendDouble(get<double>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        (*cntx)->SendError("hash value is not a float");
+        cntx->SendError("hash value is not a float");
         break;
       default:
-        (*cntx)->SendError(status);
+        cntx->SendError(status);
         break;
     }
   }
@@ -935,19 +939,19 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return (*cntx)->SendError("invalid cursor");
+    return cntx->SendError("invalid cursor");
   }
 
   // HSCAN key cursor [MATCH pattern] [COUNT count]
   if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
-    return (*cntx)->SendError(ops.status());
+    return cntx->SendError(ops.status());
   }
 
   ScanOpts scan_op = ops.value();
@@ -956,16 +960,17 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
-    (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString(absl::StrCat(cursor));
-    (*cntx)->StartArray(result->size());  // Within scan the page type is array
+    rb->StartArray(2);
+    rb->SendBulkString(absl::StrCat(cursor));
+    rb->StartArray(result->size());  // Within scan the page type is array
     for (const auto& k : *result) {
-      (*cntx)->SendBulkString(k);
+      rb->SendBulkString(k);
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -975,7 +980,7 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   string_view cmd{cntx->cid->name()};
 
   if (args.size() % 2 != 1) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
+    return cntx->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
   args.remove_prefix(1);
@@ -986,9 +991,9 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result && cmd == "HSET") {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1002,9 +1007,9 @@ void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1018,9 +1023,9 @@ void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<size_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendLong(*result);
+    cntx->SendLong(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1035,7 +1040,7 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
 void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 3) {
     DVLOG(1) << "Wrong number of command arguments: " << args.size();
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   string_view key = ArgS(args, 0);
@@ -1043,13 +1048,13 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   bool with_values = false;
 
   if ((args.size() > 1) && (!SimpleAtoi(ArgS(args, 1), &count))) {
-    return (*cntx)->SendError("count value is not an integer", kSyntaxErrType);
+    return cntx->SendError("count value is not an integer", kSyntaxErrType);
   }
 
   if (args.size() == 3) {
     ToUpper(&args[2]);
     if (ArgS(args, 2) != "WITHVALUES")
-      return (*cntx)->SendError(kSyntaxErr);
+      return cntx->SendError(kSyntaxErr);
     else
       with_values = true;
   }
@@ -1133,13 +1138,21 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     return str_vec;
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendStringArr(*result);
+    if ((result->size() == 1) && (args.size() == 1))
+      rb->SendBulkString(result->front());
+    else {
+      rb->SendStringArr(*result, facade::RedisReplyBuilder::MAP);
+    }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    (*cntx)->SendNull();
+    if (args.size() == 1)
+      rb->SendNull();
+    else
+      rb->SendEmptyArray();
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 

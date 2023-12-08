@@ -76,7 +76,8 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Prints latency histograms in usec for every called function.",
         "HELP"
         "   Prints this help."};
-    return (*cntx)->SendSimpleStrArr(kHelp);
+    auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendSimpleStrArr(kHelp);
   }
 
   if (subcmd == "EXISTS" && args.size() > 1)
@@ -96,7 +97,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
 
   string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                             "'. Try SCRIPT HELP.");
-  cntx->reply_builder()->SendError(err, kSyntaxErrType);
+  cntx->SendError(err, kSyntaxErrType);
 }
 
 void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
@@ -107,20 +108,21 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
     }
   }
 
-  (*cntx)->StartArray(res.size());
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(res.size());
   for (uint8_t v : res) {
-    (*cntx)->SendLong(v);
+    rb->SendLong(v);
   }
   return;
 }
 
 void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
   string_view body = ArgS(args, 1);
-
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (body.empty()) {
     char sha[41];
     Interpreter::FuncSha1(body, sha);
-    return (*cntx)->SendBulkString(sha);
+    return rb->SendBulkString(sha);
   }
 
   ServerState* ss = ServerState::tlocal();
@@ -129,12 +131,12 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
 
   auto res = Insert(body, interpreter);
   if (!res)
-    return (*cntx)->SendError(res.error().Format());
+    return rb->SendError(res.error().Format());
 
   // Schedule empty callback inorder to journal command via transaction framework.
   cntx->transaction->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
 
-  return (*cntx)->SendBulkString(res.value());
+  return rb->SendBulkString(res.value());
 }
 
 void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
@@ -144,7 +146,7 @@ void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
 
   for (auto flag : args.subspan(2)) {
     if (auto err = ScriptParams::ApplyFlags(facade::ToSV(flag), &data); err)
-      return (*cntx)->SendError("Invalid config format: " + err.Format());
+      return cntx->SendError("Invalid config format: " + err.Format());
   }
 
   UpdateScriptCaches(key, data);
@@ -152,18 +154,19 @@ void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
   // Schedule empty callback inorder to journal command via transaction framework.
   cntx->transaction->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
 
-  return (*cntx)->SendOk();
+  return cntx->SendOk();
 }
 
 void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
   vector<pair<string, ScriptData>> scripts = GetAll();
-  (*cntx)->StartArray(scripts.size());
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(scripts.size());
   for (const auto& [sha, data] : scripts) {
-    (*cntx)->StartArray(data.orig_body.empty() ? 2 : 3);
-    (*cntx)->SendBulkString(sha);
-    (*cntx)->SendBulkString(data.body);
+    rb->StartArray(data.orig_body.empty() ? 2 : 3);
+    rb->SendBulkString(sha);
+    rb->SendBulkString(data.body);
     if (!data.orig_body.empty())
-      (*cntx)->SendBulkString(data.orig_body);
+      rb->SendBulkString(data.orig_body);
   }
 }
 
@@ -180,11 +183,12 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
     mu.unlock();
   });
 
-  (*cntx)->StartArray(result.size());
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(result.size());
   for (const auto& k_v : result) {
-    (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString(k_v.first);
-    (*cntx)->SendBulkString(k_v.second.ToString());
+    rb->StartArray(2);
+    rb->SendBulkString(k_v.first);
+    rb->SendBulkString(k_v.second.ToString());
   }
 }
 

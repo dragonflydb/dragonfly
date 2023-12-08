@@ -43,6 +43,8 @@ class TieredStorage {
 
   TieredStats GetStats() const;
 
+  void CancelAllIos(DbIndex db_index);
+
  private:
   class InflightWriteRequest;
 
@@ -59,11 +61,7 @@ class TieredStorage {
   IoMgr io_mgr_;
   ExternalAllocator alloc_;
 
-  size_t submitted_io_writes_ = 0;
-  size_t submitted_io_write_size_ = 0;
   uint32_t num_active_requests_ = 0;
-
-  EventCount active_req_sem_;
 
   struct PerDb;
   std::vector<PerDb*> db_arr_;
