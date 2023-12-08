@@ -467,7 +467,7 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   auto pass = user.Password();
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(6);
+  rb->StartArray(8);
 
   rb->SendSimpleString("flags");
   const size_t total_elements = (pass != "nopass") ? 1 : 2;
@@ -488,6 +488,14 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   std::string acl = absl::StrCat(AclCatToString(user.AclCategory()), " ",
                                  AclCommandToString(user.AclCommandsRef()));
   rb->SendSimpleString(acl);
+
+  rb->SendSimpleString("keys");
+  std::string keys = AclKeysToString(user.Keys());
+  if (!keys.empty()) {
+    rb->SendSimpleString(keys);
+  } else {
+    rb->SendEmptyArray();
+  }
 }
 
 void AclFamily::GenPass(CmdArgList args, ConnectionContext* cntx) {

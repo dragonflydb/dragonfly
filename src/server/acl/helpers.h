@@ -53,4 +53,6 @@ struct ParseKeyResult {
 };
 
 std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command);
+
+std::string AclKeysToString(const AclKeys& keys);
 }  // namespace dfly::acl
