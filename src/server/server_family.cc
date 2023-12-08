@@ -1345,7 +1345,7 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::ClientTracking(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() != 2)
+  if (args.size() != 1)
     return cntx->SendError(kSyntaxErr);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -1353,8 +1353,8 @@ void ServerFamily::ClientTracking(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
 
-  ToUpper(&args[1]);
-  string_view state = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view state = ArgS(args, 0);
   bool is_on;
   if (state == "ON") {
     is_on = true;

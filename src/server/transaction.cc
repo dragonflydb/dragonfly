@@ -906,6 +906,12 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
+void Transaction::Refurbish() {
+  txid_ = 0;
+  coordinator_state_ = 0;
+  cb_ptr_ = nullptr;
+}
+
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
