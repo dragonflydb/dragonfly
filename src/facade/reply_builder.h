@@ -212,6 +212,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   enum CollectionType { ARRAY, SET, MAP, PUSH };
 
+  enum VerbatimFormat { TXT, MARKDOWN };
+
   using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
 
   RedisReplyBuilder(::io::Sink* stream);
@@ -238,6 +240,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SendSimpleString(std::string_view str) override;
 
   virtual void SendBulkString(std::string_view str);
+  virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
   virtual void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                bool with_scores);
 
