@@ -1432,8 +1432,4 @@ bool Connection::WeakRef::operator==(const WeakRef& other) const {
   return client_id_ == other.client_id_;
 }
 
-// bool Connection::WeakRef::operator==(const WeakRef other) const {
-//   return (client_id_ == other.client_id_);
-// }
-
 }  // namespace facade
