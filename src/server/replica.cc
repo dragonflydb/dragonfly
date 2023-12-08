@@ -84,11 +84,11 @@ error_code Replica::Start(ConnectionContext* cntx) {
 
   auto check_connection_error = [this, &cntx](error_code ec, const char* msg) -> error_code {
     if (cntx_.IsCancelled()) {
-      (*cntx)->SendError("replication cancelled");
+      cntx->SendError("replication cancelled");
       return std::make_error_code(errc::operation_canceled);
     }
     if (ec) {
-      (*cntx)->SendError(absl::StrCat(msg, ec.message()));
+      cntx->SendError(absl::StrCat(msg, ec.message()));
       cntx_.Cancel();
     }
     return ec;
@@ -118,7 +118,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
   // 4. Spawn main coordination fiber.
   sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
 
-  (*cntx)->SendOk();
+  cntx->SendOk();
   return {};
 }
 
@@ -128,7 +128,7 @@ void Replica::EnableReplication(ConnectionContext* cntx) {
   state_mask_.store(R_ENABLED);                             // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);  // call replication fiber
 
-  (*cntx)->SendOk();
+  cntx->SendOk();
 }
 
 void Replica::Stop() {

@@ -18,6 +18,7 @@ extern "C" {
 #include "redis/zset.h"
 }
 #include <absl/strings/str_cat.h>
+#include <absl/strings/strip.h>
 
 #include <jsoncons/json.hpp>
 
@@ -647,6 +648,28 @@ unsigned CompactObj::ObjType() const {
 
   LOG(FATAL) << "TBD " << int(taglen_);
   return 0;
+}
+
+string_view CompactObj::ObjTypeToString(unsigned type) {
+#define OBJECT_TYPE_CASE(type) \
+  case type:                   \
+    return absl::StripPrefix(#type, "OBJ_")
+
+  switch (type) {
+    OBJECT_TYPE_CASE(OBJ_STRING);
+    OBJECT_TYPE_CASE(OBJ_LIST);
+    OBJECT_TYPE_CASE(OBJ_SET);
+    OBJECT_TYPE_CASE(OBJ_ZSET);
+    OBJECT_TYPE_CASE(OBJ_HASH);
+    OBJECT_TYPE_CASE(OBJ_MODULE);
+    OBJECT_TYPE_CASE(OBJ_STREAM);
+    OBJECT_TYPE_CASE(OBJ_JSON);
+    default:
+      DCHECK(false) << "Unknown object type " << type;
+      return "OTHER";
+  }
+
+#undef OBJECT_TYPE_CASE
 }
 
 unsigned CompactObj::Encoding() const {
