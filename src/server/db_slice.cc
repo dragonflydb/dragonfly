@@ -1385,27 +1385,16 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   if (it != client_tracking_map_.end()) {
     // notify all the clients.
     auto& client_set = it->second;
-    DVLOG(2) << "Garbage collect clients that are no longer tracking... ";
-    auto is_closed_or_not_tracking = [](const facade::Connection::WeakRef& p) {
-      return (p.IsExpired() || (!p.Get()->IsTrackingOn()));
+    auto cb = [key, client_set = std::move(client_set)](unsigned idx, util::ProactorBase*) {
+      for (auto it = client_set.begin(); it != client_set.end(); ++it) {
+        if ((unsigned int)it->Thread() != idx)
+          continue;
+        facade::Connection* conn = it->Get();
+        if ((conn != nullptr) && conn->IsTrackingOn())
+          conn->SendInvalidationMessageAsync({key});
+      }
     };
-    absl::erase_if(client_set, is_closed_or_not_tracking);
-    DVLOG(2) << "Number of clients left: " << client_set.size();
-
-    if (!client_set.empty()) {
-      auto cb = [key, client_set = std::move(client_set)](unsigned idx, util::ProactorBase*) {
-        for (auto it = client_set.begin(); it != client_set.end(); ++it) {
-          if ((unsigned int)it->Thread() != idx)
-            continue;
-          facade::Connection* conn = it->Get();
-          if (conn != nullptr) {
-            conn->SendInvalidationMessageAsync({key});
-            return;
-          }
-        }
-      };
-      shard_set->pool()->DispatchBrief(std::move(cb));
-    }
+    shard_set->pool()->DispatchBrief(std::move(cb));
     // remove this key from the tracking table as the key no longer exists
     client_tracking_map_.erase(key);
   }

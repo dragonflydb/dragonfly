@@ -1421,7 +1421,7 @@ unsigned Connection::WeakRef::Thread() const {
 }
 
 Connection* Connection::WeakRef::Get() const {
-  // DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
+  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
   //  The connection can only be deleted on this thread, so
   //  this pointer is valid until the next suspension.
   //  Note: keeping a shared_ptr doesn't prolong the lifetime because
