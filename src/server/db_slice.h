@@ -148,11 +148,10 @@ class DbSlice {
     return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
-  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
-                               unsigned req_obj_type) const;
+  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key, unsigned req_obj_type);
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
-  std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
+  std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -270,8 +269,7 @@ class DbSlice {
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return PrimeIterator{}.
-  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx,
-                                                          PrimeIterator it) const;
+  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx, PrimeIterator it);
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -337,6 +335,9 @@ class DbSlice {
 
   // Track keys for the client represented by the the weak reference to its connection.
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
+
+  // Send invalidation message to the clients that are tracking the change to a key.
+  void SendInvalidationTrackingMessage(const std::string_view& key);
 
  private:
   // Releases a single key. `key` must have been normalized by GetLockKey().

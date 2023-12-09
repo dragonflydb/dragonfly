@@ -1149,10 +1149,29 @@ string GetPassword() {
   return "";
 }
 
+void ServerFamily::SendInvalidationMessages() const {
+  // send invalidation message (caused by flushdb) to all the clients which
+  // turned on client tracking
+  auto cb = [](unsigned thread_index, util::Connection* conn) {
+    facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
+    if (fc) {
+      ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
+      if (cntx->conn()->IsTrackingOn()) {
+        facade::Connection::InvalidationMessage x;
+        x.invalidate_due_to_flush = true;
+        cntx->conn()->SendInvalidationMessageAsync(x);
+      }
+    }
+  };
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+}
+
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, cntx->transaction->GetDbIndex());
-
+  SendInvalidationMessages();
   cntx->reply_builder()->SendOk();
 }
 
