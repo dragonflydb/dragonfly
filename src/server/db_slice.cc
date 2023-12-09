@@ -1380,10 +1380,11 @@ void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice&
   }
 }
 
-void DbSlice::SendInvalidationTrackingMessage(const std::string_view& key) {
-  if (client_tracking_map_.find(key) != client_tracking_map_.end()) {
+void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
+  auto it = client_tracking_map_.find(key);
+  if (it != client_tracking_map_.end()) {
     // notify all the clients.
-    auto& client_set = client_tracking_map_[key];
+    auto& client_set = it->second;
     DVLOG(2) << "Garbage collect clients that are no longer tracking... ";
     auto is_closed_or_not_tracking = [](const facade::Connection::WeakRef& p) {
       return (p.IsExpired() || (!p.Get()->IsTrackingOn()));
@@ -1392,14 +1393,13 @@ void DbSlice::SendInvalidationTrackingMessage(const std::string_view& key) {
     DVLOG(2) << "Number of clients left: " << client_set.size();
 
     if (!client_set.empty()) {
-      auto cb = [key, client_set](unsigned idx, util::ProactorBase*) {
+      auto cb = [key, client_set = std::move(client_set)](unsigned idx, util::ProactorBase*) {
         for (auto it = client_set.begin(); it != client_set.end(); ++it) {
-          if (it->IsExpired())
-            continue;
           if ((unsigned int)it->Thread() != idx)
             continue;
           facade::Connection* conn = it->Get();
-          conn->SendInvalidationMessageAsync({key});
+          if (conn != nullptr)
+            conn->SendInvalidationMessageAsync({key});
           return;
         }
       };

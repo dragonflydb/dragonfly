@@ -337,7 +337,7 @@ class DbSlice {
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
   // Send invalidation message to the clients that are tracking the change to a key.
-  void SendInvalidationTrackingMessage(const std::string_view& key);
+  void SendInvalidationTrackingMessage(std::string_view key);
 
  private:
   // Releases a single key. `key` must have been normalized by GetLockKey().
