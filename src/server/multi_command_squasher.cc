@@ -98,7 +98,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   auto& sinfo = PrepareShardInfo(last_sid);
 
-  sinfo.had_writes |= (cmd->Cid()->opt_mask() & CO::WRITE);
+  sinfo.had_writes |= cmd->Cid()->IsWriteOnly();
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
 

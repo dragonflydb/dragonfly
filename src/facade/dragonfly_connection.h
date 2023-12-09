@@ -16,6 +16,7 @@
 
 #include "base/io_buf.h"
 #include "core/fibers.h"
+#include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
 #include "util/connection.h"
@@ -101,9 +102,10 @@ class Connection : public util::Connection {
 
   // ACL Update message, contains ACL updates to be applied to the connection.
   struct AclUpdateMessage {
-    std::vector<std::string> username;
-    std::vector<uint32_t> categories;
-    std::vector<std::vector<uint64_t>> commands;
+    std::string username;
+    uint32_t categories;
+    std::vector<uint64_t> commands;
+    dfly::acl::AclKeys keys;
   };
 
   // Migration request message, the dispatch fiber stops to give way for thread migration.

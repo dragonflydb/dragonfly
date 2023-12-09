@@ -924,23 +924,25 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
 static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
                                                       const ConnectionContext* cntx,
-                                                      string_view error_msg) {
+                                                      string_view error_msg, CmdArgList tail_args) {
   // If we are on a squashed context we need to use the owner, because the
   // context we are operating on is a stub and the acl username is not copied
   // See: MultiCommandSquasher::SquashedHopCb
   if (cntx->conn_state.squashing_info)
     cntx = cntx->conn_state.squashing_info->owner;
 
-  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
+  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
     return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
   }
   return nullopt;
 }
 
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
-                                                     const ConnectionContext* cntx) {
+                                                     const ConnectionContext* cntx,
+                                                     CmdArgList tail_args) {
   // TODO: Move OOM check here
-  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC");
+  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
+                                   tail_args);
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
@@ -960,7 +962,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
-  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
+  bool is_write_cmd = cid->IsWriteOnly();
   bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   // Check if the command is allowed to execute under this global state
@@ -1037,7 +1039,13 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{status};
   }
 
-  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
+  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
+}
+
+OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
+  auto& db_slice = op_args.shard->db_slice();
+  db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
+  return OpStatus::OK;
 }
 
 OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
@@ -1070,7 +1078,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   if (!dispatching_in_multi) {  // Don't interrupt running multi commands
-    bool is_write = (cid->opt_mask() & CO::WRITE);
+    bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
 
@@ -1094,7 +1102,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-    if (stored_cmd.Cid()->opt_mask() & CO::WRITE) {
+    if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return cntx->SendSimpleString("QUEUED");
@@ -1201,7 +1209,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  if (auto err = VerifyCommandExecution(cid, cntx); err) {
+  if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
     cntx->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
