@@ -1398,9 +1398,10 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
           if ((unsigned int)it->Thread() != idx)
             continue;
           facade::Connection* conn = it->Get();
-          if (conn != nullptr)
+          if (conn != nullptr) {
             conn->SendInvalidationMessageAsync({key});
-          return;
+            return;
+          }
         }
       };
       shard_set->pool()->DispatchBrief(std::move(cb));
