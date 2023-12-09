@@ -1048,12 +1048,6 @@ OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const
   return OpStatus::OK;
 }
 
-OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
-  auto& db_slice = op_args.shard->db_slice();
-  db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
-  return OpStatus::OK;
-}
-
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
