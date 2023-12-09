@@ -1042,6 +1042,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
+OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
+  auto& db_slice = op_args.shard->db_slice();
+  db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
+  return OpStatus::OK;
+}
+
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1147,6 +1153,18 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (!InvokeCmd(cid, args_no_cmd, dfly_cntx, collect_stats)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
+  }
+
+  // if this is a read command, and client tracking has enabled,
+  // start tracking all the updates to the keys in this read command
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto keys = t->GetShardArgs(shard->shard_id());
+      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
+    };
+
+    dfly_cntx->transaction->Refurbish();
+    dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
 
   if (!dispatching_in_multi) {
@@ -1466,7 +1484,6 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->protocol() == facade::Protocol::REDIS)
     cntx->SendOk();
   using facade::SinkReplyBuilder;
-
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
 
@@ -2364,6 +2381,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   DeactivateMonitoring(server_cntx);
 
   server_family_.OnClose(server_cntx);
+
+  cntx->conn()->SetClientTrackingSwitch(false);
 }
 
 string Service::GetContextInfo(facade::ConnectionContext* cntx) {

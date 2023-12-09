@@ -169,7 +169,7 @@ class Connection : public util::Connection {
     bool EnsureMemoryBudget() const;
 
     bool operator<(const WeakRef& other);
-    bool operator==(const WeakRef& other);
+    bool operator==(const WeakRef& other) const;
 
    private:
     friend class Connection;
@@ -262,6 +262,10 @@ class Connection : public util::Connection {
   // Requests that at some point, this connection will be migrated to `dest` thread.
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+
+  void SetClientTrackingSwitch(bool is_on);
+
+  bool IsTrackingOn() const;
 
  protected:
   void OnShutdown() override;
@@ -402,6 +406,9 @@ class Connection : public util::Connection {
 
   // Per-thread queue backpressure structs.
   static thread_local QueueBackpressure tl_queue_backpressure_;
+
+  // a flag indicating whether the client has turned on client tracking.
+  bool tracking_enabled_ = false;
 };
 
 }  // namespace facade

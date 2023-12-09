@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -334,6 +335,9 @@ class DbSlice {
     expire_allowed_ = is_allowed;
   }
 
+  // Track keys for the client represented by the the weak reference to its connection.
+  void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
+
  private:
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
@@ -385,6 +389,16 @@ class DbSlice {
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
+
+  struct Hash {
+    size_t operator()(const facade::Connection::WeakRef& c) const {
+      return std::hash<uint32_t>()(c.GetClientId());
+    }
+  };
+
+  // the table that maps keys to the clients that are tracking them.
+  absl::flat_hash_map<std::string, absl::flat_hash_set<facade::Connection::WeakRef, Hash>>
+      client_tracking_map_;
 };
 
 }  // namespace dfly

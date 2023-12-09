@@ -1340,4 +1340,19 @@ void DbSlice::ResetUpdateEvents() {
   events_.update = 0;
 }
 
+void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice& keys) {
+  if (conn.IsExpired()) {
+    DVLOG(2) << "Connection expired, exiting TrackKey function.";
+    return;
+  }
+
+  DVLOG(2) << "Start tracking keys for client ID: " << conn.GetClientId()
+           << " with thread ID: " << conn.Thread();
+  for (auto key : keys) {
+    DVLOG(2) << "Inserting client ID " << conn.GetClientId()
+             << " into the tracking client set of key " << key;
+    client_tracking_map_[key].insert(conn);
+  }
+}
+
 }  // namespace dfly

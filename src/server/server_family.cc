@@ -1238,6 +1238,8 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientList(sub_args, cntx);
   } else if (sub_cmd == "PAUSE") {
     return ClientPause(sub_args, cntx);
+  } else if (sub_cmd == "TRACKING") {
+    return ClientTracking(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -1355,6 +1357,30 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   }).Detach();
 
   cntx->SendOk();
+}
+
+void ServerFamily::ClientTracking(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 1)
+    return cntx->SendError(kSyntaxErr);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (!rb->IsResp3())
+    return cntx->SendError(
+        "Client tracking is currently not supported for RESP2. Please use RESP3.");
+
+  ToUpper(&args[0]);
+  string_view state = ArgS(args, 0);
+  bool is_on;
+  if (state == "ON") {
+    is_on = true;
+  } else if (state == "OFF") {
+    is_on = false;
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  cntx->conn()->SetClientTrackingSwitch(is_on);
+  return cntx->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {

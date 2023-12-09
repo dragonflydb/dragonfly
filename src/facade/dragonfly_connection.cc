@@ -1353,6 +1353,16 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
   migration_request_ = dest;
 }
 
+void Connection::SetClientTrackingSwitch(bool is_on) {
+  tracking_enabled_ = is_on;
+  if (tracking_enabled_)
+    cc_->subscriptions++;
+}
+
+bool Connection::IsTrackingOn() const {
+  return tracking_enabled_;
+}
+
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
   size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
                dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
@@ -1421,7 +1431,7 @@ bool Connection::WeakRef::operator<(const WeakRef& other) {
   return client_id_ < other.client_id_;
 }
 
-bool Connection::WeakRef::operator==(const WeakRef& other) {
+bool Connection::WeakRef::operator==(const WeakRef& other) const {
   return client_id_ == other.client_id_;
 }
 
