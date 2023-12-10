@@ -288,6 +288,42 @@ async def test_multi_pubsub(async_client):
 
 
 """
+Test PUBSUB NUMSUB command.
+"""
+
+
+@pytest.mark.asyncio
+async def test_pubsub_subcommand_for_numsub(async_client):
+    subs1 = [async_client.pubsub() for i in range(5)]
+    for s in subs1:
+        await s.subscribe("channel_name1")
+    result = await async_client.pubsub_numsub("channel_name1")
+
+    for s in subs1:
+        await s.unsubscribe("channel_name1")
+    assert result[0][0] == "channel_name1" and result[0][1] == 5
+
+    subs2 = [async_client.pubsub() for i in range(5)]
+    for s in subs2:
+        await s.subscribe("channel_name2")
+
+    subs3 = [async_client.pubsub() for i in range(10)]
+    for s in subs3:
+        await s.subscribe("channel_name3")
+
+    result = await async_client.pubsub_numsub("channel_name2", "channel_name3")
+
+    for s in subs2:
+        await s.unsubscribe("channel_name2")
+
+    for s in subs3:
+        await s.unsubscribe("channel_name3")
+
+    assert result[0][0] == "channel_name2" and result[0][1] == 5
+    assert result[1][0] == "channel_name3" and result[1][1] == 10
+
+
+"""
 Test that pubsub clients who are stuck on backpressure from a slow client (the one in the test doesn't read messages at all)
 will eventually unblock when it disconnects.
 """
