@@ -2199,7 +2199,7 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 
 void Service::PubsubNumSub(const vector<string_view>& channels, ConnectionContext* cntx) {
   vector<std::pair<std::string, long>> pubsub_num_array;
-  pubsub_num_array.reserve(channels.size() * 2);
+  pubsub_num_array.reserve(channels.size());
 
   for (auto channel : channels) {
     pubsub_num_array.emplace_back(
