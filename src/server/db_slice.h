@@ -89,6 +89,7 @@ class DbSlice {
       bool key_existed = false;
 
       size_t db_size = 0;
+      size_t deletion_count = 0;
       // TODO(#2252): Add heap size here, and only update memory in d'tor
     };
 
@@ -420,6 +421,7 @@ class DbSlice {
   ssize_t memory_budget_ = SSIZE_MAX;
   size_t bytes_per_object_ = 0;
   size_t soft_budget_limit_ = 0;
+  size_t deletion_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 

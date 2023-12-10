@@ -365,8 +365,11 @@ void DbSlice::AutoUpdater::Run() {
 
   // Make sure that the DB has not changed in size since this object was created.
   // Adding or removing elements from the DB may invalidate iterators.
-  DCHECK_EQ(fields_.db_size, fields_.db_slice->DbSize(fields_.db_ind))
-      << "Attempting to run post-update after DB was modified - this is a bug!";
+  CHECK_EQ(fields_.db_size, fields_.db_slice->DbSize(fields_.db_ind))
+      << "Attempting to run post-update after DB was modified";
+
+  CHECK_EQ(fields_.deletion_count, fields_.db_slice->deletion_count_)
+      << "Attempting to run post-update after a deletion was issued";
 
   DCHECK(fields_.action == DestructorAction::kRun);
   CHECK_NE(fields_.db_slice, nullptr);
@@ -383,6 +386,7 @@ DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   DCHECK(fields_.action == DestructorAction::kRun);
   fields_.db_slice->PreUpdate(fields_.db_ind, fields_.it);
   fields_.db_size = fields_.db_slice->DbSize(fields_.db_ind);
+  fields_.deletion_count = fields_.db_slice->deletion_count_;
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
@@ -628,6 +632,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   }
 
   PerformDeletion(it, shard_owner(), db.get());
+  deletion_count_++;
 
   return true;
 }
