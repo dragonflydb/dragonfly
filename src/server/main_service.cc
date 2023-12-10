@@ -2233,9 +2233,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
         "\tReturn the currently active channels matching a <pattern> (default: '*').",
         "NUMPAT",
         "\tReturn number of subscriptions to patterns.",
-        "NUMSUB [<channel> ...]",
-        "\tReturn the number of subscribers for the specified channels, excluding",
-        "\tpattern subscriptions(default: no channels).",
+        "NUMSUB [<channel> <channel...>]",
+        "\tReturns the number of subscribers for the specified channels, excluding",
+        "\tpattern subscriptions.",
         "HELP",
         "\tPrints this help."};
 
