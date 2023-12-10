@@ -394,7 +394,6 @@ void RedisReplyBuilder::SendNumSubArray(const std::vector<std::pair<std::string,
     SendBulkString(p.first);
     SendLong(p.second);
   }
-  return;
 }
 
 void RedisReplyBuilder::SendDouble(double val) {
