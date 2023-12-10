@@ -244,6 +244,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
   virtual void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                bool with_scores);
+  void SendNumSubArray(const std::vector<std::pair<std::string, long>>& arr);
 
   void StartArray(unsigned len);  // StartCollection(len, ARRAY)
 

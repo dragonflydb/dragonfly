@@ -745,6 +745,23 @@ TEST_F(RedisReplyBuilderTest, SendStringArrayAsSet) {
       << "SendStringArrayAsSet Resp3 Failed.";
 }
 
+TEST_F(RedisReplyBuilderTest, SendNumSubArray) {
+  const std::vector<std::pair<std::string, long>> numsub_array{
+      {"test", 2}, {"test2", 3}, {"test3", 4}};
+
+  builder_->SetResp3(false);
+  builder_->SendNumSubArray(numsub_array);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*6\r\n$4\r\ntest\r\n:2\r\n$5\r\ntest2\r\n:3\r\n$5\r\ntest3\r\n:4\r\n")
+      << "SendNumSubArray Failed";
+
+  builder_->SetResp3(true);
+  builder_->SendNumSubArray(numsub_array);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*6\r\n$4\r\ntest\r\n:2\r\n$5\r\ntest2\r\n:3\r\n$5\r\ntest3\r\n:4\r\n")
+      << "SendNumSubArray Failed";
+}
+
 TEST_F(RedisReplyBuilderTest, SendScoredArray) {
   const std::vector<std::pair<std::string, double>> scored_array{
       {"e1", 1.1}, {"e2", 2.2}, {"e3", 3.3}};

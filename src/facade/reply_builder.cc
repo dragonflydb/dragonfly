@@ -386,6 +386,17 @@ void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string,
   }
 }
 
+void RedisReplyBuilder::SendNumSubArray(const std::vector<std::pair<std::string, long>>& arr) {
+  ReplyAggregator agg(this);
+
+  StartArray(arr.size() * 2);
+  for (const auto& p : arr) {
+    SendBulkString(p.first);
+    SendLong(p.second);
+  }
+  return;
+}
+
 void RedisReplyBuilder::SendDouble(double val) {
   char buf[64];
 

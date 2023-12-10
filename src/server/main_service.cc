@@ -2197,6 +2197,18 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
   cntx->SendLong(pattern_count);
 }
 
+void Service::PubsubNumSub(const vector<string_view>& channels, ConnectionContext* cntx) {
+  vector<std::pair<std::string, long>> pubsub_num_array;
+  pubsub_num_array.reserve(channels.size() * 2);
+
+  for (auto channel : channels) {
+    pubsub_num_array.emplace_back(
+        channel, ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
+  }
+
+  (*cntx)->SendNumSubArray(pubsub_num_array);
+}
+
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "starting monitor on this connection: " << cntx->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
@@ -2221,6 +2233,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
         "\tReturn the currently active channels matching a <pattern> (default: '*').",
         "NUMPAT",
         "\tReturn number of subscriptions to patterns.",
+        "NUMSUB [<channel> ...]",
+        "\tReturn the number of subscribers for the specified channels, excluding",
+        "\tpattern subscriptions(default: no channels).",
         "HELP",
         "\tPrints this help."};
 
@@ -2238,6 +2253,18 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
     PubsubChannels(pattern, cntx);
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
+  } else if (subcmd == "NUMSUB") {
+    if (args.size() == 1) {
+      (*cntx)->SendEmptyArray();
+      return;
+    }
+
+    int channels_size = args.size() - 1;
+    std::vector<string_view> channels(channels_size);
+    for (auto i = 0; i < channels_size; i++) {
+      channels[i] = ArgS(args, i + 1);
+    }
+    PubsubNumSub(channels, cntx);
   } else {
     cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
