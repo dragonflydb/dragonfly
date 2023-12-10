@@ -9,7 +9,6 @@ extern "C" {
 }
 
 #include <mimalloc.h>
-#include <sys/types.h>
 
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
@@ -581,7 +580,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
 
   DCHECK_EQ(res % kBlockLen, 0u);
 
-  off64_t file_offset = res;
+  size_t file_offset = res;
   PrimeTable* pt = db_slice_.GetTables(db_index).first;
   auto& bin_record = db->bin_map[bin_index];
 
