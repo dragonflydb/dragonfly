@@ -45,11 +45,6 @@ jobs:
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
     timeout-minutes: 60
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_CACHE_SIZE: 6G
-      SCCACHE_ERROR_LOG: /tmp/sccache_log.txt
-      SCCACHE_LOG: debug
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -67,16 +62,6 @@ jobs:
           cmake --version
           mkdir -p ${GITHUB_WORKSPACE}/build
 
-      - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.3
-
-      - name: Configure Cache Env
-        uses: actions/github-script@v6
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
-
       - name: Configure CMake
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
@@ -86,7 +71,7 @@ jobs:
             -GNinja \
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
             -L
           cd ${GITHUB_WORKSPACE}/build && pwd
@@ -95,7 +80,6 @@ jobs:
         run: |
           cd ${GITHUB_WORKSPACE}/build
           ninja src/all
-          ${SCCACHE_PATH} --show-stats | tee $GITHUB_STEP_SUMMARY
 
       - name: C++ Unit Tests
         run: |
@@ -136,11 +120,6 @@ jobs:
           run-only-on-ubuntu-latest: true
           build-folder-name: build
           filter: "not slow"
-      - name: Upload cache log
-        uses: actions/upload-artifact@v3
-        with:
-          name: sccache_log.txt
-          path: /tmp/sccache_log.txt
 
   lint-test-chart:
     runs-on: ubuntu-latest
