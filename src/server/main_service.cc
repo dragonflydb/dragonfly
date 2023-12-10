@@ -2253,11 +2253,6 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
   } else if (subcmd == "NUMSUB") {
-    if (args.size() == 1) {
-      (*cntx)->SendEmptyArray();
-      return;
-    }
-
     PubsubNumSub(args, cntx);
   } else {
     cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
