@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include <mimalloc.h>
+#include <sys/types.h>
 
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
