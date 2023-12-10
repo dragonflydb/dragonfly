@@ -2197,16 +2197,15 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
   cntx->SendLong(pattern_count);
 }
 
-void Service::PubsubNumSub(const vector<string_view>& channels, ConnectionContext* cntx) {
-  vector<std::pair<std::string, long>> pubsub_num_array;
-  pubsub_num_array.reserve(channels.size());
+void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
+  int channels_size = args.size() - 1;
+  (*cntx)->StartArray(channels_size * 2);
 
-  for (auto channel : channels) {
-    pubsub_num_array.emplace_back(
-        channel, ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
+  for (auto i = 0; i < channels_size; i++) {
+    auto channel = ArgS(args, i + 1);
+    (*cntx)->SendBulkString(channel);
+    (*cntx)->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
   }
-
-  (*cntx)->SendNumSubArray(pubsub_num_array);
 }
 
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
@@ -2259,12 +2258,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
       return;
     }
 
-    int channels_size = args.size() - 1;
-    std::vector<string_view> channels(channels_size);
-    for (auto i = 0; i < channels_size; i++) {
-      channels[i] = ArgS(args, i + 1);
-    }
-    PubsubNumSub(channels, cntx);
+    PubsubNumSub(args, cntx);
   } else {
     cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
