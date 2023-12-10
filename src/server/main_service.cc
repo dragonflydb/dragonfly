@@ -2198,11 +2198,11 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 }
 
 void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
-  int channels_size = args.size() - 1;
+  int channels_size = args.size();
   (*cntx)->StartArray(channels_size * 2);
 
   for (auto i = 0; i < channels_size; i++) {
-    auto channel = ArgS(args, i + 1);
+    auto channel = ArgS(args, i);
     (*cntx)->SendBulkString(channel);
     (*cntx)->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
   }
@@ -2253,6 +2253,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
   } else if (subcmd == "NUMSUB") {
+    args.remove_prefix(1);
     PubsubNumSub(args, cntx);
   } else {
     cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
