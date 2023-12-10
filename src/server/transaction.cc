@@ -31,7 +31,7 @@ constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
 }  // namespace
 
 IntentLock::Mode Transaction::Mode() const {
-  return (cid_->opt_mask() & CO::READONLY) ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
+  return cid_->IsReadOnly() ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
 }
 
 /**
@@ -906,6 +906,12 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
+void Transaction::Refurbish() {
+  txid_ = 0;
+  coordinator_state_ = 0;
+  cb_ptr_ = nullptr;
+}
+
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
@@ -1362,7 +1368,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     return;
 
   // Only write commands and/or no-key-transactional commands are logged
-  if ((cid_->opt_mask() & CO::WRITE) == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
+  if (cid_->IsWriteOnly() == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
   // If autojournaling was disabled and not re-enabled, skip it

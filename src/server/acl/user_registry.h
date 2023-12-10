@@ -46,6 +46,7 @@ class UserRegistry {
   struct UserCredentials {
     uint32_t acl_categories{0};
     std::vector<uint64_t> acl_commands;
+    AclKeys keys;
   };
 
   // Acquires a read lock

@@ -38,7 +38,7 @@ using OptBool = optional<bool>;
 using OptLong = optional<long>;
 using OptSizeT = optional<size_t>;
 using OptString = optional<string>;
-using JsonReplaceCb = function<void(const string&, JsonType&)>;
+using JsonReplaceCb = function<void(const JsonExpression::path_node_type&, JsonType&)>;
 using JsonReplaceVerify = std::function<OpStatus(JsonType&)>;
 using CI = CommandId;
 
@@ -119,28 +119,28 @@ void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& r
 }
 
 error_code JsonReplace(JsonType& instance, string_view path, JsonReplaceCb callback) {
-  using evaluator_t = jsoncons::jsonpath::detail::jsonpath_evaluator<JsonType, JsonType&>;
+  using evaluator_t = jsonpath::detail::jsonpath_evaluator<JsonType, JsonType&>;
   using value_type = evaluator_t::value_type;
   using reference = evaluator_t::reference;
   using json_selector_t = evaluator_t::path_expression_type;
-  using json_location_type = evaluator_t::json_location_type;
+
   jsonpath::custom_functions<JsonType> funcs = jsonpath::custom_functions<JsonType>();
 
   error_code ec;
-  jsoncons::jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
+  jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
   evaluator_t e;
   json_selector_t expr = e.compile(static_resources, path, ec);
   if (ec) {
     return ec;
   }
 
-  jsoncons::jsonpath::detail::dynamic_resources<value_type, reference> resources;
-  auto f = [&callback](const json_location_type& path, reference val) {
-    callback(path.to_string(), val);
+  jsonpath::detail::dynamic_resources<value_type, reference> resources;
+  auto f = [&callback](const json_selector_t::path_node_type& path, reference val) {
+    callback(path, val);
   };
 
-  expr.evaluate(resources, instance, resources.root_path_node(), instance, f,
-                jsonpath::result_options::nodups);
+  expr.evaluate(resources, instance, json_selector_t::path_node_type{}, instance, f,
+                jsonpath::result_options::nodups | jsonpath::result_options::path);
   return ec;
 }
 
@@ -530,7 +530,7 @@ OpResult<vector<OptSizeT>> OpArrLen(const OpArgs& op_args, string_view key,
 
 OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, string_view path) {
   vector<OptBool> vec;
-  auto cb = [&vec](const string& path, JsonType& val) {
+  auto cb = [&vec](const auto&, JsonType& val) {
     if (val.is_bool()) {
       bool current_val = val.as_bool() ^ true;
       val = current_val;
@@ -556,7 +556,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
   bool has_fractional_part = (modf(num, &int_part) != 0);
   json output(json_array_arg);
 
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (val.is_number()) {
       double result = arithmetic_op(val.as<double>(), num);
       if (isinf(result)) {
@@ -605,9 +605,10 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   }
 
   vector<string> deletion_items;
-  auto cb = [&](const string& path, JsonType& val) { deletion_items.emplace_back(path); };
+  auto cb = [&](const JsonExpression::path_node_type& path, JsonType& val) {
+    deletion_items.emplace_back(jsonpath::to_string(path));
+  };
 
-  // json j = move(result.value());
   JsonType& json_entry = *(result.value());
   error_code ec = JsonReplace(json_entry, path, cb);
   if (ec) {
@@ -670,7 +671,7 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
 OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, string_view path,
                                        const vector<string_view>& strs) {
   vector<OptSizeT> vec;
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (val.is_string()) {
       string new_val = val.as_string();
       for (auto& str : strs) {
@@ -696,7 +697,7 @@ OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, s
 // Clears containers(arrays or objects) and zeroing numbers.
 OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path) {
   long clear_items = 0;
-  auto cb = [&clear_items](const string& path, JsonType& val) {
+  auto cb = [&clear_items](const auto& path, JsonType& val) {
     if (!(val.is_object() || val.is_array() || val.is_number())) {
       return;
     }
@@ -723,7 +724,7 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path)
 OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, string_view path,
                                      int index) {
   vector<OptString> vec;
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto& path, JsonType& val) {
     if (!val.is_array() || val.empty()) {
       vec.emplace_back(nullopt);
       return;
@@ -766,7 +767,7 @@ OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, str
 OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, string_view path,
                                      int start_index, int stop_index) {
   vector<OptSizeT> vec;
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (!val.is_array()) {
       vec.emplace_back(nullopt);
       return;
@@ -822,7 +823,7 @@ OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, s
   // Insert user-supplied value into the supplied index that should be valid.
   // If at least one index isn't valid within an array in the json doc, the operation is discarded.
   // Negative indexes start from the end of the array.
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (out_of_boundaries_encountered) {
       return;
     }
@@ -887,7 +888,7 @@ OpResult<vector<OptSizeT>> OpArrAppend(const OpArgs& op_args, string_view key, s
     return result.status();
   }
 
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (!val.is_array()) {
       vec.emplace_back(nullopt);
       return;
@@ -1090,7 +1091,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   bool path_exists = false;
   bool operation_result = false;
   const JsonType& new_json = parsed_json.value();
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;

@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
@@ -872,6 +873,20 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                            << sdata_res.error().message();
   }
 
+  DbStats total;
+  for (const auto& db_stats : m.db_stats) {
+    total += db_stats;
+  }
+
+  for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+    size_t mem = total.memory_usage_by_type[type];
+    if (mem > 0) {
+      AppendMetricWithoutLabels(
+          absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), "", mem,
+          MetricType::GAUGE, &resp->body());
+    }
+  }
+
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
@@ -1185,6 +1200,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       auto cred = registry->GetCredentials(username);
       cntx->acl_categories = cred.acl_categories;
       cntx->acl_commands = cred.acl_commands;
+      cntx->keys = std::move(cred.keys);
       cntx->authenticated = true;
       return cntx->SendOk();
     }
@@ -1222,6 +1238,8 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientList(sub_args, cntx);
   } else if (sub_cmd == "PAUSE") {
     return ClientPause(sub_args, cntx);
+  } else if (sub_cmd == "TRACKING") {
+    return ClientTracking(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -1277,7 +1295,7 @@ void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
   string result = absl::StrJoin(client_info, "\n");
   result.append("\n");
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  return rb->SendBulkString(result);
+  return rb->SendVerbatimString(result);
 }
 
 void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
@@ -1339,6 +1357,30 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
   }).Detach();
 
   cntx->SendOk();
+}
+
+void ServerFamily::ClientTracking(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 1)
+    return cntx->SendError(kSyntaxErr);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (!rb->IsResp3())
+    return cntx->SendError(
+        "Client tracking is currently not supported for RESP2. Please use RESP3.");
+
+  ToUpper(&args[0]);
+  string_view state = ArgS(args, 0);
+  bool is_on;
+  if (state == "ON") {
+    is_on = true;
+  } else if (state == "OFF") {
+    is_on = false;
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  cntx->conn()->SetClientTrackingSwitch(is_on);
+  return cntx->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -1616,11 +1658,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     // are not accounted for to avoid complex computations. In some cases, when number of members
     // is known we approximate their allocations by taking 16 bytes per member.
     append("object_used_memory", total.obj_memory_usage);
+
+    for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+      size_t mem = total.memory_usage_by_type[type];
+      if (mem > 0) {
+        append(absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), mem);
+      }
+    }
     append("table_used_memory", total.table_mem_usage);
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
-    append("strval_bytes", total.strval_memory_usage);
     append("updateval_amount", total.update_value_amount);
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
@@ -1827,7 +1875,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(info);
+  rb->SendVerbatimString(info);
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {

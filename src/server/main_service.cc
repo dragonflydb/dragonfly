@@ -924,23 +924,25 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
 static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
                                                       const ConnectionContext* cntx,
-                                                      string_view error_msg) {
+                                                      string_view error_msg, CmdArgList tail_args) {
   // If we are on a squashed context we need to use the owner, because the
   // context we are operating on is a stub and the acl username is not copied
   // See: MultiCommandSquasher::SquashedHopCb
   if (cntx->conn_state.squashing_info)
     cntx = cntx->conn_state.squashing_info->owner;
 
-  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid)) {
+  if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
     return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
   }
   return nullopt;
 }
 
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
-                                                     const ConnectionContext* cntx) {
+                                                     const ConnectionContext* cntx,
+                                                     CmdArgList tail_args) {
   // TODO: Move OOM check here
-  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC");
+  return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
+                                   tail_args);
 }
 
 std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
@@ -960,7 +962,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
-  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
+  bool is_write_cmd = cid->IsWriteOnly();
   bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   // Check if the command is allowed to execute under this global state
@@ -1037,7 +1039,13 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{status};
   }
 
-  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions");
+  return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
+}
+
+OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
+  auto& db_slice = op_args.shard->db_slice();
+  db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
+  return OpStatus::OK;
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
@@ -1064,7 +1072,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   if (!dispatching_in_multi) {  // Don't interrupt running multi commands
-    bool is_write = (cid->opt_mask() & CO::WRITE);
+    bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
 
@@ -1088,7 +1096,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-    if (stored_cmd.Cid()->opt_mask() & CO::WRITE) {
+    if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return cntx->SendSimpleString("QUEUED");
@@ -1147,6 +1155,18 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
+  // if this is a read command, and client tracking has enabled,
+  // start tracking all the updates to the keys in this read command
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto keys = t->GetShardArgs(shard->shard_id());
+      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
+    };
+
+    dfly_cntx->transaction->Refurbish();
+    dfly_cntx->transaction->ScheduleSingleHopT(cb);
+  }
+
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
   }
@@ -1183,7 +1203,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
-  if (auto err = VerifyCommandExecution(cid, cntx); err) {
+  if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
     cntx->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
@@ -1464,7 +1484,6 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->protocol() == facade::Protocol::REDIS)
     cntx->SendOk();
   using facade::SinkReplyBuilder;
-
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
 
@@ -2092,12 +2111,12 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     // thus not adding any overhead to backpressure checks.
     optional<uint32_t> last_thread;
     for (auto& sub : subscribers) {
-      DCHECK_LE(last_thread.value_or(0), sub.thread_id);
-      if (last_thread && *last_thread == sub.thread_id)  // skip same thread
+      DCHECK_LE(last_thread.value_or(0), sub.Thread());
+      if (last_thread && *last_thread == sub.Thread())  // skip same thread
         continue;
 
-      sub.conn_cntx->conn()->EnsureAsyncMemoryBudget();
-      last_thread = sub.thread_id;
+      if (sub.EnsureMemoryBudget())  // Invalid pointers are skipped
+        last_thread = sub.Thread();
     }
 
     auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
@@ -2107,14 +2126,13 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
     auto cb = [subscribers_ptr, buf, channel, msg](unsigned idx, util::ProactorBase*) {
       auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
-                            ChannelStore::Subscriber::ByThread);
+                            ChannelStore::Subscriber::ByThreadId);
 
-      while (it != subscribers_ptr->end() && it->thread_id == idx) {
-        facade::Connection* conn = it->conn_cntx->conn();
-        DCHECK(conn);
-        conn->SendPubMessageAsync(
-            {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
-        it->borrow_token.Dec();
+      while (it != subscribers_ptr->end() && it->Thread() == idx) {
+        if (auto* ptr = it->Get(); ptr) {
+          ptr->SendPubMessageAsync(
+              {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
+        }
         it++;
       }
     };
@@ -2347,20 +2365,12 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {
-      auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->UnsubscribeAll(false);
-
-      // Check that all borrowers finished processing.
-      // token is increased in channel_slice (the publisher side).
-      token.Wait();
     }
 
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
-
-      auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->PUnsubscribeAll(false);
-      token.Wait();  // Same as above
     }
 
     DCHECK(!conn_state.subscribe_info);
@@ -2371,6 +2381,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   DeactivateMonitoring(server_cntx);
 
   server_family_.OnClose(server_cntx);
+
+  cntx->conn()->SetClientTrackingSwitch(false);
 }
 
 string Service::GetContextInfo(facade::ConnectionContext* cntx) {
@@ -2428,7 +2440,7 @@ void Service::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
   *registry
-      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
+      << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
       << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
       << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)

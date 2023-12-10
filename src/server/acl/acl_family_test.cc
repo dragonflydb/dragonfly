@@ -46,7 +46,7 @@ TEST_F(AclFamilyTest, AclSetUser) {
   EXPECT_THAT(resp, "OK");
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL",
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL ~*",
                                         "user vlad off nopass +@NONE"));
 
   resp = Run({"ACL", "SETUSER", "vlad", "+ACL"});
@@ -54,7 +54,7 @@ TEST_F(AclFamilyTest, AclSetUser) {
 
   resp = Run({"ACL", "LIST"});
   vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL",
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL ~*",
                                         "user vlad off nopass +@NONE +ACL"));
 }
 
@@ -79,7 +79,7 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "LIST"});
-  EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL +ALL");
+  EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL +ALL ~*");
 }
 
 TEST_F(AclFamilyTest, AclList) {
@@ -95,7 +95,7 @@ TEST_F(AclFamilyTest, AclList) {
 
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL",
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL +ALL ~*",
                                         "user kostas off d74ff0ee8da3b98 +@ADMIN",
                                         "user adi off d74ff0ee8da3b98 +@FAST"));
 }
@@ -146,7 +146,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                  UnorderedElementsAre("user default on nopass +@ALL +ALL ~*",
                                        absl::StrCat("user kostas off nopass ", "+@", cat)));
 
       resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-@", cat)});
@@ -154,7 +154,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                  UnorderedElementsAre("user default on nopass +@ALL +ALL ~*",
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
@@ -193,7 +193,7 @@ TEST_F(AclFamilyTest, TestAllCommands) {
       EXPECT_THAT(resp, "OK");
 
       resp = Run({"ACL", "LIST"});
-      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL +ALL",
+      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL +ALL ~*",
                                                       absl::StrCat("user kostas off nopass +@NONE ",
                                                                    "+", command_name)));
 
@@ -201,7 +201,7 @@ TEST_F(AclFamilyTest, TestAllCommands) {
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass +@ALL +ALL",
+                  UnorderedElementsAre("user default on nopass +@ALL +ALL ~*",
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
@@ -252,6 +252,8 @@ TEST_F(AclFamilyTest, TestGetUser) {
   EXPECT_TRUE(vec[3].GetVec().empty());
   EXPECT_THAT(vec[4], "commands");
   EXPECT_THAT(vec[5], "+@ALL +ALL");
+  EXPECT_THAT(vec[6], "keys");
+  EXPECT_THAT(vec[7], "~*");
 
   resp = Run({"ACL", "SETUSER", "kostas", "+@STRING", "+HSET"});
   resp = Run({"ACL", "GETUSER", "kostas"});
@@ -349,6 +351,60 @@ TEST_F(AclFamilyTestRename, AclRename) {
 
   resp = Run({"ROCKS", "DELUSER", "billy"});
   EXPECT_THAT(resp.GetString(), "OK");
+}
+
+TEST_F(AclFamilyTest, TestKeys) {
+  TestInitAclFam();
+  auto resp = Run({"ACL", "SETUSER", "temp", "~foo", "~bar*"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  auto& vec = resp.GetVec();
+  EXPECT_THAT(vec[6], "keys");
+  EXPECT_THAT(vec[7], "~foo ~bar*");
+
+  resp = Run({"ACL", "SETUSER", "temp", "~*", "~foo"});
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~tmp': Adding a pattern after the * "
+                           "pattern (or the 'allkeys' flag) is not valid and does not have any "
+                           "effect. Try 'resetkeys' to start with an empty list of patterns"));
+
+  resp = Run({"ACL", "SETUSER", "temp", "~*"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "SETUSER", "temp", "~foo"});
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~tmp': Adding a pattern after the * "
+                           "pattern (or the 'allkeys' flag) is not valid and does not have any "
+                           "effect. Try 'resetkeys' to start with an empty list of patterns"));
+
+  resp = Run({"ACL", "SETUSER", "temp", "resetkeys"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  EXPECT_TRUE(resp.GetVec()[7].GetVec().empty());
+
+  resp = Run({"ACL", "SETUSER", "temp", "%R~foo"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  EXPECT_THAT(resp.GetVec()[7], "%R~foo");
+
+  resp = Run({"ACL", "SETUSER", "temp", "resetkeys", "%W~foo"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  EXPECT_THAT(resp.GetVec()[7], "%W~foo");
+
+  resp = Run({"ACL", "SETUSER", "temp", "resetkeys", "%RW~foo"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  EXPECT_THAT(resp.GetVec()[7], "~foo");
+
+  resp = Run({"ACL", "SETUSER", "temp", "resetkeys", "%K~foo"});
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter %K~FOO"));
+
+  resp = Run({"ACL", "SETUSER", "temp", "resetkeys", "%Rfoo"});
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter %RFOO"));
 }
 
 }  // namespace dfly

@@ -8,6 +8,7 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <numeric>
 #include <variant>
 
 #include "absl/strings/str_cat.h"
@@ -205,9 +206,12 @@ size_t Connection::MessageHandle::UsedMemory() const {
       return msg.capacity();
     }
     size_t operator()(const AclUpdateMessagePtr& msg) {
-      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(string) +
-             msg->commands.capacity() * sizeof(vector<int>) +
-             msg->categories.capacity() * sizeof(uint32_t);
+      size_t key_cap = std::accumulate(
+          msg->keys.key_globs.begin(), msg->keys.key_globs.end(), 0, [](auto acc, auto& str) {
+            return acc + (str.first.capacity() * sizeof(char)) + sizeof(str.second);
+          });
+      return sizeof(AclUpdateMessage) + msg->username.capacity() * sizeof(char) +
+             msg->commands.capacity() * sizeof(uint64_t) + key_cap;
     }
     size_t operator()(const MigrationRequestMessage& msg) {
       return 0;
@@ -240,11 +244,10 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
   if (self->cntx()) {
-    for (size_t id = 0; id < msg.username.size(); ++id) {
-      if (msg.username[id] == self->cntx()->authed_username) {
-        self->cntx()->acl_categories = msg.categories[id];
-        self->cntx()->acl_commands = msg.commands[id];
-      }
+    if (msg.username == self->cntx()->authed_username) {
+      self->cntx()->acl_categories = msg.categories;
+      self->cntx()->acl_commands = msg.commands;
+      self->cntx()->keys = msg.keys;
     }
   }
 }
@@ -315,6 +318,10 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   }
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
+
+  // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
+  // We use it for reference counting and accessing `this` (without managing it).
+  self_ = {std::make_shared<std::monostate>(), this};
 
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
@@ -1176,9 +1183,19 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
   // connections
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
+  CHECK_EQ(self_.use_count(), 1u);    // references cache our thread and backpressure
   CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
 
   listener()->Migrate(this, dest);
+}
+
+Connection::WeakRef Connection::Borrow() {
+  DCHECK(self_);
+  // If the connection is unaware of subscriptions, it could migrate threads, making this call
+  // unsafe. All external mechanisms that borrow references should register subscriptions.
+  DCHECK_GT(cc_->subscriptions, 0);
+
+  return WeakRef(self_, queue_backpressure_, socket_->proactor()->GetPoolIndex(), id_);
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1290,10 +1307,6 @@ void Connection::RecycleMessage(MessageHandle msg) {
   }
 }
 
-void Connection::EnsureAsyncMemoryBudget() {
-  queue_backpressure_->EnsureBelowLimit();
-}
-
 std::string Connection::LocalBindStr() const {
   if (socket_->IsUDS())
     return "unix-domain-socket";
@@ -1340,6 +1353,16 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
   migration_request_ = dest;
 }
 
+void Connection::SetClientTrackingSwitch(bool is_on) {
+  tracking_enabled_ = is_on;
+  if (tracking_enabled_)
+    cc_->subscriptions++;
+}
+
+bool Connection::IsTrackingOn() const {
+  return tracking_enabled_;
+}
+
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
   size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
                dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
@@ -1365,6 +1388,51 @@ void Connection::DecreaseStatsOnClose() {
     --stats_->num_replicas;
   }
   --stats_->num_conns;
+}
+
+Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
+                             unsigned thread, uint32_t client_id)
+    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread}, client_id_{client_id} {
+}
+
+unsigned Connection::WeakRef::Thread() const {
+  return thread_;
+}
+
+Connection* Connection::WeakRef::Get() const {
+  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
+  // The connection can only be deleted on this thread, so
+  // this pointer is valid until the next suspension.
+  // Note: keeping a shared_ptr doesn't prolong the lifetime because
+  // it doesn't manage the underlying connection. See definition of `self_`.
+  return ptr_.lock().get();
+}
+
+bool Connection::WeakRef::IsExpired() const {
+  return ptr_.expired();
+}
+
+uint32_t Connection::WeakRef::GetClientId() const {
+  return client_id_;
+}
+
+bool Connection::WeakRef::EnsureMemoryBudget() const {
+  // Simple optimization: If a connection was closed, don't check memory budget.
+  if (!ptr_.expired()) {
+    // We don't rely on the connection ptr staying valid because we only access
+    // the threads backpressure
+    backpressure_->EnsureBelowLimit();
+    return true;
+  }
+  return false;
+}
+
+bool Connection::WeakRef::operator<(const WeakRef& other) {
+  return client_id_ < other.client_id_;
+}
+
+bool Connection::WeakRef::operator==(const WeakRef& other) const {
+  return client_id_ == other.client_id_;
 }
 
 }  // namespace facade

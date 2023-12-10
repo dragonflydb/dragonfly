@@ -323,6 +323,8 @@ class Transaction {
   // Utility to run a single hop on a no-key command
   static void RunOnceAsCommand(const CommandId* cid, RunnableType cb);
 
+  void Refurbish();
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {

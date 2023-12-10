@@ -214,6 +214,7 @@ class ServerFamily {
   void ClientGetName(CmdArgList args, ConnectionContext* cntx);
   void ClientList(CmdArgList args, ConnectionContext* cntx);
   void ClientPause(CmdArgList args, ConnectionContext* cntx);
+  void ClientTracking(CmdArgList args, ConnectionContext* cntx);
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);

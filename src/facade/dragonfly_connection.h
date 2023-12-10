@@ -16,6 +16,7 @@
 
 #include "base/io_buf.h"
 #include "core/fibers.h"
+#include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
 #include "util/connection.h"
@@ -53,6 +54,8 @@ class SinkReplyBuilder;
 // For pipelined requests, monitor and pubsub messages it uses
 // a separate dispatch queue that is processed on a separate fiber.
 class Connection : public util::Connection {
+  struct QueueBackpressure;
+
  public:
   Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
              ServiceInterface* service);
@@ -99,9 +102,10 @@ class Connection : public util::Connection {
 
   // ACL Update message, contains ACL updates to be applied to the connection.
   struct AclUpdateMessage {
-    std::vector<std::string> username;
-    std::vector<uint32_t> categories;
-    std::vector<std::vector<uint64_t>> commands;
+    std::string username;
+    uint32_t categories;
+    std::vector<uint64_t> commands;
+    dfly::acl::AclKeys keys;
   };
 
   // Migration request message, the dispatch fiber stops to give way for thread migration.
@@ -143,6 +147,42 @@ class Connection : public util::Connection {
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
 
+  // Weak reference to a connection, invalidated upon connection close.
+  // Used to dispatch async operations for the connection without worrying about pointer lifetime.
+  struct WeakRef {
+   public:
+    // Get residing thread of connection. Thread-safe.
+    unsigned Thread() const;
+
+    // Get pointer to connection if still valid, nullptr if expired.
+    // Can only be called from connection's thread. Validity is guaranteed
+    // only until the next suspension point.
+    Connection* Get() const;
+
+    // Returns thue if the reference expired. Thread-safe.
+    bool IsExpired() const;
+
+    // Returns client id.Thread-safe.
+    uint32_t GetClientId() const;
+
+    // Ensure owner thread's memory budget. If expired, skips and returns false. Thread-safe.
+    bool EnsureMemoryBudget() const;
+
+    bool operator<(const WeakRef& other);
+    bool operator==(const WeakRef& other) const;
+
+   private:
+    friend class Connection;
+
+    WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread,
+            uint32_t client_id);
+
+    std::weak_ptr<Connection> ptr_;
+    QueueBackpressure* backpressure_;
+    unsigned thread_;
+    uint32_t client_id_;
+  };
+
  public:
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.
@@ -175,6 +215,9 @@ class Connection : public util::Connection {
 
   // Migrate this connecton to a different thread.
   void Migrate(util::fb2::ProactorBase* dest);
+
+  // Borrow weak reference to connection. Can be called from any thread.
+  WeakRef Borrow();
 
   static void ShutdownThreadLocal();
 
@@ -219,6 +262,10 @@ class Connection : public util::Connection {
   // Requests that at some point, this connection will be migrated to `dest` thread.
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
+
+  void SetClientTrackingSwitch(bool is_on);
+
+  bool IsTrackingOn() const;
 
  protected:
   void OnShutdown() override;
@@ -340,6 +387,9 @@ class Connection : public util::Connection {
   RespVec tmp_parse_args_;
   CmdArgVec tmp_cmd_vec_;
 
+  // Used to keep track of borrowed references. Does not really own itself
+  std::shared_ptr<Connection> self_;
+
   // Pointer to corresponding queue backpressure struct.
   // Needed for access from different threads by EnsureAsyncMemoryBudget().
   QueueBackpressure* queue_backpressure_;
@@ -356,6 +406,9 @@ class Connection : public util::Connection {
 
   // Per-thread queue backpressure structs.
   static thread_local QueueBackpressure tl_queue_backpressure_;
+
+  // a flag indicating whether the client has turned on client tracking.
+  bool tracking_enabled_ = false;
 };
 
 }  // namespace facade

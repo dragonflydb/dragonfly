@@ -269,6 +269,10 @@ void RedisReplyBuilder::SetResp3(bool is_resp3) {
   is_resp3_ = is_resp3;
 }
 
+bool RedisReplyBuilder::IsResp3() const {
+  return is_resp3_;
+}
+
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   VLOG(1) << "Error: " << str;
 
@@ -325,6 +329,28 @@ void RedisReplyBuilder::SendBulkString(std::string_view str) {
   // 3 parts: length, string and CRLF.
   iovec v[3] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
 
+  return Send(v, ABSL_ARRAYSIZE(v));
+}
+
+void RedisReplyBuilder::SendVerbatimString(std::string_view str, VerbatimFormat format) {
+  if (!is_resp3_)
+    return SendBulkString(str);
+
+  char tmp[absl::numbers_internal::kFastToBufferSize + 7];
+  tmp[0] = '=';
+  // + 4 because format is three byte, and need to be followed by a ":"
+  char* next = absl::numbers_internal::FastIntToBuffer(uint32_t(str.size() + 4), tmp + 1);
+  *next++ = '\r';
+  *next++ = '\n';
+
+  DCHECK(format <= VerbatimFormat::MARKDOWN);
+  if (format == VerbatimFormat::TXT)
+    strcpy(next, "txt:");
+  else if (format == VerbatimFormat::MARKDOWN)
+    strcpy(next, "mkd:");
+  next += 4;
+  std::string_view lenpref{tmp, size_t(next - tmp)};
+  iovec v[3] = {IoVec(lenpref), IoVec(str), IoVec(kCRLF)};
   return Send(v, ABSL_ARRAYSIZE(v));
 }
 
