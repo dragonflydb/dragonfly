@@ -85,18 +85,15 @@ TEST_F(JsonTest, Path) {
   EXPECT_FALSE(ec);
 
   expr.evaluate(j1, [](const std::string& path, const json& val) {
-    ASSERT_EQ("$", path);
+    ASSERT_EQ("$['field']", path);
     ASSERT_EQ(1, val.as<int>());
   });
 
   expr = jsonpath::make_expression<json>("$.field-dash", ec);
-  EXPECT_TRUE(ec);  // can not parse '-'
+  ASSERT_FALSE(ec);  // parses '-'
 
-  ec = {};
-  expr = jsonpath::make_expression<json>("$.'field-dash'", ec);
-  ASSERT_FALSE(ec);
   expr.evaluate(j1, [](const std::string& path, const json& val) {
-    ASSERT_EQ("$", path);
+    ASSERT_EQ("$['field-dash']", path);
     ASSERT_EQ(2, val.as<int>());
   });
 }
