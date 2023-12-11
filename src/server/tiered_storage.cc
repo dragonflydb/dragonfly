@@ -631,7 +631,7 @@ void TieredStorage::InitiateGrow(size_t grow_size) {
     }
   };
 
-  error_code ec = io_mgr_.GrowAsync(grow_size, move(cb));
+  error_code ec = io_mgr_.GrowAsync(grow_size, std::move(cb));
   CHECK(!ec) << "TBD";  // TODO
 }
 

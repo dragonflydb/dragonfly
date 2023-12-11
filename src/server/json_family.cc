@@ -1014,7 +1014,7 @@ vector<OptString> OpJsonMGet(JsonExpression expression, const Transaction* t, En
       VLOG(1) << "Failed to dump JSON array to string with the error: " << ec.message();
     }
 
-    dest = move(str);
+    dest = std::move(str);
   }
 
   return response;
@@ -1157,7 +1157,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<bool> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<bool> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (*result) {
@@ -1187,11 +1187,11 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpResp(t->GetOpArgs(shard), key, move(expression));
+    return OpResp(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<JsonType>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<JsonType>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
@@ -1242,11 +1242,11 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return func(t->GetOpArgs(shard), key, move(expression));
+    return func(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1297,7 +1297,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
         continue;
 
       uint32_t indx = transaction->ReverseArgIndex(sid, j);
-      results[indx] = move(res[j]);
+      results[indx] = std::move(res[j]);
     }
   }
 
@@ -1355,12 +1355,12 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrIndex(t->GetOpArgs(shard), key, move(expression), *search_value, start_index,
+    return OpArrIndex(t->GetOpArgs(shard), key, std::move(expression), *search_value, start_index,
                       end_index);
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptLong>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptLong>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1388,7 +1388,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
       return;
     }
 
-    new_values.emplace_back(move(*val));
+    new_values.emplace_back(std::move(*val));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1396,7 +1396,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
   if (result) {
     PrintOptVec(cntx, result);
   } else {
@@ -1422,7 +1422,7 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
   if (result) {
     PrintOptVec(cntx, result);
   } else {
@@ -1458,7 +1458,7 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
   if (result) {
     PrintOptVec(cntx, result);
   } else {
@@ -1492,7 +1492,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptString>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptString>> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     rb->StartArray(result->size());
@@ -1517,7 +1517,7 @@ void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<long> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cntx->SendLong(*result);
@@ -1540,7 +1540,7 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1563,11 +1563,11 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpObjKeys(t->GetOpArgs(shard), key, move(expression));
+    return OpObjKeys(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<StringVec>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<StringVec>> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     rb->StartArray(result->size());
@@ -1595,7 +1595,7 @@ void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<long> result = trans->ScheduleSingleHopT(std::move(cb));
   cntx->SendLong(*result);
 }
 
@@ -1615,7 +1615,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cntx->SendSimpleString(*result);
@@ -1640,7 +1640,7 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cntx->SendSimpleString(*result);
@@ -1658,7 +1658,7 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptBool>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptBool>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1681,11 +1681,11 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpType(t->GetOpArgs(shard), key, move(expression));
+    return OpType(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<string>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<string>> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (result->empty()) {
@@ -1717,11 +1717,11 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrLen(t->GetOpArgs(shard), key, move(expression));
+    return OpArrLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1744,11 +1744,11 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpObjLen(t->GetOpArgs(shard), key, move(expression));
+    return OpObjLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1771,11 +1771,11 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrLen(t->GetOpArgs(shard), key, move(expression));
+    return OpStrLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1821,7 +1821,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
       }
     }
 
-    expressions.emplace_back(expr_str, move(expr));
+    expressions.emplace_back(expr_str, std::move(expr));
   }
 
   if (auto err = parser.Error(); err)
@@ -1833,7 +1833,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     rb->SendBulkString(*result);

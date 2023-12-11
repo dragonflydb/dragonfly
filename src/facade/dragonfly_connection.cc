@@ -118,7 +118,7 @@ struct Connection::Shutdown {
   ShutdownHandle next_handle = 1;
 
   ShutdownHandle Add(ShutdownCb cb) {
-    map[next_handle] = move(cb);
+    map[next_handle] = std::move(cb);
     return next_handle++;
   }
 
@@ -129,7 +129,10 @@ struct Connection::Shutdown {
 
 Connection::PubMessage::PubMessage(string pattern, shared_ptr<char[]> buf, size_t channel_len,
                                    size_t message_len)
-    : pattern{move(pattern)}, buf{move(buf)}, channel_len{channel_len}, message_len{message_len} {
+    : pattern{std::move(pattern)},
+      buf{std::move(buf)},
+      channel_len{channel_len},
+      message_len{message_len} {
 }
 
 string_view Connection::PubMessage::Channel() const {
@@ -694,7 +697,7 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
       evc_.notify();
 
   } else {
-    SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), heap)});
+    SendAsync(MessageHandle{FromArgs(std::move(tmp_parse_args_), heap)});
     if (dispatch_q_.size() > 10)
       ThisFiber::Yield();
   }
@@ -1097,7 +1100,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
       SquashPipeline(builder);
     } else {
-      MessageHandle msg = move(dispatch_q_.front());
+      MessageHandle msg = std::move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
       if (ShouldEndDispatchFiber(msg)) {
@@ -1168,7 +1171,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
     return nullptr;
 
   free_req_release_weight = 0;  // Reset the release weight.
-  auto ptr = move(pipeline_req_pool_.back());
+  auto ptr = std::move(pipeline_req_pool_.back());
   stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
   pipeline_req_pool_.pop_back();
   return ptr;
@@ -1211,11 +1214,11 @@ bool Connection::IsCurrentlyDispatching() const {
 
 void Connection::SendPubMessageAsync(PubMessage msg) {
   void* ptr = mi_malloc(sizeof(PubMessage));
-  SendAsync({PubMessagePtr{new (ptr) PubMessage{move(msg)}, MessageDeleter{}}});
+  SendAsync({PubMessagePtr{new (ptr) PubMessage{std::move(msg)}, MessageDeleter{}}});
 }
 
 void Connection::SendMonitorMessageAsync(string msg) {
-  SendAsync({MonitorMessage{move(msg)}});
+  SendAsync({MonitorMessage{std::move(msg)}});
 }
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
@@ -1302,7 +1305,7 @@ void Connection::RecycleMessage(MessageHandle msg) {
     pending_pipeline_cmd_cnt_--;
     if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
       stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
-      pipeline_req_pool_.push_back(move(*pipe));
+      pipeline_req_pool_.push_back(std::move(*pipe));
     }
   }
 }

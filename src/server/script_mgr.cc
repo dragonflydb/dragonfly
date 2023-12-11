@@ -245,7 +245,7 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   string result;
   Interpreter::AddResult add_result = interpreter->AddFunction(sha, body, &result);
   if (add_result == Interpreter::COMPILE_ERR)
-    return nonstd::make_unexpected(GenericError{move(result)});
+    return nonstd::make_unexpected(GenericError{std::move(result)});
 
   lock_guard lk{mu_};
   auto [it, _] = db_.emplace(sha, InternalScriptData{params, nullptr});
@@ -280,7 +280,8 @@ vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
   for (const auto& [sha, data] : db_) {
     string body = data.body ? string{data.body.get()} : string{};
     string orig_body = data.orig_body ? string{data.orig_body.get()} : string{};
-    res.emplace_back(string{sha.data(), sha.size()}, ScriptData{data, move(body), move(orig_body)});
+    res.emplace_back(string{sha.data(), sha.size()},
+                     ScriptData{data, std::move(body), std::move(orig_body)});
   }
 
   return res;

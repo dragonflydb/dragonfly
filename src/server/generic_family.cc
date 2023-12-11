@@ -324,7 +324,7 @@ void Renamer::Find(Transaction* t) {
     return OpStatus::OK;
   };
 
-  t->Execute(move(cb), false);
+  t->Execute(std::move(cb), false);
 };
 
 void Renamer::Finalize(Transaction* t, bool skip_exist_dest) {
@@ -734,7 +734,7 @@ void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
-  OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
   if (status == OpStatus::OK)
     cntx->SendLong(1);
   else
@@ -794,7 +794,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
     return OpExpire(t->GetOpArgs(shard), key, params);
   };
 
-  OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
   cntx->SendLong(status == OpStatus::OK);
 }
 

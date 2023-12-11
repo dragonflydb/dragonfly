@@ -1153,7 +1153,7 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
     return t->WatchInShard(keys, shard);
   };
 
-  Execute(move(cb), true);
+  Execute(std::move(cb), true);
 
   coordinator_state_ |= COORD_BLOCKED;
 
@@ -1168,14 +1168,14 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   cv_status status = cv_status::no_timeout;
   if (tp == time_point::max()) {
     DVLOG(1) << "WaitOnWatch foreva " << DebugId();
-    blocking_ec_.await(move(wake_cb));
+    blocking_ec_.await(std::move(wake_cb));
     DVLOG(1) << "WaitOnWatch AfterWait";
   } else {
     DVLOG(1) << "WaitOnWatch TimeWait for "
              << duration_cast<milliseconds>(tp - time_point::clock::now()).count() << " ms "
              << DebugId();
 
-    status = blocking_ec_.await_until(move(wake_cb), tp);
+    status = blocking_ec_.await_until(std::move(wake_cb), tp);
 
     DVLOG(1) << "WaitOnWatch await_until " << int(status);
   }

@@ -1413,7 +1413,7 @@ void DbSlice::InvalidateSlotWatches(const SlotSet& slot_ids) {
 }
 
 void DbSlice::SetDocDeletionCallback(DocDeletionCallback ddcb) {
-  doc_del_cb_ = move(ddcb);
+  doc_del_cb_ = std::move(ddcb);
 }
 
 void DbSlice::ResetUpdateEvents() {
