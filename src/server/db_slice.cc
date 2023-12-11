@@ -388,7 +388,6 @@ void DbSlice::AutoUpdater::Cancel() {
 
 DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   DCHECK(fields_.action == DestructorAction::kRun);
-  fields_.db_slice->PreUpdate(fields_.db_ind, fields_.it);
   fields_.db_size = fields_.db_slice->DbSize(fields_.db_ind);
   fields_.deletion_count = fields_.db_slice->deletion_count_;
 }
@@ -405,6 +404,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
     return OpStatus::WRONG_TYPE;
   }
 
+  PreUpdate(cntx.db_index, it);
   return {
       {it, AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
 }
@@ -477,13 +477,7 @@ OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(const Context& cntx, 
   return OpStatus::KEY_NOTFOUND;
 }
 
-pair<PrimeIterator, bool> DbSlice::AddOrFind(const Context& cntx, string_view key) noexcept(false) {
-  auto res = AddOrFind2(cntx, key);
-  return make_pair(get<0>(res), get<2>(res));
-}
-
-tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cntx,
-                                                               string_view key) noexcept(false) {
+DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key) noexcept(false) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
@@ -493,7 +487,12 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     auto res = FindExt(cntx, key);
 
     if (IsValid(res.first)) {
-      return tuple_cat(res, make_tuple(false));
+      PreUpdate(cntx.db_index, res.first);
+      return {.it = res.first,
+              .exp_it = res.second,
+              .is_new = false,
+              .post_updater = AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index,
+                                           res.first, key, true})};
     }
     // It's a new entry.
     DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
@@ -522,7 +521,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (apply_memory_limit && !caching_mode_ && evp.mem_budget() < 0) {
-    VLOG(2) << "AddOrFind2: over limit, budget: " << evp.mem_budget();
+    VLOG(2) << "AddOrFind: over limit, budget: " << evp.mem_budget();
     events_.insertion_rejections++;
     throw bad_alloc();
   }
@@ -573,7 +572,11 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       db.slots_stats[sid].key_count += 1;
     }
 
-    return make_tuple(it, ExpireIterator{}, true);
+    return {.it = it,
+            .exp_it = ExpireIterator{},
+            .is_new = true,
+            .post_updater = AutoUpdater(
+                {AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, false})};
   }
 
   auto& existing = it;
@@ -610,11 +613,20 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       existing->second.Reset();
       events_.expired_keys++;
 
-      return make_tuple(existing, ExpireIterator{}, true);
+      return {.it = existing,
+              .exp_it = ExpireIterator{},
+              .is_new = true,
+              .post_updater = AutoUpdater(
+                  {AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, false})};
     }
   }
 
-  return make_tuple(existing, expire_it, false);
+  PreUpdate(cntx.db_index, it);
+  return {.it = existing,
+          .exp_it = expire_it,
+          .is_new = false,
+          .post_updater = AutoUpdater(
+              {AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})};
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -789,12 +801,12 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   return it->second;
 }
 
-PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
-                              uint64_t expire_at_ms) noexcept(false) {
-  auto [it, added] = AddOrSkip(cntx, key, std::move(obj), expire_at_ms);
-  CHECK(added);
+DbSlice::ItAndUpdater DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
+                                      uint64_t expire_at_ms) noexcept(false) {
+  auto res = AddOrSkip(cntx, key, std::move(obj), expire_at_ms);
+  CHECK(res.is_new);
 
-  return it;
+  return {.it = res.it, .post_updater = std::move(res.post_updater)};
 }
 
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms) const {
@@ -847,21 +859,19 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime
   }
 }
 
-std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,
-                                                            std::string_view key, PrimeValue obj,
-                                                            uint64_t expire_at_ms,
-                                                            bool force_update) noexcept(false) {
+DbSlice::AddOrFindResult DbSlice::AddOrUpdateInternal(const Context& cntx, std::string_view key,
+                                                      PrimeValue obj, uint64_t expire_at_ms,
+                                                      bool force_update) noexcept(false) {
   DCHECK(!obj.IsRef());
 
-  pair<PrimeIterator, bool> res = AddOrFind(cntx, key);
-  if (!res.second && !force_update)  // have not inserted.
+  auto res = AddOrFind(cntx, key);
+  if (!res.is_new && !force_update)  // have not inserted.
     return res;
 
   auto& db = *db_arr_[cntx.db_index];
-  auto& it = res.first;
+  auto& it = res.it;
 
   it->second = std::move(obj);
-  PostUpdate(cntx.db_index, it, key, false);
 
   if (expire_at_ms) {
     it->second.SetExpire(true);
@@ -876,13 +886,13 @@ std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,
   return res;
 }
 
-pair<PrimeIterator, bool> DbSlice::AddOrUpdate(const Context& cntx, string_view key, PrimeValue obj,
-                                               uint64_t expire_at_ms) noexcept(false) {
+DbSlice::AddOrFindResult DbSlice::AddOrUpdate(const Context& cntx, string_view key, PrimeValue obj,
+                                              uint64_t expire_at_ms) noexcept(false) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
 }
 
-pair<PrimeIterator, bool> DbSlice::AddOrSkip(const Context& cntx, string_view key, PrimeValue obj,
-                                             uint64_t expire_at_ms) noexcept(false) {
+DbSlice::AddOrFindResult DbSlice::AddOrSkip(const Context& cntx, string_view key, PrimeValue obj,
+                                            uint64_t expire_at_ms) noexcept(false) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
 }
 

@@ -323,14 +323,14 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
   try {
-    std::pair<PrimeIterator, bool> add_res = shard->db_slice().AddOrFind(context_, key_);
-    if (!add_res.second) {
-      if (add_res.first->second.ObjType() != OBJ_STRING) {
+    auto add_res = shard->db_slice().AddOrFind(context_, key_);
+    if (!add_res.is_new) {
+      if (add_res.it->second.ObjType() != OBJ_STRING) {
         return OpStatus::WRONG_TYPE;
       }
     }
-    element_iter_ = add_res.first;
-    added_ = add_res.second;
+    element_iter_ = add_res.it;
+    added_ = add_res.is_new;
     shard_ = shard;
     return OpStatus::OK;
   } catch (const std::bad_alloc&) {

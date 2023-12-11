@@ -182,15 +182,14 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result,
   rb->SendScoredArray(result.value(), params.with_scores);
 }
 
-OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args, string_view key,
-                                   size_t member_len) {
+OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs& op_args,
+                                           string_view key, size_t member_len) {
   auto& db_slice = op_args.shard->db_slice();
   if (zparams.flags & ZADD_IN_XX) {
-    // TODO(#2252): Replace once AddOrFindMutable() exists
-    return db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
+    return db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   }
 
-  pair<PrimeIterator, bool> add_res;
+  DbSlice::AddOrFindResult add_res;
 
   try {
     add_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -198,10 +197,10 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  PrimeIterator& it = add_res.first;
+  PrimeIterator& it = add_res.it;
   PrimeValue& pv = it->second;
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-  if (add_res.second || zparams.override) {
+  if (add_res.is_new || zparams.override) {
     if (member_len > server.max_map_field_len) {
       detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, zs);
@@ -210,23 +209,18 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
       stats->listpack_blob_cnt++;
     }
-
-    if (!add_res.second) {
-      db_slice.PreUpdate(op_args.db_cntx.db_index, it);
-    }
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
       return OpStatus::WRONG_TYPE;
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
-  if (add_res.second && op_args.shard->blocking_controller()) {
+  if (add_res.is_new && op_args.shard->blocking_controller()) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
     op_args.shard->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
   }
 
-  return it;
+  return DbSlice::ItAndUpdater{add_res.it, std::move(add_res.post_updater)};
 }
 
 bool ScoreToLongLat(const std::optional<double>& val, double* xy) {
@@ -978,7 +972,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   size_t field_len = members.size() > server.zset_max_listpack_entries
                          ? UINT32_MAX
                          : members.front().second.size();
-  OpResult<PrimeIterator> res_it = FindZEntry(zparams, op_args, key, field_len);
+  auto res_it = FindZEntry(zparams, op_args, key, field_len);
 
   if (!res_it)
     return res_it.status();
@@ -992,7 +986,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
 
   OpStatus op_status = OpStatus::OK;
   AddResult aresult;
-  detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
+  detail::RobjWrapper* robj_wrapper = res_it->it->second.GetRobjWrapper();
   bool is_list_pack = robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK;
 
   // opportunistically reserve space if multiple entries are about to be added.
@@ -1041,8 +1035,6 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
     DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
     --stats->listpack_blob_cnt;
   }
-
-  op_args.shard->db_slice().PostUpdate(op_args.db_cntx.db_index, *res_it, key);
 
   if (zparams.flags & ZADD_IN_INCR) {
     aresult.new_score = new_score;

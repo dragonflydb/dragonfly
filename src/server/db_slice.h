@@ -186,10 +186,6 @@ class DbSlice {
     return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
-  // TODO(#2252): Remove this in favor of FindMutable() / FindReadOnly()
-  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
-                               unsigned req_obj_type) const;
-
   struct ItAndUpdater {
     PrimeIterator it;
     AutoUpdater post_updater;
@@ -201,6 +197,7 @@ class DbSlice {
                                             unsigned req_obj_type) const;
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
+  // TODO(#2252): Return AutoUpdater here as well
   std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
@@ -208,30 +205,28 @@ class DbSlice {
   OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(const Context& cntx, ArgSlice args,
                                                          int req_obj_type);
 
-  // Return .second=true if insertion occurred, false if we return the existing key.
-  // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrFind(const Context& cntx,
-                                           std::string_view key) noexcept(false);
-
-  std::tuple<PrimeIterator, ExpireIterator, bool> AddOrFind2(const Context& cntx,
-                                                             std::string_view key) noexcept(false);
+  struct AddOrFindResult {
+    PrimeIterator it;
+    ExpireIterator exp_it;
+    bool is_new = false;
+    AutoUpdater post_updater;
+  };
+  AddOrFindResult AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
-  // Returns second=true if insertion took place.
-  std::pair<PrimeIterator, bool> AddOrUpdate(const Context& cntx, std::string_view key,
-                                             PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
+  AddOrFindResult AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
+                              uint64_t expire_at_ms) noexcept(false);
 
-  // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrSkip(const Context& cntx, std::string_view key,
-                                           PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
+  AddOrFindResult AddOrSkip(const Context& cntx, std::string_view key, PrimeValue obj,
+                            uint64_t expire_at_ms) noexcept(false);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  PrimeIterator AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
-                       uint64_t expire_at_ms) noexcept(false);
+  ItAndUpdater AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
+                      uint64_t expire_at_ms) noexcept(false);
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
@@ -393,9 +388,11 @@ class DbSlice {
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
                          unsigned count);
 
-  std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
-                                                     PrimeValue obj, uint64_t expire_at_ms,
-                                                     bool force_update) noexcept(false);
+  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
+                               unsigned req_obj_type) const;
+
+  AddOrFindResult AddOrUpdateInternal(const Context& cntx, std::string_view key, PrimeValue obj,
+                                      uint64_t expire_at_ms, bool force_update) noexcept(false);
 
   void FlushSlotsFb(const SlotSet& slot_ids);
   void FlushDbIndexes(const std::vector<DbIndex>& indexes);

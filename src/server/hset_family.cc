@@ -168,22 +168,21 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.shard->db_slice();
-  const auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto add_res = db_slice.AddOrFind(op_args.db_cntx, key);
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
   size_t lpb = 0;
 
-  PrimeValue& pv = it->second;
-  if (inserted) {
+  PrimeValue& pv = add_res.it->second;
+  if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
     stats->listpack_blob_cnt++;
   } else {
     if (pv.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
 
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, add_res.it->second);
 
     if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
@@ -205,7 +204,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
     optional<string_view> res;
 
-    if (!inserted)
+    if (!add_res.is_new)
       res = LpFind(lp, field, intbuf);
 
     OpStatus status = IncrementValue(res, param);
@@ -232,7 +231,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     sds val = nullptr;
-    if (!inserted) {
+    if (!add_res.is_new) {
       auto it = sm->Find(field);
       if (it != sm->end()) {
         val = it->second;
@@ -262,7 +261,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     }
   }
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
   return OpStatus::OK;
@@ -617,7 +615,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   VLOG(2) << "OpSet(" << key << ")";
 
   auto& db_slice = op_args.shard->db_slice();
-  pair<PrimeIterator, bool> add_res;
+  DbSlice::AddOrFindResult add_res;
   try {
     add_res = db_slice.AddOrFind(op_args.db_cntx, key);
   } catch (bad_alloc&) {
@@ -627,10 +625,10 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
   uint8_t* lp = nullptr;
-  PrimeIterator& it = add_res.first;
+  PrimeIterator& it = add_res.it;
   PrimeValue& pv = it->second;
 
-  if (add_res.second) {  // new key
+  if (add_res.is_new) {
     if (op_sp.ttl == UINT32_MAX) {
       lp = lpNew(0);
       pv.InitRobj(OBJ_HASH, kEncodingListPack, lp);
@@ -646,7 +644,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       return OpStatus::WRONG_TYPE;
 
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
   if (pv.Encoding() == kEncodingListPack) {
@@ -694,7 +691,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     }
   }
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
   return created;

@@ -246,32 +246,30 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   }
 
   quicklist* dest_ql = nullptr;
-  PrimeIterator dest_it;
-  bool new_key = false;
+  src_res->post_updater.Run();
+  DbSlice::AddOrFindResult dest_res;
   try {
-    src_res->post_updater.Run();
-    tie(dest_it, new_key) = db_slice.AddOrFind(op_args.db_cntx, dest);
+    dest_res = db_slice.AddOrFind(op_args.db_cntx, dest);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  if (new_key) {
+  if (dest_res.is_new) {
     robj* obj = createQuicklistObject();
     dest_ql = (quicklist*)obj->ptr;
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    dest_it->second.ImportRObj(obj);
+    dest_res.it->second.ImportRObj(obj);
 
     // Insertion of dest could invalidate src_it. Find it again.
     src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
     src_it = src_res->it;
     DCHECK(IsValid(src_it));
   } else {
-    if (dest_it->second.ObjType() != OBJ_LIST)
+    if (dest_res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
 
-    dest_ql = GetQL(dest_it->second);
-    db_slice.PreUpdate(op_args.db_cntx.db_index, dest_it);
+    dest_ql = GetQL(dest_res.it->second);
   }
 
   string val = ListPop(src_dir, src_ql);
@@ -279,7 +277,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   quicklistPush(dest_ql, val.data(), val.size(), pos);
 
   src_res->post_updater.Run();
-  db_slice.PostUpdate(op_args.db_cntx.db_index, dest_it, dest, !new_key);
+  dest_res.post_updater.Run();
 
   if (quicklistCount(src_ql) == 0) {
     CHECK(db_slice.Del(op_args.db_cntx.db_index, src_it));
@@ -317,16 +315,20 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   EngineShard* es = op_args.shard;
   PrimeIterator it;
   bool new_key = false;
+  DbSlice::AutoUpdater post_updater;
 
   if (skip_notexist) {
-    // TODO(#2252): Move to FindMutable() once AddOrFindMutable() is implemented
-    auto it_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+    auto it_res = es->db_slice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
     if (!it_res)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
-    it = *it_res;
+    it = it_res->it;
+    post_updater = std::move(it_res->post_updater);
   } else {
     try {
-      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_cntx, key);
+      auto it_res = es->db_slice().AddOrFind(op_args.db_cntx, key);
+      it = it_res.it;
+      post_updater = std::move(it_res.post_updater);
+      new_key = it_res.is_new;
     } catch (bad_alloc&) {
       return OpStatus::OUT_OF_MEMORY;
     }
