@@ -314,7 +314,7 @@ class ElementAccess {
 };
 
 std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
-  auto res = shard->db_slice().Find(context_, key_, OBJ_STRING);
+  auto res = shard->db_slice().FindReadOnly(context_, key_, OBJ_STRING);
   if (res.status() == OpStatus::WRONG_TYPE) {
     return {};
   }
@@ -458,7 +458,8 @@ OpResult<std::string> RunBitOpNot(const OpArgs& op_args, ArgSlice keys) {
   EngineShard* es = op_args.shard;
   // if we found the value, just return, if not found then skip, otherwise report an error
   auto key = keys.front();
-  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> find_res =
+      es->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
     return GetString(find_res.value()->second, es);
   } else {
@@ -479,7 +480,8 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
 
   // collect all the value for this shard
   for (auto& key : keys) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
+    OpResult<PrimeConstIterator> find_res =
+        es->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (find_res) {
       values.emplace_back(GetString(find_res.value()->second, es));
     } else {
@@ -1261,7 +1263,7 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
 
 OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
                                 EngineShard* shard) {
-  OpResult<PrimeIterator> it_res = shard->db_slice().Find(context, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it_res = shard->db_slice().FindReadOnly(context, key, OBJ_STRING);
   if (!it_res.ok()) {
     return it_res.status();
   }

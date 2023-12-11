@@ -146,21 +146,18 @@ error_code JsonReplace(JsonType& instance, string_view path, JsonReplaceCb callb
 
 OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_view path,
                      JsonReplaceCb callback, JsonReplaceVerify verify_op = JsonReplaceVerifyNoOp) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok()) {
     return it_res.status();
   }
 
-  PrimeIterator entry_it = it_res.value();
-  auto& db_slice = op_args.shard->db_slice();
-  auto db_index = op_args.db_cntx.db_index;
+  PrimeConstIterator entry_it = it_res->it;
   JsonType* json_val = entry_it->second.GetJson();
   DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
                    << entry_it->second.ObjType() << "'";
   JsonType& json_entry = *json_val;
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, entry_it->second);
-  db_slice.PreUpdate(db_index, entry_it);
 
   // Run the update operation on this entry
   error_code ec = JsonReplace(json_entry, path, callback);
@@ -172,7 +169,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
   // Make sure that we don't have other internal issue with the operation
   OpStatus res = verify_op(json_entry);
   if (res == OpStatus::OK) {
-    db_slice.PostUpdate(db_index, entry_it, key);
+    it_res->post_updater.Run();
     op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, entry_it->second);
   }
 
@@ -180,7 +177,8 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
 }
 
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+  OpResult<PrimeConstIterator> it_res =
+      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok())
     return it_res.status();
 
@@ -982,7 +980,8 @@ vector<OptString> OpJsonMGet(JsonExpression expression, const Transaction* t, En
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_JSON);
+    OpResult<PrimeConstIterator> it_res =
+        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_JSON);
     if (!it_res.ok())
       continue;
 
@@ -1068,8 +1067,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // and its not JSON, it would return an error.
   if (path == "." || path == "$") {
     if (is_nx_condition || is_xx_condition) {
-      OpResult<PrimeIterator> it_res =
-          op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+      OpResult<PrimeConstIterator> it_res =
+          op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
       bool key_exists = (it_res.status() != OpStatus::KEY_NOTFOUND);
       if (is_nx_condition && key_exists) {
         return false;

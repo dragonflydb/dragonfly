@@ -80,7 +80,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   size_t range_len = start + value.size();
 
   if (range_len == 0) {
-    auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+    auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (it_res) {
       return it_res.value()->second.Size();
     } else {
@@ -114,7 +114,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -154,10 +154,7 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, 
   else
     new_val = absl::StrCat(slice, val);
 
-  auto& db_slice = shard->db_slice();
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
 
   return new_val.size();
 }
@@ -170,6 +167,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
   if (inserted) {
     it->second.SetString(val);
+    // TODO(#2252): We currently only call PostUpdate() (no PreUpdate()), make sure this is fixed
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
 
     return val.size();
@@ -178,17 +176,20 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  return ExtendExisting(op_args, it, key, val, prepend);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  size_t res = ExtendExisting(op_args, it, key, val, prepend);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
+  return res;
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }
 
-  return ExtendExisting(op_args, *it_res, key, val, prepend);
+  return ExtendExisting(op_args, it_res->it, key, val, prepend);
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = false,
@@ -509,11 +510,12 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   auto& db_slice = shard->db_slice();
 
   SinkReplyBuilder::MGetResponse response(args.size());
-  absl::InlinedVector<PrimeIterator, 32> iters(args.size());
+  absl::InlinedVector<PrimeConstIterator, 32> iters(args.size());
 
   size_t total_size = 0;
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_STRING);
+    OpResult<PrimeConstIterator> it_res =
+        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -524,7 +526,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   char* next = response.storage_list->data;
 
   for (size_t i = 0; i < args.size(); ++i) {
-    PrimeIterator it = iters[i];
+    PrimeConstIterator it = iters[i];
     if (it.is_done())
       continue;
 
@@ -1292,7 +1294,8 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_STRING);
+    OpResult<PrimeConstIterator> it_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 

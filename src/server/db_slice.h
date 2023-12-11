@@ -63,6 +63,44 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  class AutoUpdater {
+   public:
+    AutoUpdater();
+    AutoUpdater(AutoUpdater&& o);
+    AutoUpdater& operator=(AutoUpdater&& o);
+    ~AutoUpdater();
+
+    void Run();
+    void Cancel();
+
+   private:
+    enum class DestructorAction {
+      kDoNothing,
+      kRun,
+    };
+
+    // Wrap members in a struct to auto generate operator=
+    struct Fields {
+      DestructorAction action = DestructorAction::kDoNothing;
+
+      DbSlice* db_slice = nullptr;
+      DbIndex db_ind = 0;
+      PrimeIterator it;
+      std::string_view key;
+      bool key_existed = false;
+
+      size_t db_size = 0;
+      size_t deletion_count = 0;
+      // TODO(#2252): Add heap size here, and only update memory in d'tor
+    };
+
+    AutoUpdater(const Fields& fields);
+
+    friend class DbSlice;
+
+    Fields fields_ = {};
+  };
+
   struct Stats {
     // DbStats db;
     std::vector<DbStats> db_stats;
@@ -148,8 +186,19 @@ class DbSlice {
     return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
+  // TODO(#2252): Remove this in favor of FindMutable() / FindReadOnly()
   OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
                                unsigned req_obj_type) const;
+
+  struct ItAndUpdater {
+    PrimeIterator it;
+    AutoUpdater post_updater;
+  };
+  OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
+                                     unsigned req_obj_type);
+
+  OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
+                                            unsigned req_obj_type) const;
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
   std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
@@ -260,6 +309,7 @@ class DbSlice {
   size_t DbSize(DbIndex db_ind) const;
 
   // Callback functions called upon writing to the existing key.
+  //  TODO(#2252): Remove these (or make them private)
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
                   bool existing_entry = true);
@@ -376,6 +426,7 @@ class DbSlice {
   ssize_t memory_budget_ = SSIZE_MAX;
   size_t bytes_per_object_ = 0;
   size_t soft_budget_limit_ = 0;
+  size_t deletion_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 

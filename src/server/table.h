@@ -25,8 +25,9 @@ using PrimeTable = DashTable<PrimeKey, PrimeValue, detail::PrimeTablePolicy>;
 using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>;
 
 /// Iterators are invalidated when new keys are added to the table or some entries are deleted.
-/// Iterators are still valid  if a different entry in the table was mutated.
+/// Iterators are still valid if a different entry in the table was mutated.
 using PrimeIterator = PrimeTable::iterator;
+using PrimeConstIterator = PrimeTable::const_iterator;
 using ExpireIterator = ExpireTable::iterator;
 
 inline bool IsValid(PrimeIterator it) {
@@ -34,6 +35,10 @@ inline bool IsValid(PrimeIterator it) {
 }
 
 inline bool IsValid(ExpireIterator it) {
+  return !it.is_done();
+}
+
+inline bool IsValid(PrimeConstIterator it) {
   return !it.is_done();
 }
 

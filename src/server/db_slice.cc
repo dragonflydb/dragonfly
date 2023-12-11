@@ -338,6 +338,83 @@ auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) 
   return it;
 }
 
+DbSlice::AutoUpdater::AutoUpdater() {
+}
+
+DbSlice::AutoUpdater::AutoUpdater(AutoUpdater&& o) {
+  *this = std::move(o);
+}
+
+DbSlice::AutoUpdater& DbSlice::AutoUpdater::operator=(AutoUpdater&& o) {
+  Run();
+  fields_ = o.fields_;
+  o.Cancel();
+  return *this;
+}
+
+DbSlice::AutoUpdater::~AutoUpdater() {
+  Run();
+}
+
+void DbSlice::AutoUpdater::Run() {
+  if (fields_.action == DestructorAction::kDoNothing) {
+    return;
+  }
+
+  // Check that AutoUpdater does not run after a key was removed.
+  // If this CHECK() failed for you, it probably means that you deleted a key while having an auto
+  // updater in scope. You'll probably want to call Run() (or Cancel() - but be careful).
+  DCHECK(IsValid(fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key)))
+      << "Key was removed before PostUpdate() - this is a bug!";
+
+  // Make sure that the DB has not changed in size since this object was created.
+  // Adding or removing elements from the DB may invalidate iterators.
+  CHECK_EQ(fields_.db_size, fields_.db_slice->DbSize(fields_.db_ind))
+      << "Attempting to run post-update after DB was modified";
+
+  CHECK_EQ(fields_.deletion_count, fields_.db_slice->deletion_count_)
+      << "Attempting to run post-update after a deletion was issued";
+
+  DCHECK(fields_.action == DestructorAction::kRun);
+  CHECK_NE(fields_.db_slice, nullptr);
+
+  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.it, fields_.key, fields_.key_existed);
+  Cancel();  // Reset to not run again
+}
+
+void DbSlice::AutoUpdater::Cancel() {
+  this->fields_ = {};
+}
+
+DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
+  DCHECK(fields_.action == DestructorAction::kRun);
+  fields_.db_slice->PreUpdate(fields_.db_ind, fields_.it);
+  fields_.db_size = fields_.db_slice->DbSize(fields_.db_ind);
+  fields_.deletion_count = fields_.db_slice->deletion_count_;
+}
+
+OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
+                                                     unsigned req_obj_type) {
+  // TODO(#2252): Call an internal find version that does not handle post updates
+  auto it = FindExt(cntx, key).first;
+
+  if (!IsValid(it))
+    return OpStatus::KEY_NOTFOUND;
+
+  if (it->second.ObjType() != req_obj_type) {
+    return OpStatus::WRONG_TYPE;
+  }
+
+  return {
+      {it, AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
+}
+
+auto DbSlice::FindReadOnly(const Context& cntx, string_view key, unsigned req_obj_type) const
+    -> OpResult<PrimeConstIterator> {
+  auto res = Find(cntx, key, req_obj_type);
+  return res.ok() ? OpResult<PrimeConstIterator>(res.value()) : res.status();
+}
+
 pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
   pair<PrimeIterator, ExpireIterator> res;
 
@@ -562,6 +639,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   }
 
   PerformDeletion(it, shard_owner(), db.get());
+  deletion_count_++;
 
   return true;
 }
