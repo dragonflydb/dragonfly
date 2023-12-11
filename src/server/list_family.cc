@@ -443,7 +443,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
     return OpStatus::OK;
   };
 
-  trans->Execute(move(cb), false);
+  trans->Execute(std::move(cb), false);
 
   if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
     result = find_res[0] ? find_res[1] : find_res[0];
@@ -478,7 +478,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 
       return OpStatus::OK;
     };
-    trans->Execute(move(cb), true);
+    trans->Execute(std::move(cb), true);
     result = std::move(find_res[0].value());
   }
 
@@ -1213,7 +1213,7 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
   cntx->conn_state.is_blocking = true;
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_LIST, move(cb), unsigned(timeout * 1000));
+      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000));
   cntx->conn_state.is_blocking = false;
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {

@@ -337,7 +337,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
       auto schema = ParseSchemaOrReply(index.type, parser.Tail(), cntx);
       if (!schema)
         return;
-      index.schema = move(*schema);
+      index.schema = std::move(*schema);
       break;  // SCHEMA always comes last
     }
 
@@ -367,7 +367,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("Index already exists");
   }
 
-  auto idx_ptr = make_shared<DocIndex>(move(index));
+  auto idx_ptr = make_shared<DocIndex>(std::move(index));
   cntx->transaction->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);

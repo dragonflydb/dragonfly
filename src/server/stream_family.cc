@@ -169,7 +169,6 @@ const uint32_t STREAM_LISTPACK_MAX_PRE_ALLOCATE = 4096;
 /* Every stream item inside the listpack, has a flags field that is used to
  * mark the entry as deleted, or having the same field as the "master"
  * entry at the start of the listpack. */
-const uint32_t STREAM_ITEM_FLAG_NONE = 0;              /* No special flags. */
 const uint32_t STREAM_ITEM_FLAG_DELETED = (1 << 0);    /* Entry is deleted. Skip it. */
 const uint32_t STREAM_ITEM_FLAG_SAMEFIELDS = (1 << 1); /* Same fields as master entry. */
 
@@ -932,7 +931,7 @@ vector<Record> GetStreamRecords(stream* s, streamID start, streamID end, bool re
       string skey(reinterpret_cast<char*>(key), key_len);
       string sval(reinterpret_cast<char*>(value), value_len);
 
-      rec.kv_arr.emplace_back(move(skey), move(sval));
+      rec.kv_arr.emplace_back(std::move(skey), std::move(sval));
     }
     records.push_back(std::move(rec));
     arraylen++;

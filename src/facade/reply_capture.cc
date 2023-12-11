@@ -24,8 +24,9 @@ void CapturingReplyBuilder::SendError(std::string_view str, std::string_view typ
 void CapturingReplyBuilder::SendError(ErrorReply error) {
   SKIP_LESS(ReplyMode::ONLY_ERR);
 
-  string message = visit([](auto&& str) -> string { return string{move(str)}; }, error.message);
-  Capture(Error{move(message), error.kind});
+  string message =
+      visit([](auto&& str) -> string { return string{std::move(str)}; }, error.message);
+  Capture(Error{std::move(message), error.kind});
 }
 
 void CapturingReplyBuilder::SendMGetResponse(MGetResponse resp) {
@@ -57,7 +58,7 @@ void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
   for (unsigned i = 0; i < warr.Size(); i++)
     sarr[i] = warr[i];
 
-  Capture(StrArrPayload{true, ARRAY, move(sarr)});
+  Capture(StrArrPayload{true, ARRAY, std::move(sarr)});
 }
 
 void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
@@ -70,7 +71,7 @@ void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
   for (unsigned i = 0; i < warr.Size(); i++)
     sarr[i] = warr[i];
 
-  Capture(StrArrPayload{false, type, move(sarr)});
+  Capture(StrArrPayload{false, type, std::move(sarr)});
 }
 
 void CapturingReplyBuilder::SendNull() {
@@ -114,7 +115,7 @@ void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
 
 CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
   CHECK(stack_.empty());
-  Payload pl = move(current_);
+  Payload pl = std::move(current_);
   current_ = monostate{};
   return pl;
 }
@@ -125,7 +126,7 @@ void CapturingReplyBuilder::SendDirect(Payload&& val) {
   ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
   if (reply_mode_ >= min_mode) {
     DCHECK_EQ(current_.index(), 0u);
-    current_ = move(val);
+    current_ = std::move(val);
   } else {
     current_ = monostate{};
   }
@@ -146,9 +147,9 @@ void CapturingReplyBuilder::Capture(Payload val) {
 
 void CapturingReplyBuilder::CollapseFilledCollections() {
   while (!stack_.empty() && stack_.top().second == 0) {
-    auto pl = move(stack_.top());
+    auto pl = std::move(stack_.top());
     stack_.pop();
-    Capture(move(pl.first));
+    Capture(std::move(pl.first));
   }
 }
 
@@ -223,7 +224,7 @@ struct CaptureVisitor {
 
 void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
   if (auto* crb = dynamic_cast<CapturingReplyBuilder*>(rb); crb != nullptr) {
-    crb->SendDirect(move(pl));
+    crb->SendDirect(std::move(pl));
     return;
   }
 

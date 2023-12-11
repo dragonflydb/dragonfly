@@ -71,14 +71,11 @@ class JournalSlice {
   mutable util::SharedMutex cb_mu_;
   std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_ ABSL_GUARDED_BY(cb_mu_);
 
-  size_t file_offset_ = 0;
   LSN lsn_ = 1;
 
   uint32_t slice_index_ = UINT32_MAX;
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
-
-  bool lameduck_ = false;
 };
 
 }  // namespace journal

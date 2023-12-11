@@ -641,7 +641,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
       return OpStatus::WRONG_TYPE;
 
     string val = GetString(shard, prime_value);
-    params.prev_val->emplace(move(val));
+    params.prev_val->emplace(std::move(val));
   }
 
   DbSlice& db_slice = shard->db_slice();

@@ -733,7 +733,7 @@ ScoredMap FromObject(CompactObj& co, double weight) {
 
   for (auto& elem : arr) {
     elem.second *= weight;
-    res.emplace(move(elem));
+    res.emplace(std::move(elem));
   }
 
   return res;
@@ -983,7 +983,6 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
 
   unsigned added = 0;
   unsigned updated = 0;
-  unsigned processed = 0;
 
   sds& tmp_str = op_args.shard->tmp_str1;
   double new_score = 0;
@@ -1033,8 +1032,6 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
       added++;
     if (retflags & ZADD_OUT_UPDATED)
       updated++;
-    if (!(retflags & ZADD_OUT_NOP))
-      processed++;
   }
 
   // if we migrated to skip_list - update listpack stats.

@@ -21,7 +21,7 @@ using namespace facade;
 class TestConnection : public facade::Connection {
  public:
   TestConnection(Protocol protocol, io::StringSink* sink);
-  std::string RemoteEndpointStr() const;
+  std::string RemoteEndpointStr() const override;
 
   void SendPubMessageAsync(PubMessage pmsg) final;
 

@@ -100,7 +100,7 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_TERM, string, "Печкин");
 
   double d;
-  absl::SimpleAtod("33.3", &d);
+  ASSERT_TRUE(absl::SimpleAtod("33.3", &d));
   SetInput("33.3");
   NEXT_EQ(TOK_DOUBLE, double, d);
 }

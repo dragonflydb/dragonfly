@@ -70,7 +70,7 @@ TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
 }
 
 void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
-  messages.push_back(move(pmsg));
+  messages.push_back(std::move(pmsg));
 }
 
 std::string TestConnection::RemoteEndpointStr() const {

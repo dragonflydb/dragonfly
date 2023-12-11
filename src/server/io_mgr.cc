@@ -48,7 +48,7 @@ error_code IoMgr::Open(const string& path) {
   auto res = OpenLinux(path, kFlags, 0666);
   if (!res)
     return res.error();
-  backing_file_ = move(res.value());
+  backing_file_ = std::move(res.value());
   Proactor* proactor = (Proactor*)ProactorBase::me();
   {
     FiberCall fc(proactor);
@@ -80,7 +80,7 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
   SubmitEntry entry = proactor->GetSubmitEntry(
-      [this, len, cb = move(cb)](auto*, Proactor::IoResult res, uint32_t) {
+      [this, len, cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t) {
         this->flags.grow_progress = 0;
         sz_ += (res == 0 ? len : 0);
         cb(res);
@@ -99,9 +99,9 @@ error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
 
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
-  auto ring_cb = [cb = move(cb)](auto*, Proactor::IoResult res, uint32_t flags) { cb(res); };
+  auto ring_cb = [cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t flags) { cb(res); };
 
-  SubmitEntry se = proactor->GetSubmitEntry(move(ring_cb), 0);
+  SubmitEntry se = proactor->GetSubmitEntry(std::move(ring_cb), 0);
   se.PrepWrite(backing_file_->fd(), blob.data(), blob.size(), offset);
 
   return error_code{};

@@ -113,10 +113,10 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
   io_sink_.reset(file);
 
   is_linux_file_ = file_type & FileType::IO_URING;
+  bool align_writes = (file_type & FileType::DIRECT) != 0;
+  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, align_writes));
 
-  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, file_type | FileType::DIRECT));
-
-  return saver_->SaveHeader(move(glob_data));
+  return saver_->SaveHeader(std::move(glob_data));
 }
 
 error_code RdbSnapshot::SaveBody() {
@@ -140,7 +140,7 @@ void RdbSnapshot::StartInShard(EngineShard* shard) {
 }
 
 SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
-    : SaveStagesInputs{move(inputs)} {
+    : SaveStagesInputs{std::move(inputs)} {
   start_time_ = absl::Now();
 }
 
