@@ -228,6 +228,25 @@ TEST_F(StringFamilyTest, MGetSet) {
   set_fb.Join();
 }
 
+TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "true");
+  ResetService();
+  Run({"debug", "populate", "100000", "key", "32", "RAND"});
+  auto resp = Run({"scan", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  StringVec vec = StrArray(resp.GetVec()[1]);
+  ASSERT_GE(vec.size(), 10);
+
+  auto mget_resp = StrArray(Run(
+      {"mget", vec[0], vec[1], vec[2], vec[3], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9]}));
+
+  for (int i = 0; i < 10; ++i) {
+    auto get_resp = Run({"get", vec[i]});
+    EXPECT_EQ(get_resp, mget_resp[i]);
+  }
+}
+
 TEST_F(StringFamilyTest, MSetGet) {
   Run({"mset", "x", "0", "y", "0", "a", "0", "b", "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
