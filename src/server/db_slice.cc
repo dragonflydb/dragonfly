@@ -1013,7 +1013,9 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
       TieredStorage* tiered = shard_owner()->tiered_storage();
       auto [offset, size] = it->second.GetExternalSlice();
       tiered->Free(offset, size);
+      bool has_expire = it->second.HasExpire();
       it->second.Reset();
+      it->second.SetExpire(has_expire);  // we keep expire data
 
       stats->tiered_entries -= 1;
       stats->tiered_size -= size;
