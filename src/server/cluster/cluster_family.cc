@@ -669,6 +669,9 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
   if (sub_cmd == "CONF") {
     MigrationConf(args, cntx);
+  }
+  if (sub_cmd == "FLOW") {
+    Flow(args, cntx);
   } else {
     cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -683,7 +686,8 @@ ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t 
     }
   }
   return migrations_jobs_
-      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port, std::move(slots)))
+      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port,
+                                                      &server_family_->service(), std::move(slots)))
       .get();
 }
 
@@ -722,6 +726,18 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->SendLong(shard_set->size());
   return;
+}
+
+void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  auto shard_id = parser.Next<size_t>();
+
+  VLOG(1) << "Create flow for " << shard_id << " shard";
+
+  absl::InsecureBitGen gen;
+  string eof_token = GetRandomHex(gen, 40);
+
+  cntx->SendSimpleString(eof_token);
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);

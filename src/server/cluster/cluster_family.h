@@ -54,6 +54,8 @@ class ClusterFamily {
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
 
+  void Flow(CmdArgList args, ConnectionContext* cntx);
+
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   ServerFamily* server_family_ = nullptr;

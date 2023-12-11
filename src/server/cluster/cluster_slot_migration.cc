@@ -3,9 +3,11 @@
 //
 #include "server/cluster/cluster_slot_migration.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/flags/flag.h>
 
 #include "base/logging.h"
+#include "server/cluster/cluster_shard_migration.h"
 #include "server/error.h"
 #include "server/main_service.h"
 
@@ -17,15 +19,29 @@ ABSL_DECLARE_FLAG(int32_t, port);
 namespace dfly {
 
 using namespace std;
+using namespace util;
 using namespace facade;
 using absl::GetFlag;
 
-ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port,
+namespace {
+// Distribute flow indices over all available threads (shard_set pool size).
+vector<vector<unsigned>> Partition(unsigned num_flows) {
+  vector<vector<unsigned>> partition(shard_set->pool()->size());
+  for (unsigned i = 0; i < num_flows; ++i) {
+    partition[i % partition.size()].push_back(i);
+  }
+  return partition;
+}
+
+}  // namespace
+
+ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(std::move(host_ip), port), slots_(std::move(slots)) {
+    : ProtocolClient(move(host_ip), port), service_(*se), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
+  sync_fb_.JoinIfNeeded();
 }
 
 error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
@@ -46,11 +62,13 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
+  state_ = ClusterSlotMigration::C_CONNECTING;
+
   VLOG(1) << "Greeting";
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "couldn't greet source "));
 
-  state_ = ClusterSlotMigration::C_CONNECTING;
+  sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
 
   return {};
 }
@@ -72,7 +90,7 @@ error_code ClusterSlotMigration::Greet() {
   if (!CheckRespFirstTypes({RespExpr::INT64}))
     return make_error_code(errc::bad_message);
 
-  souce_shards_num_ = get<int64_t>(LastResponseArgs()[0].u);
+  source_shards_num_ = get<int64_t>(LastResponseArgs()[0].u);
 
   return error_code{};
 }
@@ -80,6 +98,75 @@ error_code ClusterSlotMigration::Greet() {
 ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   const auto& ctx = server();
   return {ctx.host, ctx.port, state_};
+}
+
+void ClusterSlotMigration::MainMigrationFb() {
+  VLOG(1) << "Main migration fiber started";
+
+  state_ = ClusterSlotMigration::C_FULL_SYNC;
+
+  // TODO add reconnection code
+  if (auto ec = InitiateDflyFullSync(); ec) {
+    LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
+                 << ec.message();
+  }
+}
+
+std::error_code ClusterSlotMigration::InitiateDflyFullSync() {
+  shard_flows_.resize(source_shards_num_);
+  for (unsigned i = 0; i < source_shards_num_; ++i) {
+    shard_flows_[i].reset(new ClusterShardMigration(server(), i));
+  }
+
+  // Blocked on until all flows got full sync cut.
+  BlockingCounter sync_block{source_shards_num_};
+
+  // Switch to new error handler that closes flow sockets.
+  auto err_handler = [this, sync_block](const auto& ge) mutable {
+    // Unblock this function.
+    sync_block.Cancel();
+
+    // Make sure the flows are not in a state transition
+    lock_guard lk{flows_op_mu_};
+
+    // Unblock all sockets.
+    DefaultErrorHandler(ge);
+    for (auto& flow : shard_flows_)
+      flow->Cancel();
+  };
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
+
+  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
+        GlobalState::LOADING);
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  };
+
+  std::atomic_uint32_t synced_shards = 0;
+  auto partition = Partition(source_shards_num_);
+  auto shard_cb = [&](unsigned index, auto*) {
+    for (auto id : partition[index]) {
+      auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &cntx_);
+      if (!ec) {
+        ++synced_shards;
+      } else {
+        cntx_.ReportError(ec);
+      }
+    }
+  };
+  // Lock to prevent the error handler from running instantly
+  // while the flows are in a mixed state.
+  lock_guard lk{flows_op_mu_};
+  shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
+
+  VLOG(1) << synced_shards << " from " << source_shards_num_ << " shards is synchronized";
+  if (synced_shards != source_shards_num_) {
+    cntx_.ReportError(std::make_error_code(errc::state_not_recoverable), "full sync is failed");
+  }
+
+  return cntx_.GetError();
 }
 
 }  // namespace dfly

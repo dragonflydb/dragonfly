@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include "server/cluster/cluster_shard_migration.h"
 #include "server/protocol_client.h"
 
 namespace dfly {
@@ -17,7 +18,7 @@ class ClusterSlotMigration : ProtocolClient {
     State state;
   };
 
-  ClusterSlotMigration(std::string host_ip, uint16_t port,
+  ClusterSlotMigration(std::string host_ip, uint16_t port, Service* se,
                        std::vector<ClusterConfig::SlotRange> slots);
   ~ClusterSlotMigration();
 
@@ -25,10 +26,19 @@ class ClusterSlotMigration : ProtocolClient {
   Info GetInfo() const;
 
  private:
+  void MainMigrationFb();
+  std::error_code InitiateDflyFullSync();
+
+ private:
+  Service& service_;
+  Mutex flows_op_mu_;
+  std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   std::error_code Greet();
   std::vector<ClusterConfig::SlotRange> slots_;
-  size_t souce_shards_num_ = 0;
+  uint32_t source_shards_num_ = 0;
   State state_ = C_NO_STATE;
+
+  Fiber sync_fb_;
 };
 
 }  // namespace dfly
