@@ -339,6 +339,9 @@ class DbSlice {
   // Send invalidation message to the clients that are tracking the change to a key.
   void SendInvalidationTrackingMessage(std::string_view key);
 
+  // Delete a key referred by its iterator.
+  void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
+
  private:
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
@@ -356,6 +359,9 @@ class DbSlice {
 
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
+
+  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
+                       DbTable* table);
 
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);

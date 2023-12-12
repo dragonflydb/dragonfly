@@ -46,65 +46,6 @@ static_assert(kPrimeSegmentSize == 32288);
 // 24576
 static_assert(kExpireSegmentSize == 23528);
 
-void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
-                     DbTable* table) {
-  if (!exp_it.is_done()) {
-    table->expire.Erase(exp_it);
-  }
-
-  if (del_it->second.HasFlag()) {
-    if (table->mcflag.Erase(del_it->first) == 0) {
-      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
-                 << del_it->first.ToString();
-    }
-  }
-
-  DbTableStats& stats = table->stats;
-  const PrimeValue& pv = del_it->second;
-  if (pv.IsExternal()) {
-    auto [offset, size] = pv.GetExternalSlice();
-
-    stats.tiered_entries--;
-    stats.tiered_size -= size;
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->Free(offset, size);
-  }
-  if (pv.HasIoPending()) {
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->CancelIo(table->index, del_it);
-  }
-
-  size_t value_heap_size = pv.MallocUsed();
-  stats.inline_keys -= del_it->first.IsInline();
-  int64_t delta = del_it->first.MallocUsed() + value_heap_size;
-  stats.obj_memory_usage -= delta;
-  stats.AddTypeMemoryUsage(pv.ObjType(), -delta);
-  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
-    --stats.listpack_blob_cnt;
-  } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
-    --stats.listpack_blob_cnt;
-  }
-
-  if (ClusterConfig::IsEnabled()) {
-    string tmp;
-    string_view key = del_it->first.GetSlice(&tmp);
-    SlotId sid = ClusterConfig::KeySlot(key);
-    table->slots_stats[sid].key_count -= 1;
-  }
-
-  table->prime.Erase(del_it);
-}
-
-inline void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table) {
-  ExpireIterator exp_it;
-  if (del_it->second.HasExpire()) {
-    exp_it = table->expire.Find(del_it->first);
-    DCHECK(!exp_it.is_done());
-  }
-
-  PerformDeletion(del_it, exp_it, shard, table);
-};
-
 class PrimeEvictionPolicy {
  public:
   static constexpr bool can_evict = true;  // we implement eviction functionality.
@@ -223,13 +164,9 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
       return 0;
     }
 
-    std::string tmp;
-    std::string_view key = last_slot_it->first.GetSlice(&tmp);
-
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
-    PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
+    db_slice_->PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
-    db_slice_->SendInvalidationTrackingMessage(key);
   }
   me->ShiftRight(bucket_it);
 
@@ -556,19 +493,16 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   }
 
   auto& db = db_arr_[db_ind];
-
   auto obj_type = it->second.ObjType();
 
-  string tmp;
-  string_view key = it->first.GetSlice(&tmp);
-
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
+    string tmp;
+    string_view key = it->first.GetSlice(&tmp);
     DbContext cntx{db_ind, GetCurrentTimeMs()};
     doc_del_cb_(key, cntx, it->second);
   }
 
   PerformDeletion(it, shard_owner(), db.get());
-  SendInvalidationTrackingMessage(key);
 
   return true;
 }
@@ -585,7 +519,6 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     SlotId sid = ClusterConfig::KeySlot(key);
     if (slot_ids.contains(sid) && it.GetVersion() < next_version) {
       PerformDeletion(it, shard_owner(), db_arr_[0].get());
-      SendInvalidationTrackingMessage(key);
     }
     return true;
   };
@@ -633,12 +566,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     for (auto& db_ptr : flush_db_arr) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-          if (it->second.IsExternal()) {
-            std::string tmp;
-            std::string_view key = it->first.GetSlice(&tmp);
+          if (it->second.IsExternal())
             PerformDeletion(it, shard_owner(), db_ptr.get());
-            SendInvalidationTrackingMessage(key);
-          }
         }
 
         DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
@@ -1022,8 +951,6 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   PerformDeletion(it, expire_it, shard_owner(), db.get());
   ++events_.expired_keys;
 
-  SendInvalidationTrackingMessage(tmp_key);
-
   return make_pair(PrimeIterator{}, ExpireIterator{});
 }
 
@@ -1183,8 +1110,6 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
           PerformDeletion(evict_it, shard_owner(), db_table.get());
           ++evicted;
 
-          SendInvalidationTrackingMessage(key);
-
           used_memory_after = owner_->UsedMemory();
           // returns when whichever condition is met first
           if ((evicted == max_eviction_per_hb) ||
@@ -1264,12 +1189,8 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      string_view key = evict_it->first.GetSlice(&tmp);
-
       PerformDeletion(evict_it, shard_owner(), table);
       ++evicted;
-
-      SendInvalidationTrackingMessage(key);
 
       if (freed_memory_fun() > memory_to_free) {
         evict_succeeded = true;
@@ -1295,12 +1216,8 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      string_view key = evict_it->first.GetSlice(&tmp);
-
       PerformDeletion(evict_it, shard_owner(), table);
       ++evicted;
-
-      SendInvalidationTrackingMessage(key);
 
       if (freed_memory_fun() > memory_to_free) {
         evict_succeeded = true;
@@ -1399,5 +1316,66 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
     client_tracking_map_.erase(key);
   }
 }
+
+void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
+                              DbTable* table) {
+  std::string tmp;
+  std::string_view key = del_it->first.GetSlice(&tmp);
+
+  if (!exp_it.is_done()) {
+    table->expire.Erase(exp_it);
+  }
+
+  if (del_it->second.HasFlag()) {
+    if (table->mcflag.Erase(del_it->first) == 0) {
+      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+                 << del_it->first.ToString();
+    }
+  }
+
+  DbTableStats& stats = table->stats;
+  const PrimeValue& pv = del_it->second;
+  if (pv.IsExternal()) {
+    auto [offset, size] = pv.GetExternalSlice();
+
+    stats.tiered_entries--;
+    stats.tiered_size -= size;
+    TieredStorage* tiered = shard->tiered_storage();
+    tiered->Free(offset, size);
+  }
+  if (pv.HasIoPending()) {
+    TieredStorage* tiered = shard->tiered_storage();
+    tiered->CancelIo(table->index, del_it);
+  }
+
+  size_t value_heap_size = pv.MallocUsed();
+  stats.inline_keys -= del_it->first.IsInline();
+  int64_t delta = del_it->first.MallocUsed() + value_heap_size;
+  stats.obj_memory_usage -= delta;
+  stats.AddTypeMemoryUsage(pv.ObjType(), -delta);
+  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
+    --stats.listpack_blob_cnt;
+  } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+    --stats.listpack_blob_cnt;
+  }
+
+  if (ClusterConfig::IsEnabled()) {
+    SlotId sid = ClusterConfig::KeySlot(key);
+    table->slots_stats[sid].key_count -= 1;
+  }
+
+  table->prime.Erase(del_it);
+  SendInvalidationTrackingMessage(key);
+}
+
+void DbSlice::PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table) {
+  ExpireIterator exp_it;
+  if (del_it->second.HasExpire()) {
+    exp_it = table->expire.Find(del_it->first);
+    DCHECK(!exp_it.is_done());
+  }
+
+  PerformDeletion(del_it, exp_it, shard, table);
+};
 
 }  // namespace dfly
