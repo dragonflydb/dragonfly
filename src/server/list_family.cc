@@ -254,16 +254,16 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     return OpStatus::OUT_OF_MEMORY;
   }
 
+  // Insertion of dest could invalidate src_it. Find it again.
+  src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
+  src_it = src_res->it;
+
   if (dest_res.is_new) {
     robj* obj = createQuicklistObject();
     dest_ql = (quicklist*)obj->ptr;
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
     dest_res.it->second.ImportRObj(obj);
-
-    // Insertion of dest could invalidate src_it. Find it again.
-    src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
-    src_it = src_res->it;
     DCHECK(IsValid(src_it));
   } else {
     if (dest_res.it->second.ObjType() != OBJ_LIST)
