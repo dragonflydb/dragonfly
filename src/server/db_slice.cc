@@ -884,10 +884,15 @@ DbSlice::AddOrFindResult DbSlice::AddOrUpdateInternal(const Context& cntx, std::
   if (expire_at_ms) {
     it->second.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
-    auto [eit, inserted] = db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta));
-    CHECK(inserted || force_update);
-    if (!inserted) {
-      eit->second = ExpirePeriod(delta);
+    if (IsValid(res.exp_it) && force_update) {
+      res.exp_it->second = ExpirePeriod(delta);
+    } else {
+      auto [eit, inserted] = db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta));
+      CHECK(inserted || force_update);
+      if (!inserted) {
+        eit->second = ExpirePeriod(delta);
+      }
+      res.exp_it = eit;
     }
   }
 
