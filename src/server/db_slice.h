@@ -336,9 +336,6 @@ class DbSlice {
   // Track keys for the client represented by the the weak reference to its connection.
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
-  // Send invalidation message to the clients that are tracking the change to a key.
-  void SendInvalidationTrackingMessage(std::string_view key);
-
   // Delete a key referred by its iterator.
   void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
 
@@ -362,6 +359,9 @@ class DbSlice {
 
   void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
                        DbTable* table);
+
+  // Send invalidation message to the clients that are tracking the change to a key.
+  void SendInvalidationTrackingMessage(std::string_view key);
 
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
