@@ -616,3 +616,37 @@ async def test_unix_domain_socket(df_local_factory, tmp_dir):
 
     r = aioredis.Redis(unix_socket_path=tmp_dir / "df.sock")
     assert await r.ping()
+
+
+"""
+Test nested pauses. Executing CLIENT PAUSE should be possible even if another write-pause is active.
+It should prolong the pause for all current commands.
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_nested_client_pause(async_client: aioredis.Redis):
+    async def do_pause():
+        await async_client.execute_command("CLIENT", "PAUSE", "1000", "WRITE")
+
+    async def do_write():
+        await async_client.execute_command("LPUSH", "l", "1")
+
+    p1 = asyncio.create_task(do_pause())
+    await asyncio.sleep(0.1)
+
+    p2 = asyncio.create_task(do_write())
+    assert not p2.done()
+
+    await asyncio.sleep(0.5)
+    p3 = asyncio.create_task(do_pause())
+
+    await p1
+    await asyncio.sleep(0.1)
+    assert not p2.done()  # blocked by p3 now
+
+    await p2
+    await asyncio.sleep(0.0)
+    assert p3.done()
+    await p3
