@@ -23,13 +23,12 @@ namespace dfly::acl {
     return true;
   }
 
-  const auto is_authed = IsUserAllowedToInvokeCommandGeneric(cntx.acl_categories, cntx.acl_commands,
-                                                             cntx.keys, tail_args, id);
+  const auto [is_authed, reason] = IsUserAllowedToInvokeCommandGeneric(
+      cntx.acl_categories, cntx.acl_commands, cntx.keys, tail_args, id);
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
-    using Reason = acl::AclLog::Reason;
-    log.Add(cntx, std::string(id.name()), Reason::COMMAND);
+    log.Add(cntx, std::string(id.name()), reason);
   }
 
   return is_authed;
@@ -39,10 +38,9 @@ namespace dfly::acl {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 
-[[nodiscard]] bool IsUserAllowedToInvokeCommandGeneric(uint32_t acl_cat,
-                                                       const std::vector<uint64_t>& acl_commands,
-                                                       const AclKeys& keys, CmdArgList tail_args,
-                                                       const CommandId& id) {
+[[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
+    uint32_t acl_cat, const std::vector<uint64_t>& acl_commands, const AclKeys& keys,
+    CmdArgList tail_args, const CommandId& id) {
   const auto cat_credentials = id.acl_categories();
   const size_t index = id.GetFamily();
   const uint64_t command_mask = id.GetBitIndex();
@@ -52,7 +50,7 @@ namespace dfly::acl {
       (acl_cat & cat_credentials) != 0 || (acl_commands[index] & command_mask) != 0;
 
   if (!command) {
-    return false;
+    return {false, AclLog::Reason::COMMAND};
   }
 
   auto match = [](const auto& pattern, const auto& target) {
@@ -97,7 +95,7 @@ namespace dfly::acl {
     }
   }
 
-  return keys_allowed;
+  return {keys_allowed, AclLog::Reason::KEY};
 }
 
 #pragma GCC diagnostic pop
