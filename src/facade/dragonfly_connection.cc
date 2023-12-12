@@ -1209,7 +1209,7 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused) {
   if (!IsCurrentlyDispatching())
     return;
 
-  if (cc_->paused && !ignore_paused)
+  if (cc_->paused && ignore_paused)
     return;
 
   VLOG(1) << "Sent checkpoint to " << DebugInfo();
