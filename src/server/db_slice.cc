@@ -397,6 +397,7 @@ DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) 
   exp_it = ExpireIterator{};  // ItAndUpdater doesn't have exp_it
   is_new = false;
   post_updater = std::move(o).post_updater;
+  return *this;
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
