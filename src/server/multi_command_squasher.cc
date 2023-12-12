@@ -98,7 +98,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   auto& sinfo = PrepareShardInfo(last_sid);
 
-  sinfo.had_writes |= (cmd->Cid()->opt_mask() & CO::WRITE);
+  sinfo.had_writes |= cmd->Cid()->IsWriteOnly();
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
 
@@ -118,7 +118,7 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
 
   if (verify_commands_) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
-      (*cntx_)->SendError(move(*err));
+      cntx_->SendError(std::move(*err));
       return !error_abort_;
     }
   }
@@ -154,7 +154,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     if (verify_commands_) {
       // The shared context is used for state verification, the local one is only for replies
       if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
-        crb.SendError(*move(err));
+        crb.SendError(std::move(*err));
         sinfo.replies.emplace_back(crb.Take());
         continue;
       }
@@ -215,7 +215,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
 
     aborted |= error_abort_ && CapturingReplyBuilder::GetError(replies.back());
 
-    CapturingReplyBuilder::Apply(move(replies.back()), rb);
+    CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
     replies.pop_back();
 
     if (aborted)

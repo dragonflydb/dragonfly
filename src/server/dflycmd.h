@@ -216,8 +216,6 @@ class DflyCmd {
  private:
   ServerFamily* sf_;  // Not owned
 
-  TxId journal_txid_ = 0;
-
   uint32_t next_sync_id_ = 1;
 
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;

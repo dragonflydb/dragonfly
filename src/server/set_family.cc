@@ -695,20 +695,18 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ArgSlice&
                          bool journal_rewrite) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
-  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
   if (!find_res) {
     return find_res.status();
   }
 
-  db_slice.PreUpdate(op_args.db_cntx.db_index, *find_res);
-
-  CompactObj& co = find_res.value()->second;
+  CompactObj& co = find_res->it->second;
   auto [removed, isempty] = RemoveSet(op_args.db_cntx, vals, &co);
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, *find_res, key);
+  find_res->post_updater.Run();
 
   if (isempty) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, find_res.value()));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, find_res->it));
   }
   if (journal_rewrite && op_args.shard->journal()) {
     vector<string_view> mapped(vals.size() + 1);
@@ -749,7 +747,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
 
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
-    OpResult<PrimeIterator> res = es->db_slice().Find(t->GetDbContext(), k, OBJ_SET);
+    OpResult<PrimeConstIterator> res = es->db_slice().FindReadOnly(t->GetDbContext(), k, OBJ_SET);
     if (res && index == 0) {  // successful src find.
       DCHECK(!res->is_done());
       const CompactObj& val = res.value()->second;
@@ -815,10 +813,10 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
   absl::flat_hash_set<string> uniques;
 
   for (string_view key : keys) {
-    OpResult<PrimeIterator> find_res =
-        op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
     if (find_res) {
-      PrimeValue& pv = find_res.value()->second;
+      const PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
         StringSet* ss = (StringSet*)pv.RObjPtr();
         ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
@@ -843,14 +841,15 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!keys.empty());
   DVLOG(1) << "OpDiff from " << keys.front();
   EngineShard* es = op_args.shard;
-  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, keys.front(), OBJ_SET);
+  OpResult<PrimeConstIterator> find_res =
+      es->db_slice().FindReadOnly(op_args.db_cntx, keys.front(), OBJ_SET);
 
   if (!find_res) {
     return find_res.status();
   }
 
   absl::flat_hash_set<string> uniques;
-  PrimeValue& pv = find_res.value()->second;
+  const PrimeValue& pv = find_res.value()->second;
   if (IsDenseEncoding(pv)) {
     StringSet* ss = (StringSet*)pv.RObjPtr();
     ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
@@ -864,7 +863,8 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!uniques.empty());  // otherwise the key would not exist.
 
   for (size_t i = 1; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> diff_res = es->db_slice().Find(op_args.db_cntx, keys[i], OBJ_SET);
+    OpResult<PrimeConstIterator> diff_res =
+        es->db_slice().FindReadOnly(op_args.db_cntx, keys[i], OBJ_SET);
     if (!diff_res) {
       if (diff_res.status() == OpStatus::WRONG_TYPE) {
         return OpStatus::WRONG_TYPE;
@@ -901,12 +901,12 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 
   StringVec result;
   if (keys.size() == 1) {
-    OpResult<PrimeIterator> find_res =
-        es->db_slice().Find(t->GetDbContext(), keys.front(), OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        es->db_slice().FindReadOnly(t->GetDbContext(), keys.front(), OBJ_SET);
     if (!find_res)
       return find_res.status();
 
-    PrimeValue& pv = find_res.value()->second;
+    const PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
       ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
@@ -926,7 +926,8 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   OpStatus status = OpStatus::OK;
 
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->GetDbContext(), keys[i], OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        es->db_slice().FindReadOnly(t->GetDbContext(), keys[i], OBJ_SET);
     if (!find_res) {
       if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND ||
           find_res.status() != OpStatus::KEY_NOTFOUND) {
@@ -976,7 +977,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 // count - how many elements to pop.
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
@@ -984,7 +985,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   if (count == 0)
     return result;
 
-  PrimeIterator it = find_res.value();
+  PrimeIterator it = find_res->it;
   size_t slen = it->second.Size();
 
   /* CASE 1:
@@ -1003,6 +1004,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     });
 
     // Delete the set as it is now empty
+    find_res->post_updater.Run();
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
 
     // Replicate as DEL.
@@ -1011,7 +1013,6 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     }
   } else {
     SetType st{it->second.RObjPtr(), it->second.Encoding()};
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     if (st.second == kEncodingIntSet) {
       intset* is = (intset*)st.first;
       int64_t val = 0;
@@ -1035,20 +1036,19 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
       std::copy(result.begin(), result.end(), mapped.begin() + 1);
       RecordJournal(op_args, "SREM"sv, mapped);
     }
-
-    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
   }
   return result;
 }
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
-  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
+  OpResult<PrimeConstIterator> find_res =
+      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res)
     return find_res.status();
 
-  PrimeIterator it = find_res.value();
+  PrimeConstIterator it = find_res.value();
   StringVec res;
 
   if (it->second.Encoding() == kEncodingIntSet) {
@@ -1083,10 +1083,10 @@ void SAdd(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return (*cntx)->SendLong(result.value());
+    return cntx->SendLong(result.value());
   }
 
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 void SIsMember(CmdArgList args, ConnectionContext* cntx) {
@@ -1094,7 +1094,8 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   string_view val = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
 
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
@@ -1107,9 +1108,9 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   switch (result.status()) {
     case OpStatus::OK:
-      return (*cntx)->SendLong(1);
+      return cntx->SendLong(1);
     default:
-      return (*cntx)->SendLong(0);
+      return cntx->SendLong(0);
   }
 }
 
@@ -1125,7 +1126,8 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
   memberships.reserve(vals.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
       FindInSet(memberships, t->GetDbContext(), st, vals);
@@ -1134,14 +1136,15 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
     return find_res.status();
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   if (result == OpStatus::KEY_NOTFOUND) {
     memberships.assign(vals.size(), "0");
-    return (*cntx)->SendStringArr(memberships);
+    return rb->SendStringArr(memberships);
   } else if (result == OpStatus::OK) {
-    return (*cntx)->SendStringArr(memberships);
+    return rb->SendStringArr(memberships);
   }
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 void SMove(CmdArgList args, ConnectionContext* cntx) {
@@ -1156,11 +1159,11 @@ void SMove(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<unsigned> result = mover.Commit(cntx->transaction);
   if (!result) {
-    return (*cntx)->SendError(result.status());
+    return cntx->SendError(result.status());
     return;
   }
 
-  (*cntx)->SendLong(result.value());
+  cntx->SendLong(result.value());
 }
 
 void SRem(CmdArgList args, ConnectionContext* cntx) {
@@ -1178,11 +1181,11 @@ void SRem(CmdArgList args, ConnectionContext* cntx) {
 
   switch (result.status()) {
     case OpStatus::WRONG_TYPE:
-      return (*cntx)->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     case OpStatus::OK:
-      return (*cntx)->SendLong(result.value());
+      return cntx->SendLong(result.value());
     default:
-      return (*cntx)->SendLong(0);
+      return cntx->SendLong(0);
   }
 }
 
@@ -1190,7 +1193,8 @@ void SCard(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
     }
@@ -1202,11 +1206,11 @@ void SCard(CmdArgList args, ConnectionContext* cntx) {
 
   switch (result.status()) {
     case OpStatus::OK:
-      return (*cntx)->SendLong(result.value());
+      return cntx->SendLong(result.value());
     case OpStatus::WRONG_TYPE:
-      return (*cntx)->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     default:
-      return (*cntx)->SendLong(0);
+      return cntx->SendLong(0);
   }
 }
 
@@ -1216,7 +1220,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
     string_view arg = ArgS(args, 1);
     if (!absl::SimpleAtoi(arg, &count)) {
-      (*cntx)->SendError(kInvalidIntErr);
+      cntx->SendError(kInvalidIntErr);
       return;
     }
   }
@@ -1225,22 +1229,23 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
     return OpPop(t->GetOpArgs(shard), key, count);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1) {  // SPOP key
       if (result.status() == OpStatus::KEY_NOTFOUND) {
-        (*cntx)->SendNull();
+        rb->SendNull();
       } else {
         DCHECK_EQ(1u, result.value().size());
-        (*cntx)->SendBulkString(result.value().front());
+        rb->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+      rb->SendStringArr(*result, RedisReplyBuilder::SET);
     }
     return;
   }
 
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 void SDiff(CmdArgList args, ConnectionContext* cntx) {
@@ -1263,7 +1268,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
-    (*cntx)->SendError(rsv.status());
+    cntx->SendError(rsv.status());
     return;
   }
 
@@ -1271,7 +1276,8 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.script_info) {  // sort under script
     sort(arr.begin(), arr.end());
   }
-  (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendStringArr(arr, RedisReplyBuilder::SET);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1311,7 +1317,7 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
     cntx->transaction->Conclude();
-    (*cntx)->SendError(rsv.status());
+    cntx->SendError(rsv.status());
     return;
   }
 
@@ -1325,7 +1331,7 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  (*cntx)->SendLong(result.size());
+  cntx->SendLong(result.size());
 }
 
 void SMembers(CmdArgList args, ConnectionContext* cntx) {
@@ -1339,9 +1345,10 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(svec.begin(), svec.end());
     }
-    (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendStringArr(*result, RedisReplyBuilder::SET);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1353,21 +1360,22 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
   int count = is_count ? parser.Next<int>() : 1;
 
   if (parser.HasNext())
-    return (*cntx)->SendError(WrongNumArgsError("SRANDMEMBER"));
+    return cntx->SendError(WrongNumArgsError("SRANDMEMBER"));
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   const unsigned ucount = std::abs(count);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     StringVec result;
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
+    OpResult<PrimeConstIterator> find_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
     }
 
-    PrimeValue& pv = find_res.value()->second;
+    const PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
       ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
@@ -1385,7 +1393,7 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (count < 0 && !result->empty()) {
       for (auto i = result->size(); i < ucount; ++i) {
@@ -1393,15 +1401,15 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
         result->push_back(result->front());
       }
     }
-    (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
+    rb->SendStringArr(*result, RedisReplyBuilder::SET);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      (*cntx)->SendStringArr(StringVec(), RedisReplyBuilder::SET);
+      rb->SendStringArr(StringVec(), RedisReplyBuilder::SET);
     } else {
-      (*cntx)->SendNull();
+      rb->SendNull();
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1421,9 +1429,10 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1451,7 +1460,7 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
   if (!result) {
     cntx->transaction->Conclude();
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
     return;
   }
 
@@ -1464,20 +1473,20 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  (*cntx)->SendLong(result->size());
+  cntx->SendLong(result->size());
 }
 
 void SInterCard(CmdArgList args, ConnectionContext* cntx) {
   unsigned num_keys;
   if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
 
   unsigned limit = 0;
   if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
     if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
-      return (*cntx)->SendError("limit can't be negative");
+      return cntx->SendError("limit can't be negative");
   } else if (args.size() > (num_keys + 1))
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1489,7 +1498,7 @@ void SInterCard(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SvArray> result =
       InterResultVec(result_set, cntx->transaction->GetUniqueShardCnt(), limit);
 
-  return (*cntx)->SendLong(result->size());
+  return cntx->SendLong(result->size());
 }
 
 void SUnion(CmdArgList args, ConnectionContext* cntx) {
@@ -1509,9 +1518,10 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
-    (*cntx)->SendError(unionset.status());
+    cntx->SendError(unionset.status());
   }
 }
 
@@ -1538,7 +1548,7 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   ResultSetView unionset = UnionResultVec(result_set);
   if (!unionset) {
     cntx->transaction->Conclude();
-    (*cntx)->SendError(unionset.status());
+    cntx->SendError(unionset.status());
     return;
   }
 
@@ -1553,7 +1563,7 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  (*cntx)->SendLong(result.size());
+  cntx->SendLong(result.size());
 }
 
 void SScan(CmdArgList args, ConnectionContext* cntx) {
@@ -1563,19 +1573,19 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return (*cntx)->SendError("invalid cursor");
+    return cntx->SendError("invalid cursor");
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
   if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
-    return (*cntx)->SendError(ops.status());
+    return cntx->SendError(ops.status());
   }
 
   ScanOpts scan_op = ops.value();
@@ -1584,16 +1594,17 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
-    (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString(absl::StrCat(cursor));
-    (*cntx)->StartArray(result->size());  // Within scan the return page is of type array
+    rb->StartArray(2);
+    rb->SendBulkString(absl::StrCat(cursor));
+    rb->StartArray(result->size());  // Within scan the return page is of type array
     for (const auto& k : *result) {
-      (*cntx)->SendBulkString(k);
+      rb->SendBulkString(k);
     }
   } else {
-    (*cntx)->SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1605,7 +1616,7 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   vector<string_view> vals(args.size() - 2);
@@ -1621,10 +1632,10 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return (*cntx)->SendLong(result.value());
+    return cntx->SendLong(result.value());
   }
 
-  (*cntx)->SendError(result.status());
+  cntx->SendError(result.status());
 }
 
 }  // namespace

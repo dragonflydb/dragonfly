@@ -99,7 +99,8 @@ void MemoryCmd::Run(CmdArgList args) {
         "DECOMMIT",
         "    Force decommit the memory freed by the server back to OS.",
     };
-    return (*cntx_)->SendSimpleStrArr(help_arr);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+    return rb->SendSimpleStrArr(help_arr);
   };
 
   if (sub_cmd == "STATS") {
@@ -116,7 +117,7 @@ void MemoryCmd::Run(CmdArgList args) {
       mi_heap_collect(ServerState::tlocal()->data_heap(), true);
       mi_heap_collect(mi_heap_get_backing(), true);
     });
-    return (*cntx_)->SendSimpleString("OK");
+    return cntx_->SendSimpleString("OK");
   }
 
   if (sub_cmd == "MALLOC-STATS") {
@@ -132,7 +133,7 @@ void MemoryCmd::Run(CmdArgList args) {
       }
 
       if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
-        return (*cntx_)->SendError(kInvalidIntErr);
+        return cntx_->SendError(kInvalidIntErr);
       }
     }
 
@@ -147,11 +148,12 @@ void MemoryCmd::Run(CmdArgList args) {
 
     string res = shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStats(backing, tid); });
 
-    return (*cntx_)->SendBulkString(res);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+    return rb->SendBulkString(res);
   }
 
   string err = UnknownSubCmd(sub_cmd, "MEMORY");
-  return (*cntx_)->SendError(err, kSyntaxErrType);
+  return cntx_->SendError(err, kSyntaxErrType);
 }
 
 namespace {
@@ -270,10 +272,11 @@ void MemoryCmd::Stats() {
   // Serialization stats, including both replication-related serialization and saving to RDB files.
   stats.push_back({"serialization", serialization_memory.load()});
 
-  (*cntx_)->StartCollection(stats.size(), RedisReplyBuilder::MAP);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  rb->StartCollection(stats.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : stats) {
-    (*cntx_)->SendBulkString(k);
-    (*cntx_)->SendLong(v);
+    rb->SendBulkString(k);
+    rb->SendLong(v);
   }
 }
 
@@ -292,7 +295,7 @@ void MemoryCmd::Usage(std::string_view key) {
 
   if (memory_usage < 0)
     return cntx_->SendError(kKeyNotFoundErr);
-  (*cntx_)->SendLong(memory_usage);
+  cntx_->SendLong(memory_usage);
 }
 
 }  // namespace dfly

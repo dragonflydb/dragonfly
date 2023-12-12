@@ -23,8 +23,8 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
 
   std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
-  virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field);
-  virtual void Remove(DocId id, DocumentAccessor* doc, std::string_view field);
+  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
  protected:
   virtual T Get(DocId id, DocumentAccessor* doc, std::string_view field) = 0;

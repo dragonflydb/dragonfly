@@ -118,7 +118,7 @@ struct Connection::Shutdown {
   ShutdownHandle next_handle = 1;
 
   ShutdownHandle Add(ShutdownCb cb) {
-    map[next_handle] = move(cb);
+    map[next_handle] = std::move(cb);
     return next_handle++;
   }
 
@@ -129,7 +129,10 @@ struct Connection::Shutdown {
 
 Connection::PubMessage::PubMessage(string pattern, shared_ptr<char[]> buf, size_t channel_len,
                                    size_t message_len)
-    : pattern{move(pattern)}, buf{move(buf)}, channel_len{channel_len}, message_len{message_len} {
+    : pattern{std::move(pattern)},
+      buf{std::move(buf)},
+      channel_len{channel_len},
+      message_len{message_len} {
 }
 
 string_view Connection::PubMessage::Channel() const {
@@ -318,6 +321,10 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   }
 
   migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
+
+  // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
+  // We use it for reference counting and accessing `this` (without managing it).
+  self_ = {std::make_shared<std::monostate>(), this};
 
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
@@ -690,7 +697,7 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
       evc_.notify();
 
   } else {
-    SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), heap)});
+    SendAsync(MessageHandle{FromArgs(std::move(tmp_parse_args_), heap)});
     if (dispatch_q_.size() > 10)
       ThisFiber::Yield();
   }
@@ -1093,7 +1100,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
       SquashPipeline(builder);
     } else {
-      MessageHandle msg = move(dispatch_q_.front());
+      MessageHandle msg = std::move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
       if (ShouldEndDispatchFiber(msg)) {
@@ -1164,7 +1171,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
     return nullptr;
 
   free_req_release_weight = 0;  // Reset the release weight.
-  auto ptr = move(pipeline_req_pool_.back());
+  auto ptr = std::move(pipeline_req_pool_.back());
   stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
   pipeline_req_pool_.pop_back();
   return ptr;
@@ -1179,9 +1186,19 @@ void Connection::Migrate(util::fb2::ProactorBase* dest) {
   // connections
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
+  CHECK_EQ(self_.use_count(), 1u);    // references cache our thread and backpressure
   CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
 
   listener()->Migrate(this, dest);
+}
+
+Connection::WeakRef Connection::Borrow() {
+  DCHECK(self_);
+  // If the connection is unaware of subscriptions, it could migrate threads, making this call
+  // unsafe. All external mechanisms that borrow references should register subscriptions.
+  DCHECK_GT(cc_->subscriptions, 0);
+
+  return WeakRef(self_, queue_backpressure_, socket_->proactor()->GetPoolIndex(), id_);
 }
 
 void Connection::ShutdownThreadLocal() {
@@ -1197,11 +1214,11 @@ bool Connection::IsCurrentlyDispatching() const {
 
 void Connection::SendPubMessageAsync(PubMessage msg) {
   void* ptr = mi_malloc(sizeof(PubMessage));
-  SendAsync({PubMessagePtr{new (ptr) PubMessage{move(msg)}, MessageDeleter{}}});
+  SendAsync({PubMessagePtr{new (ptr) PubMessage{std::move(msg)}, MessageDeleter{}}});
 }
 
 void Connection::SendMonitorMessageAsync(string msg) {
-  SendAsync({MonitorMessage{move(msg)}});
+  SendAsync({MonitorMessage{std::move(msg)}});
 }
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
@@ -1288,13 +1305,9 @@ void Connection::RecycleMessage(MessageHandle msg) {
     pending_pipeline_cmd_cnt_--;
     if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
       stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
-      pipeline_req_pool_.push_back(move(*pipe));
+      pipeline_req_pool_.push_back(std::move(*pipe));
     }
   }
-}
-
-void Connection::EnsureAsyncMemoryBudget() {
-  queue_backpressure_->EnsureBelowLimit();
 }
 
 std::string Connection::LocalBindStr() const {
@@ -1343,6 +1356,16 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
   migration_request_ = dest;
 }
 
+void Connection::SetClientTrackingSwitch(bool is_on) {
+  tracking_enabled_ = is_on;
+  if (tracking_enabled_)
+    cc_->subscriptions++;
+}
+
+bool Connection::IsTrackingOn() const {
+  return tracking_enabled_;
+}
+
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
   size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
                dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
@@ -1368,6 +1391,51 @@ void Connection::DecreaseStatsOnClose() {
     --stats_->num_replicas;
   }
   --stats_->num_conns;
+}
+
+Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
+                             unsigned thread, uint32_t client_id)
+    : ptr_{ptr}, backpressure_{backpressure}, thread_{thread}, client_id_{client_id} {
+}
+
+unsigned Connection::WeakRef::Thread() const {
+  return thread_;
+}
+
+Connection* Connection::WeakRef::Get() const {
+  DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
+  // The connection can only be deleted on this thread, so
+  // this pointer is valid until the next suspension.
+  // Note: keeping a shared_ptr doesn't prolong the lifetime because
+  // it doesn't manage the underlying connection. See definition of `self_`.
+  return ptr_.lock().get();
+}
+
+bool Connection::WeakRef::IsExpired() const {
+  return ptr_.expired();
+}
+
+uint32_t Connection::WeakRef::GetClientId() const {
+  return client_id_;
+}
+
+bool Connection::WeakRef::EnsureMemoryBudget() const {
+  // Simple optimization: If a connection was closed, don't check memory budget.
+  if (!ptr_.expired()) {
+    // We don't rely on the connection ptr staying valid because we only access
+    // the threads backpressure
+    backpressure_->EnsureBelowLimit();
+    return true;
+  }
+  return false;
+}
+
+bool Connection::WeakRef::operator<(const WeakRef& other) {
+  return client_id_ < other.client_id_;
+}
+
+bool Connection::WeakRef::operator==(const WeakRef& other) const {
+  return client_id_ == other.client_id_;
 }
 
 }  // namespace facade

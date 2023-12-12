@@ -88,49 +88,49 @@ using namespace std;
 
 final_query:
   filter
-      { driver->Set(move($1)); }
+      { driver->Set(std::move($1)); }
   | filter ARROW knn_query
-      { driver->Set(AstKnnNode(move($1), move($3))); }
+      { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
 
 knn_query:
   LBRACKET KNN UINT32 FIELD TERM opt_knn_alias RBRACKET
     { $$ = AstKnnNode($3, $4, BytesToFtVector($5), $6); }
 
 opt_knn_alias:
-  AS TERM { $$ = move($2); }
+  AS TERM { $$ = std::move($2); }
   | { $$ = std::string{}; }
 
 filter:
-  search_expr               { $$ = move($1); }
+  search_expr               { $$ = std::move($1); }
   | STAR                    { $$ = AstStarNode(); }
 
 search_expr:
-  search_unary_expr         { $$ = move($1); }
-  | search_and_expr         { $$ = move($1); }
-  | search_or_expr          { $$ = move($1); }
+  search_unary_expr         { $$ = std::move($1); }
+  | search_and_expr         { $$ = std::move($1); }
+  | search_or_expr          { $$ = std::move($1); }
 
 search_and_expr:
-  search_unary_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
-  | search_and_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+  search_unary_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
+  | search_and_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
 
 search_or_expr:
-  search_expr OR_OP search_and_expr                { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
-  | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+  search_expr OR_OP search_and_expr                { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
+  | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 search_unary_expr:
-  LPAREN search_expr RPAREN           { $$ = move($2); }
-  | NOT_OP search_unary_expr          { $$ = AstNegateNode(move($2)); }
-  | TERM                              { $$ = AstTermNode(move($1)); }
+  LPAREN search_expr RPAREN           { $$ = std::move($2); }
+  | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2)); }
+  | TERM                              { $$ = AstTermNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(to_string($1)); }
-  | FIELD COLON field_cond            { $$ = AstFieldNode(move($1), move($3)); }
+  | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
-  TERM                                                  { $$ = AstTermNode(move($1)); }
+  TERM                                                  { $$ = AstTermNode(std::move($1)); }
   | UINT32                                              { $$ = AstTermNode(to_string($1)); }
-  | NOT_OP field_cond                                   { $$ = AstNegateNode(move($2)); }
-  | LPAREN field_cond_expr RPAREN                       { $$ = move($2); }
-  | LBRACKET numeric_filter_expr RBRACKET               { $$ = move($2); }
-  | LCURLBR tag_list RCURLBR                            { $$ = move($2); }
+  | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
+  | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
+  | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }
+  | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
 
 numeric_filter_expr:
 opt_lparen generic_number opt_lparen generic_number { $$ = AstRangeNode($2, $1, $4, $3); }
@@ -144,29 +144,29 @@ opt_lparen:
   | LPAREN { $$ = true; }
 
 field_cond_expr:
-  field_unary_expr                       { $$ = move($1); }
-  | field_and_expr                       { $$ = move($1); }
-  | field_or_expr                        { $$ = move($1); }
+  field_unary_expr                       { $$ = std::move($1); }
+  | field_and_expr                       { $$ = std::move($1); }
+  | field_or_expr                        { $$ = std::move($1); }
 
 field_and_expr:
-  field_unary_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
-  | field_and_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+  field_unary_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
+  | field_and_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
 
 field_or_expr:
-  field_cond_expr OR_OP field_unary_expr          { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
-  | field_cond_expr OR_OP field_and_expr          { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+  field_cond_expr OR_OP field_unary_expr          { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
+  | field_cond_expr OR_OP field_and_expr          { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 field_unary_expr:
-  LPAREN field_cond_expr RPAREN                  { $$ = move($2); }
-  | NOT_OP field_unary_expr                      { $$ = AstNegateNode(move($2)); };
-  | TERM                                         { $$ = AstTermNode(move($1)); }
+  LPAREN field_cond_expr RPAREN                  { $$ = std::move($2); }
+  | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); };
+  | TERM                                         { $$ = AstTermNode(std::move($1)); }
   | UINT32                                       { $$ = AstTermNode(to_string($1)); }
 
 tag_list:
-  TERM                       { $$ = AstTagsNode(move($1)); }
+  TERM                       { $$ = AstTagsNode(std::move($1)); }
   | UINT32                   { $$ = AstTagsNode(to_string($1)); }
-  | tag_list OR_OP TERM      { $$ = AstTagsNode(move($1), move($3)); }
-  | tag_list OR_OP DOUBLE    { $$ = AstTagsNode(move($1), to_string($3)); }
+  | tag_list OR_OP TERM      { $$ = AstTagsNode(std::move($1), std::move($3)); }
+  | tag_list OR_OP DOUBLE    { $$ = AstTagsNode(std::move($1), to_string($3)); }
 
 
 %%

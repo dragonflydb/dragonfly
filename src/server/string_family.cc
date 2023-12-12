@@ -80,7 +80,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   size_t range_len = start + value.size();
 
   if (range_len == 0) {
-    auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+    auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (it_res) {
       return it_res.value()->second.Size();
     } else {
@@ -114,7 +114,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -154,10 +154,7 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, 
   else
     new_val = absl::StrCat(slice, val);
 
-  auto& db_slice = shard->db_slice();
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
 
   return new_val.size();
 }
@@ -170,6 +167,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
   if (inserted) {
     it->second.SetString(val);
+    // TODO(#2252): We currently only call PostUpdate() (no PreUpdate()), make sure this is fixed
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
 
     return val.size();
@@ -178,17 +176,20 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  return ExtendExisting(op_args, it, key, val, prepend);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  size_t res = ExtendExisting(op_args, it, key, val, prepend);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
+  return res;
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }
 
-  return ExtendExisting(op_args, *it_res, key, val, prepend);
+  return ExtendExisting(op_args, it_res->it, key, val, prepend);
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = false,
@@ -509,11 +510,12 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   auto& db_slice = shard->db_slice();
 
   SinkReplyBuilder::MGetResponse response(args.size());
-  absl::InlinedVector<PrimeIterator, 32> iters(args.size());
+  absl::InlinedVector<PrimeConstIterator, 32> iters(args.size());
 
   size_t total_size = 0;
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_STRING);
+    OpResult<PrimeConstIterator> it_res =
+        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -524,7 +526,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   char* next = response.storage_list->data;
 
   for (size_t i = 0; i < args.size(); ++i) {
-    PrimeIterator it = iters[i];
+    PrimeConstIterator it = iters[i];
     if (it.is_done())
       continue;
 
@@ -641,7 +643,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
       return OpStatus::WRONG_TYPE;
 
     string val = GetString(shard, prime_value);
-    params.prev_val->emplace(move(val));
+    params.prev_val->emplace(std::move(val));
   }
 
   DbSlice& db_slice = shard->db_slice();
@@ -791,11 +793,12 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   const auto result{SetGeneric(cntx, sparams, key, value, true)};
 
   if (sparams.flags & SetCmd::SET_GET) {
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     // When SET_GET is used, the reply is not affected by whether anything was set.
     if (result->has_value()) {
-      (*cntx)->SendBulkString(result->value());
+      rb->SendBulkString(result->value());
     } else {
-      (*cntx)->SendNull();
+      rb->SendNull();
     }
     return;
   }
@@ -853,17 +856,18 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    (*cntx)->SendBulkString(*result);
+    rb->SendBulkString(*result);
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        (*cntx)->SendError(kWrongTypeErr);
+        rb->SendError(kWrongTypeErr);
         break;
       default:
         DVLOG(1) << "GET " << key << " nil";
-        (*cntx)->SendNull();
+        rb->SendNull();
     }
   }
 }
@@ -881,17 +885,18 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    (*cntx)->SendBulkString(*result);
+    rb->SendBulkString(*result);
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        (*cntx)->SendError(kWrongTypeErr);
+        rb->SendError(kWrongTypeErr);
         break;
       default:
         DVLOG(1) << "GET " << key << " nil";
-        (*cntx)->SendNull();
+        rb->SendNull();
     }
   }
 }
@@ -912,16 +917,17 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (status != OpStatus::OK) {
-    (*cntx)->SendError(status);
+    cntx->SendError(status);
     return;
   }
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (prev_val) {
-    (*cntx)->SendBulkString(*prev_val);
+    rb->SendBulkString(*prev_val);
     return;
   }
 
-  return (*cntx)->SendNull();
+  return rb->SendNull();
 }
 
 void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
@@ -938,16 +944,16 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     if (cur_arg == "EX" || cur_arg == "PX" || cur_arg == "EXAT" || cur_arg == "PXAT") {
       i++;
       if (i >= args.size()) {
-        return (*cntx)->SendError(kSyntaxErr);
+        return cntx->SendError(kSyntaxErr);
       }
 
       string_view ex = ArgS(args, i);
       if (!absl::SimpleAtoi(ex, &int_arg)) {
-        return (*cntx)->SendError(kInvalidIntErr);
+        return cntx->SendError(kInvalidIntErr);
       }
 
       if (int_arg <= 0) {
-        return (*cntx)->SendError(InvalidExpireTime("getex"));
+        return cntx->SendError(InvalidExpireTime("getex"));
       }
 
       if (cur_arg == "EXAT" || cur_arg == "PXAT") {
@@ -963,7 +969,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     } else if (cur_arg == "PERSIST") {
       exp_params.persist = true;
     } else {
-      return (*cntx)->SendError(kSyntaxErr);
+      return cntx->SendError(kSyntaxErr);
     }
   }
 
@@ -989,16 +995,17 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result)
-    return (*cntx)->SendBulkString(*result);
+    return rb->SendBulkString(*result);
 
   switch (result.status()) {
     case OpStatus::WRONG_TYPE:
-      (*cntx)->SendError(kWrongTypeErr);
+      rb->SendError(kWrongTypeErr);
       break;
     default:
       DVLOG(1) << "GET " << key << " nil";
-      (*cntx)->SendNull();
+      rb->SendNull();
   }
 }
 
@@ -1013,7 +1020,7 @@ void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
   return IncrByGeneric(key, val, cntx);
 }
@@ -1024,7 +1031,7 @@ void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return (*cntx)->SendError(kInvalidFloatErr);
+    return cntx->SendError(kInvalidFloatErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1036,7 +1043,7 @@ void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
-    return (*cntx)->SendError(result.status());
+    return cntx->SendError(result.status());
   }
 
   builder->SendDouble(result.value());
@@ -1053,10 +1060,10 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return (*cntx)->SendError(kIncrOverflow);
+    return cntx->SendError(kIncrOverflow);
   }
 
   return IncrByGeneric(key, -val, cntx);
@@ -1114,9 +1121,9 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
 
     OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
     if (!result)
-      return (*cntx)->SendError(result.status());
+      return cntx->SendError(result.status());
     else
-      return (*cntx)->SendLong(result.value());
+      return cntx->SendLong(result.value());
   }
   DCHECK(cntx->protocol() == Protocol::MEMCACHE);
 
@@ -1142,11 +1149,11 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   int32_t unit_vals;
 
   if (!absl::SimpleAtoi(ex, &unit_vals)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   if (unit_vals < 1 || unit_vals >= kMaxExpireDeadlineSec) {
-    return (*cntx)->SendError(InvalidExpireTime(cntx->cid->name()));
+    return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
   SetCmd::SetParams sparams;
@@ -1163,7 +1170,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
 
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
-  return (*cntx)->SendError(result.status());
+  return cntx->SendError(result.status());
 }
 
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
@@ -1241,9 +1248,9 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
 
   OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
   if (status == OpStatus::OK) {
-    (*cntx)->SendOk();
+    cntx->SendOk();
   } else {
-    (*cntx)->SendError(status);
+    cntx->SendError(status);
   }
 }
 
@@ -1280,14 +1287,15 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
 
   transaction->Execute(std::move(epilog_cb), true);
 
-  (*cntx)->SendLong(to_skip ? 0 : 1);
+  cntx->SendLong(to_skip ? 0 : 1);
 }
 
 void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_STRING);
+    OpResult<PrimeConstIterator> it_res =
+        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -1298,9 +1306,9 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   OpResult<size_t> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   } else {
-    (*cntx)->SendLong(result.value());
+    cntx->SendLong(result.value());
   }
 }
 
@@ -1311,7 +1319,7 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
   int32_t start, end;
 
   if (!absl::SimpleAtoi(from, &start) || !absl::SimpleAtoi(to, &end)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1322,9 +1330,10 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   } else {
-    (*cntx)->SendBulkString(result.value());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendBulkString(result.value());
   }
 }
 
@@ -1335,16 +1344,16 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   int32_t start;
 
   if (!absl::SimpleAtoi(offset, &start)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   if (start < 0) {
-    return (*cntx)->SendError("offset is out of range");
+    return cntx->SendError("offset is out of range");
   }
 
   size_t min_size = start + value.size();
   if (min_size > kMaxStrLen) {
-    return (*cntx)->SendError("string exceeds maximum allowed size");
+    return cntx->SendError("string exceeds maximum allowed size");
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
@@ -1355,9 +1364,9 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   OpResult<uint32_t> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
-    (*cntx)->SendError(result.status());
+    cntx->SendError(result.status());
   } else {
-    (*cntx)->SendLong(result.value());
+    cntx->SendLong(result.value());
   }
 }
 
@@ -1381,21 +1390,21 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   uint64_t max_burst;
   const string_view max_burst_str = ArgS(args, 1);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   // Emit count of tokens per period
   uint64_t count;
   const string_view count_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(count_str, &count)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   // Period of emitting count of tokens
   uint64_t period;
   const string_view period_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(period_str, &period)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
 
   // Apply quantity of tokens now
@@ -1404,22 +1413,22 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
     const string_view quantity_str = ArgS(args, 4);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
-      return (*cntx)->SendError(kInvalidIntErr);
+      return cntx->SendError(kInvalidIntErr);
     }
   }
 
   if (max_burst > INT64_MAX - 1) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
   const int64_t limit = max_burst + 1;
 
   if (period > UINT64_MAX / 1000 || count == 0 || period * 1000 / count > INT64_MAX) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr);
   }
   const int64_t emission_interval_ms = period * 1000 / count;
 
   if (emission_interval_ms == 0) {
-    return (*cntx)->SendError("zero rates are not supported");
+    return cntx->SendError("zero rates are not supported");
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
@@ -1430,7 +1439,8 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    (*cntx)->StartArray(result->size());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->StartArray(result->size());
     auto& array = result.value();
 
     int64_t retry_after_s = array[3] / 1000;
@@ -1446,22 +1456,22 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
     array[4] = reset_after_s;
 
     for (const auto& v : array) {
-      (*cntx)->SendLong(v);
+      rb->SendLong(v);
     }
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        (*cntx)->SendError(kWrongTypeErr);
+        cntx->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        (*cntx)->SendError(kInvalidIntErr);
+        cntx->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        (*cntx)->SendError(kOutOfMemory);
+        cntx->SendError(kOutOfMemory);
         break;
       default:
-        (*cntx)->SendError(result.status());
+        cntx->SendError(result.status());
         break;
     }
   }

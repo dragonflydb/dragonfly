@@ -35,7 +35,7 @@ struct SaveStagesInputs {
 class RdbSnapshot {
  public:
   RdbSnapshot(FiberQueueThreadPool* fq_tp, SnapshotStorage* snapshot_storage)
-      : fq_tp_{fq_tp}, snapshot_storage_{snapshot_storage} {
+      : snapshot_storage_{snapshot_storage} {
   }
 
   GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data);
@@ -56,7 +56,6 @@ class RdbSnapshot {
  private:
   bool started_ = false;
   bool is_linux_file_ = false;
-  util::fb2::FiberQueueThreadPool* fq_tp_ = nullptr;
   SnapshotStorage* snapshot_storage_ = nullptr;
 
   unique_ptr<io::Sink> io_sink_;

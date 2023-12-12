@@ -55,7 +55,7 @@ struct IndexResult {
       value_ = DocVec{};
   }
 
-  IndexResult(DocVec&& dv) : value_{move(dv)} {
+  IndexResult(DocVec&& dv) : value_{std::move(dv)} {
   }
 
   IndexResult(const DocVec* dv) : value_{dv} {
@@ -224,7 +224,7 @@ struct BasicSearch {
       visit(cb, matched.Borrowed(), current.Borrowed());
     }
 
-    current = move(tmp_vec_);
+    current = std::move(tmp_vec_);
   }
 
   // Efficiently unify multiple sub results with specified logical op
@@ -240,7 +240,7 @@ struct BasicSearch {
 
     IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
-      Merge(move(matched), &out, op);
+      Merge(std::move(matched), &out, op);
     return out;
   }
 
@@ -444,7 +444,7 @@ struct BasicSearch {
 }  // namespace
 
 FieldIndices::FieldIndices(Schema schema, PMR_NS::memory_resource* mr)
-    : schema_{move(schema)}, all_ids_{}, indices_{} {
+    : schema_{std::move(schema)}, all_ids_{}, indices_{} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }

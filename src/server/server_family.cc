@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
@@ -207,13 +208,13 @@ void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Serv
   size_t requested_slow_log_length = UINT32_MAX;
   size_t argc = args.size();
   if (argc >= 3) {
-    (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
+    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
     return;
   } else if (argc == 2) {
     string_view length = facade::ArgS(args, 1);
     int64_t num;
     if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
-      (*cntx)->SendError("count should be greater than or equal to -1");
+      cntx->SendError("count should be greater than or equal to -1");
       return;
     }
     if (num >= 0) {
@@ -239,40 +240,41 @@ void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Serv
 
   requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
 
-  (*cntx)->StartArray(requested_slow_log_length);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(requested_slow_log_length);
   for (size_t i = 0; i < requested_slow_log_length; ++i) {
     const auto& entry = merged_slow_log[i].first;
     const auto& args = entry.cmd_args;
 
-    (*cntx)->StartArray(6);
+    rb->StartArray(6);
 
-    (*cntx)->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
-    (*cntx)->SendLong(entry.unix_timestamp / 1000000000);
-    (*cntx)->SendLong(entry.execution_time_micro);
+    rb->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
+    rb->SendLong(entry.unix_timestamp / 1000000000);
+    rb->SendLong(entry.execution_time_micro);
 
     // if we truncated the args, there is one pseudo-element containing the number of truncated
     // args that we must add, so the result length is increased by 1
     size_t len = args.size() + int(args.size() < entry.original_length);
 
-    (*cntx)->StartArray(len);
+    rb->StartArray(len);
 
     for (const auto& arg : args) {
       if (arg.second > 0) {
         auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
         auto cmd_arg = arg.first.substr(0, dfly::kMaximumSlowlogArgLength - suffix.length());
-        (*cntx)->SendBulkString(absl::StrCat(cmd_arg, suffix));
+        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
       } else {
-        (*cntx)->SendBulkString(arg.first);
+        rb->SendBulkString(arg.first);
       }
     }
     // if we truncated arguments - add a special string to indicate that.
     if (args.size() < entry.original_length) {
-      (*cntx)->SendBulkString(
+      rb->SendBulkString(
           absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
     }
 
-    (*cntx)->SendBulkString(entry.client_ip);
-    (*cntx)->SendBulkString(entry.client_name);
+    rb->SendBulkString(entry.client_ip);
+    rb->SendBulkString(entry.client_name);
   }
   return;
 }
@@ -871,6 +873,20 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                            << sdata_res.error().message();
   }
 
+  DbStats total;
+  for (const auto& db_stats : m.db_stats) {
+    total += db_stats;
+  }
+
+  for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+    size_t mem = total.memory_usage_by_type[type];
+    if (mem > 0) {
+      AppendMetricWithoutLabels(
+          absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), "", mem,
+          MetricType::GAUGE, &resp->body());
+    }
+  }
+
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
@@ -1114,7 +1130,7 @@ void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
       },
       [](ShardId) { return true; });
 
-  return (*cntx)->SendLong(num_keys.load(memory_order_relaxed));
+  return cntx->SendLong(num_keys.load(memory_order_relaxed));
 }
 
 void ServerFamily::BreakOnShutdown() {
@@ -1157,18 +1173,18 @@ void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, DbSlice::kDbAll);
-  (*cntx)->SendOk();
+  cntx->SendOk();
 }
 
 void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   // non admin port auth
@@ -1186,16 +1202,16 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       cntx->acl_commands = cred.acl_commands;
       cntx->keys = std::move(cred.keys);
       cntx->authenticated = true;
-      return (*cntx)->SendOk();
+      return cntx->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return (*cntx)->SendError(facade::kAuthRejected);
+    return cntx->SendError(facade::kAuthRejected);
   }
 
   if (!cntx->req_auth) {
-    return (*cntx)->SendError(
+    return cntx->SendError(
         "AUTH <password> called without any password configured for "
         "admin port. Are you sure your configuration is correct?");
   }
@@ -1203,9 +1219,9 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   string_view pass = ArgS(args, 0);
   if (pass == GetPassword()) {
     cntx->authenticated = true;
-    (*cntx)->SendOk();
+    cntx->SendOk();
   } else {
-    (*cntx)->SendError(facade::kAuthRejected);
+    cntx->SendError(facade::kAuthRejected);
   }
 }
 
@@ -1222,40 +1238,42 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientList(sub_args, cntx);
   } else if (sub_cmd == "PAUSE") {
     return ClientPause(sub_args, cntx);
+  } else if (sub_cmd == "TRACKING") {
+    return ClientTracking(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
-    return (*cntx)->SendOk();
+    return cntx->SendOk();
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
+  return cntx->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
 void ServerFamily::ClientSetName(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 1) {
     cntx->conn()->SetName(string{ArgS(args, 0)});
-    return (*cntx)->SendOk();
+    return cntx->SendOk();
   } else {
-    return (*cntx)->SendError(facade::kSyntaxErr);
+    return cntx->SendError(facade::kSyntaxErr);
   }
 }
 
 void ServerFamily::ClientGetName(CmdArgList args, ConnectionContext* cntx) {
   if (!args.empty()) {
-    return (*cntx)->SendError(facade::kSyntaxErr);
+    return cntx->SendError(facade::kSyntaxErr);
   }
-  auto name = cntx->conn()->GetName();
-  if (!name.empty()) {
-    return (*cntx)->SendBulkString(name);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (auto name = cntx->conn()->GetName(); !name.empty()) {
+    return rb->SendBulkString(name);
   } else {
-    return (*cntx)->SendNull();
+    return rb->SendNull();
   }
 }
 
 void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
   if (!args.empty()) {
-    return (*cntx)->SendError(facade::kSyntaxErr);
+    return cntx->SendError(facade::kSyntaxErr);
   }
 
   vector<string> client_info;
@@ -1276,7 +1294,8 @@ void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
 
   string result = absl::StrJoin(client_info, "\n");
   result.append("\n");
-  return (*cntx)->SendBulkString(result);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  return rb->SendVerbatimString(result);
 }
 
 void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
@@ -1288,7 +1307,7 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
     pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
   if (auto err = parser.Error(); err) {
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
   }
 
   // Set global pause state and track commands that are running when the pause state is flipped.
@@ -1310,7 +1329,7 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
     service_.proactor_pool().Await([pause_state](util::ProactorBase* pb) {
       ServerState::tlocal()->SetPauseState(pause_state, false);
     });
-    return (*cntx)->SendError("Failed to pause all running clients");
+    return cntx->SendError("Failed to pause all running clients");
   }
 
   // We should not expire/evict keys while clients are puased.
@@ -1337,7 +1356,31 @@ void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
     }
   }).Detach();
 
-  (*cntx)->SendOk();
+  cntx->SendOk();
+}
+
+void ServerFamily::ClientTracking(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 1)
+    return cntx->SendError(kSyntaxErr);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (!rb->IsResp3())
+    return cntx->SendError(
+        "Client tracking is currently not supported for RESP2. Please use RESP3.");
+
+  ToUpper(&args[0]);
+  string_view state = ArgS(args, 0);
+  bool is_on;
+  if (state == "ON") {
+    is_on = true;
+  } else if (state == "OFF") {
+    is_on = false;
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  cntx->conn()->SetClientTrackingSwitch(is_on);
+  return cntx->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -1346,7 +1389,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "SET") {
     if (args.size() != 3) {
-      return (*cntx)->SendError(WrongNumArgsError("config|set"));
+      return cntx->SendError(WrongNumArgsError("config|set"));
     }
 
     ToLower(&args[1]);
@@ -1357,19 +1400,19 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
     switch (result) {
       case ConfigRegistry::SetResult::OK:
-        return (*cntx)->SendOk();
+        return cntx->SendOk();
       case ConfigRegistry::SetResult::UNKNOWN:
-        return (*cntx)->SendError(
+        return cntx->SendError(
             absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
             kConfigErrType);
 
       case ConfigRegistry::SetResult::READONLY:
-        return (*cntx)->SendError(
-            absl::StrCat(kErrPrefix, param, "') - can't set immutable config"), kConfigErrType);
+        return cntx->SendError(absl::StrCat(kErrPrefix, param, "') - can't set immutable config"),
+                               kConfigErrType);
 
       case ConfigRegistry::SetResult::INVALID:
-        return (*cntx)->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
-                                  kConfigErrType);
+        return cntx->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
+                               kConfigErrType);
     }
     ABSL_UNREACHABLE();
   }
@@ -1391,8 +1434,8 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
         res.push_back(flag->CurrentValue());
       }
     }
-
-    return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendStringArr(res, RedisReplyBuilder::MAP);
   }
 
   if (sub_cmd == "RESETSTAT") {
@@ -1405,9 +1448,9 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       stats.pipelined_cmd_cnt = 0;
     });
 
-    return (*cntx)->SendOk();
+    return cntx->SendOk();
   } else {
-    return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
+    return cntx->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
 }
 
@@ -1434,7 +1477,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   string err_detail;
   bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
   if (args.size() > 2) {
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   if (args.size() >= 1) {
@@ -1445,7 +1488,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     } else if (sub_cmd == "RDB") {
       new_version = false;
     } else {
-      return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+      return cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
     }
   }
 
@@ -1456,9 +1499,9 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
 
   GenericError ec = DoSave(new_version, basename, cntx->transaction);
   if (ec) {
-    (*cntx)->SendError(ec.Format());
+    cntx->SendError(ec.Format());
   } else {
-    (*cntx)->SendOk();
+    cntx->SendOk();
   }
 }
 
@@ -1540,7 +1583,7 @@ Metrics ServerFamily::GetMetrics() const {
 
 void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   string_view section;
@@ -1615,11 +1658,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     // are not accounted for to avoid complex computations. In some cases, when number of members
     // is known we approximate their allocations by taking 16 bytes per member.
     append("object_used_memory", total.obj_memory_usage);
+
+    for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+      size_t mem = total.memory_usage_by_type[type];
+      if (mem > 0) {
+        append(absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), mem);
+      }
+    }
     append("table_used_memory", total.table_mem_usage);
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
-    append("strval_bytes", total.strval_memory_usage);
     append("updateval_amount", total.update_value_amount);
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
@@ -1769,7 +1818,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     auto unknown_cmd = service_.UknownCmdMap();
 
-    append_sorted("cmdstat_", move(commands));
+    append_sorted("cmdstat_", std::move(commands));
     append_sorted("unknown_",
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
   }
@@ -1825,8 +1874,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
   }
-
-  (*cntx)->SendBulkString(info);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendVerbatimString(info);
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
@@ -1843,7 +1892,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
     if (!valid_proto_version) {
-      (*cntx)->SendError(UnknownCmd("HELLO", args));
+      cntx->SendError(UnknownCmd("HELLO", args));
       return;
     }
 
@@ -1860,7 +1909,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
         clientname = ArgS(args, i + 1);
         i += 1;
       } else {
-        (*cntx)->SendError(kSyntaxErr);
+        cntx->SendError(kSyntaxErr);
         return;
       }
     }
@@ -1870,13 +1919,13 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     if (username == "default" && password == GetPassword()) {
       cntx->authenticated = true;
     } else {
-      (*cntx)->SendError(facade::kAuthRejected);
+      cntx->SendError(facade::kAuthRejected);
       return;
     }
   }
 
   if (cntx->req_auth && !cntx->authenticated) {
-    (*cntx)->SendError(
+    cntx->SendError(
         "-NOAUTH HELLO must be called with the client already "
         "authenticated, otherwise the HELLO <proto> AUTH <user> <pass> "
         "option can be used to authenticate the client and "
@@ -1888,30 +1937,31 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     cntx->conn()->SetName(string{clientname});
   }
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   int proto_version = 2;
   if (is_resp3) {
     proto_version = 3;
-    (*cntx)->SetResp3(true);
+    rb->SetResp3(true);
   } else {
     // Issuing hello 2 again is valid and should switch back to RESP2
-    (*cntx)->SetResp3(false);
+    rb->SetResp3(false);
   }
 
-  (*cntx)->StartCollection(7, RedisReplyBuilder::MAP);
-  (*cntx)->SendBulkString("server");
-  (*cntx)->SendBulkString("redis");
-  (*cntx)->SendBulkString("version");
-  (*cntx)->SendBulkString(kRedisVersion);
-  (*cntx)->SendBulkString("dragonfly_version");
-  (*cntx)->SendBulkString(GetVersion());
-  (*cntx)->SendBulkString("proto");
-  (*cntx)->SendLong(proto_version);
-  (*cntx)->SendBulkString("id");
-  (*cntx)->SendLong(cntx->conn()->GetClientId());
-  (*cntx)->SendBulkString("mode");
-  (*cntx)->SendBulkString("standalone");
-  (*cntx)->SendBulkString("role");
-  (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
+  rb->StartCollection(7, RedisReplyBuilder::MAP);
+  rb->SendBulkString("server");
+  rb->SendBulkString("redis");
+  rb->SendBulkString("version");
+  rb->SendBulkString(kRedisVersion);
+  rb->SendBulkString("dragonfly_version");
+  rb->SendBulkString(GetVersion());
+  rb->SendBulkString("proto");
+  rb->SendLong(proto_version);
+  rb->SendBulkString("id");
+  rb->SendLong(cntx->conn()->GetClientId());
+  rb->SendBulkString("mode");
+  rb->SendBulkString("standalone");
+  rb->SendBulkString("role");
+  rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
 void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
@@ -1934,12 +1984,12 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
           GlobalState::ACTIVE)
         << "Server is set to replica no one, yet state is not active!";
 
-    return (*cntx)->SendOk();
+    return cntx->SendOk();
   }
 
   uint32_t port;
   if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
-    (*cntx)->SendError(kInvalidIntErr);
+    cntx->SendError(kInvalidIntErr);
     return;
   }
 
@@ -1947,7 +1997,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
       new_state.first != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
-    (*cntx)->SendError("Invalid state");
+    cntx->SendError("Invalid state");
     return;
   }
 
@@ -2015,37 +2065,37 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   auto timeout_sec = parser.Next<float>();
   if (timeout_sec < 0) {
-    return (*cntx)->SendError("timeout is negative");
+    return cntx->SendError("timeout is negative");
   }
 
   bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
 
   if (parser.HasNext())
-    return (*cntx)->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
+    return cntx->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
   if (auto err = parser.Error(); err)
-    return (*cntx)->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   if (ServerState::tlocal()->is_master)
-    return (*cntx)->SendError("Already a master instance");
+    return cntx->SendError("Already a master instance");
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
   auto info = replica_->GetInfo();
   if (!info.full_sync_done) {
-    return (*cntx)->SendError("Full sync not done");
+    return cntx->SendError("Full sync not done");
   }
 
   std::error_code ec = replica_->TakeOver(ArgS(args, 0), save_flag);
   if (ec)
-    return (*cntx)->SendError("Couldn't execute takeover");
+    return cntx->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
   service_.proactor_pool().AwaitFiberOnAll(
       [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
   replica_->Stop();
   replica_.reset();
-  return (*cntx)->SendOk();
+  return cntx->SendOk();
 }
 
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
@@ -2071,17 +2121,18 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
-        (*cntx)->StartArray(4);
-        (*cntx)->SendSimpleString(master_id_);
-        (*cntx)->SendSimpleString(sync_id);
-        (*cntx)->SendLong(replica_info->flows.size());
-        (*cntx)->SendLong(unsigned(DflyVersion::CURRENT_VER));
+        auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+        rb->StartArray(4);
+        rb->SendSimpleString(master_id_);
+        rb->SendSimpleString(sync_id);
+        rb->SendLong(replica_info->flows.size());
+        rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
         return;
       }
     } else if (cmd == "LISTENING-PORT") {
       uint32_t replica_listening_port;
       if (!absl::SimpleAtoi(arg, &replica_listening_port)) {
-        (*cntx)->SendError(kInvalidIntErr);
+        cntx->SendError(kInvalidIntErr);
         return;
       }
       cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
@@ -2093,7 +2144,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
       unsigned version;
       if (!absl::SimpleAtoi(arg, &version)) {
-        return (*cntx)->SendError(kInvalidIntErr);
+        return cntx->SendError(kInvalidIntErr);
       }
       dfly_cmd_->SetDflyClientVersion(cntx, DflyVersion(version));
     } else if (cmd == "ACK" && args.size() == 2) {
@@ -2119,43 +2170,44 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  (*cntx)->SendOk();
+  cntx->SendOk();
   return;
 
 err:
   LOG(ERROR) << "Error in receiving command: " << args;
-  (*cntx)->SendError(kSyntaxErr);
+  cntx->SendError(kSyntaxErr);
 }
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   ServerState& etl = *ServerState::tlocal();
   if (etl.is_master) {
-    (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString("master");
+    rb->StartArray(2);
+    rb->SendBulkString("master");
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
-    (*cntx)->StartArray(vec.size());
+    rb->StartArray(vec.size());
     for (auto& data : vec) {
-      (*cntx)->StartArray(3);
-      (*cntx)->SendBulkString(data.address);
-      (*cntx)->SendBulkString(absl::StrCat(data.listening_port));
-      (*cntx)->SendBulkString(data.state);
+      rb->StartArray(3);
+      rb->SendBulkString(data.address);
+      rb->SendBulkString(absl::StrCat(data.listening_port));
+      rb->SendBulkString(data.state);
     }
 
   } else {
     unique_lock lk{replicaof_mu_};
     Replica::Info rinfo = replica_->GetInfo();
-    (*cntx)->StartArray(4);
-    (*cntx)->SendBulkString("replica");
-    (*cntx)->SendBulkString(rinfo.host);
-    (*cntx)->SendBulkString(absl::StrCat(rinfo.port));
+    rb->StartArray(4);
+    rb->SendBulkString("replica");
+    rb->SendBulkString(rinfo.host);
+    rb->SendBulkString(absl::StrCat(rinfo.port));
     if (rinfo.full_sync_done) {
-      (*cntx)->SendBulkString("stable_sync");
+      rb->SendBulkString("stable_sync");
     } else if (rinfo.full_sync_in_progress) {
-      (*cntx)->SendBulkString("full_sync");
+      rb->SendBulkString("full_sync");
     } else if (rinfo.master_link_established) {
-      (*cntx)->SendBulkString("preparation");
+      rb->SendBulkString("preparation");
     } else {
-      (*cntx)->SendBulkString("connecting");
+      rb->SendBulkString("connecting");
     }
   }
 }
@@ -2180,24 +2232,25 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
     lock_guard lk(save_mu_);
     save_time = last_save_info_->save_time;
   }
-  (*cntx)->SendLong(save_time);
+  cntx->SendLong(save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "LATEST") {
-    return (*cntx)->SendEmptyArray();
+    return rb->SendEmptyArray();
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  (*cntx)->SendError(kSyntaxErr);
+  cntx->SendError(kSyntaxErr);
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
-    (*cntx)->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
     return;
   }
 
@@ -2207,7 +2260,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
     } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
       save_on_shutdown_ = false;
     } else {
-      (*cntx)->SendError(kSyntaxErr);
+      cntx->SendError(kSyntaxErr);
       return;
     }
   }
@@ -2216,7 +2269,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
       [](ProactorBase* pb) { ServerState::tlocal()->EnterLameDuck(); });
 
   CHECK_NOTNULL(acceptor_)->Stop();
-  (*cntx)->SendOk();
+  cntx->SendOk();
 }
 
 void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
@@ -2224,7 +2277,7 @@ void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
   if (cntx->async_dispatch) {
     // SYNC is a special command that should not be sent in batch with other commands.
     // It should be the last command since afterwards the server just dumps the replication data.
-    (*cntx)->SendError("Can not sync in pipeline mode");
+    cntx->SendError("Can not sync in pipeline mode");
     return;
   }
 
@@ -2256,7 +2309,8 @@ void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
         "HELP",
         "    Prints this help.",
     };
-    (*cntx)->SendSimpleStrArr(help);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendSimpleStrArr(help);
     return;
   }
 
@@ -2266,41 +2320,42 @@ void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
       lengths[index] = ServerState::tlocal()->GetSlowLog().Length();
     });
     int sum = std::accumulate(lengths.begin(), lengths.end(), 0);
-    return (*cntx)->SendLong(sum);
+    return cntx->SendLong(sum);
   }
 
   if (sub_cmd == "RESET") {
     service_.proactor_pool().AwaitFiberOnAll(
         [](auto index, auto* context) { ServerState::tlocal()->GetSlowLog().Reset(); });
-    return (*cntx)->SendOk();
+    return cntx->SendOk();
   }
 
   if (sub_cmd == "GET") {
     return SlowLogGet(args, cntx, service_, sub_cmd);
   }
-  (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
+  cntx->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
 void ServerFamily::Module(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   if (ArgS(args, 0) != "LIST")
-    return (*cntx)->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
 
-  (*cntx)->StartArray(2);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(2);
 
   // Json
-  (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
-  (*cntx)->SendSimpleString("name");
-  (*cntx)->SendSimpleString("ReJSON");
-  (*cntx)->SendSimpleString("ver");
-  (*cntx)->SendLong(20'000);
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendSimpleString("name");
+  rb->SendSimpleString("ReJSON");
+  rb->SendSimpleString("ver");
+  rb->SendLong(20'000);
 
   // Search
-  (*cntx)->StartCollection(2, RedisReplyBuilder::MAP);
-  (*cntx)->SendSimpleString("name");
-  (*cntx)->SendSimpleString("search");
-  (*cntx)->SendSimpleString("ver");
-  (*cntx)->SendLong(20'000);  // we target v2
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendSimpleString("name");
+  rb->SendSimpleString("search");
+  rb->SendSimpleString("ver");
+  rb->SendLong(20'000);  // we target v2
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))

@@ -96,7 +96,7 @@ class User final {
   void SetPasswordHash(std::string_view password, bool is_hashed);
 
   // For ACL key globs
-  void SetKeyGlobs(std::vector<UpdateKey>&& keys);
+  void SetKeyGlobs(std::vector<UpdateKey> keys);
 
   // when optional is empty, the special `nopass` password is implied
   // password hashed with xx64

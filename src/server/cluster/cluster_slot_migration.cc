@@ -22,7 +22,7 @@ using absl::GetFlag;
 
 ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(move(host_ip), port), slots_(std::move(slots)) {
+    : ProtocolClient(std::move(host_ip), port), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -31,9 +31,9 @@ ClusterSlotMigration::~ClusterSlotMigration() {
 error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
   VLOG(1) << "Starting slot migration";
 
-  auto check_connection_error = [this, &cntx](error_code ec, const char* msg) -> error_code {
+  auto check_connection_error = [&cntx](error_code ec, const char* msg) -> error_code {
     if (ec) {
-      (*cntx)->SendError(absl::StrCat(msg, ec.message()));
+      cntx->SendError(absl::StrCat(msg, ec.message()));
     }
     return ec;
   };

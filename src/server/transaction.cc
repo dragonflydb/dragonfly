@@ -31,7 +31,7 @@ constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
 }  // namespace
 
 IntentLock::Mode Transaction::Mode() const {
-  return (cid_->opt_mask() & CO::READONLY) ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
+  return cid_->IsReadOnly() ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
 }
 
 /**
@@ -906,6 +906,12 @@ void Transaction::Conclude() {
   Execute(std::move(cb), true);
 }
 
+void Transaction::Refurbish() {
+  txid_ = 0;
+  coordinator_state_ = 0;
+  cb_ptr_ = nullptr;
+}
+
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
@@ -1147,7 +1153,7 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
     return t->WatchInShard(keys, shard);
   };
 
-  Execute(move(cb), true);
+  Execute(std::move(cb), true);
 
   coordinator_state_ |= COORD_BLOCKED;
 
@@ -1162,14 +1168,14 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   cv_status status = cv_status::no_timeout;
   if (tp == time_point::max()) {
     DVLOG(1) << "WaitOnWatch foreva " << DebugId();
-    blocking_ec_.await(move(wake_cb));
+    blocking_ec_.await(std::move(wake_cb));
     DVLOG(1) << "WaitOnWatch AfterWait";
   } else {
     DVLOG(1) << "WaitOnWatch TimeWait for "
              << duration_cast<milliseconds>(tp - time_point::clock::now()).count() << " ms "
              << DebugId();
 
-    status = blocking_ec_.await_until(move(wake_cb), tp);
+    status = blocking_ec_.await_until(std::move(wake_cb), tp);
 
     DVLOG(1) << "WaitOnWatch await_until " << int(status);
   }
@@ -1362,7 +1368,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     return;
 
   // Only write commands and/or no-key-transactional commands are logged
-  if ((cid_->opt_mask() & CO::WRITE) == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
+  if (cid_->IsWriteOnly() == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
   // If autojournaling was disabled and not re-enabled, skip it

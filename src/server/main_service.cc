@@ -962,7 +962,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
-  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
+  bool is_write_cmd = cid->IsWriteOnly();
   bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   // Check if the command is allowed to execute under this global state
@@ -1042,6 +1042,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
+OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
+  auto& db_slice = op_args.shard->db_slice();
+  db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
+  return OpStatus::OK;
+}
+
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1066,7 +1072,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   if (!dispatching_in_multi) {  // Don't interrupt running multi commands
-    bool is_write = (cid->opt_mask() & CO::WRITE);
+    bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
 
@@ -1090,7 +1096,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
-    if (stored_cmd.Cid()->opt_mask() & CO::WRITE) {
+    if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return cntx->SendSimpleString("QUEUED");
@@ -1117,7 +1123,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
           dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
 
       if (status != OpStatus::OK)
-        return (*cntx)->SendError(status);
+        return cntx->SendError(status);
     }
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
@@ -1128,7 +1134,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
             st != OpStatus::OK)
-          return (*cntx)->SendError(st);
+          return cntx->SendError(st);
       }
 
       dfly_cntx->transaction = dist_trans.get();
@@ -1147,6 +1153,18 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (!InvokeCmd(cid, args_no_cmd, dfly_cntx, collect_stats)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
+  }
+
+  // if this is a read command, and client tracking has enabled,
+  // start tracking all the updates to the keys in this read command
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto keys = t->GetShardArgs(shard->shard_id());
+      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
+    };
+
+    dfly_cntx->transaction->Refurbish();
+    dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
 
   if (!dispatching_in_multi) {
@@ -1186,7 +1204,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(!cid->Validate(tail_args));
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
-    (*cntx)->SendError(std::move(*err));
+    cntx->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
 
@@ -1464,9 +1482,8 @@ absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
 
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->protocol() == facade::Protocol::REDIS)
-    (*cntx)->SendOk();
+    cntx->SendOk();
   using facade::SinkReplyBuilder;
-
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
 
@@ -1476,11 +1493,11 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.exec_info.IsCollecting()) {
-    return (*cntx)->SendError("MULTI calls can not be nested");
+    return cntx->SendError("MULTI calls can not be nested");
   }
   cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_COLLECT;
   // TODO: to protect against huge exec transactions.
-  return (*cntx)->SendOk();
+  return cntx->SendOk();
 }
 
 void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
@@ -1488,7 +1505,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   // Skip if EXEC will already fail due previous WATCH.
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
-    return (*cntx)->SendOk();
+    return cntx->SendOk();
   }
 
   atomic_uint32_t keys_existed = 0;
@@ -1510,12 +1527,12 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
     exec_info.watched_keys.emplace_back(cntx->db_index(), ArgS(args, i));
   }
 
-  return (*cntx)->SendOk();
+  return cntx->SendOk();
 }
 
 void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
   UnwatchAllKeys(cntx);
-  return (*cntx)->SendOk();
+  return cntx->SendOk();
 }
 
 template <typename F> void WithReplies(CapturingReplyBuilder* crb, ConnectionContext* cntx, F&& f) {
@@ -1595,14 +1612,15 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   string_view body = ArgS(args, 0);
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (body.empty()) {
-    return (*cntx)->SendNull();
+    return rb->SendNull();
   }
 
   BorrowedInterpreter interpreter{cntx};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
-    return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
+    return rb->SendError(res.error().Format(), facade::kScriptErrType);
 
   string sha{std::move(res.value())};
 
@@ -1679,7 +1697,7 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
       string err = StrCat(
           "Multi mode conflict when running eval in multi transaction. Multi mode is: ", multi_mode,
           " eval mode is: ", script_mode);
-      (*cntx)->SendError(err);
+      cntx->SendError(err);
       return nullopt;
     }
     return false;
@@ -1760,12 +1778,12 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   // Sanitizing the input to avoid code injection.
   if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
-    return (*cntx)->SendError(facade::kScriptNotFound);
+    return cntx->SendError(facade::kScriptNotFound);
   }
 
   auto params = LoadScipt(eval_args.sha, server_family_.script_mgr(), interpreter);
   if (!params)
-    return (*cntx)->SendError(facade::kScriptNotFound);
+    return cntx->SendError(facade::kScriptNotFound);
 
   string error;
 
@@ -1856,7 +1874,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
-    return (*cntx)->SendError(resp, facade::kScriptErrType);
+    return cntx->SendError(resp, facade::kScriptErrType);
   }
 
   CHECK(result == Interpreter::RUN_OK);
@@ -1864,14 +1882,14 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
   if (!interpreter->IsResultSafe()) {
-    (*cntx)->SendError("reached lua stack limit");
+    cntx->SendError("reached lua stack limit");
   } else {
     interpreter->SerializeResult(&ser);
   }
 }
 
 void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = (*cntx).operator->();
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   if (!cntx->conn_state.exec_info.IsCollecting()) {
     return rb->SendError("DISCARD without MULTI");
@@ -1978,7 +1996,7 @@ void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = (*cntx).operator->();
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
 
@@ -2049,7 +2067,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
         if (scmd.Cid()->IsTransactional()) {
           OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, args);
           if (st != OpStatus::OK) {
-            (*cntx)->SendError(st);
+            cntx->SendError(st);
             break;
           }
         }
@@ -2093,12 +2111,12 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     // thus not adding any overhead to backpressure checks.
     optional<uint32_t> last_thread;
     for (auto& sub : subscribers) {
-      DCHECK_LE(last_thread.value_or(0), sub.thread_id);
-      if (last_thread && *last_thread == sub.thread_id)  // skip same thread
+      DCHECK_LE(last_thread.value_or(0), sub.Thread());
+      if (last_thread && *last_thread == sub.Thread())  // skip same thread
         continue;
 
-      sub.conn_cntx->conn()->EnsureAsyncMemoryBudget();
-      last_thread = sub.thread_id;
+      if (sub.EnsureMemoryBudget())  // Invalid pointers are skipped
+        last_thread = sub.Thread();
     }
 
     auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
@@ -2108,21 +2126,20 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
     auto cb = [subscribers_ptr, buf, channel, msg](unsigned idx, util::ProactorBase*) {
       auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
-                            ChannelStore::Subscriber::ByThread);
+                            ChannelStore::Subscriber::ByThreadId);
 
-      while (it != subscribers_ptr->end() && it->thread_id == idx) {
-        facade::Connection* conn = it->conn_cntx->conn();
-        DCHECK(conn);
-        conn->SendPubMessageAsync(
-            {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
-        it->borrow_token.Dec();
+      while (it != subscribers_ptr->end() && it->Thread() == idx) {
+        if (auto* ptr = it->Get(); ptr) {
+          ptr->SendPubMessageAsync(
+              {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
+        }
         it++;
       }
     };
     shard_set->pool()->DispatchBrief(std::move(cb));
   }
 
-  (*cntx)->SendLong(num_published);
+  cntx->SendLong(num_published);
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
@@ -2156,34 +2173,35 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "FLUSH") {
-    return (*cntx)->SendOk();
+    return cntx->SendOk();
   }
 
   string err = UnknownSubCmd(sub_cmd, "FUNCTION");
-  return (*cntx)->SendError(err, kSyntaxErrType);
+  return cntx->SendError(err, kSyntaxErrType);
 }
 
 void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
-  (*cntx)->SendStringArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendStringArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {
   size_t pattern_count = ServerState::tlocal()->channel_store()->PatternCount();
 
-  (*cntx)->SendLong(pattern_count);
+  cntx->SendLong(pattern_count);
 }
 
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "starting monitor on this connection: " << cntx->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
   // this connection, to send to it any command
-  (*cntx)->SendOk();
+  cntx->SendOk();
   cntx->ChangeMonitor(true /* start */);
 }
 
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() < 1) {
-    (*cntx)->SendError(WrongNumArgsError(cntx->cid->name()));
+    cntx->SendError(WrongNumArgsError(cntx->cid->name()));
     return;
   }
 
@@ -2200,7 +2218,8 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
         "HELP",
         "\tPrints this help."};
 
-    (*cntx)->SendSimpleStrArr(help_arr);
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendSimpleStrArr(help_arr);
     return;
   }
 
@@ -2214,7 +2233,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
   } else {
-    (*cntx)->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
+    cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
 }
 
@@ -2226,28 +2245,29 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
     }
   });
 
-  auto serialize_command = [&cntx](string_view name, const CommandId& cid) {
-    (*cntx)->StartArray(6);
-    (*cntx)->SendSimpleString(cid.name());
-    (*cntx)->SendLong(cid.arity());
-    (*cntx)->StartArray(CommandId::OptCount(cid.opt_mask()));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto serialize_command = [&rb](string_view name, const CommandId& cid) {
+    rb->StartArray(6);
+    rb->SendSimpleString(cid.name());
+    rb->SendLong(cid.arity());
+    rb->StartArray(CommandId::OptCount(cid.opt_mask()));
 
     for (uint32_t i = 0; i < 32; ++i) {
       unsigned obit = (1u << i);
       if (cid.opt_mask() & obit) {
         const char* name = CO::OptName(CO::CommandOpt{obit});
-        (*cntx)->SendSimpleString(name);
+        rb->SendSimpleString(name);
       }
     }
 
-    (*cntx)->SendLong(cid.first_key_pos());
-    (*cntx)->SendLong(cid.last_key_pos());
-    (*cntx)->SendLong(cid.opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1);
+    rb->SendLong(cid.first_key_pos());
+    rb->SendLong(cid.last_key_pos());
+    rb->SendLong(cid.opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1);
   };
 
   // If no arguments are specified, reply with all commands
   if (args.empty()) {
-    (*cntx)->StartArray(cmd_cnt);
+    rb->StartArray(cmd_cnt);
     registry_.Traverse([&](string_view name, const CommandId& cid) {
       if (cid.opt_mask() & CO::HIDDEN)
         return;
@@ -2261,7 +2281,7 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
 
   // COUNT
   if (subcmd == "COUNT") {
-    return (*cntx)->SendLong(cmd_cnt);
+    return cntx->SendLong(cmd_cnt);
   }
 
   // INFO [cmd]
@@ -2270,16 +2290,16 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
     string_view cmd = ArgS(args, 1);
 
     if (const auto* cid = registry_.Find(cmd); cid) {
-      (*cntx)->StartArray(1);
+      rb->StartArray(1);
       serialize_command(cmd, *cid);
     } else {
-      (*cntx)->SendNull();
+      rb->SendNull();
     }
 
     return;
   }
 
-  return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
+  return cntx->SendError(kSyntaxErr, kSyntaxErrType);
 }
 
 VarzValue::Map Service::GetVarzStats() {
@@ -2345,20 +2365,12 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {
-      auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->UnsubscribeAll(false);
-
-      // Check that all borrowers finished processing.
-      // token is increased in channel_slice (the publisher side).
-      token.Wait();
     }
 
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
-
-      auto token = conn_state.subscribe_info->borrow_token;
       server_cntx->PUnsubscribeAll(false);
-      token.Wait();  // Same as above
     }
 
     DCHECK(!conn_state.subscribe_info);
@@ -2369,6 +2381,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   DeactivateMonitoring(server_cntx);
 
   server_family_.OnClose(server_cntx);
+
+  cntx->conn()->SetClientTrackingSwitch(false);
 }
 
 string Service::GetContextInfo(facade::ConnectionContext* cntx) {
@@ -2426,7 +2440,7 @@ void Service::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
   *registry
-      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
+      << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
       << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
       << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
