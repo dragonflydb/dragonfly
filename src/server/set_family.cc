@@ -629,7 +629,6 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     res = AddStrSet(op_args.db_cntx, vals, UINT32_MAX, &co);
   }
 
-  add_res.post_updater.Run();
   if (journal_update && op_args.shard->journal()) {
     if (overwrite) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});

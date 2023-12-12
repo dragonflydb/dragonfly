@@ -591,7 +591,6 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
   it->second = std::move(tvalue);
-  add_res.post_updater.Run();
 
   if (params.expire_after_ms) {
     db_slice.AddExpire(op_args_.db_cntx.db_index, it,
