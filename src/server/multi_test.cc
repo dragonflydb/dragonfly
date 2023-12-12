@@ -920,6 +920,12 @@ TEST_F(MultiTest, EvalExpiration) {
   EXPECT_LE(CheckedInt({"pttl", "x"}), 5000);
 }
 
+TEST_F(MultiTest, NoKeyTransactional) {
+  Run({"multi"});
+  Run({"ft._list"});
+  Run({"exec"});
+}
+
 class MultiEvalTest : public BaseFamilyTest {
  protected:
   MultiEvalTest() : BaseFamilyTest() {
