@@ -346,7 +346,6 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   } else {
     if (it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
-    es->db_slice().PreUpdate(op_args.db_cntx.db_index, it);
     ql = GetQL(it->second);
   }
 
@@ -368,8 +367,6 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
                       op_args.tx->DebugId());
     }
   }
-
-  es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
