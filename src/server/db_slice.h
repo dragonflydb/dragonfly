@@ -210,7 +210,10 @@ class DbSlice {
     ExpireIterator exp_it;
     bool is_new = false;
     AutoUpdater post_updater;
+
+    AddOrFindResult& operator=(ItAndUpdater&& o);
   };
+
   AddOrFindResult AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
 
   // Same as AddOrSkip, but overwrites in case entry exists.

@@ -313,40 +313,34 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, ArgSlice vals, bool journal_rewrite) {
   EngineShard* es = op_args.shard;
-  PrimeIterator it;
-  bool new_key = false;
-  DbSlice::AutoUpdater post_updater;
+  DbSlice::AddOrFindResult res;
 
   if (skip_notexist) {
-    auto it_res = es->db_slice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
-    if (!it_res)
+    auto tmp_res = es->db_slice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
+    if (!tmp_res)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
-    it = it_res->it;
-    post_updater = std::move(it_res->post_updater);
+    res = std::move(*tmp_res);
   } else {
     try {
-      auto it_res = es->db_slice().AddOrFind(op_args.db_cntx, key);
-      it = it_res.it;
-      post_updater = std::move(it_res.post_updater);
-      new_key = it_res.is_new;
+      res = es->db_slice().AddOrFind(op_args.db_cntx, key);
     } catch (bad_alloc&) {
       return OpStatus::OUT_OF_MEMORY;
     }
   }
 
   quicklist* ql = nullptr;
-  DVLOG(1) << "OpPush " << key << " new_key " << new_key;
+  DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
 
-  if (new_key) {
+  if (res.is_new) {
     robj* o = createQuicklistObject();
     ql = (quicklist*)o->ptr;
     quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    it->second.ImportRObj(o);
+    res.it->second.ImportRObj(o);
   } else {
-    if (it->second.ObjType() != OBJ_LIST)
+    if (res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
-    ql = GetQL(it->second);
+    ql = GetQL(res.it->second);
   }
 
   // Left push is LIST_HEAD.
@@ -357,10 +351,10 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
   }
 
-  if (new_key) {
+  if (res.is_new) {
     if (es->blocking_controller()) {
       string tmp;
-      string_view key = it->first.GetSlice(&tmp);
+      string_view key = res.it->first.GetSlice(&tmp);
 
       es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
       absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", key, " by ",

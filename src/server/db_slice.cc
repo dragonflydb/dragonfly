@@ -392,6 +392,13 @@ DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   fields_.deletion_count = fields_.db_slice->deletion_count_;
 }
 
+DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) {
+  it = o.it;
+  exp_it = ExpireIterator{};  // ItAndUpdater doesn't have exp_it
+  is_new = false;
+  post_updater = std::move(o).post_updater;
+}
+
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
   // TODO(#2252): Call an internal find version that does not handle post updates

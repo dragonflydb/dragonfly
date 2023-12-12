@@ -614,9 +614,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
     if (!res_it) {
       return res_it.status();
     }
-    add_res.it = res_it->it;
-    add_res.is_new = false;
-    add_res.post_updater = std::move(res_it->post_updater);
+    add_res = std::move(*res_it);
   } else {
     try {
       add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
