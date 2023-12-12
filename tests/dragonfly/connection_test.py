@@ -298,10 +298,15 @@ async def test_pubsub_subcommand_for_numsub(async_client):
     for s in subs1:
         await s.subscribe("channel_name1")
     result = await async_client.pubsub_numsub("channel_name1")
+    assert result[0][0] == "channel_name1" and result[0][1] == 5
 
     for s in subs1:
         await s.unsubscribe("channel_name1")
-    assert result[0][0] == "channel_name1" and result[0][1] == 5
+    result = await async_client.pubsub_numsub("channel_name1")
+    assert result[0][0] == "channel_name1" and result[0][1] == 0
+
+    result = await async_client.pubsub_numsub()
+    assert len(result) == 0
 
     subs2 = [async_client.pubsub() for i in range(5)]
     for s in subs2:
@@ -312,15 +317,14 @@ async def test_pubsub_subcommand_for_numsub(async_client):
         await s.subscribe("channel_name3")
 
     result = await async_client.pubsub_numsub("channel_name2", "channel_name3")
+    assert result[0][0] == "channel_name2" and result[0][1] == 5
+    assert result[1][0] == "channel_name3" and result[1][1] == 10
 
     for s in subs2:
         await s.unsubscribe("channel_name2")
 
     for s in subs3:
         await s.unsubscribe("channel_name3")
-
-    assert result[0][0] == "channel_name2" and result[0][1] == 5
-    assert result[1][0] == "channel_name3" and result[1][1] == 10
 
 
 """
