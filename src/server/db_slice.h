@@ -310,7 +310,11 @@ class DbSlice {
 
   // Callback functions called upon writing to the existing key.
   //  TODO(#2252): Remove these (or make them private)
-  void PreUpdate(DbIndex db_ind, PrimeIterator it);
+  enum class PreUpdateMode {
+    kFull = 0,
+    kWithoutCallbacks,
+  };
+  void PreUpdate(DbIndex db_ind, PrimeIterator it, PreUpdateMode mode = PreUpdateMode::kFull);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
                   bool existing_entry = true);
 

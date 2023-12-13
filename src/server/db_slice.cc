@@ -46,6 +46,13 @@ static_assert(kPrimeSegmentSize == 32288);
 // 24576
 static_assert(kExpireSegmentSize == 23528);
 
+void AccountObjectMemory(const CompactObj& obj, DbTableStats* stats, int64_t multiplier) {
+  const int64_t value_heap_size = obj.MallocUsed() * multiplier;
+
+  stats->obj_memory_usage += value_heap_size;
+  stats->AddTypeMemoryUsage(obj.ObjType(), value_heap_size);
+}
+
 void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
                      DbTable* table) {
   if (!exp_it.is_done()) {
@@ -74,11 +81,10 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     tiered->CancelIo(table->index, del_it);
   }
 
-  size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
-  int64_t delta = del_it->first.MallocUsed() + value_heap_size;
-  stats.obj_memory_usage -= delta;
-  stats.AddTypeMemoryUsage(pv.ObjType(), -delta);
+  AccountObjectMemory(del_it->first, &stats, -1);   // Key
+  AccountObjectMemory(del_it->second, &stats, -1);  // Value
+
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
   } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
@@ -238,7 +244,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 216);
+  static_assert(kDbSz == 208);
 
   DbTableStats::operator+=(o);
 
@@ -557,16 +563,16 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
   if (inserted) {  // new entry
     db.stats.inline_keys += it->first.IsInline();
-    int64_t delta = it->first.MallocUsed();
-    db.stats.obj_memory_usage += delta;
-    db.stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+    AccountObjectMemory(it->first, &db.stats, 1);  // Account for key
+
+    DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
+    PreUpdate(cntx.db_index, it, PreUpdateMode::kWithoutCallbacks);
 
     events_.garbage_collected = db.prime.garbage_collected();
     events_.stash_unloaded = db.prime.stash_unloaded();
     events_.evicted_keys += evp.evicted();
     events_.garbage_checked += evp.checked();
 
-    it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
     if (ClusterConfig::IsEnabled()) {
       SlotId sid = ClusterConfig::KeySlot(key);
@@ -602,11 +608,11 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
         }
       }
 
-      // Keep the entry but reset the object.
-      int64_t value_heap_size = existing->second.MallocUsed();
-      db.stats.obj_memory_usage -= value_heap_size;
-      db.stats.AddTypeMemoryUsage(it->second.ObjType(), -value_heap_size);
+      // PreUpdate() will remove accounting for value's memory.
+      // TODO(#2252): Make sure we reduce memory even after PreUpdate() is removed.
+      PreUpdate(cntx.db_index, it, PreUpdateMode::kWithoutCallbacks);
 
+      // Keep the entry but reset the object.
       existing->second.Reset();
       events_.expired_keys++;
 
@@ -992,18 +998,19 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
   return true;
 }
 
-void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
+void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it, PreUpdateMode mode) {
   FiberAtomicGuard fg;
-  DVLOG(2) << "Running callbacks in dbid " << db_ind;
-  for (const auto& ccb : change_cb_) {
-    ccb.second(db_ind, ChangeReq{it});
+
+  if (mode != PreUpdateMode::kWithoutCallbacks) {
+    DVLOG(2) << "Running callbacks in dbid " << db_ind;
+    for (const auto& ccb : change_cb_) {
+      ccb.second(db_ind, ChangeReq{it});
+    }
   }
 
-  int64_t value_heap_size = it->second.MallocUsed();
+  // TODO(#2252): Remove and do accounting only in PostUpdate()
   auto* stats = MutableStats(db_ind);
-  stats->obj_memory_usage -= value_heap_size;
-  stats->AddTypeMemoryUsage(it->second.ObjType(), -value_heap_size);
-  stats->update_value_amount -= value_heap_size;
+  AccountObjectMemory(it->second, stats, -1);
 
   if (it->second.ObjType() == OBJ_STRING) {
     if (it->second.IsExternal()) {
@@ -1031,11 +1038,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
 void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing) {
   DbTableStats* stats = MutableStats(db_ind);
 
-  int64_t value_heap_size = it->second.MallocUsed();
-  stats->obj_memory_usage += value_heap_size;
-  stats->AddTypeMemoryUsage(it->second.ObjType(), value_heap_size);
-  if (existing)
-    stats->update_value_amount += value_heap_size;
+  AccountObjectMemory(it->second, stats, 1);
 
   auto& db = *db_arr_[db_ind];
   auto& watched_keys = db.watched_keys;
