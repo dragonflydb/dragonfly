@@ -413,6 +413,13 @@ class DbSlice {
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
+  enum class FindInternalMode {
+    kUpdateStats,
+    kDontUpdateStats,
+  };
+  std::pair<PrimeIterator, ExpireIterator> FindInternal(const Context& cntx, std::string_view key,
+                                                        FindInternalMode mode) const;
+
   uint64_t NextVersion() {
     return version_++;
   }

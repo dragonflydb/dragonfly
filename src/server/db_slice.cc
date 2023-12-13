@@ -332,7 +332,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
 
 auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) const
     -> OpResult<PrimeIterator> {
-  auto it = FindExt(cntx, key).first;
+  auto it = FindInternal(cntx, key, FindInternalMode::kUpdateStats).first;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -401,8 +401,7 @@ DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
-  // TODO(#2252): Call an internal find version that does not handle post updates
-  auto it = FindExt(cntx, key).first;
+  auto it = FindInternal(cntx, key, FindInternalMode::kUpdateStats).first;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -422,6 +421,12 @@ auto DbSlice::FindReadOnly(const Context& cntx, string_view key, unsigned req_ob
 }
 
 pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
+  return FindInternal(cntx, key, FindInternalMode::kUpdateStats);
+}
+
+std::pair<PrimeIterator, ExpireIterator> DbSlice::FindInternal(const Context& cntx,
+                                                               std::string_view key,
+                                                               FindInternalMode mode) const {
   pair<PrimeIterator, ExpireIterator> res;
 
   if (!IsDbValid(cntx.db_index))
@@ -431,7 +436,8 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
   res.first = db.prime.Find(key);
   FiberAtomicGuard fg;
   if (!IsValid(res.first)) {
-    events_.misses++;
+    if (mode == FindInternalMode::kUpdateStats)
+      events_.misses++;
     return res;
   }
 
@@ -448,19 +454,22 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
         }
       };
 
-      //
       db.prime.CVCUponBump(change_cb_.back().first, res.first, bump_cb);
     }
 
     res.first = db.prime.BumpUp(res.first, PrimeBumpPolicy{});
-    ++events_.bumpups;
+    if (mode == FindInternalMode::kUpdateStats)
+      ++events_.bumpups;
   }
 
-  events_.hits++;
   db.top_keys.Touch(key);
 
-  if (ClusterConfig::IsEnabled()) {
-    db.slots_stats[ClusterConfig::KeySlot(key)].total_reads += 1;
+  if (mode == FindInternalMode::kUpdateStats) {
+    events_.hits++;
+
+    if (ClusterConfig::IsEnabled()) {
+      db.slots_stats[ClusterConfig::KeySlot(key)].total_reads += 1;
+    }
   }
 
   return res;
@@ -494,18 +503,16 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
   DbTable& db = *db_arr_[cntx.db_index];
 
-  // If we have some registered onchange callbacks, we must know in advance whether its Find or Add.
-  if (!change_cb_.empty()) {
-    auto res = FindExt(cntx, key);
+  auto res = FindInternal(cntx, key, FindInternalMode::kDontUpdateStats);
 
-    if (IsValid(res.first)) {
-      return tuple_cat(res, make_tuple(false));
-    }
-    // It's a new entry.
-    DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
-    for (const auto& ccb : change_cb_) {
-      ccb.second(cntx.db_index, key);
-    }
+  if (IsValid(res.first)) {
+    return tuple_cat(res, make_tuple(false));
+  }
+
+  // It's a new entry.
+  DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
+  for (const auto& ccb : change_cb_) {
+    ccb.second(cntx.db_index, key);
   }
 
   // In case we are loading from rdb file or replicating we want to disable conservative memory
@@ -549,6 +556,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     throw e;
   }
 
+  DCHECK(inserted) << "Inserted key " << key << " after not finding it";
   size_t evicted_obj_bytes = 0;
 
   // We may still reach the state when our memory usage is above the limit even if we
@@ -561,66 +569,24 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     // evicted_obj_bytes = EvictObjects(-evp.mem_budget(), it, &db);
   }
 
-  if (inserted) {  // new entry
-    db.stats.inline_keys += it->first.IsInline();
-    AccountObjectMemory(it->first, &db.stats, 1);  // Account for key
+  db.stats.inline_keys += it->first.IsInline();
+  AccountObjectMemory(it->first, &db.stats, 1);  // Account for key
 
-    DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
-    PreUpdate(cntx.db_index, it, PreUpdateMode::kWithoutCallbacks);
+  DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
+  PreUpdate(cntx.db_index, it, PreUpdateMode::kWithoutCallbacks);
 
-    events_.garbage_collected = db.prime.garbage_collected();
-    events_.stash_unloaded = db.prime.stash_unloaded();
-    events_.evicted_keys += evp.evicted();
-    events_.garbage_checked += evp.checked();
+  events_.garbage_collected = db.prime.garbage_collected();
+  events_.stash_unloaded = db.prime.stash_unloaded();
+  events_.evicted_keys += evp.evicted();
+  events_.garbage_checked += evp.checked();
 
-    memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
-    if (ClusterConfig::IsEnabled()) {
-      SlotId sid = ClusterConfig::KeySlot(key);
-      db.slots_stats[sid].key_count += 1;
-    }
-
-    return make_tuple(it, ExpireIterator{}, true);
+  memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
+  if (ClusterConfig::IsEnabled()) {
+    SlotId sid = ClusterConfig::KeySlot(key);
+    db.slots_stats[sid].key_count += 1;
   }
 
-  auto& existing = it;
-
-  DCHECK(IsValid(existing));
-
-  memory_budget_ += evicted_obj_bytes;
-
-  ExpireIterator expire_it;
-  if (existing->second.HasExpire()) {
-    expire_it = db.expire.Find(existing->first);
-    CHECK(IsValid(expire_it));
-
-    // TODO: to implement the incremental update of expiry values using multi-generation
-    // expire_base_ update. Right now we use only index 0.
-    uint64_t delta_ms = cntx.time_now_ms - expire_base_[0];
-
-    if (expire_it->second.duration_ms() <= delta_ms) {
-      db.expire.Erase(expire_it);
-
-      if (existing->second.HasFlag()) {
-        if (db.mcflag.Erase(existing->first) == 0) {
-          LOG(ERROR)
-              << "Internal error, inconsistent state, mcflag should be present but not found "
-              << existing->first.ToString();
-        }
-      }
-
-      // PreUpdate() will remove accounting for value's memory.
-      // TODO(#2252): Make sure we reduce memory even after PreUpdate() is removed.
-      PreUpdate(cntx.db_index, it, PreUpdateMode::kWithoutCallbacks);
-
-      // Keep the entry but reset the object.
-      existing->second.Reset();
-      events_.expired_keys++;
-
-      return make_tuple(existing, ExpireIterator{}, true);
-    }
-  }
-
-  return make_tuple(existing, expire_it, false);
+  return make_tuple(it, ExpireIterator{}, true);
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
