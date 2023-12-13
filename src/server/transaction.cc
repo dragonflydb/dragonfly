@@ -497,6 +497,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   if (is_concluding)  // Check last hop
     LogAutoJournalOnShard(shard);
 
+  shard->db_slice().OnCbFinish();
   // at least the coordinator thread owns the reference.
   DCHECK_GE(GetUseCount(), 1u);
 

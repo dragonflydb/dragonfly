@@ -166,10 +166,18 @@ class PrimeEvictionPolicy {
 
 class PrimeBumpPolicy {
  public:
-  // returns true if key can be made less important for eviction (opposite of bump up)
-  bool CanBumpDown(const CompactObj& key) const {
-    return !key.IsSticky();
+  PrimeBumpPolicy(const absl::flat_hash_set<string_view>& bumped_itmes)
+      : bumped_itmes_(bumped_itmes) {
   }
+  // returns true if key can be made less important for eviction (opposite of bump up)
+  bool CanBumpDown(const CompactObj& obj) const {
+    string tmp;
+    string_view key = obj.GetSlice(&tmp);
+    return !obj.IsSticky() && !bumped_itmes_.contains(key);
+  }
+
+ private:
+  const absl::flat_hash_set<string_view>& bumped_itmes_;
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
@@ -468,12 +476,12 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
           ccb.second(cntx.db_index, bit);
         }
       };
-
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
+    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bump_items_});
 
-    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{});
     ++events_.bumpups;
+    bump_items_.insert(key);
   }
 
   db.top_keys.Touch(key);
@@ -1408,6 +1416,10 @@ void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice&
              << " into the tracking client set of key " << key;
     client_tracking_map_[key].insert(conn);
   }
+}
+
+void DbSlice::OnCbFinish() {
+  bump_items_.clear();
 }
 
 }  // namespace dfly

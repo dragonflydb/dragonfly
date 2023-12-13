@@ -233,18 +233,41 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   SetTestFlag("cache_mode", "true");
   ResetService();
   Run({"debug", "populate", "100000", "key", "32", "RAND"});
+
+  // Scan starts traversing the database, because we populated the database with lots of items we
+  // assume that scan will return items from the same bucket that reside next to each other.
   auto resp = Run({"scan", "0"});
   ASSERT_THAT(resp, ArrLen(2));
   StringVec vec = StrArray(resp.GetVec()[1]);
   ASSERT_GE(vec.size(), 10);
 
+  auto get_bump_ups = [](const string& str) -> size_t {
+    const string matcher = "bump_ups:";
+    const auto pos = str.find(matcher) + matcher.size();
+    const auto sub = str.substr(pos, 1);
+    return atoi(sub.c_str());
+  };
+
+  resp = Run({"info", "stats"});
+  EXPECT_EQ(get_bump_ups(resp.GetString()), 0);
+
   auto mget_resp = StrArray(Run(
       {"mget", vec[0], vec[1], vec[2], vec[3], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9]}));
+
+  resp = Run({"info", "stats"});
+  size_t bumps1 = get_bump_ups(resp.GetString());
+  EXPECT_GT(bumps1, 0);
+  EXPECT_LT(bumps1, 10);  // we assume that some bumps are blocked because items reside next to each
+                          // other in the slot.
 
   for (int i = 0; i < 10; ++i) {
     auto get_resp = Run({"get", vec[i]});
     EXPECT_EQ(get_resp, mget_resp[i]);
   }
+
+  resp = Run({"info", "stats"});
+  size_t bumps2 = get_bump_ups(resp.GetString());
+  EXPECT_GT(bumps2, bumps1);
 }
 
 TEST_F(StringFamilyTest, MSetGet) {
