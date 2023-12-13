@@ -224,8 +224,21 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     }
 
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
+    auto& lt = table->trans_locks;
+    string tmp;
+    string_view key = last_slot_it->first.GetSlice(&tmp);
+    if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+      return 0;
+
     PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
+
+    // delete the key in replicas.
+    if (auto journal = db_slice_->shard_owner()->journal(); journal) {
+      ArgSlice delete_args{key};
+      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1,
+                           make_pair("DEL", delete_args), false);
+    }
   }
   me->ShiftRight(bucket_it);
 
