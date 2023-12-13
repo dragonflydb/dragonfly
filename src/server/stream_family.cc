@@ -2834,6 +2834,11 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
                                       }};
       auto sitem = opts.stream_ids.at(*wake_key);
       range_opts.start = sitem.id;
+      if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
+        range_opts.start.val = sitem.group->last_id;  // only for '>'
+        streamIncrID(&range_opts.start.val);
+      }
+
       range_opts.group = sitem.group;
       range_opts.consumer = sitem.consumer;
       range_opts.noack = opts.noack;
@@ -2918,8 +2923,11 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
           opts->serve_history = true;
           continue;
         }
-        requested_sitem.id.val = requested_sitem.group->last_id;
-        streamIncrID(&requested_sitem.id.val);
+        // we know the requested last_id only when we already have it
+        if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
+          requested_sitem.id.val = requested_sitem.group->last_id;
+          streamIncrID(&requested_sitem.id.val);
+        }
       }
 
       if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
