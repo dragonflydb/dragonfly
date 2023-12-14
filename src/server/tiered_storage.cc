@@ -100,12 +100,6 @@ static size_t ExternalizeEntry(size_t item_offset, DbTableStats* stats, PrimeVal
   return item_size;
 }
 
-struct PrimeHasher {
-  size_t operator()(const PrimeKey& o) const {
-    return o.HashCode();
-  }
-};
-
 struct SingleRequest {
   SingleRequest(size_t blob_len, int64 offset, string key)
       : blob_len(blob_len), offset(offset), key(std::move(key)) {
@@ -422,7 +416,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   CHECK_LT(bin_record.pending_entries.size(), max_entries);
 
   VLOG(2) << "ScheduleOffload:" << it->first.ToString();
-  bin_record.pending_entries.insert(it->first);
+  bin_record.pending_entries.insert(it->first.AsRef());
   it->second.SetIoPending(true);
 
   if (bin_record.pending_entries.size() < max_entries)

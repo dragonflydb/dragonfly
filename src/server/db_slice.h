@@ -448,7 +448,7 @@ class DbSlice {
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
-  mutable absl::flat_hash_set<std::string_view> bump_items_;
+  mutable absl::flat_hash_set<CompactObjectView, PrimeHasher> bumped_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;

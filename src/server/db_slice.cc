@@ -166,18 +166,16 @@ class PrimeEvictionPolicy {
 
 class PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(const absl::flat_hash_set<string_view>& bumped_itmes)
-      : bumped_itmes_(bumped_itmes) {
+  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items)
+      : bumped_items_(bumped_items) {
   }
   // returns true if key can be made less important for eviction (opposite of bump up)
   bool CanBumpDown(const CompactObj& obj) const {
-    string tmp;
-    string_view key = obj.GetSlice(&tmp);
-    return !obj.IsSticky() && !bumped_itmes_.contains(key);
+    return !obj.IsSticky() && !bumped_items_.contains(obj);
   }
 
  private:
-  const absl::flat_hash_set<string_view>& bumped_itmes_;
+  const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items_;
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
@@ -478,10 +476,9 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
-    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bump_items_});
-
+    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bumped_items_});
     ++events_.bumpups;
-    bump_items_.insert(key);
+    bumped_items_.insert(res.first->first.AsRef());
   }
 
   db.top_keys.Touch(key);
@@ -633,7 +630,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     DbContext cntx{db_ind, GetCurrentTimeMs()};
     doc_del_cb_(key, cntx, it->second);
   }
-
+  bumped_items_.erase(it->first.AsRef());
   PerformDeletion(it, shard_owner(), db.get());
   deletion_count_++;
 
@@ -1419,7 +1416,7 @@ void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice&
 }
 
 void DbSlice::OnCbFinish() {
-  bump_items_.clear();
+  bumped_items_.clear();
 }
 
 }  // namespace dfly
