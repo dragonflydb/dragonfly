@@ -878,13 +878,18 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     total += db_stats;
   }
 
-  for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
-    size_t mem = total.memory_usage_by_type[type];
-    if (mem > 0) {
-      AppendMetricWithoutLabels(
-          absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), "", mem,
-          MetricType::GAUGE, &resp->body());
+  {
+    string type_used_memory_metric;
+    AppendMetricHeader("type_used_memory", "Memory used per type", MetricType::GAUGE,
+                       &type_used_memory_metric);
+    for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+      size_t mem = total.memory_usage_by_type[type];
+      if (mem > 0) {
+        AppendMetricValue("type_used_memory", mem, {"type"}, {CompactObj::ObjTypeToString(type)},
+                          &type_used_memory_metric);
+      }
     }
+    absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
 
   // Stats metrics
