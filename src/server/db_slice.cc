@@ -570,7 +570,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
   AccountObjectMemory(it->first, &db.stats, 1);  // Account for key
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
-  PreUpdate(cntx.db_index, it, PreUpdateMode::kWithoutCallbacks);
+  it.SetVersion(NextVersion());
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
