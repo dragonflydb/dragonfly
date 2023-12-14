@@ -310,11 +310,7 @@ class DbSlice {
 
   // Callback functions called upon writing to the existing key.
   //  TODO(#2252): Remove these (or make them private)
-  enum class PreUpdateMode {
-    kFull = 0,
-    kWithoutCallbacks,
-  };
-  void PreUpdate(DbIndex db_ind, PrimeIterator it, PreUpdateMode mode = PreUpdateMode::kFull);
+  void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
                   bool existing_entry = true);
 
@@ -414,8 +410,8 @@ class DbSlice {
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
   enum class FindInternalMode {
-    kUpdateStats,
-    kDontUpdateStats,
+    kUpdateCacheStats,
+    kDontUpdateCacheStats,
   };
   std::pair<PrimeIterator, ExpireIterator> FindInternal(const Context& cntx, std::string_view key,
                                                         FindInternalMode mode) const;

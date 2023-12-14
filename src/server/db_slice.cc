@@ -332,7 +332,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
 
 auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) const
     -> OpResult<PrimeIterator> {
-  auto it = FindInternal(cntx, key, FindInternalMode::kUpdateStats).first;
+  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats).first;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -401,7 +401,7 @@ DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
-  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateStats).first;
+  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats).first;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -421,7 +421,7 @@ auto DbSlice::FindReadOnly(const Context& cntx, string_view key, unsigned req_ob
 }
 
 pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
-  return FindInternal(cntx, key, FindInternalMode::kUpdateStats);
+  return FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
 }
 
 std::pair<PrimeIterator, ExpireIterator> DbSlice::FindInternal(const Context& cntx,
@@ -436,7 +436,7 @@ std::pair<PrimeIterator, ExpireIterator> DbSlice::FindInternal(const Context& cn
   res.first = db.prime.Find(key);
   FiberAtomicGuard fg;
   if (!IsValid(res.first)) {
-    if (mode == FindInternalMode::kUpdateStats)
+    if (mode == FindInternalMode::kUpdateCacheStats)
       events_.misses++;
     return res;
   }
@@ -463,7 +463,7 @@ std::pair<PrimeIterator, ExpireIterator> DbSlice::FindInternal(const Context& cn
 
   db.top_keys.Touch(key);
 
-  if (mode == FindInternalMode::kUpdateStats) {
+  if (mode == FindInternalMode::kUpdateCacheStats) {
     events_.hits++;
 
     if (ClusterConfig::IsEnabled()) {
@@ -502,7 +502,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
   DbTable& db = *db_arr_[cntx.db_index];
 
-  auto res = FindInternal(cntx, key, FindInternalMode::kDontUpdateStats);
+  auto res = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats);
 
   if (IsValid(res.first)) {
     return tuple_cat(res, make_tuple(false));
@@ -961,14 +961,12 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
   return true;
 }
 
-void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it, PreUpdateMode mode) {
+void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   FiberAtomicGuard fg;
 
-  if (mode != PreUpdateMode::kWithoutCallbacks) {
-    DVLOG(2) << "Running callbacks in dbid " << db_ind;
-    for (const auto& ccb : change_cb_) {
-      ccb.second(db_ind, ChangeReq{it});
-    }
+  DVLOG(2) << "Running callbacks in dbid " << db_ind;
+  for (const auto& ccb : change_cb_) {
+    ccb.second(db_ind, ChangeReq{it});
   }
 
   // TODO(#2252): Remove and do accounting only in PostUpdate()
