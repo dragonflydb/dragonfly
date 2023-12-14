@@ -401,7 +401,7 @@ DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
-  auto it = FindInternal(cntx, key, FindInternalMode::kUpdateStats).first;
+  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateStats).first;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -458,8 +458,7 @@ std::pair<PrimeIterator, ExpireIterator> DbSlice::FindInternal(const Context& cn
     }
 
     res.first = db.prime.BumpUp(res.first, PrimeBumpPolicy{});
-    if (mode == FindInternalMode::kUpdateStats)
-      ++events_.bumpups;
+    ++events_.bumpups;
   }
 
   db.top_keys.Touch(key);
