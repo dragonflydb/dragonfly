@@ -544,11 +544,10 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
   // the insert operation: twice more efficient.
   CompactObj co_key{key};
   PrimeIterator it;
-  bool inserted;
 
   // I try/catch just for sake of having a convenient place to set a breakpoint.
   try {
-    tie(it, inserted) = db.prime.Insert(std::move(co_key), PrimeValue{}, evp);
+    it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
     VLOG(2) << "AddOrFind2: bad alloc exception, budget: " << evp.mem_budget();
     events_.insertion_rejections++;
@@ -556,7 +555,6 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     throw e;
   }
 
-  DCHECK(inserted) << "Inserted key " << key << " after not finding it";
   size_t evicted_obj_bytes = 0;
 
   // We may still reach the state when our memory usage is above the limit even if we
