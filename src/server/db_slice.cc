@@ -227,13 +227,14 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     auto& lt = table->trans_locks;
     string tmp;
     string_view key = last_slot_it->first.GetSlice(&tmp);
+    // do not evict locked keys
     if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
       return 0;
 
     PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
 
-    // delete the key in replicas.
+    // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       ArgSlice delete_args{key};
       journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1,
