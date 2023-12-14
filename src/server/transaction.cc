@@ -951,7 +951,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
   } catch (std::exception& e) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
-
+  shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard);
 
   sd.is_armed.store(false, memory_order_relaxed);
@@ -1239,6 +1239,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   DCHECK_EQ(unique_shard_cnt_, 1u);
   auto* shard = EngineShard::tlocal();
   auto status = cb(this, shard);
+  shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard);
   return status;
 }
