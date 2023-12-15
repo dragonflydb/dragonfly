@@ -514,7 +514,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     before = tl_cluster_config->GetOwnedSlots();
   }
 
-  // Ignore paused commands because we filter them with CancelBlockingOnThread
+  // Ignore blocked commands because we filter them with CancelBlockingOnThread
   DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
                           true /* ignore blocked */};
 

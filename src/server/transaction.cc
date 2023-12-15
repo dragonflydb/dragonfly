@@ -1165,7 +1165,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
 
-  {
+  if (DCHECK_IS_ON()) {
     int64_t ms = -1;
     if (tp != time_point::max())
       ms = duration_cast<milliseconds>(tp - time_point::clock::now()).count();
