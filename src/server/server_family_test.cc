@@ -200,4 +200,52 @@ TEST_F(ServerFamilyTest, ClientPause) {
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
 }
 
+TEST_F(ServerFamilyTest, ClientTracking) {
+  // case 1. can't use the feature for resp2
+  auto resp = Run({"CLIENT", "TRACKING", "ON"});
+  EXPECT_THAT(resp.GetString(),
+              "ERR Client tracking is currently not supported for RESP2. Please use RESP3.");
+
+  // case 2. allows when resp3 is used
+  Run({"HELLO", "3"});
+  resp = Run({"CLIENT", "TRACKING", "ON"});
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  // case 3. turn off client tracking
+  resp = Run({"CLIENT", "TRACKING", "OFF"});
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  // case 4. testing tracking of a key string
+  Run({"CLIENT", "TRACKING", "ON"});
+  Run({"GET", "FOO"});
+  resp = Run({"SET", "FOO", "10"});
+  const auto& msg = GetInvalidationMessage("IO0", 0);
+  EXPECT_EQ(msg.key, "FOO");
+
+  // case 5. update string from another connection
+  // need to do another read to re-initialize the tracking of the key.
+  Run({"GET", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"SET", "FOO", "30"}); });
+  const auto& msg2 = GetInvalidationMessage("IO0", 1);
+  EXPECT_EQ(msg2.key, "FOO");
+
+  // case 6. delete the key
+  Run({"SET", "BAR", "1"});
+  Run({"GET", "BAR"});
+  pp_->at(1)->Await([&] { return Run({"DEL", "BAR"}); });
+  EXPECT_EQ(GetInvalidationMessage("IO0", 2).key, "BAR");
+
+  // case 7. test multi command
+  Run({"MGET", "X", "Y", "Z"});
+  pp_->at(1)->Await([&] { return Run({"MSET", "X", "1", "Y", "2"}); });
+  EXPECT_EQ(GetInvalidationMessage("IO0", 3).key, "X");
+  EXPECT_EQ(GetInvalidationMessage("IO0", 4).key, "Y");
+
+  // case 8. flushdb command
+  // Run({"GET", "BAR"});
+  // Run({"FLUSHDB"});
+  // pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  // EXPECT_TRUE(GetInvalidationMessage("IO0", 5).invalidate_due_to_flush);
+}
+
 }  // namespace dfly

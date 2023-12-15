@@ -1198,6 +1198,7 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
 
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, DbSlice::kDbAll);
+  SendInvalidationMessages();
   cntx->SendOk();
 }
 

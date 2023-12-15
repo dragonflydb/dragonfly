@@ -73,6 +73,10 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
   messages.push_back(move(pmsg));
 }
 
+void TestConnection::SendInvalidationMessageAsync(InvalidationMessage msg) {
+  invalidate_messages.push_back(move(msg));
+}
+
 std::string TestConnection::RemoteEndpointStr() const {
   return "";
 }
@@ -105,6 +109,8 @@ class BaseFamilyTest::TestConnWrapper {
 
   // returns: type(pmessage), pattern, channel, message.
   const facade::Connection::PubMessage& GetPubMessage(size_t index) const;
+
+  const facade::Connection::InvalidationMessage& GetInvalidationMessage(size_t index) const;
 
   ConnectionContext* cmd_cntx() {
     return static_cast<ConnectionContext*>(dummy_conn_->cntx());
@@ -528,6 +534,12 @@ const facade::Connection::PubMessage& BaseFamilyTest::TestConnWrapper::GetPubMes
   return dummy_conn_->messages[index];
 }
 
+const facade::Connection::InvalidationMessage&
+BaseFamilyTest::TestConnWrapper::GetInvalidationMessage(size_t index) const {
+  CHECK_LT(index, dummy_conn_->invalidate_messages.size());
+  return dummy_conn_->invalidate_messages[index];
+}
+
 bool BaseFamilyTest::IsLocked(DbIndex db_index, std::string_view key) const {
   ShardId sid = Shard(key, shard_set->size());
   KeyLockArgs args;
@@ -559,6 +571,13 @@ const facade::Connection::PubMessage& BaseFamilyTest::GetPublishedMessage(string
   CHECK(it != connections_.end());
 
   return it->second->GetPubMessage(index);
+}
+
+const facade::Connection::InvalidationMessage& BaseFamilyTest::GetInvalidationMessage(
+    string_view conn_id, size_t index) const {
+  auto it = connections_.find(conn_id);
+  CHECK(it != connections_.end());
+  return it->second->GetInvalidationMessage(index);
 }
 
 ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id) const {
