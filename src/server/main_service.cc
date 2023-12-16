@@ -2197,6 +2197,18 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
   cntx->SendLong(pattern_count);
 }
 
+void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
+  int channels_size = args.size();
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(channels_size * 2);
+
+  for (auto i = 0; i < channels_size; i++) {
+    auto channel = ArgS(args, i);
+    rb->SendBulkString(channel);
+    rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
+  }
+}
+
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "starting monitor on this connection: " << cntx->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
@@ -2221,6 +2233,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
         "\tReturn the currently active channels matching a <pattern> (default: '*').",
         "NUMPAT",
         "\tReturn number of subscriptions to patterns.",
+        "NUMSUB [<channel> <channel...>]",
+        "\tReturns the number of subscribers for the specified channels, excluding",
+        "\tpattern subscriptions.",
         "HELP",
         "\tPrints this help."};
 
@@ -2238,6 +2253,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
     PubsubChannels(pattern, cntx);
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
+  } else if (subcmd == "NUMSUB") {
+    args.remove_prefix(1);
+    PubsubNumSub(args, cntx);
   } else {
     cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
