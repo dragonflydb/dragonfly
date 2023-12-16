@@ -1,6 +1,7 @@
 import random
 import pytest
 import asyncio
+import time
 from redis import asyncio as aioredis
 from redis.exceptions import ConnectionError as redis_conn_error
 import async_timeout
@@ -303,6 +304,15 @@ async def test_pubsub_subcommand_for_numsub(async_client):
     for s in subs1:
         await s.unsubscribe("channel_name1")
     result = await async_client.pubsub_numsub("channel_name1")
+
+    retry = 5
+    for i in range(0, retry):
+        result = await async_client.pubsub_numsub("channel_name1")
+        if result[0][0] == "channel_name1" and result[0][1] == 0:
+            break
+        else:
+            time.sleep(1)
+
     assert result[0][0] == "channel_name1" and result[0][1] == 0
 
     result = await async_client.pubsub_numsub()

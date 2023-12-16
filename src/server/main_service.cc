@@ -2199,12 +2199,13 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 
 void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
   int channels_size = args.size();
-  (*cntx)->StartArray(channels_size * 2);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(channels_size * 2);
 
   for (auto i = 0; i < channels_size; i++) {
     auto channel = ArgS(args, i);
-    (*cntx)->SendBulkString(channel);
-    (*cntx)->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
+    rb->SendBulkString(channel);
+    rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
   }
 }
 
