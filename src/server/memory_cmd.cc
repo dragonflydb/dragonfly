@@ -191,14 +191,6 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
         mems[thread_index].replication_connection_size += usage.mem;
         mems[thread_index].replication_memory += usage.buf_mem;
       }
-
-      if (cntx != nullptr) {
-        mems[thread_index].pipelined_bytes +=
-            cntx->conn_state.exec_info.body.capacity() * sizeof(StoredCmd);
-        for (const auto& pipeline : cntx->conn_state.exec_info.body) {
-          mems[thread_index].pipelined_bytes += pipeline.UsedHeapMemory();
-        }
-      }
     });
   }
 

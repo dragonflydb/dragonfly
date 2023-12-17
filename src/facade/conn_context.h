@@ -88,7 +88,8 @@ class ConnectionContext {
   }
 
   virtual size_t UsedMemory() const {
-    return dfly::HeapSize(rbuilder_);
+    return dfly::HeapSize(rbuilder_) + dfly::HeapSize(authed_username) +
+           dfly::HeapSize(acl_commands);
   }
 
   // connection state / properties.
