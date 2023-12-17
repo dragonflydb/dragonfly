@@ -330,9 +330,9 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->prime.Reserve(key_size);
 }
 
-auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) const
-    -> OpResult<PrimeIterator> {
-  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats).first;
+OpResult<PrimeIterator> DbSlice::Find(const Context& cntx, string_view key,
+                                      unsigned req_obj_type) const {
+  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats).it;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -400,15 +400,28 @@ DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
 
 DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) {
   it = o.it;
-  exp_it = ExpireIterator{};  // ItAndUpdater doesn't have exp_it
+  exp_it = o.exp_it;
   is_new = false;
   post_updater = std::move(o).post_updater;
   return *this;
 }
 
+DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
+  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
+
+  if (IsValid(it)) {
+    PreUpdate(cntx.db_index, it);
+    return {it, exp_it,
+            AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})};
+  } else {
+    return {it, exp_it, {}};
+  }
+}
+
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
-  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats).first;
+  // Don't use FindMutable() so that we don't call PreUpdate()
+  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -418,42 +431,50 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
   }
 
   PreUpdate(cntx.db_index, it);
-  return {
-      {it, AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
+  return {{it, exp_it,
+           AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
 }
 
-auto DbSlice::FindReadOnly(const Context& cntx, string_view key, unsigned req_obj_type) const
-    -> OpResult<PrimeConstIterator> {
-  auto res = Find(cntx, key, req_obj_type);
-  return res.ok() ? OpResult<PrimeConstIterator>(res.value()) : res.status();
+DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
+  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
+  return {res.it, res.exp_it};
 }
 
-pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
-  return FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
+OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
+                                                   unsigned req_obj_type) const {
+  auto it = FindReadOnly(cntx, key).it;
+
+  if (!IsValid(it))
+    return OpStatus::KEY_NOTFOUND;
+
+  if (it->second.ObjType() != req_obj_type) {
+    return OpStatus::WRONG_TYPE;
+  }
+
+  return {it};
 }
 
-std::pair<PrimeIterator, ExpireIterator> DbSlice::FindInternal(const Context& cntx,
-                                                               std::string_view key,
-                                                               FindInternalMode mode) const {
-  pair<PrimeIterator, ExpireIterator> res;
+DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view key,
+                                        FindInternalMode mode) const {
+  DbSlice::ItAndExp res;
 
   if (!IsDbValid(cntx.db_index))
     return res;
 
   auto& db = *db_arr_[cntx.db_index];
-  res.first = db.prime.Find(key);
+  res.it = db.prime.Find(key);
   FiberAtomicGuard fg;
-  if (!IsValid(res.first)) {
+  if (!IsValid(res.it)) {
     if (mode == FindInternalMode::kUpdateCacheStats)
       events_.misses++;
     return res;
   }
 
-  if (res.first->second.HasExpire()) {  // check expiry state
-    res = ExpireIfNeeded(cntx, res.first);
+  if (res.it->second.HasExpire()) {  // check expiry state
+    res = ExpireIfNeeded(cntx, res.it);
   }
 
-  if (caching_mode_ && IsValid(res.first)) {
+  if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
@@ -462,10 +483,10 @@ std::pair<PrimeIterator, ExpireIterator> DbSlice::FindInternal(const Context& cn
         }
       };
 
-      db.prime.CVCUponBump(change_cb_.back().first, res.first, bump_cb);
+      db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
 
-    res.first = db.prime.BumpUp(res.first, PrimeBumpPolicy{});
+    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{});
     ++events_.bumpups;
   }
 
@@ -506,13 +527,13 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
 
   auto res = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats);
 
-  if (IsValid(res.first)) {
-    PreUpdate(cntx.db_index, res.first);
-    return {.it = res.first,
-            .exp_it = res.second,
+  if (IsValid(res.it)) {
+    PreUpdate(cntx.db_index, res.it);
+    return {.it = res.it,
+            .exp_it = res.exp_it,
             .is_new = false,
             .post_updater = AutoUpdater(
-                {AutoUpdater::DestructorAction::kRun, this, cntx.db_index, res.first, key, true})};
+                {AutoUpdater::DestructorAction::kRun, this, cntx.db_index, res.it, key, true})};
   }
 
   // It's a new entry.
@@ -774,7 +795,7 @@ DbSlice::ItAndUpdater DbSlice::AddNew(const Context& cntx, string_view key, Prim
   auto res = AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
   CHECK(res.is_new);
 
-  return {.it = res.it, .post_updater = std::move(res.post_updater)};
+  return {.it = res.it, .exp_it = res.exp_it, .post_updater = std::move(res.post_updater)};
 }
 
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms) const {
@@ -1025,8 +1046,7 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   }
 }
 
-pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
-                                                            PrimeIterator it) const {
+DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
   DCHECK(it->second.HasExpire());
   auto& db = db_arr_[cntx.db_index];
 
@@ -1039,7 +1059,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
 
   // Never do expiration on replica or if expiration is disabled.
   if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
-    return make_pair(it, expire_it);
+    return {it, expire_it};
 
   string tmp_key_buf;
   string_view tmp_key;
@@ -1060,7 +1080,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   PerformDeletion(it, expire_it, shard_owner(), db.get());
   ++events_.expired_keys;
 
-  return make_pair(PrimeIterator{}, ExpireIterator{});
+  return {PrimeIterator{}, ExpireIterator{}};
 }
 
 void DbSlice::ExpireAllIfNeeded() {

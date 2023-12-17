@@ -672,7 +672,7 @@ TEST_F(GenericFamilyTest, Info) {
 
   EXPECT_THAT(Run({"del", "k3"}), IntArg(1));
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
 }
 
 TEST_F(GenericFamilyTest, FieldTtl) {

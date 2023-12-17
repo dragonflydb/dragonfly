@@ -220,7 +220,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs&
     op_args.shard->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
   }
 
-  return DbSlice::ItAndUpdater{add_res.it, std::move(add_res.post_updater)};
+  return DbSlice::ItAndUpdater{add_res.it, add_res.exp_it, std::move(add_res.post_updater)};
 }
 
 bool ScoreToLongLat(const std::optional<double>& val, double* xy) {
@@ -896,35 +896,35 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
   }
 
   auto& db_slice = shard->db_slice();
-  vector<pair<PrimeIterator, double>> it_arr(keys.size());
+  vector<pair<DbSlice::ItAndUpdater, double>> it_arr(keys.size());
   if (it_arr.empty())          // could be when only the dest key is hosted in this shard
     return OpStatus::SKIPPED;  // return noop
 
   for (unsigned j = 0; j < keys.size(); ++j) {
-    auto it_res = db_slice.FindExt(t->GetDbContext(), keys[j]).first;
-    if (!IsValid(it_res))
+    auto it_res = db_slice.FindMutable(t->GetDbContext(), keys[j]);
+    if (!IsValid(it_res.it))
       continue;  // we exit in the next loop
 
     // sets are supported for ZINTER* commands:
-    auto obj_type = it_res->second.ObjType();
+    auto obj_type = it_res.it->second.ObjType();
     if (obj_type != OBJ_ZSET && obj_type != OBJ_SET)
       return OpStatus::WRONG_TYPE;
 
-    it_arr[j] = {
-        it_res, GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys, cmdargs_keys_offset)};
+    it_arr[j] = {std::move(it_res), GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys,
+                                                 cmdargs_keys_offset)};
   }
 
   ScoredMap result;
   for (auto it = it_arr.begin(); it != it_arr.end(); ++it) {
-    if (it->first.is_done()) {
+    if (it->first.it.is_done()) {
       return ScoredMap{};
     }
 
     ScoredMap sm;
-    if (it->first->second.ObjType() == OBJ_ZSET)
-      sm = FromObject(it->first->second, it->second);
+    if (it->first.it->second.ObjType() == OBJ_ZSET)
+      sm = FromObject(it->first.it->second, it->second);
     else
-      sm = ZSetFromSet(it->first->second, it->second);
+      sm = ZSetFromSet(it->first.it->second, it->second);
 
     if (result.empty())
       result.swap(sm);
@@ -962,7 +962,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   auto& db_slice = op_args.shard->db_slice();
 
   if (zparams.override && members.empty()) {
-    auto it = db_slice.FindExt(op_args.db_cntx, key).first;
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // We can ignore post_updater
     db_slice.Del(op_args.db_cntx.db_index, it);
     return OpStatus::OK;
   }
