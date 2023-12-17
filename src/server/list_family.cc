@@ -246,32 +246,30 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   }
 
   quicklist* dest_ql = nullptr;
-  PrimeIterator dest_it;
-  bool new_key = false;
+  src_res->post_updater.Run();
+  DbSlice::AddOrFindResult dest_res;
   try {
-    src_res->post_updater.Run();
-    tie(dest_it, new_key) = db_slice.AddOrFind(op_args.db_cntx, dest);
+    dest_res = db_slice.AddOrFind(op_args.db_cntx, dest);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  if (new_key) {
+  // Insertion of dest could invalidate src_it. Find it again.
+  src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
+  src_it = src_res->it;
+
+  if (dest_res.is_new) {
     robj* obj = createQuicklistObject();
     dest_ql = (quicklist*)obj->ptr;
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    dest_it->second.ImportRObj(obj);
-
-    // Insertion of dest could invalidate src_it. Find it again.
-    src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
-    src_it = src_res->it;
+    dest_res.it->second.ImportRObj(obj);
     DCHECK(IsValid(src_it));
   } else {
-    if (dest_it->second.ObjType() != OBJ_LIST)
+    if (dest_res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
 
-    dest_ql = GetQL(dest_it->second);
-    db_slice.PreUpdate(op_args.db_cntx.db_index, dest_it);
+    dest_ql = GetQL(dest_res.it->second);
   }
 
   string val = ListPop(src_dir, src_ql);
@@ -279,7 +277,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   quicklistPush(dest_ql, val.data(), val.size(), pos);
 
   src_res->post_updater.Run();
-  db_slice.PostUpdate(op_args.db_cntx.db_index, dest_it, dest, !new_key);
+  dest_res.post_updater.Run();
 
   if (quicklistCount(src_ql) == 0) {
     CHECK(db_slice.Del(op_args.db_cntx.db_index, src_it));
@@ -315,37 +313,34 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, ArgSlice vals, bool journal_rewrite) {
   EngineShard* es = op_args.shard;
-  PrimeIterator it;
-  bool new_key = false;
+  DbSlice::AddOrFindResult res;
 
   if (skip_notexist) {
-    // TODO(#2252): Move to FindMutable() once AddOrFindMutable() is implemented
-    auto it_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
-    if (!it_res)
+    auto tmp_res = es->db_slice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
+    if (!tmp_res)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
-    it = *it_res;
+    res = std::move(*tmp_res);
   } else {
     try {
-      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_cntx, key);
+      res = es->db_slice().AddOrFind(op_args.db_cntx, key);
     } catch (bad_alloc&) {
       return OpStatus::OUT_OF_MEMORY;
     }
   }
 
   quicklist* ql = nullptr;
-  DVLOG(1) << "OpPush " << key << " new_key " << new_key;
+  DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
 
-  if (new_key) {
+  if (res.is_new) {
     robj* o = createQuicklistObject();
     ql = (quicklist*)o->ptr;
     quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    it->second.ImportRObj(o);
+    res.it->second.ImportRObj(o);
   } else {
-    if (it->second.ObjType() != OBJ_LIST)
+    if (res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
-    es->db_slice().PreUpdate(op_args.db_cntx.db_index, it);
-    ql = GetQL(it->second);
+    ql = GetQL(res.it->second);
   }
 
   // Left push is LIST_HEAD.
@@ -356,18 +351,16 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
   }
 
-  if (new_key) {
+  if (res.is_new) {
     if (es->blocking_controller()) {
       string tmp;
-      string_view key = it->first.GetSlice(&tmp);
+      string_view key = res.it->first.GetSlice(&tmp);
 
       es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
       absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", key, " by ",
                       op_args.tx->DebugId());
     }
   }
-
-  es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";

@@ -607,16 +607,14 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
 OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
   auto& db_slice = op_args.shard->db_slice();
-  pair<PrimeIterator, bool> add_res;
+  DbSlice::AddOrFindResult add_res;
 
   if (opts.no_mkstream) {
-    // TODO(#2252): Replace with FindMutable() once AddOrFindMutable() is implemented
-    auto res_it = db_slice.Find(op_args.db_cntx, opts.key, OBJ_STREAM);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
     if (!res_it) {
       return res_it.status();
     }
-    add_res.first = res_it.value();
-    add_res.second = false;
+    add_res = std::move(*res_it);
   } else {
     try {
       add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
@@ -626,17 +624,14 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
   }
 
   robj* stream_obj = nullptr;
-  PrimeIterator& it = add_res.first;
+  PrimeIterator& it = add_res.it;
 
-  if (add_res.second) {  // new key
+  if (add_res.is_new) {
     stream_obj = createStreamObject();
 
     it->second.ImportRObj(stream_obj);
-  } else {
-    if (it->second.ObjType() != OBJ_STREAM)
-      return OpStatus::WRONG_TYPE;
-
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  } else if (it->second.ObjType() != OBJ_STREAM) {
+    return OpStatus::WRONG_TYPE;
   }
 
   stream* stream_inst = (stream*)it->second.RObjPtr();
@@ -1128,8 +1123,7 @@ struct CreateOpts {
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  // TODO(#2252): Replace with FindMutable() once new AddNew() is implemented
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
@@ -1139,13 +1133,13 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
         return res_it.status();
 
       robj* stream_obj = createStreamObject();
-      (*res_it)->second.ImportRObj(stream_obj);
+      res_it->it->second.ImportRObj(stream_obj);
     } else {
       return res_it.status();
     }
   }
 
-  CompactObj& cobj = (*res_it)->second;
+  CompactObj& cobj = res_it->it->second;
   stream* s = (stream*)cobj.RObjPtr();
 
   streamID id;

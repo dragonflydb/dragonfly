@@ -168,8 +168,8 @@ bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& 
   }
 
   DbContext context{.db_index = index, .time_now_ms = GetCurrentTimeMs()};
-  auto [it, added] = db_slice.AddOrSkip(context, key, std::move(pv), expire_ms);
-  return added;
+  db_slice.AddNew(context, key, std::move(pv), expire_ms);
+  return true;
 }
 
 class RestoreArgs {
@@ -380,6 +380,7 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
     auto& db_slice = es->db_slice();
     string_view dest_key = dest_res_.key;
     PrimeIterator dest_it = db_slice.FindExt(t->GetDbContext(), dest_key).first;
+    DbSlice::AutoUpdater post_updater;
     bool is_prior_list = false;
 
     if (IsValid(dest_it)) {
@@ -397,7 +398,10 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
       if (src_res_.ref_val.ObjType() == OBJ_STRING) {
         pv_.SetString(str_val_);
       }
-      dest_it = db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
+      auto add_res =
+          db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
+      dest_it = add_res.it;
+      post_updater = std::move(add_res.post_updater);
     }
 
     dest_it->first.SetSticky(src_res_.sticky);
@@ -1441,6 +1445,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     return OpStatus::OK;
 
   bool is_prior_list = false;
+  DbSlice::AutoUpdater post_updater;
   auto [to_it, to_expire] = db_slice.FindExt(op_args.db_cntx, to_key);
   if (IsValid(to_it)) {
     if (skip_exists)
@@ -1472,7 +1477,9 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     // On the other hand, AddNew does not rely on the iterators - this is why we keep
     // the value in `from_obj`.
     CHECK(db_slice.Del(op_args.db_cntx.db_index, from_it));
-    to_it = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
+    auto add_res = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
+    to_it = add_res.it;
+    post_updater = std::move(add_res.post_updater);
   }
 
   to_it->first.SetSticky(sticky);
@@ -1529,10 +1536,10 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   from_it->second.SetExpire(IsValid(from_expire));
 
   CHECK(db_slice.Del(op_args.db_cntx.db_index, from_it));
-  to_it = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
-  to_it->first.SetSticky(sticky);
+  auto add_res = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
+  add_res.it->first.SetSticky(sticky);
 
-  if (to_it->second.ObjType() == OBJ_LIST && op_args.shard->blocking_controller()) {
+  if (add_res.it->second.ObjType() == OBJ_LIST && op_args.shard->blocking_controller()) {
     op_args.shard->blocking_controller()->AwakeWatched(target_db, key);
   }
 
