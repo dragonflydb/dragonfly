@@ -1,6 +1,7 @@
 import random
 import pytest
 import asyncio
+import time
 from redis import asyncio as aioredis
 from redis.exceptions import ConnectionError as redis_conn_error
 import async_timeout
@@ -285,6 +286,55 @@ async def test_multi_pubsub(async_client):
     state, message = await run_multi_pubsub(async_client, messages, "my-channel")
 
     assert state, message
+
+
+"""
+Test PUBSUB NUMSUB command.
+"""
+
+
+@pytest.mark.asyncio
+async def test_pubsub_subcommand_for_numsub(async_client):
+    subs1 = [async_client.pubsub() for i in range(5)]
+    for s in subs1:
+        await s.subscribe("channel_name1")
+    result = await async_client.pubsub_numsub("channel_name1")
+    assert result[0][0] == "channel_name1" and result[0][1] == 5
+
+    for s in subs1:
+        await s.unsubscribe("channel_name1")
+    result = await async_client.pubsub_numsub("channel_name1")
+
+    retry = 5
+    for i in range(0, retry):
+        result = await async_client.pubsub_numsub("channel_name1")
+        if result[0][0] == "channel_name1" and result[0][1] == 0:
+            break
+        else:
+            time.sleep(1)
+
+    assert result[0][0] == "channel_name1" and result[0][1] == 0
+
+    result = await async_client.pubsub_numsub()
+    assert len(result) == 0
+
+    subs2 = [async_client.pubsub() for i in range(5)]
+    for s in subs2:
+        await s.subscribe("channel_name2")
+
+    subs3 = [async_client.pubsub() for i in range(10)]
+    for s in subs3:
+        await s.subscribe("channel_name3")
+
+    result = await async_client.pubsub_numsub("channel_name2", "channel_name3")
+    assert result[0][0] == "channel_name2" and result[0][1] == 5
+    assert result[1][0] == "channel_name3" and result[1][1] == 10
+
+    for s in subs2:
+        await s.unsubscribe("channel_name2")
+
+    for s in subs3:
+        await s.unsubscribe("channel_name3")
 
 
 """
@@ -616,3 +666,37 @@ async def test_unix_domain_socket(df_local_factory, tmp_dir):
 
     r = aioredis.Redis(unix_socket_path=tmp_dir / "df.sock")
     assert await r.ping()
+
+
+"""
+Test nested pauses. Executing CLIENT PAUSE should be possible even if another write-pause is active.
+It should prolong the pause for all current commands.
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_nested_client_pause(async_client: aioredis.Redis):
+    async def do_pause():
+        await async_client.execute_command("CLIENT", "PAUSE", "1000", "WRITE")
+
+    async def do_write():
+        await async_client.execute_command("LPUSH", "l", "1")
+
+    p1 = asyncio.create_task(do_pause())
+    await asyncio.sleep(0.1)
+
+    p2 = asyncio.create_task(do_write())
+    assert not p2.done()
+
+    await asyncio.sleep(0.5)
+    p3 = asyncio.create_task(do_pause())
+
+    await p1
+    await asyncio.sleep(0.1)
+    assert not p2.done()  # blocked by p3 now
+
+    await p2
+    await asyncio.sleep(0.0)
+    assert p3.done()
+    await p3
