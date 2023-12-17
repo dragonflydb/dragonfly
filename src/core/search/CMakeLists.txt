@@ -9,5 +9,6 @@ add_library(query_parser base.cc ast_expr.cc query_driver.cc search.cc indices.c
 target_link_libraries(query_parser base absl::strings TRDP::reflex TRDP::uni-algo TRDP::hnswlib)
 
 cxx_test(compressed_sorted_set_test query_parser LABELS DFLY)
+cxx_test(block_list_test query_parser LABELS DFLY)
 cxx_test(search_parser_test query_parser LABELS DFLY)
 cxx_test(search_test query_parser LABELS DFLY)

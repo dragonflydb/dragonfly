@@ -48,7 +48,7 @@ class CompressedSortedSet {
     absl::Span<const uint8_t> diffs_{};
   };
 
-  friend struct Iterator;
+  using iterator = ConstIterator;
 
  public:
   explicit CompressedSortedSet(PMR_NS::memory_resource* mr);
@@ -56,11 +56,19 @@ class CompressedSortedSet {
   ConstIterator begin() const;
   ConstIterator end() const;
 
-  void Insert(IntType value);  // Insert arbitrary element, needs to scan whole list
-  void Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
+  bool Insert(IntType value);  // Insert arbitrary element, needs to scan whole list
+  bool Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
 
   size_t Size() const;
   size_t ByteSize() const;
+
+  void Merge(CompressedSortedSet&& other) {
+  }
+
+  std::pair<CompressedSortedSet, CompressedSortedSet> Split() && {
+    auto* mr = diffs_.get_allocator().resource();
+    return std::make_pair(std::move(*this), CompressedSortedSet{mr});
+  }
 
   // To use transparently in templates together with stl containers
   size_t size() const {
@@ -90,6 +98,7 @@ class CompressedSortedSet {
 
  private:
   uint32_t size_{0};
+  IntType head_value_{0};
   std::optional<IntType> tail_value_{};
   std::vector<uint8_t, PMR_NS::polymorphic_allocator<uint8_t>> diffs_;
 };
