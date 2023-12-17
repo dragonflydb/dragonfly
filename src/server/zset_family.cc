@@ -1321,15 +1321,14 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
+
   OpResult<ScoredArray> popped_array;
-  cntx->conn_state.is_blocking = true;
+  auto cb = [is_max, &popped_array](Transaction* t, EngineShard* shard, std::string_view key) {
+    popped_array = OpBZPop(t, shard, key, is_max);
+  };
+
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_ZSET,
-      [is_max, &popped_array](Transaction* t, EngineShard* shard, std::string_view key) {
-        popped_array = OpBZPop(t, shard, key, is_max);
-      },
-      unsigned(timeout * 1000));
-  cntx->conn_state.is_blocking = false;
+      transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {

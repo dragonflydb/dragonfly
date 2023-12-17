@@ -238,7 +238,8 @@ OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_typ
 }
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
-                                              BlockingResultCb func, unsigned limit_ms) {
+                                              BlockingResultCb func, unsigned limit_ms,
+                                              bool* block_flag) {
   trans->Schedule();
 
   string result_key;
@@ -281,9 +282,12 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
 
   auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
 
-  bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
-  if (!wait_succeeded)
-    return OpStatus::TIMED_OUT;
+  *block_flag = true;
+  auto status = trans->WaitOnWatch(limit_tp, std::move(wcb));
+  *block_flag = false;
+
+  if (status != OpStatus::OK)
+    return status;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {

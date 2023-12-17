@@ -88,9 +88,9 @@ TEST_F(BlockingControllerTest, Timeout) {
   trans_->Schedule();
   auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->GetShardArgs(0); };
 
-  bool res = trans_->WaitOnWatch(tp, cb);
+  facade::OpStatus status = trans_->WaitOnWatch(tp, cb);
 
-  EXPECT_FALSE(res);
+  EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(
       0, [&] { return EngineShard::tlocal()->blocking_controller()->NumWatched(0); });
 

@@ -514,11 +514,21 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     before = tl_cluster_config->GetOwnedSlots();
   }
 
-  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn()};
-  auto cb = [&tracker, &new_config](util::ProactorBase* pb) {
+  // Ignore blocked commands because we filter them with CancelBlockingOnThread
+  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
+                          true /* ignore blocked */};
+
+  auto blocking_filter = [&new_config](ArgSlice keys) {
+    bool moved = any_of(keys.begin(), keys.end(), [&](auto k) { return !new_config->IsMySlot(k); });
+    return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
+  };
+
+  auto cb = [this, &tracker, &new_config, blocking_filter](util::ProactorBase* pb) {
+    server_family_->CancelBlockingOnThread(blocking_filter);
     tl_cluster_config = new_config;
     tracker.TrackOnThread();
   };
+
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
   DCHECK(tl_cluster_config != nullptr);
 

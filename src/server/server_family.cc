@@ -1142,17 +1142,18 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
-void ServerFamily::CancelBlockingCommands() {
-  auto cb = [](unsigned thread_index, util::Connection* conn) {
-    facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
-    if (fc) {
-      ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
-      cntx->CancelBlocking();
+void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> status_cb) {
+  auto cb = [status_cb](unsigned thread_index, util::Connection* conn) {
+    if (auto fcntx = static_cast<facade::Connection*>(conn)->cntx(); fcntx) {
+      auto* cntx = static_cast<ConnectionContext*>(fcntx);
+      if (cntx->transaction && cntx->blocked) {
+        cntx->transaction->CancelBlocking(status_cb);
+      }
     }
   };
-  for (auto* listener : listeners_) {
-    listener->TraverseConnections(cb);
-  }
+
+  for (auto* listener : listeners_)
+    listener->TraverseConnectionsOnThread(cb);
 }
 
 string GetPassword() {

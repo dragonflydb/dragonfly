@@ -1048,6 +1048,12 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
 
+  absl::StrAppend(&info, "state=");
+  if (cc_->paused)
+    absl::StrAppend(&info, "p");
+  if (cc_->blocked)
+    absl::StrAppend(&info, "b");
+
   absl::StrAppend(&info, "}");
   return info;
 }
@@ -1225,11 +1231,14 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
 }
 
-void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused) {
+void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, bool ignore_blocked) {
   if (!IsCurrentlyDispatching())
     return;
 
   if (cc_->paused && ignore_paused)
+    return;
+
+  if (cc_->blocked && ignore_blocked)
     return;
 
   VLOG(1) << "Sent checkpoint to " << DebugInfo();

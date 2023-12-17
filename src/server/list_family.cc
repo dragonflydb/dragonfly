@@ -889,9 +889,8 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
   // Block
-  bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
-  if (!wait_succeeded)
-    return OpStatus::TIMED_OUT;
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
+    return status;
 
   t->Execute(cb_move, true);
   return op_res;
@@ -914,9 +913,8 @@ OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
   // This allows us to run Transaction::Execute on watched transactions in both shards.
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
-  bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
-  if (!wait_succeeded)
-    return OpStatus::TIMED_OUT;
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
+    return status;
 
   return MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, true);
 }
@@ -1206,10 +1204,9 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
     popped_value = OpBPop(t, shard, key, dir);
   };
 
-  cntx->conn_state.is_blocking = true;
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000));
-  cntx->conn_state.is_blocking = false;
+      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked);
+
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {
     DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
@@ -1222,8 +1219,12 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return rb->SendError(kWrongTypeErr);
+    case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::KEY_MOVED:
+      // TODO: proper error for moved
+      return rb->SendError("-MOVED");
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
   }

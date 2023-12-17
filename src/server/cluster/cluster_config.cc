@@ -311,6 +311,10 @@ bool ClusterConfig::IsMySlot(SlotId id) const {
   return my_slots_.test(id);
 }
 
+bool ClusterConfig::IsMySlot(std::string_view key) const {
+  return IsMySlot(KeySlot(key));
+}
+
 ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
   CHECK_LT(id, my_slots_.size()) << "Requesting a non-existing slot id " << id;
 

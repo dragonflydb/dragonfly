@@ -155,8 +155,6 @@ struct ConnectionState {
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
 
-  bool is_blocking = false;  // whether this connection is blocking on a command
-
   ExecInfo exec_info;
   ReplicationInfo replication_info;
 
@@ -194,7 +192,6 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
-  void CancelBlocking();           // Cancel an ongoing blocking transaction if there is one.
 
   size_t UsedMemory() const override;
 
