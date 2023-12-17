@@ -66,6 +66,8 @@ class DbSlice {
   class AutoUpdater {
    public:
     AutoUpdater();
+    AutoUpdater(const AutoUpdater& o) = delete;
+    AutoUpdater& operator=(const AutoUpdater& o) = delete;
     AutoUpdater(AutoUpdater&& o);
     AutoUpdater& operator=(AutoUpdater&& o);
     ~AutoUpdater();
