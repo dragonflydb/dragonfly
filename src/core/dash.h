@@ -145,6 +145,11 @@ class DashTable : public detail::DashTableBase {
                           InsertMode::kInsertIfNotFound);
   }
 
+  template <typename U, typename V> iterator InsertNew(U&& key, V&& value) {
+    DefaultEvictionPolicy policy;
+    return InsertNew(std::forward<U>(key), std::forward<V>(value), policy);
+  }
+
   template <typename U, typename V, typename EvictionPolicy>
   iterator InsertNew(U&& key, V&& value, EvictionPolicy& ev) {
     return InsertInternal(std::forward<U>(key), std::forward<V>(value), ev,

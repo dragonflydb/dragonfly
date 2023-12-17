@@ -771,7 +771,7 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 
 DbSlice::ItAndUpdater DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
                                       uint64_t expire_at_ms) noexcept(false) {
-  auto res = AddOrSkip(cntx, key, std::move(obj), expire_at_ms);
+  auto res = AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
   CHECK(res.is_new);
 
   return {.it = res.it, .post_updater = std::move(res.post_updater)};
@@ -847,12 +847,7 @@ DbSlice::AddOrFindResult DbSlice::AddOrUpdateInternal(const Context& cntx, std::
     if (IsValid(res.exp_it) && force_update) {
       res.exp_it->second = ExpirePeriod(delta);
     } else {
-      auto [eit, inserted] = db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta));
-      CHECK(inserted || force_update);
-      if (!inserted) {
-        eit->second = ExpirePeriod(delta);
-      }
-      res.exp_it = eit;
+      res.exp_it = db.expire.InsertNew(it->first.AsRef(), ExpirePeriod(delta));
     }
   }
 
@@ -862,11 +857,6 @@ DbSlice::AddOrFindResult DbSlice::AddOrUpdateInternal(const Context& cntx, std::
 DbSlice::AddOrFindResult DbSlice::AddOrUpdate(const Context& cntx, string_view key, PrimeValue obj,
                                               uint64_t expire_at_ms) noexcept(false) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
-}
-
-DbSlice::AddOrFindResult DbSlice::AddOrSkip(const Context& cntx, string_view key, PrimeValue obj,
-                                            uint64_t expire_at_ms) noexcept(false) {
-  return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
 }
 
 size_t DbSlice::DbSize(DbIndex db_ind) const {
