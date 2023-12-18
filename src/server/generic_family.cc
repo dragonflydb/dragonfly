@@ -615,6 +615,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
     return OpStatus::KEY_NOTFOUND;
   }
 
+  find_res.post_updater.Run();
   auto res = db_slice.UpdateExpire(op_args.db_cntx, find_res.it, find_res.exp_it, params);
 
   // If the value was deleted, replicate as DEL.
