@@ -352,7 +352,7 @@ void Renamer::Finalize(Transaction* t, bool skip_exist_dest) {
 OpStatus Renamer::MoveSrc(Transaction* t, EngineShard* es) {
   if (es->shard_id() == src_sid_) {  // Handle source key.
     auto res = es->db_slice().FindMutable(t->GetDbContext(), src_res_.key);
-    auto it = res.it;
+    auto& it = res.it;
     CHECK(IsValid(it));
 
     // We distinguish because of the SmallString that is pinned to its thread by design,
@@ -381,7 +381,7 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
     auto& db_slice = es->db_slice();
     string_view dest_key = dest_res_.key;
     auto res = db_slice.FindMutable(t->GetDbContext(), dest_key);
-    auto dest_it = res.it;
+    auto& dest_it = res.it;
     bool is_prior_list = false;
 
     if (IsValid(dest_it)) {
@@ -400,7 +400,6 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
         pv_.SetString(str_val_);
       }
       res = db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
-      dest_it = res.it;
     }
 
     dest_it->first.SetSticky(src_res_.sticky);
