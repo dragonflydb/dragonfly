@@ -180,7 +180,7 @@ class DbSlice {
   }
 
   // returns absolute time of the expiration.
-  time_t ExpireTime(ExpireIterator it) const {
+  time_t ExpireTime(ExpireConstIterator it) const {
     return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
   }
 
@@ -199,7 +199,7 @@ class DbSlice {
 
   struct ItAndExpConst {
     PrimeConstIterator it;
-    ExpireIterator exp_it;
+    ExpireConstIterator exp_it;
   };
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
