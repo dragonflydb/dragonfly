@@ -99,6 +99,17 @@ bool MatchHttp11Line(string_view line) {
   return absl::StartsWith(line, "GET ") && absl::EndsWith(line, "HTTP/1.1");
 }
 
+void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
+                         absl::FunctionRef<void()> f) {
+  const size_t prev_capacity = io_buf.Capacity();
+  f();
+  const size_t capacity = io_buf.Capacity();
+  if (stats != nullptr && prev_capacity != capacity) {
+    VLOG(1) << "Grown io_buf to " << capacity;
+    stats->read_buf_capacity += capacity - prev_capacity;
+  }
+}
+
 constexpr size_t kMinReadSize = 256;
 
 thread_local uint32_t free_req_release_weight = 0;
@@ -565,7 +576,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
       return MatchHttp11Line(ib);
     }
     last_len = io_buf_.InputLen();
-    io_buf_.EnsureCapacity(io_buf_.Capacity());
+    UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity()); });
   } while (last_len < 1024);
 
   return false;
@@ -598,7 +609,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // Main loop.
   if (parse_status != ERROR && !ec) {
     if (io_buf_.AppendLen() < 64) {
-      io_buf_.EnsureCapacity(io_buf_.Capacity() * 2);
+      UpdateIoBufCapacity(io_buf_, stats_,
+                          [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity() * 2); });
     }
     auto res = IoLoop(peer, orig_builder);
 
@@ -917,7 +929,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         // (Note: The buffer object is only working in power-of-2 sizes,
         // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
-          io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
+          UpdateIoBufCapacity(io_buf_, stats_,
+                              [&]() { io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint)); });
         }
 
         // If we got a partial request and we couldn't parse the length, just
@@ -926,13 +939,11 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         // a reasonable limit to save on Recv() calls.
         if (io_buf_.AppendLen() < 64u || (is_iobuf_full && capacity < 4096)) {
           // Last io used most of the io_buf to the end.
-          io_buf_.Reserve(capacity * 2);  // Valid growth range.
+          UpdateIoBufCapacity(io_buf_, stats_, [&]() {
+            io_buf_.Reserve(capacity * 2);  // Valid growth range.
+          });
         }
 
-        if (capacity < io_buf_.Capacity()) {
-          VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
-          stats_->read_buf_capacity += (io_buf_.Capacity() - capacity);
-        }
         DCHECK_GT(io_buf_.AppendLen(), 0U);
       } else if (io_buf_.AppendLen() == 0) {
         // We have a full buffer and we can not progress with parsing.
