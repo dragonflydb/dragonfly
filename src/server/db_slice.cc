@@ -407,7 +407,7 @@ DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) 
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
+  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats);
 
   if (IsValid(it)) {
     PreUpdate(cntx.db_index, it);
@@ -421,7 +421,7 @@ DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key)
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
   // Don't use FindMutable() so that we don't call PreUpdate()
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
+  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats);
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
