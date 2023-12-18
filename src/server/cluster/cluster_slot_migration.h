@@ -18,7 +18,7 @@ class ClusterSlotMigration : ProtocolClient {
     State state;
   };
 
-  ClusterSlotMigration(std::string host_ip, uint16_t port, Service* se,
+  ClusterSlotMigration(std::string host_ip, uint16_t port,
                        std::vector<ClusterConfig::SlotRange> slots);
   ~ClusterSlotMigration();
 
@@ -30,7 +30,6 @@ class ClusterSlotMigration : ProtocolClient {
   std::error_code InitiateDflyFullSync();
 
  private:
-  Service& service_;
   Mutex flows_op_mu_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   std::error_code Greet();

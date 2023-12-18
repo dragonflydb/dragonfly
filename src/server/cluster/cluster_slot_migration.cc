@@ -35,9 +35,9 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
-ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
+ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(move(host_ip), port), service_(*se), slots_(std::move(slots)) {
+    : ProtocolClient(move(host_ip), port), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
