@@ -4,10 +4,12 @@
 
 #include "core/search/block_list.h"
 
+#include <absl/container/btree_set.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <map>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -20,10 +22,11 @@ class BlockListTest : public ::testing::Test {
  protected:
 };
 
-TEST_F(BlockListTest, LoopInsertErase) {
+TEST_F(BlockListTest, LoopMidInsertErase) {
   const size_t kNumElements = 1000;
 
-  BlockList<CompressedSortedSet> list{PMR_NS::get_default_resource()};
+  // Create list with small block size to test blocking mechanism more extensively
+  BlockList<CompressedSortedSet> list{PMR_NS::get_default_resource(), 10};
   for (int i = 0; i < kNumElements / 2; i++) {
     list.Insert(i);
     list.Insert(i + kNumElements / 2);
@@ -43,6 +46,36 @@ TEST_F(BlockListTest, LoopInsertErase) {
   EXPECT_EQ(out.size(), 0);
 }
 
+TEST_F(BlockListTest, InsertReverseRemoveSteps) {
+  const size_t kNumElements = 1000;
+
+  BlockList<CompressedSortedSet> list{PMR_NS::get_default_resource(), 10};
+
+  for (int i = 0; i < kNumElements; i++) {
+    list.Insert(kNumElements - i - 1);
+  }
+
+  for (int deleted_pref = 0; deleted_pref < 10; deleted_pref++) {
+    vector<DocId> out{list.begin(), list.end()};
+    reverse(out.begin(), out.end());
+
+    EXPECT_EQ(out.size(), kNumElements / 10 * (10 - deleted_pref));
+    for (int i = 0; i < kNumElements; i++) {
+      if (i % 10 >= deleted_pref) {
+        EXPECT_EQ(out.back(), DocId(i));
+        out.pop_back();
+      }
+    }
+
+    for (int i = 0; i < kNumElements; i++) {
+      if (i % 10 == deleted_pref)
+        list.Remove(i);
+    }
+  }
+
+  EXPECT_EQ(list.size(), 0);
+}
+
 static void BM_Erase90PctTail(benchmark::State& state) {
   BlockList<CompressedSortedSet> bl{PMR_NS::get_default_resource()};
 
@@ -59,38 +92,5 @@ static void BM_Erase90PctTail(benchmark::State& state) {
 }
 
 BENCHMARK(BM_Erase90PctTail)->Args({100'000});
-
-/*
-TEST_F(BlockListTest, MergeBench) {
-  CompressedSortedSet l1{PMR_NS::get_default_resource()}, l2{PMR_NS::get_default_resource()};
-  vector<int> v1, v2;
-  BlockList bl1, bl2;
-
-  auto start = clock();
-
-  for (int i = 0; i < 1'000'000; i++) {
-    //l1.Insert(i);
-    //l2.Insert(i);
-    //v1.push_back(i);
-    //v2.push_back(i);
-    bl1.Insert(i);
-    bl2.Insert(i);
-  }
-
-  VLOG(0) << "Filling: " << (clock() - start);
-
-  vector<int> vout;
-  vout.reserve(v1.size());
-
-  for (int i = 0; i < 10; i++) {
-    vout.clear();
-    start = clock();
-    //set_intersection(l1.begin(), l1.end(), l2.begin(), l2.end(), back_inserter(vout));
-    //set_intersection(v1.begin(), v1.end(), v2.begin(), v2.end(), back_inserter(vout));
-    set_intersection(bl1.begin(), bl1.end(), bl2.begin(), bl2.end(), back_inserter(vout));
-    VLOG(0) << (clock() - start);
-  }
-}
-*/
 
 }  // namespace dfly::search

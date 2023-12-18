@@ -4,9 +4,42 @@ namespace dfly::search {
 
 using namespace std;
 
-namespace {}  // namespace
+bool SortedVector::Insert(DocId t) {
+  if (entries_.size() > 0 && t > entries_.back()) {
+    entries_.push_back(t);
+    return true;
+  }
 
-template <typename C> bool BlockList<C>::Insert(IntType t) {
+  auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
+  if (it != entries_.end() && *it == t)
+    return false;
+
+  entries_.insert(it, t);
+  return true;
+}
+
+bool SortedVector::Remove(DocId t) {
+  auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
+  if (it != entries_.end() && *it == t) {
+    entries_.erase(it);
+    return true;
+  }
+  return false;
+}
+
+void SortedVector::Merge(SortedVector&& other) {
+  for (int t : other.entries_)
+    Insert(t);
+}
+
+std::pair<SortedVector, SortedVector> SortedVector::Split() && {
+  std::vector<DocId> tail(entries_.begin() + entries_.size() / 2, entries_.end());
+  entries_.resize(entries_.size() / 2);
+
+  return std::make_pair(std::move(*this), SortedVector{std::move(tail)});
+}
+
+template <typename C> bool BlockList<C>::Insert(DocId t) {
   auto block = FindBlock(t);
   if (block == blocks_.end())
     block = blocks_.insert(blocks_.end(), C{mr_});
@@ -19,7 +52,7 @@ template <typename C> bool BlockList<C>::Insert(IntType t) {
   return true;
 }
 
-template <typename C> bool BlockList<C>::Remove(IntType t) {
+template <typename C> bool BlockList<C>::Remove(DocId t) {
   if (auto block = FindBlock(t); block != blocks_.end() && block->Remove(t)) {
     size_--;
     TryMerge(block);
@@ -29,13 +62,13 @@ template <typename C> bool BlockList<C>::Remove(IntType t) {
   return false;
 }
 
-template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(IntType t) {
+template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(DocId t) {
   if (!blocks_.empty() && t >= *blocks_.back().begin())
     return --blocks_.end();
 
   // Find first block that can't contain t
   auto it = std::upper_bound(blocks_.begin(), blocks_.end(), t,
-                             [](IntType t, const C& l) { return *l.begin() > t; });
+                             [](DocId t, const C& l) { return *l.begin() > t; });
 
   // Move to previous if possible
   if (it != blocks_.begin() && blocks_.size() > 0)
@@ -87,6 +120,6 @@ typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::opera
 }
 
 template class BlockList<CompressedSortedSet>;
-template class BlockList<SortedVectorContainer>;
+template class BlockList<SortedVector>;
 
 }  // namespace dfly::search

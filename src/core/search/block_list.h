@@ -13,53 +13,25 @@
 
 namespace dfly::search {
 
-using IntType = DocId;
-
-struct SortedVectorContainer {
-  SortedVectorContainer() = default;
-  SortedVectorContainer(PMR_NS::memory_resource*) : entries_{} {
+// Supports Insert and Remove operations for keeping a sorted vector internally.
+// Wrapper to use vectors with BlockList
+struct SortedVector {
+  SortedVector(PMR_NS::memory_resource* mr) : entries_{mr} {
   }
 
-  bool Insert(IntType t) {
-    if (entries_.size() > 0 && t > entries_.back()) {
-      entries_.push_back(t);
-      return true;
-    }
+  bool Insert(DocId t);
 
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
-    if (it != entries_.end() && *it == t)
-      return false;
+  bool Remove(DocId t);
 
-    entries_.insert(it, t);
-    return true;
-  }
+  void Merge(SortedVector&& other);
 
-  bool Remove(IntType t) {
-    auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
-    if (it != entries_.end() && *it == t) {
-      entries_.erase(it);
-      return true;
-    }
-    return false;
-  }
-
-  void Merge(SortedVectorContainer&& other) {
-    for (int t : other.entries_)
-      Insert(t);
-  }
-
-  std::pair<SortedVectorContainer, SortedVectorContainer> Split() && {
-    std::vector<IntType> tail(entries_.begin() + entries_.size() / 2, entries_.end());
-    entries_.resize(entries_.size() / 2);
-
-    return std::make_pair(std::move(*this), SortedVectorContainer{std::move(tail)});
-  }
+  std::pair<SortedVector, SortedVector> Split();
 
   size_t Size() {
     return entries_.size();
   }
 
-  using iterator = typename std::vector<IntType>::const_iterator;
+  using iterator = typename std::vector<DocId>::const_iterator;
 
   auto begin() const {
     return entries_.cbegin();
@@ -70,25 +42,30 @@ struct SortedVectorContainer {
   }
 
  private:
-  SortedVectorContainer(std::vector<IntType>&& v) : entries_{std::move(v)} {
+  SortedVector(PMR_NS::vector<DocId>&& v) : entries_{std::move(v)} {
   }
 
-  std::vector<IntType> entries_;
+  PMR_NS::vector<DocId> entries_;
 };
 
+// BlockList is a container for CompressedSortedSet / vector<DocId> to separate the full sorted
+// range between a list of those containers. This reduces any update compexity from O(N)
+// to O(K), where K is the max block size.
+//
+// It tires to balance their sizes in the range [block_size / 2, block_size * 2].
 template <typename C /* underlying container type */> class BlockList {
   using BlockIt = typename std::vector<C>::iterator;
 
  public:
-  BlockList(PMR_NS::memory_resource* mr, const size_t block_size = 1000)
+  BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000)
       : block_size_{block_size}, mr_{mr} {
   }
 
   // Insert element, returns true if inserted, false if already present.
-  bool Insert(IntType t);
+  bool Insert(DocId t);
 
   // Remove element, returns true if removed, false if not found.
-  bool Remove(IntType t);
+  bool Remove(DocId t);
 
   size_t Size() {
     return size_;
@@ -102,11 +79,11 @@ template <typename C /* underlying container type */> class BlockList {
     // To make it work with std container contructors
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
-    using value_type = IntType;
-    using pointer = IntType*;
-    using reference = IntType&;
+    using value_type = DocId;
+    using pointer = DocId*;
+    using reference = DocId&;
 
-    IntType operator*() const {
+    DocId operator*() const {
       return **block_it;
     }
 
@@ -144,7 +121,7 @@ template <typename C /* underlying container type */> class BlockList {
 
  private:
   // Find block that should contain t. Returns end() only if empty
-  BlockIt FindBlock(IntType t);
+  BlockIt FindBlock(DocId t);
 
   // If needed, try merging with previous block
   void TryMerge(BlockIt block);
@@ -155,9 +132,8 @@ template <typename C /* underlying container type */> class BlockList {
  private:
   const size_t block_size_ = 1000;
 
-  PMR_NS::memory_resource* mr_;
   size_t size_ = 0;
-  std::vector<C> blocks_;
+  PMR_NS::vector<C> blocks_;
 };
 
 }  // namespace dfly::search
