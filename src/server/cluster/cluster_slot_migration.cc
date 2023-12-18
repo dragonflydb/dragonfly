@@ -118,14 +118,8 @@ std::error_code ClusterSlotMigration::InitiateDflyFullSync() {
     shard_flows_[i].reset(new ClusterShardMigration(server(), i));
   }
 
-  // Blocked on until all flows got full sync cut.
-  BlockingCounter sync_block{source_shards_num_};
-
   // Switch to new error handler that closes flow sockets.
-  auto err_handler = [this, sync_block](const auto& ge) mutable {
-    // Unblock this function.
-    sync_block.Cancel();
-
+  auto err_handler = [this](const auto& ge) mutable {
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
 
@@ -136,19 +130,11 @@ std::error_code ClusterSlotMigration::InitiateDflyFullSync() {
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
-  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
-        GlobalState::LOADING);
-
-  absl::Cleanup cleanup = [this]() {
-    // We do the following operations regardless of outcome.
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-  };
-
   std::atomic_uint32_t synced_shards = 0;
   auto partition = Partition(source_shards_num_);
   auto shard_cb = [&](unsigned index, auto*) {
     for (auto id : partition[index]) {
-      auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &cntx_);
+      auto ec = shard_flows_[id]->StartSyncFlow(&cntx_);
       if (!ec) {
         ++synced_shards;
       } else {

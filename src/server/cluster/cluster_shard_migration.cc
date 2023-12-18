@@ -24,7 +24,7 @@ ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint3
 ClusterShardMigration::~ClusterShardMigration() {
 }
 
-std::error_code ClusterShardMigration::StartSyncFlow(BlockingCounter sb, Context* cntx) {
+std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
   using nonstd::make_unexpected;
 
   RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
@@ -42,10 +42,6 @@ std::error_code ClusterShardMigration::StartSyncFlow(BlockingCounter sb, Context
   }
 
   PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
-
-  string eof_token(ToSV(LastResponseArgs()[0].GetBuf()));
-
-  sb.Dec();  // for future sync
 
   return {};
 }

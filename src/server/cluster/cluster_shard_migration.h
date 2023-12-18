@@ -13,7 +13,7 @@ class ClusterShardMigration : public ProtocolClient {
   ClusterShardMigration(ServerContext server_context, uint32_t shard_id);
   ~ClusterShardMigration();
 
-  std::error_code StartSyncFlow(BlockingCounter sb, Context* cntx);
+  std::error_code StartSyncFlow(Context* cntx);
   void Cancel();
 
  private:

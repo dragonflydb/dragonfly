@@ -703,8 +703,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
+  DCHECK(!parser.Error());
 
   if (!tl_cluster_config) {
     cntx->SendError(kClusterNotConfigured);
@@ -731,13 +730,9 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
 void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto shard_id = parser.Next<size_t>();
+  DCHECK(!parser.Error());
 
   VLOG(1) << "Create flow for " << shard_id << " shard";
-
-  absl::InsecureBitGen gen;
-  string eof_token = GetRandomHex(gen, 40);
-
-  cntx->SendSimpleString(eof_token);
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);
