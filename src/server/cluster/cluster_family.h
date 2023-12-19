@@ -83,7 +83,7 @@ class ClusterFamily {
   std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
-  uint32_t next_sync_id = 1;
+  uint32_t next_sync_id_ = 1;
   using MigrationInfoMap = absl::btree_map<uint32_t, std::shared_ptr<MigrationInfo>>;
   MigrationInfoMap migration_infos_;
 };

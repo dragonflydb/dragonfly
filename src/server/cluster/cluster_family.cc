@@ -697,7 +697,6 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Create slot migration config";
   CmdArgParser parser{args};
   auto port = parser.Next<uint16_t>();
-  ;
 
   std::vector<ClusterConfig::SlotRange> slots;
   do {
@@ -735,7 +734,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
 
 uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t port) {
   std::lock_guard lk(migration_mu_);
-  auto sync_id = next_sync_id++;
+  auto sync_id = next_sync_id_++;
   auto info = make_shared<MigrationInfo>(cntx->conn()->RemoteEndpointAddress(), sync_id, port);
   auto [it, inserted] = migration_infos_.emplace(sync_id, info);
   CHECK(inserted);
