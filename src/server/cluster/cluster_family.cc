@@ -704,7 +704,8 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     slots.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
-  DCHECK(!parser.Error());
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
   if (!tl_cluster_config) {
     cntx->SendError(kClusterNotConfigured);
@@ -735,7 +736,8 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
 uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t port) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
-  auto info = make_shared<MigrationInfo>(cntx->conn()->RemoteEndpointAddress(), sync_id, port);
+  auto info = make_shared<MigrationInfo>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(),
+                                         sync_id, port);
   auto [it, inserted] = migration_infos_.emplace(sync_id, info);
   CHECK(inserted);
   return sync_id;
@@ -744,7 +746,9 @@ uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t
 void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
-  DCHECK(!parser.Error());
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
   VLOG(1) << "Create flow "
           << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
@@ -755,7 +759,7 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   if (!info)
     cntx->SendError(kIdNotFound);
 
-  info->conn = cntx->conn();
+  info->flows[shard_id].conn = cntx->conn();
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
 
@@ -765,6 +769,8 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
 void ClusterFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto sync_id = parser.Next<uint32_t>();
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   VLOG(1) << "Got DFLYMIGRATE SYNC " << sync_id;
@@ -773,7 +779,9 @@ void ClusterFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
   if (!info)
     cntx->SendError(kIdNotFound);
 
-  auto cb = [info](EngineShard* shard) { info->conn->socket()->Write(io::Buffer("OK")); };
+  auto cb = [info](EngineShard* shard) {
+    info->flows[shard->shard_id()].conn->socket()->Write(io::Buffer("OK"));
+  };
   shard_set->RunBlockingInParallel(std::move(cb));
 
   LOG(INFO) << "Started migation with target node " << info->host_ip << ":" << info->port;

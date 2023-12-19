@@ -61,15 +61,19 @@ class ClusterFamily {
   void Flow(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);
 
+  struct FlowInfo {
+    facade::Connection* conn = nullptr;
+  };
+
   struct MigrationInfo {
     MigrationInfo() = default;
-    MigrationInfo(std::string ip, uint32_t sync_id, uint16_t port)
-        : host_ip(ip), sync_id(sync_id), port(port) {
+    MigrationInfo(std::uint32_t flows_num, std::string ip, uint32_t sync_id, uint16_t port)
+        : host_ip(ip), sync_id(sync_id), port(port), flows(flows_num) {
     }
     std::string host_ip;
-    facade::Connection* conn = nullptr;
     uint32_t sync_id;
     uint16_t port;
+    std::vector<FlowInfo> flows;
   };
 
   std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);
