@@ -1448,7 +1448,6 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     return OpStatus::OK;
 
   bool is_prior_list = false;
-  DbSlice::AutoUpdater post_updater;
   auto to_res = db_slice.FindMutable(op_args.db_cntx, to_key);
   if (IsValid(to_res.it)) {
     if (skip_exists)
