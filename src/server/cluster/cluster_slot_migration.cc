@@ -91,6 +91,7 @@ error_code ClusterSlotMigration::Greet() {
     return make_error_code(errc::bad_message);
 
   source_shards_num_ = get<int64_t>(LastResponseArgs()[0].u);
+  sync_id_ = get<int64_t>(LastResponseArgs()[0].u);
 
   return error_code{};
 }
@@ -115,7 +116,7 @@ void ClusterSlotMigration::MainMigrationFb() {
 std::error_code ClusterSlotMigration::InitiateDflyFullSync() {
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(server(), i));
+    shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_));
   }
 
   // Switch to new error handler that closes flow sockets.
@@ -147,10 +148,20 @@ std::error_code ClusterSlotMigration::InitiateDflyFullSync() {
   lock_guard lk{flows_op_mu_};
   shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
 
-  VLOG(1) << synced_shards << " from " << source_shards_num_ << " shards is synchronized";
+  VLOG(1) << synced_shards << " from " << source_shards_num_ << " shards were set flow";
   if (synced_shards != source_shards_num_) {
-    cntx_.ReportError(std::make_error_code(errc::state_not_recoverable), "full sync is failed");
+    cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                      "incorrect shards num, only for tests");
   }
+
+  RETURN_ON_ERR(cntx_.GetError());
+
+  string request = absl::StrCat("DFLYMIGRATE SYNC ", sync_id_);
+
+  VLOG(1) << "Sending: " << request;
+  RETURN_ON_ERR(SendCommandAndReadResponse(request));
+
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   return cntx_.GetError();
 }

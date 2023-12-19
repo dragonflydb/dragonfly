@@ -35,6 +35,7 @@ class ClusterSlotMigration : ProtocolClient {
   std::error_code Greet();
   std::vector<ClusterConfig::SlotRange> slots_;
   uint32_t source_shards_num_ = 0;
+  uint32_t sync_id_ = 0;
   State state_ = C_NO_STATE;
 
   Fiber sync_fb_;

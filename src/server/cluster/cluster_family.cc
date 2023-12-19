@@ -41,6 +41,8 @@ using ClusterShards = ClusterConfig::ClusterShards;
 using Node = ClusterConfig::Node;
 using SlotRange = ClusterConfig::SlotRange;
 
+constexpr char kIdNotFound[] = "syncid not found";
+
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only under admin port";
@@ -636,7 +638,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     return cntx->SendError(err->MakeReply());
 
   auto state = [&] {
-    lock_guard lk(migrations_jobs_mu_);
+    lock_guard lk(migration_mu_);
     for (const auto& m : migrations_jobs_) {
       const auto& info = m->GetInfo();
       if (info.host == host_ip && info.port == port)
@@ -669,9 +671,10 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
   if (sub_cmd == "CONF") {
     MigrationConf(args, cntx);
-  }
-  if (sub_cmd == "FLOW") {
+  } else if (sub_cmd == "FLOW") {
     Flow(args, cntx);
+  } else if (sub_cmd == "SYNC") {
+    Sync(args, cntx);
   } else {
     cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -679,7 +682,7 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
 
 ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
                                                   std::vector<ClusterConfig::SlotRange> slots) {
-  lock_guard lk(migrations_jobs_mu_);
+  lock_guard lk(migration_mu_);
   for (const auto& mj : migrations_jobs_) {
     if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
       return nullptr;
@@ -694,7 +697,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Create slot migration config";
   CmdArgParser parser{args};
   auto port = parser.Next<uint16_t>();
-  (void)port;  // we need it for the next step
+  ;
 
   std::vector<ClusterConfig::SlotRange> slots;
   do {
@@ -720,18 +723,69 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  cntx->conn()->SetName("slot_migration_ctrl");
+  auto sync_id = CreateMigrationSession(cntx, port);
 
+  cntx->conn()->SetName("slot_migration_ctrl");
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(2);
   cntx->SendLong(shard_set->size());
+  cntx->SendLong(sync_id);
   return;
+}
+
+uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t port) {
+  std::lock_guard lk(migration_mu_);
+  auto sync_id = next_sync_id++;
+  auto info = make_shared<MigrationInfo>(cntx->conn()->RemoteEndpointAddress(), sync_id, port);
+  auto [it, inserted] = migration_infos_.emplace(sync_id, info);
+  CHECK(inserted);
+  return sync_id;
 }
 
 void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
-  auto shard_id = parser.Next<size_t>();
+  auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
   DCHECK(!parser.Error());
 
-  VLOG(1) << "Create flow for " << shard_id << " shard";
+  VLOG(1) << "Create flow "
+          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
+
+  cntx->conn()->SetName(absl::StrCat("migration_flow_", sync_id));
+
+  auto info = GetMigrationInfo(sync_id);
+  if (!info)
+    cntx->SendError(kIdNotFound);
+
+  info->conn = cntx->conn();
+
+  cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
+
+  cntx->SendOk();
+}
+
+void ClusterFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  auto sync_id = parser.Next<uint32_t>();
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+
+  VLOG(1) << "Got DFLYMIGRATE SYNC " << sync_id;
+
+  auto info = GetMigrationInfo(sync_id);
+  if (!info)
+    cntx->SendError(kIdNotFound);
+
+  auto cb = [info](EngineShard* shard) { info->conn->socket()->Write(io::Buffer("OK")); };
+  shard_set->RunBlockingInParallel(std::move(cb));
+
+  LOG(INFO) << "Started migation with target node " << info->host_ip << ":" << info->port;
+
+  return rb->SendOk();
+}
+
+shared_ptr<ClusterFamily::MigrationInfo> ClusterFamily::GetMigrationInfo(uint32_t sync_id) {
+  unique_lock lk(migration_mu_);
+  auto sync_it = migration_infos_.find(sync_id);
+  return sync_it != migration_infos_.end() ? sync_it->second : nullptr;
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);

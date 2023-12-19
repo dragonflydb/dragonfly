@@ -15,13 +15,16 @@ namespace dfly {
 
 using namespace std;
 using namespace facade;
+using namespace util;
 using absl::GetFlag;
 
-ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t shard_id)
-    : ProtocolClient(server_context), source_shard_id_(shard_id) {
+ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t shard_id,
+                                             uint32_t sync_id)
+    : ProtocolClient(server_context), source_shard_id_(shard_id), sync_id_(sync_id) {
 }
 
 ClusterShardMigration::~ClusterShardMigration() {
+  JoinFlow();
 }
 
 std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
@@ -31,7 +34,7 @@ std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
 
   VLOG(1) << "Sending on flow " << source_shard_id_;
 
-  std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", source_shard_id_);
+  std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", sync_id_, source_shard_id_);
 
   ResetParser(/*server_mode=*/false);
   leftover_buf_.emplace(128);
@@ -41,13 +44,36 @@ std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
     return read_resp.error();
   }
 
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+
+  leftover_buf_->ConsumeInput(read_resp->left_in_buffer);
+
+  sync_fb_ =
+      fb2::Fiber("shard_migration_full_sync", &ClusterShardMigration::FullSyncShardFb, this, cntx);
 
   return {};
 }
 
+void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
+  DCHECK(leftover_buf_);
+  io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
+
+  uint8_t ok_buf[2];
+  ps.ReadAtLeast(io::MutableBytes{ok_buf, 2}, 2);
+  if (string_view(reinterpret_cast<char*>(ok_buf), 2) != "OK") {
+    cntx->ReportError(std::make_error_code(errc::protocol_error),
+                      "Incorrect FullSync data, only for tets");
+  }
+
+  VLOG(1) << "FullSyncShardFb finished after reading 2 bytes";
+}
+
 void ClusterShardMigration::Cancel() {
   CloseSocket();
+}
+
+void ClusterShardMigration::JoinFlow() {
+  sync_fb_.JoinIfNeeded();
 }
 
 }  // namespace dfly

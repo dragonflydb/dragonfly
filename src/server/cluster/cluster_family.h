@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/container/btree_map.h>
+
 #include <string>
 
 #include "facade/conn_context.h"
@@ -54,16 +56,36 @@ class ClusterFamily {
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
 
+  uint32_t CreateMigrationSession(ConnectionContext* cntx, uint16_t port);
+
   void Flow(CmdArgList args, ConnectionContext* cntx);
+  void Sync(CmdArgList args, ConnectionContext* cntx);
+
+  struct MigrationInfo {
+    MigrationInfo() = default;
+    MigrationInfo(std::string ip, uint32_t sync_id, uint16_t port)
+        : host_ip(ip), sync_id(sync_id), port(port) {
+    }
+    std::string host_ip;
+    facade::Connection* conn = nullptr;
+    uint32_t sync_id;
+    uint16_t port;
+  };
+
+  std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);
 
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   ServerFamily* server_family_ = nullptr;
 
-  mutable Mutex migrations_jobs_mu_;
+  mutable Mutex migration_mu_;  // guard migrations operations
   // holds all slot migrations that are currently in progress.
   std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
-      ABSL_GUARDED_BY(migrations_jobs_mu_);
+      ABSL_GUARDED_BY(migration_mu_);
+
+  uint32_t next_sync_id = 1;
+  using MigrationInfoMap = absl::btree_map<uint32_t, std::shared_ptr<MigrationInfo>>;
+  MigrationInfoMap migration_infos_;
 };
 
 }  // namespace dfly

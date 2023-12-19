@@ -10,15 +10,22 @@ namespace dfly {
 
 class ClusterShardMigration : public ProtocolClient {
  public:
-  ClusterShardMigration(ServerContext server_context, uint32_t shard_id);
+  ClusterShardMigration(ServerContext server_context, uint32_t shard_id, uint32_t sync_id);
   ~ClusterShardMigration();
 
   std::error_code StartSyncFlow(Context* cntx);
   void Cancel();
 
  private:
+  void FullSyncShardFb(Context* cntx);
+  void JoinFlow();
+
+ private:
   uint32_t source_shard_id_;
+  uint32_t sync_id_;
   std::optional<base::IoBuf> leftover_buf_;
+
+  Fiber sync_fb_;
 };
 
 }  // namespace dfly
