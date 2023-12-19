@@ -1533,12 +1533,12 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  from_res.post_updater.Run();
   PrimeValue from_obj = std::move(from_res.it->second);
 
   // Restore expire flag after std::move.
   from_res.it->second.SetExpire(IsValid(from_res.exp_it));
 
-  from_res.post_updater.Run();
   CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
   auto add_res = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
   add_res.it->first.SetSticky(sticky);
