@@ -728,8 +728,8 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   cntx->conn()->SetName("slot_migration_ctrl");
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(2);
-  cntx->SendLong(shard_set->size());
-  cntx->SendLong(sync_id);
+  rb->SendLong(sync_id);
+  rb->SendLong(shard_set->size());
   return;
 }
 
@@ -747,8 +747,9 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
 
-  if (auto err = parser.Error(); err)
+  if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());
+  }
 
   VLOG(1) << "Create flow "
           << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";

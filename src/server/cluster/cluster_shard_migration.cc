@@ -28,13 +28,10 @@ ClusterShardMigration::~ClusterShardMigration() {
 }
 
 std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
-  using nonstd::make_unexpected;
-
   RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
 
-  VLOG(1) << "Sending on flow " << source_shard_id_;
-
-  std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", sync_id_, source_shard_id_);
+  std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", sync_id_, " ", source_shard_id_);
+  VLOG(1) << "cmd: " << cmd;
 
   ResetParser(/*server_mode=*/false);
   leftover_buf_.emplace(128);
@@ -60,6 +57,7 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
 
   uint8_t ok_buf[2];
   ps.ReadAtLeast(io::MutableBytes{ok_buf, 2}, 2);
+
   if (string_view(reinterpret_cast<char*>(ok_buf), 2) != "OK") {
     cntx->ReportError(std::make_error_code(errc::protocol_error),
                       "Incorrect FullSync data, only for tets");

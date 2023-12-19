@@ -86,12 +86,12 @@ error_code ClusterSlotMigration::Greet() {
   }
   VLOG(1) << "Migration command: " << cmd;
   RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
-  // Response is: num_shards
-  if (!CheckRespFirstTypes({RespExpr::INT64}))
+  // Response is: sync_id, num_shards
+  if (!CheckRespFirstTypes({RespExpr::INT64, RespExpr::INT64}))
     return make_error_code(errc::bad_message);
 
-  source_shards_num_ = get<int64_t>(LastResponseArgs()[0].u);
   sync_id_ = get<int64_t>(LastResponseArgs()[0].u);
+  source_shards_num_ = get<int64_t>(LastResponseArgs()[1].u);
 
   return error_code{};
 }
