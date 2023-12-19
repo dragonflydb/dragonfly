@@ -1524,7 +1524,7 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   // Fetch value at key in target db.
   DbContext target_cntx = op_args.db_cntx;
   target_cntx.db_index = target_db;
-  auto to_res = db_slice.FindMutable(target_cntx, key);
+  auto to_res = db_slice.FindReadOnly(target_cntx, key);
   if (IsValid(to_res.it))
     return OpStatus::KEY_EXISTS;
 
