@@ -125,6 +125,8 @@ class BaseFamilyTest : public ::testing::Test {
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
 
+  size_t InvalidationMessagesLen(std::string_view conn_id) const;
+
   const facade::Connection::PubMessage& GetPublishedMessage(std::string_view conn_id,
                                                             size_t index) const;
 

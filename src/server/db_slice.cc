@@ -1172,8 +1172,6 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
     return current < used_memory_start ? used_memory_start - current : 0;
   };
 
-  string_view key;
-  string tmp;
   for (unsigned i = 0; !evict_succeeded && i < kNumStashBuckets; ++i) {
     unsigned stash_bid = i + PrimeTable::Segment_t::kNumBuckets;
     const auto& bucket = segment->GetBucket(stash_bid);

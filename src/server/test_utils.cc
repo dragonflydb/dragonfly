@@ -565,6 +565,14 @@ size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
   return it->second->conn()->messages.size();
 }
 
+size_t BaseFamilyTest::InvalidationMessagesLen(string_view conn_id) const {
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return 0;
+
+  return it->second->conn()->invalidate_messages.size();
+}
+
 const facade::Connection::PubMessage& BaseFamilyTest::GetPublishedMessage(string_view conn_id,
                                                                           size_t index) const {
   auto it = connections_.find(conn_id);

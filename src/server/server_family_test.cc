@@ -236,15 +236,21 @@ TEST_F(ServerFamilyTest, ClientTracking) {
   EXPECT_EQ(GetInvalidationMessage("IO0", 2).key, "BAR");
 
   // case 7. test multi command
-  Run({"MGET", "X", "Y", "Z"});
-  pp_->at(1)->Await([&] { return Run({"MSET", "X", "1", "Y", "2"}); });
-  EXPECT_EQ(GetInvalidationMessage("IO0", 3).key, "X");
-  EXPECT_EQ(GetInvalidationMessage("IO0", 4).key, "Y");
+  Run({"MGET", "X1", "X2", "X3", "X4", "Y1", "Y2", "Y3", "Y4", "Z1", "Z2", "Z3", "Z4"});
+  pp_->at(1)->Await([&] { return Run({"MSET", "X1", "1", "Y3", "2", "Z2", "3", "Z4", "5"}); });
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 7);
+  std::vector<std::string_view> keys_invalidated;
+  for (unsigned int i = 3; i < 7; ++i)
+    keys_invalidated.push_back(GetInvalidationMessage("IO0", i).key);
+  ASSERT_THAT(keys_invalidated, ElementsAre("X1", "Y3", "Z2", "Z4"));
+
+  // EXPECT_EQ(GetInvalidationMessage("IO0", 3).key, "X");
+  // EXPECT_EQ(GetInvalidationMessage("IO0", 4).key, "Y");
 
   // case 8. flushdb command
   // Run({"GET", "BAR"});
   // Run({"FLUSHDB"});
-  // pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  // The following doesn't work correctly as we currently can't mock listener.
   // EXPECT_TRUE(GetInvalidationMessage("IO0", 5).invalidate_due_to_flush);
 }
 
