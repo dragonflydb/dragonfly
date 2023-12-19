@@ -1095,6 +1095,7 @@ Replica::Info Replica::GetInfo() const {
     res.full_sync_in_progress = (state_mask_.load() & R_SYNCING);
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
+    res.master_id = master_context_.master_repl_id;
     return res;
   };
 

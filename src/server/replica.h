@@ -136,6 +136,7 @@ class Replica : ProtocolClient {
     bool full_sync_in_progress;
     bool full_sync_done;
     time_t master_last_io_sec;  // monotonic clock.
+    std::string master_id;
   };
 
   Info GetInfo() const;  // thread-safe, blocks fiber
