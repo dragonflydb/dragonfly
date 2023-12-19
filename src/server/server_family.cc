@@ -1796,6 +1796,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("master_link_status", link);
       append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
       append("master_sync_in_progress", rinfo.full_sync_in_progress);
+      append("master_replid", rinfo.master_id);
     }
   }
 
