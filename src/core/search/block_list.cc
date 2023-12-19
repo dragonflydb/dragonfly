@@ -4,45 +4,10 @@ namespace dfly::search {
 
 using namespace std;
 
-bool SortedVector::Insert(DocId t) {
-  if (entries_.size() > 0 && t > entries_.back()) {
-    entries_.push_back(t);
-    return true;
-  }
-
-  auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
-  if (it != entries_.end() && *it == t)
-    return false;
-
-  entries_.insert(it, t);
-  return true;
-}
-
-bool SortedVector::Remove(DocId t) {
-  auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
-  if (it != entries_.end() && *it == t) {
-    entries_.erase(it);
-    return true;
-  }
-  return false;
-}
-
-void SortedVector::Merge(SortedVector&& other) {
-  for (int t : other.entries_)
-    Insert(t);
-}
-
-std::pair<SortedVector, SortedVector> SortedVector::Split() && {
-  std::vector<DocId> tail(entries_.begin() + entries_.size() / 2, entries_.end());
-  entries_.resize(entries_.size() / 2);
-
-  return std::make_pair(std::move(*this), SortedVector{std::move(tail)});
-}
-
 template <typename C> bool BlockList<C>::Insert(DocId t) {
   auto block = FindBlock(t);
   if (block == blocks_.end())
-    block = blocks_.insert(blocks_.end(), C{mr_});
+    block = blocks_.insert(blocks_.end(), C{blocks_.get_allocator().resource()});
 
   if (!block->Insert(t))
     return false;
@@ -63,6 +28,8 @@ template <typename C> bool BlockList<C>::Remove(DocId t) {
 }
 
 template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(DocId t) {
+  DCHECK(blocks_.empty() || blocks_.back().Size() > 0u);
+
   if (!blocks_.empty() && t >= *blocks_.back().begin())
     return --blocks_.end();
 
@@ -86,6 +53,7 @@ template <typename C> void BlockList<C>::TryMerge(BlockIt block) {
   if (block->Size() >= block_size_ / 2 || block == blocks_.begin())
     return;
 
+  // Merge strictly right with left to benefit from tail insert optimizations
   size_t idx = std::distance(blocks_.begin(), block);
   blocks_[idx - 1].Merge(std::move(*block));
   blocks_.erase(block);
@@ -121,5 +89,40 @@ typename BlockList<C>::BlockListIterator& BlockList<C>::BlockListIterator::opera
 
 template class BlockList<CompressedSortedSet>;
 template class BlockList<SortedVector>;
+
+bool SortedVector::Insert(DocId t) {
+  if (entries_.size() > 0 && t > entries_.back()) {
+    entries_.push_back(t);
+    return true;
+  }
+
+  auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
+  if (it != entries_.end() && *it == t)
+    return false;
+
+  entries_.insert(it, t);
+  return true;
+}
+
+bool SortedVector::Remove(DocId t) {
+  auto it = std::lower_bound(entries_.begin(), entries_.end(), t);
+  if (it != entries_.end() && *it == t) {
+    entries_.erase(it);
+    return true;
+  }
+  return false;
+}
+
+void SortedVector::Merge(SortedVector&& other) {
+  for (int t : other.entries_)
+    Insert(t);
+}
+
+std::pair<SortedVector, SortedVector> SortedVector::Split() && {
+  PMR_NS::vector<DocId> tail(entries_.begin() + entries_.size() / 2, entries_.end());
+  entries_.resize(entries_.size() / 2);
+
+  return std::make_pair(std::move(*this), SortedVector{std::move(tail)});
+}
 
 }  // namespace dfly::search

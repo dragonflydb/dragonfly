@@ -63,24 +63,11 @@ class CompressedSortedSet {
   size_t Size() const;
   size_t ByteSize() const;
 
-  void Merge(CompressedSortedSet&& other) {
-    for (int v : other)
-      Insert(v);
-  }
+  // Add all values from other
+  void Merge(CompressedSortedSet&& other);
 
-  std::pair<CompressedSortedSet, CompressedSortedSet> Split() && {
-    std::vector<int> v(begin(), end());
-    auto* mr = diffs_.get_allocator().resource();
-
-    CompressedSortedSet s1(mr), s2(mr);
-    for (int i = 0; i < v.size() / 2; i++)
-      s1.Insert(v[i]);
-
-    for (int i = v.size() / 2; i < v.size(); i++)
-      s2.Insert(v[i]);
-
-    return std::make_pair(std::move(s1), std::move(s2));
-  }
+  // Split into two equally sized halves
+  std::pair<CompressedSortedSet, CompressedSortedSet> Split() &&;
 
   // To use transparently in templates together with stl containers
   size_t size() const {

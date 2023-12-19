@@ -199,6 +199,33 @@ size_t CompressedSortedSet::ByteSize() const {
   return diffs_.size();
 }
 
+void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
+  for (int v : other)
+    Insert(v);
+}
+
+std::pair<CompressedSortedSet, CompressedSortedSet> CompressedSortedSet::Split() && {
+  DCHECK_GT(Size(), 2u);
+
+  CompressedSortedSet second(diffs_.get_allocator().resource());
+
+  // Move iterator to middle position and save size of diffs tail
+  auto it = begin();
+  std::advance(it, size_ / 2);
+  size_t keep_bytes = it.diffs_.data() - diffs_.data();
+
+  // Copy second half into second set
+  for (; it != end(); ++it)
+    second.Insert(*it);
+
+  // Erase diffs tail
+  diffs_.resize(keep_bytes);
+  tail_value_ = std::nullopt;
+  size_ -= second.Size();
+
+  return std::make_pair(std::move(*this), std::move(second));
+}
+
 // The leftmost three bits of the first byte store the number of additional bytes. All following
 // bits store the number itself.
 absl::Span<uint8_t> CompressedSortedSet::WriteVarLen(IntType value, absl::Span<uint8_t> buf) {

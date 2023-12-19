@@ -12,53 +12,19 @@
 #include "core/search/compressed_sorted_set.h"
 
 namespace dfly::search {
-
-// Supports Insert and Remove operations for keeping a sorted vector internally.
-// Wrapper to use vectors with BlockList
-struct SortedVector {
-  SortedVector(PMR_NS::memory_resource* mr) : entries_{mr} {
-  }
-
-  bool Insert(DocId t);
-
-  bool Remove(DocId t);
-
-  void Merge(SortedVector&& other);
-
-  std::pair<SortedVector, SortedVector> Split();
-
-  size_t Size() {
-    return entries_.size();
-  }
-
-  using iterator = typename std::vector<DocId>::const_iterator;
-
-  auto begin() const {
-    return entries_.cbegin();
-  }
-
-  auto end() const {
-    return entries_.cend();
-  }
-
- private:
-  SortedVector(PMR_NS::vector<DocId>&& v) : entries_{std::move(v)} {
-  }
-
-  PMR_NS::vector<DocId> entries_;
-};
-
-// BlockList is a container for CompressedSortedSet / vector<DocId> to separate the full sorted
-// range between a list of those containers. This reduces any update compexity from O(N)
-// to O(K), where K is the max block size.
+// BlockList is a container wrapper for CompressedSortedSet / vector<DocId>
+// to divide the full sorted id range into separate blocks. This reduces modification
+// complexity from O(N) to O(logN + K), where K is the max bock size.
 //
-// It tires to balance their sizes in the range [block_size / 2, block_size * 2].
-template <typename C /* underlying container type */> class BlockList {
-  using BlockIt = typename std::vector<C>::iterator;
+// It tires to balance block sizes in the range [block_size / 2, block_size * 2]
+// by splitting or merging nodes when needed.
+template <typename C /* underlying container */> class BlockList {
+  using BlockIt = typename PMR_NS::vector<C>::iterator;
+  using ConstBlockIt = typename PMR_NS::vector<C>::const_iterator;
 
  public:
   BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000)
-      : block_size_{block_size}, mr_{mr} {
+      : block_size_{block_size}, blocks_(mr) {
   }
 
   // Insert element, returns true if inserted, false if already present.
@@ -67,11 +33,11 @@ template <typename C /* underlying container type */> class BlockList {
   // Remove element, returns true if removed, false if not found.
   bool Remove(DocId t);
 
-  size_t Size() {
+  size_t Size() const {
     return size_;
   }
 
-  size_t size() {
+  size_t size() const {
     return size_;
   }
 
@@ -100,22 +66,22 @@ template <typename C /* underlying container type */> class BlockList {
     }
 
    private:
-    BlockListIterator(BlockIt begin, BlockIt end) : it(begin), it_end(end) {
+    BlockListIterator(ConstBlockIt begin, ConstBlockIt end) : it(begin), it_end(end) {
       if (it != it_end) {
         block_it = it->begin();
         block_end = it->end();
       }
     }
 
-    BlockIt it, it_end;
+    ConstBlockIt it, it_end;
     std::optional<typename C::iterator> block_it, block_end;
   };
 
-  BlockListIterator begin() {
+  BlockListIterator begin() const {
     return BlockListIterator{blocks_.begin(), blocks_.end()};
   }
 
-  BlockListIterator end() {
+  BlockListIterator end() const {
     return BlockListIterator{blocks_.end(), blocks_.end()};
   }
 
@@ -131,9 +97,40 @@ template <typename C /* underlying container type */> class BlockList {
 
  private:
   const size_t block_size_ = 1000;
-
   size_t size_ = 0;
   PMR_NS::vector<C> blocks_;
+};
+
+// Supports Insert and Remove operations for keeping a sorted vector internally.
+// Wrapper to use vectors with BlockList
+struct SortedVector {
+  SortedVector(PMR_NS::memory_resource* mr) : entries_(mr) {
+  }
+
+  bool Insert(DocId t);
+  bool Remove(DocId t);
+  void Merge(SortedVector&& other);
+  std::pair<SortedVector, SortedVector> Split() &&;
+
+  size_t Size() {
+    return entries_.size();
+  }
+
+  using iterator = typename PMR_NS::vector<DocId>::const_iterator;
+
+  iterator begin() const {
+    return entries_.cbegin();
+  }
+
+  iterator end() const {
+    return entries_.cend();
+  }
+
+ private:
+  SortedVector(PMR_NS::vector<DocId>&& v) : entries_{std::move(v)} {
+  }
+
+  PMR_NS::vector<DocId> entries_;
 };
 
 }  // namespace dfly::search

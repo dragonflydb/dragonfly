@@ -27,23 +27,23 @@ TEST_F(BlockListTest, LoopMidInsertErase) {
 
   // Create list with small block size to test blocking mechanism more extensively
   BlockList<CompressedSortedSet> list{PMR_NS::get_default_resource(), 10};
-  for (int i = 0; i < kNumElements / 2; i++) {
+  for (size_t i = 0; i < kNumElements / 2; i++) {
     list.Insert(i);
     list.Insert(i + kNumElements / 2);
   }
 
   vector<int> out(list.begin(), list.end());
   ASSERT_EQ(out.size(), kNumElements);
-  for (int i = 0; i < kNumElements; i++)
+  for (size_t i = 0; i < kNumElements; i++)
     ASSERT_EQ(out[i], i);
 
-  for (int i = 0; i < kNumElements / 2; i++) {
+  for (size_t i = 0; i < kNumElements / 2; i++) {
     list.Remove(i);
     list.Remove(i + kNumElements / 2);
   }
 
   out = {list.begin(), list.end()};
-  EXPECT_EQ(out.size(), 0);
+  EXPECT_EQ(out.size(), 0u);
 }
 
 TEST_F(BlockListTest, InsertReverseRemoveSteps) {
@@ -51,36 +51,36 @@ TEST_F(BlockListTest, InsertReverseRemoveSteps) {
 
   BlockList<CompressedSortedSet> list{PMR_NS::get_default_resource(), 10};
 
-  for (int i = 0; i < kNumElements; i++) {
+  for (size_t i = 0; i < kNumElements; i++) {
     list.Insert(kNumElements - i - 1);
   }
 
-  for (int deleted_pref = 0; deleted_pref < 10; deleted_pref++) {
+  for (size_t deleted_pref = 0; deleted_pref < 10; deleted_pref++) {
     vector<DocId> out{list.begin(), list.end()};
     reverse(out.begin(), out.end());
 
     EXPECT_EQ(out.size(), kNumElements / 10 * (10 - deleted_pref));
-    for (int i = 0; i < kNumElements; i++) {
+    for (size_t i = 0; i < kNumElements; i++) {
       if (i % 10 >= deleted_pref) {
         EXPECT_EQ(out.back(), DocId(i));
         out.pop_back();
       }
     }
 
-    for (int i = 0; i < kNumElements; i++) {
+    for (size_t i = 0; i < kNumElements; i++) {
       if (i % 10 == deleted_pref)
         list.Remove(i);
     }
   }
 
-  EXPECT_EQ(list.size(), 0);
+  EXPECT_EQ(list.size(), 0u);
 }
 
 static void BM_Erase90PctTail(benchmark::State& state) {
   BlockList<CompressedSortedSet> bl{PMR_NS::get_default_resource()};
 
   unsigned size = state.range(0);
-  for (int i = 0; i < size; i++)
+  for (size_t i = 0; i < size; i++)
     bl.Insert(i);
 
   size_t base = size / 10;
