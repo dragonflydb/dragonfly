@@ -559,7 +559,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && vals.empty()) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // We can ignore post_updater
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     db_slice.Del(op_args.db_cntx.db_index, it);
     if (journal_update && op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
