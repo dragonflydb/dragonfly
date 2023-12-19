@@ -691,7 +691,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
       tiered->CancelAllIos(index);
     }
   }
-
+  CHECK(bumped_items_.empty());
   auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
     for (auto& db_ptr : flush_db_arr) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
