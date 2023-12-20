@@ -180,7 +180,7 @@ class DbSlice {
   }
 
   // returns absolute time of the expiration.
-  time_t ExpireTime(ExpireIterator it) const {
+  time_t ExpireTime(ExpireConstIterator it) const {
     return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
   }
 
@@ -190,17 +190,20 @@ class DbSlice {
 
   struct ItAndUpdater {
     PrimeIterator it;
+    ExpireIterator exp_it;
     AutoUpdater post_updater;
   };
+  ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
                                      unsigned req_obj_type);
 
+  struct ItAndExpConst {
+    PrimeConstIterator it;
+    ExpireConstIterator exp_it;
+  };
+  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                             unsigned req_obj_type) const;
-
-  // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
-  // TODO(#2252): Return AutoUpdater here as well
-  std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -315,8 +318,11 @@ class DbSlice {
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return PrimeIterator{}.
-  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx,
-                                                          PrimeIterator it) const;
+  struct ItAndExp {
+    PrimeIterator it;
+    ExpireIterator exp_it;
+  };
+  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -410,8 +416,7 @@ class DbSlice {
     kUpdateCacheStats,
     kDontUpdateCacheStats,
   };
-  std::pair<PrimeIterator, ExpireIterator> FindInternal(const Context& cntx, std::string_view key,
-                                                        FindInternalMode mode) const;
+  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode) const;
 
   uint64_t NextVersion() {
     return version_++;
