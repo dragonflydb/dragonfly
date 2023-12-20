@@ -478,7 +478,7 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
     }
     res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bumped_items_});
     ++events_.bumpups;
-    bumped_items_.insert(res.first->first.AsRef());
+    bumped_items_.insert(res.it->first.AsRef());
   }
 
   db.top_keys.Touch(key);
