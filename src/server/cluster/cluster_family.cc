@@ -723,7 +723,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto sync_id = CreateMigrationSession(cntx, port);
+  auto sync_id = CreateMigrationSession(cntx, port, std::move(slots));
 
   cntx->conn()->SetName("slot_migration_ctrl");
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -733,11 +733,12 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   return;
 }
 
-uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t port) {
+uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t port,
+                                               std::vector<ClusterConfig::SlotRange> slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
   auto info = make_shared<MigrationInfo>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(),
-                                         sync_id, port);
+                                         sync_id, port, std::move(slots));
   auto [it, inserted] = migration_infos_.emplace(sync_id, info);
   CHECK(inserted);
   return sync_id;

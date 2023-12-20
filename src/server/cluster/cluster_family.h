@@ -53,13 +53,16 @@ class ClusterFamily {
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
 
   void MigrationConf(CmdArgList args, ConnectionContext* cntx);
+  void Flow(CmdArgList args, ConnectionContext* cntx);
+  void Sync(CmdArgList args, ConnectionContext* cntx);
+
+  // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
 
-  uint32_t CreateMigrationSession(ConnectionContext* cntx, uint16_t port);
-
-  void Flow(CmdArgList args, ConnectionContext* cntx);
-  void Sync(CmdArgList args, ConnectionContext* cntx);
+  // store info about migration and create unique session id
+  uint32_t CreateMigrationSession(ConnectionContext* cntx, uint16_t port,
+                                  std::vector<ClusterConfig::SlotRange> slots);
 
   struct FlowInfo {
     facade::Connection* conn = nullptr;
@@ -67,13 +70,15 @@ class ClusterFamily {
 
   struct MigrationInfo {
     MigrationInfo() = default;
-    MigrationInfo(std::uint32_t flows_num, std::string ip, uint32_t sync_id, uint16_t port)
-        : host_ip(ip), sync_id(sync_id), port(port), flows(flows_num) {
+    MigrationInfo(std::uint32_t flows_num, std::string ip, uint32_t sync_id, uint16_t port,
+                  std::vector<ClusterConfig::SlotRange> slots)
+        : host_ip(ip), flows(flows_num), slots(slots), sync_id(sync_id), port(port) {
     }
     std::string host_ip;
+    std::vector<FlowInfo> flows;
+    std::vector<ClusterConfig::SlotRange> slots;
     uint32_t sync_id;
     uint16_t port;
-    std::vector<FlowInfo> flows;
   };
 
   std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);

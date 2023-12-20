@@ -107,13 +107,13 @@ void ClusterSlotMigration::MainMigrationFb() {
   state_ = ClusterSlotMigration::C_FULL_SYNC;
 
   // TODO add reconnection code
-  if (auto ec = InitiateDflyFullSync(); ec) {
+  if (auto ec = InitiateSlotsMigration(); ec) {
     LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
                  << ec.message();
   }
 }
 
-std::error_code ClusterSlotMigration::InitiateDflyFullSync() {
+std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
     shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_));

@@ -27,7 +27,7 @@ class ClusterSlotMigration : ProtocolClient {
 
  private:
   void MainMigrationFb();
-  std::error_code InitiateDflyFullSync();
+  std::error_code InitiateSlotsMigration();
 
  private:
   Mutex flows_op_mu_;
