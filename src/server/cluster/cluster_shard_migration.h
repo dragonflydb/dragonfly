@@ -8,6 +8,8 @@
 
 namespace dfly {
 
+// ClusterShardMigration manage data receiving in slots migration process.
+// It is created per shard on the target node to initiate FLOW step.
 class ClusterShardMigration : public ProtocolClient {
  public:
   ClusterShardMigration(ServerContext server_context, uint32_t shard_id, uint32_t sync_id);
