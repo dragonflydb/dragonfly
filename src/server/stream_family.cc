@@ -169,7 +169,6 @@ const uint32_t STREAM_LISTPACK_MAX_PRE_ALLOCATE = 4096;
 /* Every stream item inside the listpack, has a flags field that is used to
  * mark the entry as deleted, or having the same field as the "master"
  * entry at the start of the listpack. */
-const uint32_t STREAM_ITEM_FLAG_NONE = 0;              /* No special flags. */
 const uint32_t STREAM_ITEM_FLAG_DELETED = (1 << 0);    /* Entry is deleted. Skip it. */
 const uint32_t STREAM_ITEM_FLAG_SAMEFIELDS = (1 << 1); /* Same fields as master entry. */
 
@@ -608,15 +607,14 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
 OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
   auto& db_slice = op_args.shard->db_slice();
-  pair<PrimeIterator, bool> add_res;
+  DbSlice::AddOrFindResult add_res;
 
   if (opts.no_mkstream) {
-    auto res_it = db_slice.Find(op_args.db_cntx, opts.key, OBJ_STREAM);
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
     if (!res_it) {
       return res_it.status();
     }
-    add_res.first = res_it.value();
-    add_res.second = false;
+    add_res = std::move(*res_it);
   } else {
     try {
       add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
@@ -626,17 +624,14 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
   }
 
   robj* stream_obj = nullptr;
-  PrimeIterator& it = add_res.first;
+  PrimeIterator& it = add_res.it;
 
-  if (add_res.second) {  // new key
+  if (add_res.is_new) {
     stream_obj = createStreamObject();
 
     it->second.ImportRObj(stream_obj);
-  } else {
-    if (it->second.ObjType() != OBJ_STREAM)
-      return OpStatus::WRONG_TYPE;
-
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  } else if (it->second.ObjType() != OBJ_STREAM) {
+    return OpStatus::WRONG_TYPE;
   }
 
   stream* stream_inst = (stream*)it->second.RObjPtr();
@@ -668,7 +663,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -680,7 +675,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
   streamIterator si;
   int64_t numfields;
   streamID id;
-  CompactObj& cobj = (*res_it)->second;
+  const CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
   streamID sstart = opts.start.val, send = opts.end.val;
 
@@ -797,6 +792,14 @@ OpResult<RecordVec> OpRangeFromConsumerPEL(const OpArgs& op_args, string_view ke
   return result;
 }
 
+namespace {
+// Our C-API doesn't use const, so we have to const cast.
+// Only intended for read-only functions.
+stream* GetReadOnlyStream(const CompactObj& cobj) {
+  return const_cast<stream*>((const stream*)cobj.RObjPtr());
+}
+}  // namespace
+
 // Returns a map of stream to the ID of the last entry in the stream. Any
 // streams not found are omitted from the result.
 OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
@@ -807,7 +810,7 @@ OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
 
   vector<pair<string_view, streamID>> last_ids;
   for (string_view key : args) {
-    OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+    OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
     if (!res_it) {
       if (res_it.status() == OpStatus::KEY_NOTFOUND) {
         continue;
@@ -815,8 +818,8 @@ OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
       return res_it.status();
     }
 
-    CompactObj& cobj = (*res_it)->second;
-    stream* s = (stream*)cobj.RObjPtr();
+    const CompactObj& cobj = (*res_it)->second;
+    stream* s = GetReadOnlyStream(cobj);
 
     streamID last_id = s->last_id;
     if (s->length) {
@@ -869,10 +872,10 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ArgSlice& args, const Read
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
-  CompactObj& cobj = (*res_it)->second;
+  const CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
   return s->length;
 }
@@ -880,12 +883,12 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
 OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
                                          EngineShard* shard) {
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
+  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
   vector<GroupInfo> result;
-  CompactObj& cobj = (*res_it)->second;
+  const CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
 
   if (s->cgroups) {
@@ -932,7 +935,7 @@ vector<Record> GetStreamRecords(stream* s, streamID start, streamID end, bool re
       string skey(reinterpret_cast<char*>(key), key_len);
       string sval(reinterpret_cast<char*>(value), value_len);
 
-      rec.kv_arr.emplace_back(move(skey), move(sval));
+      rec.kv_arr.emplace_back(std::move(skey), std::move(sval));
     }
     records.push_back(std::move(rec));
     arraylen++;
@@ -1012,12 +1015,12 @@ void GetConsumers(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard,
                                int full, size_t count) {
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
+  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
   vector<StreamInfo> result;
-  CompactObj& cobj = (*res_it)->second;
+  const CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
 
   StreamInfo sinfo;
@@ -1075,13 +1078,13 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
 OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard* shard,
                                            string_view stream_name, string_view group_name) {
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, stream_name, OBJ_STREAM);
+  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(db_cntx, stream_name, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
   vector<ConsumerInfo> result;
-  CompactObj& cobj = (*res_it)->second;
-  stream* s = (stream*)cobj.RObjPtr();
+  const CompactObj& cobj = (*res_it)->second;
+  stream* s = GetReadOnlyStream(cobj);
   shard->tmp_str1 = sdscpylen(shard->tmp_str1, group_name.data(), group_name.length());
   streamCG* cg = streamLookupCG(s, shard->tmp_str1);
   if (cg == NULL) {
@@ -1120,7 +1123,7 @@ struct CreateOpts {
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
@@ -1130,13 +1133,13 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
         return res_it.status();
 
       robj* stream_obj = createStreamObject();
-      (*res_it)->second.ImportRObj(stream_obj);
+      res_it->it->second.ImportRObj(stream_obj);
     } else {
       return res_it.status();
     }
   }
 
-  CompactObj& cobj = (*res_it)->second;
+  CompactObj& cobj = res_it->it->second;
   stream* s = (stream*)cobj.RObjPtr();
 
   streamID id;
@@ -1158,19 +1161,24 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   return OpStatus::BUSY_GROUP;
 }
 
-OpResult<pair<stream*, streamCG*>> FindGroup(const OpArgs& op_args, string_view key,
-                                             string_view gname) {
+struct FindGroupResult {
+  stream* s = nullptr;
+  streamCG* cg = nullptr;
+  DbSlice::AutoUpdater post_updater;
+};
+OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
-  CompactObj& cobj = (*res_it)->second;
-  pair<stream*, streamCG*> res;
-  res.first = (stream*)cobj.RObjPtr();
+  CompactObj& cobj = res_it->it->second;
+  FindGroupResult res;
+  res.s = (stream*)cobj.RObjPtr();
   shard->tmp_str1 = sdscpylen(shard->tmp_str1, gname.data(), gname.size());
-  res.second = streamLookupCG(res.first, shard->tmp_str1);
+  res.cg = streamLookupCG(res.s, shard->tmp_str1);
+  res.post_updater = std::move(res_it->post_updater);
 
   return res;
 }
@@ -1231,12 +1239,10 @@ void AppendClaimResultItem(ClaimInfo& result, stream* s, streamID id) {
 // XCLAIM key group consumer min-idle-time id
 OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts,
                             absl::Span<streamID> ids) {
-  OpResult<pair<stream*, streamCG*>> cgr_res = FindGroup(op_args, key, opts.group);
+  auto cgr_res = FindGroup(op_args, key, opts.group);
   if (!cgr_res)
     return cgr_res.status();
-  stream* s = cgr_res->first;
-  streamCG* scg = cgr_res->second;
-  if (!scg) {
+  if (!cgr_res->cg) {
     return OpStatus::SKIPPED;
   }
   streamConsumer* consumer = nullptr;
@@ -1246,8 +1252,8 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 
   streamID last_id = opts.last_id;
   if (opts.flags & kClaimLastID) {
-    if (streamCompareID(&last_id, &scg->last_id) > 0) {
-      scg->last_id = last_id;
+    if (streamCompareID(&last_id, &cgr_res->cg->last_id) > 0) {
+      cgr_res->cg->last_id = last_id;
     }
   }
 
@@ -1255,11 +1261,11 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
     std::array<uint8_t, sizeof(streamID)> buf;
     StreamEncodeID(buf.begin(), &id);
 
-    streamNACK* nack = (streamNACK*)raxFind(scg->pel, buf.begin(), sizeof(buf));
-    if (!streamEntryExists(s, &id)) {
+    streamNACK* nack = (streamNACK*)raxFind(cgr_res->cg->pel, buf.begin(), sizeof(buf));
+    if (!streamEntryExists(cgr_res->s, &id)) {
       if (nack != raxNotFound) {
         /* Release the NACK */
-        raxRemove(scg->pel, buf.begin(), sizeof(buf), nullptr);
+        raxRemove(cgr_res->cg->pel, buf.begin(), sizeof(buf), nullptr);
         raxRemove(nack->consumer->pel, buf.begin(), sizeof(buf), nullptr);
         streamFreeNACK(nack);
       }
@@ -1271,7 +1277,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
     if ((opts.flags & kClaimForce) && nack == raxNotFound) {
       /* Create the NACK. */
       nack = streamCreateNACK(nullptr);
-      raxInsert(scg->pel, buf.begin(), sizeof(buf), nack, nullptr);
+      raxInsert(cgr_res->cg->pel, buf.begin(), sizeof(buf), nack, nullptr);
     }
 
     // We found the nack, continue.
@@ -1287,9 +1293,9 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       // Try to get the consumer. If not found, create a new one.
       op_args.shard->tmp_str1 =
           sdscpylen(op_args.shard->tmp_str1, opts.consumer.data(), opts.consumer.size());
-      if ((consumer = streamLookupConsumer(scg, op_args.shard->tmp_str1, SLC_NO_REFRESH)) ==
+      if ((consumer = streamLookupConsumer(cgr_res->cg, op_args.shard->tmp_str1, SLC_NO_REFRESH)) ==
           nullptr) {
-        consumer = streamCreateConsumer(scg, op_args.shard->tmp_str1, nullptr, 0,
+        consumer = streamCreateConsumer(cgr_res->cg, op_args.shard->tmp_str1, nullptr, 0,
                                         SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       }
 
@@ -1319,7 +1325,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       }
 
       /* Send the reply for this entry. */
-      AppendClaimResultItem(result, s, id);
+      AppendClaimResultItem(result, cgr_res->s, id);
     }
   }
   return result;
@@ -1327,16 +1333,13 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 
 // XGROUP DESTROY key groupname
 OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gname) {
-  OpResult<pair<stream*, streamCG*>> cgr_res = FindGroup(op_args, key, gname);
+  auto cgr_res = FindGroup(op_args, key, gname);
   if (!cgr_res)
     return cgr_res.status();
 
-  stream* s = cgr_res->first;
-  streamCG* scg = cgr_res->second;
-
-  if (scg) {
-    raxRemove(s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
-    streamFreeCG(scg);
+  if (cgr_res->cg) {
+    raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
+    streamFreeCG(cgr_res->cg);
     return OpStatus::OK;
   }
 
@@ -1366,7 +1369,7 @@ vector<GroupConsumerPair> OpGetGroupConsumerPairs(ArgSlice slice_args, const OpA
     if (!group_res) {
       continue;
     }
-    if (group = group_res->second; !group) {
+    if (group = group_res->cg; !group) {
       continue;
     }
 
@@ -1385,10 +1388,10 @@ vector<GroupConsumerPair> OpGetGroupConsumerPairs(ArgSlice slice_args, const OpA
 // XGROUP CREATECONSUMER key groupname consumername
 OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, string_view gname,
                                     string_view consumer_name) {
-  OpResult<pair<stream*, streamCG*>> cgroup_res = FindGroup(op_args, key, gname);
+  auto cgroup_res = FindGroup(op_args, key, gname);
   if (!cgroup_res)
     return cgroup_res.status();
-  streamCG* cg = cgroup_res->second;
+  streamCG* cg = cgroup_res->cg;
   if (cg == nullptr)
     return OpStatus::SKIPPED;
 
@@ -1405,11 +1408,11 @@ OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, stri
 // XGROUP DELCONSUMER key groupname consumername
 OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_view gname,
                                  string_view consumer_name) {
-  OpResult<pair<stream*, streamCG*>> cgroup_res = FindGroup(op_args, key, gname);
+  auto cgroup_res = FindGroup(op_args, key, gname);
   if (!cgroup_res)
     return cgroup_res.status();
 
-  streamCG* cg = cgroup_res->second;
+  streamCG* cg = cgroup_res->cg;
   if (cg == nullptr)
     return OpStatus::SKIPPED;
 
@@ -1427,18 +1430,18 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
 }
 
 OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, string_view id) {
-  OpResult<pair<stream*, streamCG*>> cgr_res = FindGroup(op_args, key, gname);
+  auto cgr_res = FindGroup(op_args, key, gname);
   if (!cgr_res)
     return cgr_res.status();
 
-  streamCG* cg = cgr_res->second;
+  streamCG* cg = cgr_res->cg;
   if (cg == nullptr)
     return OpStatus::SKIPPED;
 
   streamID sid;
   ParsedStreamId parsed_id;
   if (id == "$") {
-    sid = cgr_res->first->last_id;
+    sid = cgr_res->s->last_id;
   } else {
     if (ParseID(id, true, 0, &parsed_id)) {
       sid = parsed_id.val;
@@ -1454,11 +1457,11 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
 OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
-  CompactObj& cobj = (*res_it)->second;
+  CompactObj& cobj = res_it->it->second;
   stream* stream_inst = (stream*)cobj.RObjPtr();
   long long entries_added = -1;
   streamID max_xdel_id{0, 0};
@@ -1493,11 +1496,11 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
 OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<streamID> ids) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
-  CompactObj& cobj = (*res_it)->second;
+  CompactObj& cobj = res_it->it->second;
   stream* stream_inst = (stream*)cobj.RObjPtr();
 
   uint32_t deleted = 0;
@@ -1536,12 +1539,11 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
 // XACK key groupname id [id ...]
 OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gname,
                          absl::Span<streamID> ids) {
-  OpResult<pair<stream*, streamCG*>> res = FindGroup(op_args, key, gname);
+  auto res = FindGroup(op_args, key, gname);
   if (!res)
     return res.status();
-  auto [stream_inst, cg] = *res;
 
-  if (cg == nullptr || stream_inst == nullptr) {
+  if (res->cg == nullptr || res->s == nullptr) {
     return 0;
   }
 
@@ -1554,9 +1556,9 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
     // Lookup the ID in the group PEL: it will have a reference to the
     // NACK structure that will have a reference to the consumer, so that
     // we are able to remove the entry from both PELs.
-    streamNACK* nack = (streamNACK*)raxFind(cg->pel, buf, sizeof(buf));
+    streamNACK* nack = (streamNACK*)raxFind(res->cg->pel, buf, sizeof(buf));
     if (nack != raxNotFound) {
-      raxRemove(cg->pel, buf, sizeof(buf), nullptr);
+      raxRemove(res->cg->pel, buf, sizeof(buf), nullptr);
       raxRemove(nack->consumer->pel, buf, sizeof(buf), nullptr);
       streamFreeNACK(nack);
       acknowledged++;
@@ -1566,10 +1568,11 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
 }
 
 OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts) {
-  OpResult<pair<stream*, streamCG*>> cgr_res = FindGroup(op_args, key, opts.group);
+  auto cgr_res = FindGroup(op_args, key, opts.group);
   if (!cgr_res)
     return cgr_res.status();
-  auto [stream, group] = *cgr_res;
+  stream* stream = cgr_res->s;
+  streamCG* group = cgr_res->cg;
 
   if (stream == nullptr || group == nullptr) {
     return OpStatus::KEY_NOTFOUND;
@@ -1770,12 +1773,12 @@ PendingExtendedResultList GetPendingExtendedResult(streamCG* cg, streamConsumer*
 }
 
 OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const PendingOpts& opts) {
-  OpResult<pair<stream*, streamCG*>> cgroup_res = FindGroup(op_args, key, opts.group_name);
+  auto cgroup_res = FindGroup(op_args, key, opts.group_name);
   if (!cgroup_res) {
     return cgroup_res.status();
   }
 
-  streamCG* cg = cgroup_res->second;
+  streamCG* cg = cgroup_res->cg;
   if (cg == nullptr) {
     return OpStatus::SKIPPED;
   }
@@ -1923,7 +1926,7 @@ void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
 OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, opts.key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
   if (!res_it) {
     if (res_it.status() == OpStatus::KEY_NOTFOUND) {
       return 0;
@@ -1931,7 +1934,7 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
     return res_it.status();
   }
 
-  CompactObj& cobj = (*res_it)->second;
+  CompactObj& cobj = res_it->it->second;
   stream* s = (stream*)cobj.RObjPtr();
 
   return StreamTrim(opts, s);
@@ -2814,10 +2817,8 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
   auto tp = (opts.timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts.timeout)
                            : Transaction::time_point::max();
 
-  bool wait_succeeded = cntx->transaction->WaitOnWatch(tp, std::move(wcb));
-  if (!wait_succeeded) {
+  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
     return rb->SendNullArray();
-  }
 
   // Resolve the entry in the woken key. Note this must not use OpRead since
   // only the shard that contains the woken key blocks for the awoken

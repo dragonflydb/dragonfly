@@ -196,7 +196,7 @@ class ServerFamily {
 
   void BreakOnShutdown();
 
-  void CancelBlockingCommands();
+  void CancelBlockingOnThread(std::function<facade::OpStatus(ArgSlice)> = {});
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);

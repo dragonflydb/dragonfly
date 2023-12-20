@@ -135,12 +135,26 @@ class DashTable : public detail::DashTableBase {
   // false for duplicate, true if inserted.
   template <typename U, typename V> std::pair<iterator, bool> Insert(U&& key, V&& value) {
     DefaultEvictionPolicy policy;
-    return InsertInternal(std::forward<U>(key), std::forward<V>(value), policy);
+    return InsertInternal(std::forward<U>(key), std::forward<V>(value), policy,
+                          InsertMode::kInsertIfNotFound);
   }
 
   template <typename U, typename V, typename EvictionPolicy>
   std::pair<iterator, bool> Insert(U&& key, V&& value, EvictionPolicy& ev) {
-    return InsertInternal(std::forward<U>(key), std::forward<V>(value), ev);
+    return InsertInternal(std::forward<U>(key), std::forward<V>(value), ev,
+                          InsertMode::kInsertIfNotFound);
+  }
+
+  template <typename U, typename V> iterator InsertNew(U&& key, V&& value) {
+    DefaultEvictionPolicy policy;
+    return InsertNew(std::forward<U>(key), std::forward<V>(value), policy);
+  }
+
+  template <typename U, typename V, typename EvictionPolicy>
+  iterator InsertNew(U&& key, V&& value, EvictionPolicy& ev) {
+    return InsertInternal(std::forward<U>(key), std::forward<V>(value), ev,
+                          InsertMode::kForceInsert)
+        .first;
   }
 
   template <typename U> const_iterator Find(U&& key) const;
@@ -280,8 +294,13 @@ class DashTable : public detail::DashTableBase {
   }
 
  private:
+  enum class InsertMode {
+    kInsertIfNotFound,
+    kForceInsert,
+  };
   template <typename U, typename V, typename EvictionPolicy>
-  std::pair<iterator, bool> InsertInternal(U&& key, V&& value, EvictionPolicy& policy);
+  std::pair<iterator, bool> InsertInternal(U&& key, V&& value, EvictionPolicy& policy,
+                                           InsertMode mode);
 
   void IncreaseDepth(unsigned new_depth);
   void Split(uint32_t seg_id);
@@ -325,6 +344,9 @@ class DashTable<_Key, _Value, Policy>::Iterator {
  public:
   using iterator_category = std::forward_iterator_tag;
   using difference_type = std::ptrdiff_t;
+  using IteratorPairType =
+      std::conditional_t<IsConst, detail::IteratorPair<const Key_t, const Value_t>,
+                         detail::IteratorPair<Key_t, Value_t>>;
 
   // Copy constructor from iterator to const_iterator.
   template <bool TIsConst = IsConst, bool TIsSingleB,
@@ -372,16 +394,9 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return *this;
   }
 
-  detail::IteratorPair<Key_t, Value_t> operator->() {
+  IteratorPairType operator->() const {
     auto* seg = owner_->segment_[seg_id_];
-    return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                seg->Value(bucket_id_, slot_id_)};
-  }
-
-  const detail::IteratorPair<Key_t, Value_t> operator->() const {
-    auto* seg = owner_->segment_[seg_id_];
-    return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                seg->Value(bucket_id_, slot_id_)};
+    return {seg->Key(bucket_id_, slot_id_), seg->Value(bucket_id_, slot_id_)};
   }
 
   // Make it self-contained. Does not need container::end().
@@ -721,8 +736,8 @@ void DashTable<_Key, _Value, Policy>::Reserve(size_t size) {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename U, typename V, typename EvictionPolicy>
-auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, EvictionPolicy& ev)
-    -> std::pair<iterator, bool> {
+auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, EvictionPolicy& ev,
+                                                     InsertMode mode) -> std::pair<iterator, bool> {
   uint64_t key_hash = DoHash(key);
   uint32_t target_seg_id = SegmentId(key_hash);
 
@@ -734,8 +749,15 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     // Load heap allocated segment data - to avoid TLB miss when accessing the bucket.
     __builtin_prefetch(target, 0, 1);
 
-    auto [it, res] =
-        target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash, EqPred());
+    typename SegmentType::Iterator it;
+    bool res = true;
+    if (mode == InsertMode::kForceInsert) {
+      it = target->InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true);
+      res = it.found();
+    } else {
+      std::tie(it, res) =
+          target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash, EqPred());
+    }
 
     if (res) {  // success
       ++size_;

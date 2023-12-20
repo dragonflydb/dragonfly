@@ -200,8 +200,9 @@ class Connection : public util::Connection {
   void SendAclUpdateAsync(AclUpdateMessage msg);
 
   // If any dispatch is currently in progress, increment counter and send checkpoint message to
-  // decrement it once finished. It ignore_paused is true, paused dispatches are ignored.
-  void SendCheckpoint(util::fb2::BlockingCounter bc, bool ignore_paused = false);
+  // decrement it once finished.
+  void SendCheckpoint(util::fb2::BlockingCounter bc, bool ignore_paused = false,
+                      bool ignore_blocked = false);
 
   // Add InvalidationMessage to dispatch queue.
   virtual void SendInvalidationMessageAsync(InvalidationMessage);

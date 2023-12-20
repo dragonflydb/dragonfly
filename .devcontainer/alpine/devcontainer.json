@@ -1,0 +1,20 @@
+{
+  "name": "helio",
+  "image": "ghcr.io/romange/alpine-dev",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools-themes",
+        "twxs.cmake"
+      ],
+      "settings": {
+        "cmake.buildDirectory": "${workspaceFolder}/build-alpine"
+      }
+    }
+  },
+  "mounts": [
+    "source=alpine-vol,target=/root,type=volume"
+  ]
+}

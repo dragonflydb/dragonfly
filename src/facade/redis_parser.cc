@@ -425,7 +425,7 @@ auto RedisParser::ConsumeBulk(Buffer str) -> Result {
       vector<uint8_t> nb(bulk_len_);
       memcpy(nb.data(), str.data(), len);
       bulk_str = Buffer{nb.data(), len};
-      buf_stash_.emplace_back(move(nb));
+      buf_stash_.emplace_back(std::move(nb));
       is_broken_token_ = true;
       cached_expr_->back().has_support = true;
     }

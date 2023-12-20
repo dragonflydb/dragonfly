@@ -68,7 +68,7 @@ template <typename C> size_t IsStoredInlined(const C& c) {
   return data >= start && data <= end;
 }
 
-size_t StoredCmd::UsedHeapMemory() const {
+size_t StoredCmd::UsedMemory() const {
   size_t buffer_size = IsStoredInlined(buffer_) ? 0 : buffer_.size();
   size_t sz_size = IsStoredInlined(sizes_) ? 0 : sizes_.size() * sizeof(uint32_t);
   return buffer_size + sz_size;
@@ -115,12 +115,6 @@ void ConnectionContext::ChangeMonitor(bool start) {
   shard_set->pool()->Await(
       [start](auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
   EnableMonitoring(start);
-}
-
-void ConnectionContext::CancelBlocking() {
-  if (transaction) {
-    transaction->CancelBlocking();
-  }
 }
 
 vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add, bool to_reply,
@@ -235,9 +229,24 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
   rb->SendLong(count);
 }
 
+size_t ConnectionState::ExecInfo::UsedMemory() const {
+  return dfly::HeapSize(body) + dfly::HeapSize(watched_keys);
+}
+
+size_t ConnectionState::ScriptInfo::UsedMemory() const {
+  return dfly::HeapSize(keys);
+}
+
+size_t ConnectionState::SubscribeInfo::UsedMemory() const {
+  return dfly::HeapSize(channels) + dfly::HeapSize(patterns);
+}
+
+size_t ConnectionState::UsedMemory() const {
+  return dfly::HeapSize(exec_info) + dfly::HeapSize(script_info) + dfly::HeapSize(subscribe_info);
+}
+
 size_t ConnectionContext::UsedMemory() const {
-  return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(authed_username) +
-         dfly::HeapSize(acl_commands);
+  return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(conn_state);
 }
 
 void ConnectionState::ExecInfo::Clear() {

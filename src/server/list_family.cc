@@ -184,7 +184,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
   auto& db_slice = shard->db_slice();
-  auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_LIST);
+  auto it_res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_LIST);
 
   if (!it_res) {
     auto messages = debugMessages.All();
@@ -203,14 +203,13 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
 
-  PrimeIterator it = *it_res;
+  PrimeIterator it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   absl::StrAppend(debugMessages.Next(), "OpBPop: ", key, " by ", t->DebugId());
 
-  db_slice.PreUpdate(t->GetDbIndex(), it);
   std::string value = ListPop(dir, ql);
-  db_slice.PostUpdate(t->GetDbIndex(), it, key);
+  it_res->post_updater.Run();
 
   if (quicklistCount(ql) == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
@@ -230,58 +229,55 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
                                    ListDir src_dir, ListDir dest_dir) {
   auto& db_slice = op_args.shard->db_slice();
-  auto src_res = db_slice.Find(op_args.db_cntx, src, OBJ_LIST);
+  auto src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
   if (!src_res)
     return src_res.status();
 
-  PrimeIterator src_it = *src_res;
+  PrimeIterator src_it = src_res->it;
   quicklist* src_ql = GetQL(src_it->second);
 
   if (src == dest) {  // simple case.
-    db_slice.PreUpdate(op_args.db_cntx.db_index, src_it);
     string val = ListPop(src_dir, src_ql);
 
     int pos = (dest_dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
     quicklistPush(src_ql, val.data(), val.size(), pos);
-    db_slice.PostUpdate(op_args.db_cntx.db_index, src_it, src);
 
     return val;
   }
 
   quicklist* dest_ql = nullptr;
-  PrimeIterator dest_it;
-  bool new_key = false;
+  src_res->post_updater.Run();
+  DbSlice::AddOrFindResult dest_res;
   try {
-    tie(dest_it, new_key) = db_slice.AddOrFind(op_args.db_cntx, dest);
+    dest_res = db_slice.AddOrFind(op_args.db_cntx, dest);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  if (new_key) {
+  // Insertion of dest could invalidate src_it. Find it again.
+  src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
+  src_it = src_res->it;
+
+  if (dest_res.is_new) {
     robj* obj = createQuicklistObject();
     dest_ql = (quicklist*)obj->ptr;
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    dest_it->second.ImportRObj(obj);
-
-    // Insertion of dest could invalidate src_it. Find it again.
-    src_it = db_slice.GetTables(op_args.db_cntx.db_index).first->Find(src);
+    dest_res.it->second.ImportRObj(obj);
+    DCHECK(IsValid(src_it));
   } else {
-    if (dest_it->second.ObjType() != OBJ_LIST)
+    if (dest_res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
 
-    dest_ql = GetQL(dest_it->second);
-    db_slice.PreUpdate(op_args.db_cntx.db_index, dest_it);
+    dest_ql = GetQL(dest_res.it->second);
   }
-
-  db_slice.PreUpdate(op_args.db_cntx.db_index, src_it);
 
   string val = ListPop(src_dir, src_ql);
   int pos = (dest_dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
   quicklistPush(dest_ql, val.data(), val.size(), pos);
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, src_it, src);
-  db_slice.PostUpdate(op_args.db_cntx.db_index, dest_it, dest, !new_key);
+  src_res->post_updater.Run();
+  dest_res.post_updater.Run();
 
   if (quicklistCount(src_ql) == 0) {
     CHECK(db_slice.Del(op_args.db_cntx.db_index, src_it));
@@ -293,7 +289,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 // Read-only peek operation that determines whether the list exists and optionally
 // returns the first from left/right value without popping it from the list.
 OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool fetch) {
-  auto it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res) {
     return it_res.status();
   }
@@ -317,36 +313,34 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, ArgSlice vals, bool journal_rewrite) {
   EngineShard* es = op_args.shard;
-  PrimeIterator it;
-  bool new_key = false;
+  DbSlice::AddOrFindResult res;
 
   if (skip_notexist) {
-    auto it_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
-    if (!it_res)
+    auto tmp_res = es->db_slice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
+    if (!tmp_res)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
-    it = *it_res;
+    res = std::move(*tmp_res);
   } else {
     try {
-      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_cntx, key);
+      res = es->db_slice().AddOrFind(op_args.db_cntx, key);
     } catch (bad_alloc&) {
       return OpStatus::OUT_OF_MEMORY;
     }
   }
 
   quicklist* ql = nullptr;
-  DVLOG(1) << "OpPush " << key << " new_key " << new_key;
+  DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
 
-  if (new_key) {
+  if (res.is_new) {
     robj* o = createQuicklistObject();
     ql = (quicklist*)o->ptr;
     quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    it->second.ImportRObj(o);
+    res.it->second.ImportRObj(o);
   } else {
-    if (it->second.ObjType() != OBJ_LIST)
+    if (res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
-    es->db_slice().PreUpdate(op_args.db_cntx.db_index, it);
-    ql = GetQL(it->second);
+    ql = GetQL(res.it->second);
   }
 
   // Left push is LIST_HEAD.
@@ -357,18 +351,16 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
   }
 
-  if (new_key) {
+  if (res.is_new) {
     if (es->blocking_controller()) {
       string tmp;
-      string_view key = it->first.GetSlice(&tmp);
+      string_view key = res.it->first.GetSlice(&tmp);
 
       es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
       absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", key, " by ",
                       op_args.tx->DebugId());
     }
   }
-
-  es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
@@ -384,13 +376,12 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, uint32_t count,
                           bool return_results, bool journal_rewrite) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = *it_res;
+  PrimeIterator it = it_res->it;
   quicklist* ql = GetQL(it->second);
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
 
   StringVec res;
   if (quicklistCount(ql) < count) {
@@ -408,7 +399,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
     }
   }
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+  it_res->post_updater.Run();
 
   if (quicklistCount(ql) == 0) {
     absl::StrAppend(debugMessages.Next(), "OpPop Del: ", key, " by ", op_args.tx->DebugId());
@@ -443,7 +434,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
     return OpStatus::OK;
   };
 
-  trans->Execute(move(cb), false);
+  trans->Execute(std::move(cb), false);
 
   if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
     result = find_res[0] ? find_res[1] : find_res[0];
@@ -478,7 +469,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 
       return OpStatus::OK;
     };
-    trans->Execute(move(cb), true);
+    trans->Execute(std::move(cb), true);
     result = std::move(find_res[0].value());
   }
 
@@ -486,7 +477,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 }
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
@@ -496,7 +487,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
 }
 
 OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
   quicklist* ql = GetQL(res.value()->second);
@@ -520,7 +511,8 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
                                  std::string_view element, int rank, int count, int max_len) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  OpResult<PrimeConstIterator> it_res =
+      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
 
@@ -564,11 +556,11 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
                        int insert_param) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
-  quicklist* ql = GetQL(it_res.value()->second);
+  quicklist* ql = GetQL(it_res->it->second);
   quicklistEntry entry = container_utils::QLEntry();
   quicklistIter* qiter = quicklistGetIterator(ql, AL_START_HEAD);
   bool found = false;
@@ -582,14 +574,12 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
 
   int res = -1;
   if (found) {
-    db_slice.PreUpdate(op_args.db_cntx.db_index, *it_res);
     if (insert_param == LIST_TAIL) {
       quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
     } else {
       DCHECK_EQ(LIST_HEAD, insert_param);
       quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
     }
-    db_slice.PostUpdate(op_args.db_cntx.db_index, *it_res, key);
     res = quicklistCount(ql);
   }
   quicklistReleaseIterator(qiter);
@@ -598,11 +588,11 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view elem, long count) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = *it_res;
+  PrimeIterator it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   int iter_direction = AL_START_HEAD;
@@ -618,7 +608,6 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   unsigned removed = 0;
   const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
 
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   while (quicklistNext(qiter, &entry)) {
     if (quicklistCompare(&entry, elem_ptr, elem.size())) {
       quicklistDelEntry(qiter, &entry);
@@ -627,7 +616,8 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
         break;
     }
   }
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+
+  it_res->post_updater.Run();
 
   quicklistReleaseIterator(qiter);
 
@@ -640,16 +630,14 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
 
 OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = *it_res;
+  PrimeIterator it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (!replaced) {
     return OpStatus::OUT_OF_RANGE;
@@ -659,11 +647,11 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
 
 OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = *it_res;
+  PrimeIterator it = it_res->it;
   quicklist* ql = GetQL(it->second);
   long llen = quicklistCount(ql);
 
@@ -690,10 +678,10 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
     rtrim = llen - end - 1;
   }
 
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   quicklistDelRange(ql, 0, ltrim);
   quicklistDelRange(ql, -rtrim, rtrim);
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+
+  it_res->post_updater.Run();
 
   if (quicklistCount(ql) == 0) {
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
@@ -702,7 +690,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
 }
 
 OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start, long end) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
@@ -894,9 +882,8 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
   // Block
-  bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
-  if (!wait_succeeded)
-    return OpStatus::TIMED_OUT;
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
+    return status;
 
   t->Execute(cb_move, true);
   return op_res;
@@ -919,9 +906,8 @@ OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
   // This allows us to run Transaction::Execute on watched transactions in both shards.
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
-  bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
-  if (!wait_succeeded)
-    return OpStatus::TIMED_OUT;
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
+    return status;
 
   return MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, true);
 }
@@ -1211,10 +1197,9 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
     popped_value = OpBPop(t, shard, key, dir);
   };
 
-  cntx->conn_state.is_blocking = true;
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_LIST, move(cb), unsigned(timeout * 1000));
-  cntx->conn_state.is_blocking = false;
+      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked);
+
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {
     DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
@@ -1227,8 +1212,12 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return rb->SendError(kWrongTypeErr);
+    case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::KEY_MOVED:
+      // TODO: proper error for moved
+      return rb->SendError("-MOVED");
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
   }

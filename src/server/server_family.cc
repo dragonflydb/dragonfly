@@ -854,6 +854,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("dispatch_queue_bytes", "", m.conn_stats.dispatch_queue_bytes,
+                            MetricType::GAUGE, &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -878,13 +880,18 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     total += db_stats;
   }
 
-  for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
-    size_t mem = total.memory_usage_by_type[type];
-    if (mem > 0) {
-      AppendMetricWithoutLabels(
-          absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), "", mem,
-          MetricType::GAUGE, &resp->body());
+  {
+    string type_used_memory_metric;
+    AppendMetricHeader("type_used_memory", "Memory used per type", MetricType::GAUGE,
+                       &type_used_memory_metric);
+    for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
+      size_t mem = total.memory_usage_by_type[type];
+      if (mem > 0) {
+        AppendMetricValue("type_used_memory", mem, {"type"}, {CompactObj::ObjTypeToString(type)},
+                          &type_used_memory_metric);
+      }
     }
+    absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
 
   // Stats metrics
@@ -1137,17 +1144,18 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
-void ServerFamily::CancelBlockingCommands() {
-  auto cb = [](unsigned thread_index, util::Connection* conn) {
-    facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
-    if (fc) {
-      ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
-      cntx->CancelBlocking();
+void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> status_cb) {
+  auto cb = [status_cb](unsigned thread_index, util::Connection* conn) {
+    if (auto fcntx = static_cast<facade::Connection*>(conn)->cntx(); fcntx) {
+      auto* cntx = static_cast<ConnectionContext*>(fcntx);
+      if (cntx->transaction && cntx->blocked) {
+        cntx->transaction->CancelBlocking(status_cb);
+      }
     }
   };
-  for (auto* listener : listeners_) {
-    listener->TraverseConnections(cb);
-  }
+
+  for (auto* listener : listeners_)
+    listener->TraverseConnectionsOnThread(cb);
 }
 
 string GetPassword() {
@@ -1689,7 +1697,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
-    append("updateval_amount", total.update_value_amount);
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
@@ -1816,6 +1823,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("master_link_status", link);
       append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
       append("master_sync_in_progress", rinfo.full_sync_in_progress);
+      append("master_replid", rinfo.master_id);
     }
   }
 
@@ -1838,7 +1846,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     auto unknown_cmd = service_.UknownCmdMap();
 
-    append_sorted("cmdstat_", move(commands));
+    append_sorted("cmdstat_", std::move(commands));
     append_sorted("unknown_",
                   vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
   }

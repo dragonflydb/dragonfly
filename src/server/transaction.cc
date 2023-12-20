@@ -1144,7 +1144,7 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
   return reverse_index_[sd.arg_start + arg_index];
 }
 
-bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider) {
+OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider) {
   DVLOG(2) << "WaitOnWatch " << DebugId();
   using namespace chrono;
 
@@ -1153,7 +1153,7 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
     return t->WatchInShard(keys, shard);
   };
 
-  Execute(move(cb), true);
+  Execute(std::move(cb), true);
 
   coordinator_state_ |= COORD_BLOCKED;
 
@@ -1165,29 +1165,36 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
 
+  if (DCHECK_IS_ON()) {
+    int64_t ms = -1;
+    if (tp != time_point::max())
+      ms = duration_cast<milliseconds>(tp - time_point::clock::now()).count();
+    DVLOG(1) << "WaitOnWatch TimeWait for " << ms << " ms " << DebugId();
+  }
+
   cv_status status = cv_status::no_timeout;
   if (tp == time_point::max()) {
-    DVLOG(1) << "WaitOnWatch foreva " << DebugId();
-    blocking_ec_.await(move(wake_cb));
-    DVLOG(1) << "WaitOnWatch AfterWait";
+    blocking_ec_.await(std::move(wake_cb));
   } else {
-    DVLOG(1) << "WaitOnWatch TimeWait for "
-             << duration_cast<milliseconds>(tp - time_point::clock::now()).count() << " ms "
-             << DebugId();
-
-    status = blocking_ec_.await_until(move(wake_cb), tp);
-
-    DVLOG(1) << "WaitOnWatch await_until " << int(status);
+    status = blocking_ec_.await_until(std::move(wake_cb), tp);
   }
+
+  DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
 
   --stats->num_blocked_clients;
 
-  bool is_expired = (coordinator_state_ & COORD_CANCELLED) || status == cv_status::timeout;
-  if (is_expired)
+  OpStatus result = OpStatus::OK;
+  if (status == cv_status::timeout) {
+    result = OpStatus::TIMED_OUT;
+  } else if (coordinator_state_ & COORD_CANCELLED) {
+    result = local_result_;
+  }
+
+  if (result != OpStatus::OK)
     ExpireBlocking(wkeys_provider);
 
   coordinator_state_ &= ~COORD_BLOCKED;
-  return !is_expired;
+  return result;
 }
 
 // Runs only in the shard thread.
@@ -1430,11 +1437,26 @@ void Transaction::RunOnceAsCommand(const CommandId* cid, RunnableType cb) {
   });
 }
 
-void Transaction::CancelBlocking() {
-  if (coordinator_state_ & COORD_BLOCKED) {
-    coordinator_state_ |= COORD_CANCELLED;
-    blocking_ec_.notify();
+void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
+  if ((coordinator_state_ & COORD_BLOCKED) == 0)
+    return;
+
+  OpStatus status = OpStatus::CANCELLED;
+  if (status_cb) {
+    vector<string_view> all_keys;
+    IterateActiveShards([this, &all_keys](PerShardData&, auto i) {
+      auto shard_keys = GetShardArgs(i);
+      all_keys.insert(all_keys.end(), shard_keys.begin(), shard_keys.end());
+    });
+    status = status_cb(absl::MakeSpan(all_keys));
   }
+
+  if (status == OpStatus::OK)
+    return;
+
+  coordinator_state_ |= COORD_CANCELLED;
+  local_result_ = status;
+  blocking_ec_.notify();
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {

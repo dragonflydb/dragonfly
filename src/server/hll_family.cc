@@ -71,14 +71,14 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   string hll;
 
   try {
-    auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
-    if (inserted) {
+    auto res = db_slice.AddOrFind(op_args.db_cntx, key);
+    if (res.is_new) {
       hll.resize(getDenseHllSize());
       createDenseHll(StringToHllPtr(hll));
-    } else if (it->second.ObjType() != OBJ_STRING) {
+    } else if (res.it->second.ObjType() != OBJ_STRING) {
       return OpStatus::WRONG_TYPE;
     } else {
-      it->second.GetString(&hll);
+      res.it->second.GetString(&hll);
       ConvertToDenseIfNeeded(&hll);
     }
 
@@ -91,9 +91,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
       updated += added;
     }
 
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
-    it->second.SetString(hll);
-    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !inserted);
+    res.it->second.SetString(hll);
 
     return std::min(updated, 1);
   } catch (const std::bad_alloc&) {
@@ -117,7 +115,7 @@ void PFAdd(CmdArgList args, ConnectionContext* cntx) {
 OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.shard->db_slice();
 
-  OpResult<PrimeIterator> it = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
     string hll;
     string_view hll_view = it.value()->second.GetSlice(&hll);
@@ -150,8 +148,8 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
   try {
     vector<string> values;
     for (size_t i = 0; i < keys.size(); ++i) {
-      OpResult<PrimeIterator> it =
-          op_args.shard->db_slice().Find(op_args.db_cntx, keys[i], OBJ_STRING);
+      OpResult<PrimeConstIterator> it =
+          op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, keys[i], OBJ_STRING);
       if (it.ok()) {
         string hll;
         it.value()->second.GetString(&hll);
@@ -260,10 +258,8 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
     string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.shard->db_slice();
-    auto [it, inserted] = db_slice.AddOrFind(t->GetDbContext(), key);
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
-    it->second.SetString(hll);
-    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !inserted);
+    auto res = db_slice.AddOrFind(t->GetDbContext(), key);
+    res.it->second.SetString(hll);
     return OpStatus::OK;
   };
   trans->Execute(std::move(set_cb), true);

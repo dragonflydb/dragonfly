@@ -38,7 +38,7 @@ using OptBool = optional<bool>;
 using OptLong = optional<long>;
 using OptSizeT = optional<size_t>;
 using OptString = optional<string>;
-using JsonReplaceCb = function<void(const string&, JsonType&)>;
+using JsonReplaceCb = function<void(const JsonExpression::path_node_type&, JsonType&)>;
 using JsonReplaceVerify = std::function<OpStatus(JsonType&)>;
 using CI = CommandId;
 
@@ -52,16 +52,13 @@ inline OpStatus JsonReplaceVerifyNoOp(JsonType&) {
 
 void SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
   auto& db_slice = op_args.shard->db_slice();
-  DbIndex db_index = op_args.db_cntx.db_index;
-  auto [it_output, added] = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto res = db_slice.AddOrFind(op_args.db_cntx, key);
 
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_output->second);
-  db_slice.PreUpdate(db_index, it_output);
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  it_output->second.SetJson(std::move(value));
+  res.it->second.SetJson(std::move(value));
 
-  db_slice.PostUpdate(db_index, it_output, key);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_output->second);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
 }
 
 string JsonTypeToName(const JsonType& val) {
@@ -119,48 +116,45 @@ void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& r
 }
 
 error_code JsonReplace(JsonType& instance, string_view path, JsonReplaceCb callback) {
-  using evaluator_t = jsoncons::jsonpath::detail::jsonpath_evaluator<JsonType, JsonType&>;
+  using evaluator_t = jsonpath::detail::jsonpath_evaluator<JsonType, JsonType&>;
   using value_type = evaluator_t::value_type;
   using reference = evaluator_t::reference;
   using json_selector_t = evaluator_t::path_expression_type;
-  using json_location_type = evaluator_t::json_location_type;
+
   jsonpath::custom_functions<JsonType> funcs = jsonpath::custom_functions<JsonType>();
 
   error_code ec;
-  jsoncons::jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
+  jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
   evaluator_t e;
   json_selector_t expr = e.compile(static_resources, path, ec);
   if (ec) {
     return ec;
   }
 
-  jsoncons::jsonpath::detail::dynamic_resources<value_type, reference> resources;
-  auto f = [&callback](const json_location_type& path, reference val) {
-    callback(path.to_string(), val);
+  jsonpath::detail::dynamic_resources<value_type, reference> resources;
+  auto f = [&callback](const json_selector_t::path_node_type& path, reference val) {
+    callback(path, val);
   };
 
-  expr.evaluate(resources, instance, resources.root_path_node(), instance, f,
-                jsonpath::result_options::nodups);
+  expr.evaluate(resources, instance, json_selector_t::path_node_type{}, instance, f,
+                jsonpath::result_options::nodups | jsonpath::result_options::path);
   return ec;
 }
 
 OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_view path,
                      JsonReplaceCb callback, JsonReplaceVerify verify_op = JsonReplaceVerifyNoOp) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok()) {
     return it_res.status();
   }
 
-  PrimeIterator entry_it = it_res.value();
-  auto& db_slice = op_args.shard->db_slice();
-  auto db_index = op_args.db_cntx.db_index;
+  PrimeConstIterator entry_it = it_res->it;
   JsonType* json_val = entry_it->second.GetJson();
   DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
                    << entry_it->second.ObjType() << "'";
   JsonType& json_entry = *json_val;
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, entry_it->second);
-  db_slice.PreUpdate(db_index, entry_it);
 
   // Run the update operation on this entry
   error_code ec = JsonReplace(json_entry, path, callback);
@@ -172,7 +166,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
   // Make sure that we don't have other internal issue with the operation
   OpStatus res = verify_op(json_entry);
   if (res == OpStatus::OK) {
-    db_slice.PostUpdate(db_index, entry_it, key);
+    it_res->post_updater.Run();
     op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, entry_it->second);
   }
 
@@ -180,7 +174,8 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
 }
 
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+  OpResult<PrimeConstIterator> it_res =
+      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok())
     return it_res.status();
 
@@ -532,7 +527,7 @@ OpResult<vector<OptSizeT>> OpArrLen(const OpArgs& op_args, string_view key,
 
 OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, string_view path) {
   vector<OptBool> vec;
-  auto cb = [&vec](const string& path, JsonType& val) {
+  auto cb = [&vec](const auto&, JsonType& val) {
     if (val.is_bool()) {
       bool current_val = val.as_bool() ^ true;
       val = current_val;
@@ -558,7 +553,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
   bool has_fractional_part = (modf(num, &int_part) != 0);
   json output(json_array_arg);
 
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (val.is_number()) {
       double result = arithmetic_op(val.as<double>(), num);
       if (isinf(result)) {
@@ -596,7 +591,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   long total_deletions = 0;
   if (path.empty()) {
     auto& db_slice = op_args.shard->db_slice();
-    auto [it, _] = db_slice.FindExt(op_args.db_cntx, key);
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     total_deletions += long(db_slice.Del(op_args.db_cntx.db_index, it));
     return total_deletions;
   }
@@ -607,9 +602,10 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   }
 
   vector<string> deletion_items;
-  auto cb = [&](const string& path, JsonType& val) { deletion_items.emplace_back(path); };
+  auto cb = [&](const JsonExpression::path_node_type& path, JsonType& val) {
+    deletion_items.emplace_back(jsonpath::to_string(path));
+  };
 
-  // json j = move(result.value());
   JsonType& json_entry = *(result.value());
   error_code ec = JsonReplace(json_entry, path, cb);
   if (ec) {
@@ -672,7 +668,7 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
 OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, string_view path,
                                        const vector<string_view>& strs) {
   vector<OptSizeT> vec;
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (val.is_string()) {
       string new_val = val.as_string();
       for (auto& str : strs) {
@@ -698,7 +694,7 @@ OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, s
 // Clears containers(arrays or objects) and zeroing numbers.
 OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path) {
   long clear_items = 0;
-  auto cb = [&clear_items](const string& path, JsonType& val) {
+  auto cb = [&clear_items](const auto& path, JsonType& val) {
     if (!(val.is_object() || val.is_array() || val.is_number())) {
       return;
     }
@@ -725,7 +721,7 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path)
 OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, string_view path,
                                      int index) {
   vector<OptString> vec;
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto& path, JsonType& val) {
     if (!val.is_array() || val.empty()) {
       vec.emplace_back(nullopt);
       return;
@@ -768,7 +764,7 @@ OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, str
 OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, string_view path,
                                      int start_index, int stop_index) {
   vector<OptSizeT> vec;
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (!val.is_array()) {
       vec.emplace_back(nullopt);
       return;
@@ -824,7 +820,7 @@ OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, s
   // Insert user-supplied value into the supplied index that should be valid.
   // If at least one index isn't valid within an array in the json doc, the operation is discarded.
   // Negative indexes start from the end of the array.
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (out_of_boundaries_encountered) {
       return;
     }
@@ -889,7 +885,7 @@ OpResult<vector<OptSizeT>> OpArrAppend(const OpArgs& op_args, string_view key, s
     return result.status();
   }
 
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     if (!val.is_array()) {
       vec.emplace_back(nullopt);
       return;
@@ -981,7 +977,8 @@ vector<OptString> OpJsonMGet(JsonExpression expression, const Transaction* t, En
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_JSON);
+    OpResult<PrimeConstIterator> it_res =
+        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_JSON);
     if (!it_res.ok())
       continue;
 
@@ -1014,7 +1011,7 @@ vector<OptString> OpJsonMGet(JsonExpression expression, const Transaction* t, En
       VLOG(1) << "Failed to dump JSON array to string with the error: " << ec.message();
     }
 
-    dest = move(str);
+    dest = std::move(str);
   }
 
   return response;
@@ -1067,8 +1064,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // and its not JSON, it would return an error.
   if (path == "." || path == "$") {
     if (is_nx_condition || is_xx_condition) {
-      OpResult<PrimeIterator> it_res =
-          op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+      OpResult<PrimeConstIterator> it_res =
+          op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
       bool key_exists = (it_res.status() != OpStatus::KEY_NOTFOUND);
       if (is_nx_condition && key_exists) {
         return false;
@@ -1091,7 +1088,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   bool path_exists = false;
   bool operation_result = false;
   const JsonType& new_json = parsed_json.value();
-  auto cb = [&](const string& path, JsonType& val) {
+  auto cb = [&](const auto&, JsonType& val) {
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;
@@ -1157,7 +1154,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<bool> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<bool> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (*result) {
@@ -1187,11 +1184,11 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpResp(t->GetOpArgs(shard), key, move(expression));
+    return OpResp(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<JsonType>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<JsonType>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
@@ -1242,11 +1239,11 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return func(t->GetOpArgs(shard), key, move(expression));
+    return func(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1297,7 +1294,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
         continue;
 
       uint32_t indx = transaction->ReverseArgIndex(sid, j);
-      results[indx] = move(res[j]);
+      results[indx] = std::move(res[j]);
     }
   }
 
@@ -1355,12 +1352,12 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrIndex(t->GetOpArgs(shard), key, move(expression), *search_value, start_index,
+    return OpArrIndex(t->GetOpArgs(shard), key, std::move(expression), *search_value, start_index,
                       end_index);
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptLong>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptLong>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1388,7 +1385,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
       return;
     }
 
-    new_values.emplace_back(move(*val));
+    new_values.emplace_back(std::move(*val));
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1396,7 +1393,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
   if (result) {
     PrintOptVec(cntx, result);
   } else {
@@ -1422,7 +1419,7 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
   if (result) {
     PrintOptVec(cntx, result);
   } else {
@@ -1458,7 +1455,7 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
   if (result) {
     PrintOptVec(cntx, result);
   } else {
@@ -1492,7 +1489,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptString>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptString>> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     rb->StartArray(result->size());
@@ -1517,7 +1514,7 @@ void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<long> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cntx->SendLong(*result);
@@ -1540,7 +1537,7 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1563,11 +1560,11 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpObjKeys(t->GetOpArgs(shard), key, move(expression));
+    return OpObjKeys(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<StringVec>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<StringVec>> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     rb->StartArray(result->size());
@@ -1595,7 +1592,7 @@ void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<long> result = trans->ScheduleSingleHopT(std::move(cb));
   cntx->SendLong(*result);
 }
 
@@ -1615,7 +1612,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cntx->SendSimpleString(*result);
@@ -1640,7 +1637,7 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     cntx->SendSimpleString(*result);
@@ -1658,7 +1655,7 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptBool>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptBool>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1681,11 +1678,11 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpType(t->GetOpArgs(shard), key, move(expression));
+    return OpType(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<string>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<string>> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (result->empty()) {
@@ -1717,11 +1714,11 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrLen(t->GetOpArgs(shard), key, move(expression));
+    return OpArrLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1744,11 +1741,11 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpObjLen(t->GetOpArgs(shard), key, move(expression));
+    return OpObjLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1771,11 +1768,11 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrLen(t->GetOpArgs(shard), key, move(expression));
+    return OpStrLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     PrintOptVec(cntx, result);
@@ -1821,7 +1818,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
       }
     }
 
-    expressions.emplace_back(expr_str, move(expr));
+    expressions.emplace_back(expr_str, std::move(expr));
   }
 
   if (auto err = parser.Error(); err)
@@ -1833,7 +1830,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     rb->SendBulkString(*result);

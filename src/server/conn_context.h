@@ -35,7 +35,7 @@ class StoredCmd {
 
   size_t NumArgs() const;
 
-  size_t UsedHeapMemory() const;
+  size_t UsedMemory() const;
 
   // Fill the arg list with stored arguments, it should be at least of size NumArgs().
   // Between filling and invocation, cmd should NOT be moved.
@@ -80,6 +80,8 @@ struct ConnectionState {
     // Resets local watched keys info. Does not unregister the keys from DbSlices.
     void ClearWatched();
 
+    size_t UsedMemory() const;
+
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     bool is_write = false;
@@ -97,6 +99,8 @@ struct ConnectionState {
 
   // Lua-script related data.
   struct ScriptInfo {
+    size_t UsedMemory() const;
+
     absl::flat_hash_set<std::string_view> keys;  // declared keys
 
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
@@ -113,6 +117,8 @@ struct ConnectionState {
     unsigned SubscriptionCount() const {
       return channels.size() + patterns.size();
     }
+
+    size_t UsedMemory() const;
 
     // TODO: to provide unique_strings across service. This will allow us to use string_view here.
     absl::flat_hash_set<std::string> channels;
@@ -139,6 +145,8 @@ struct ConnectionState {
     FETCH_CAS_VER = 1,
   };
 
+  size_t UsedMemory() const;
+
  public:
   DbIndex db_index = 0;
 
@@ -146,8 +154,6 @@ struct ConnectionState {
   // For set op - it's the flag value we are storing along with the value.
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
-
-  bool is_blocking = false;  // whether this connection is blocking on a command
 
   ExecInfo exec_info;
   ReplicationInfo replication_info;
@@ -186,7 +192,6 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
-  void CancelBlocking();           // Cancel an ongoing blocking transaction if there is one.
 
   size_t UsedMemory() const override;
 
@@ -199,7 +204,7 @@ class ConnectionContext : public facade::ConnectionContext {
                          // of it as a state for the connection
 
   // Reference to a FlowInfo for this connection if from a master to a replica.
-  FlowInfo* replication_flow;
+  FlowInfo* replication_flow = nullptr;
 
  private:
   void EnableMonitoring(bool enable) {

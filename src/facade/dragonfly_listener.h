@@ -89,7 +89,7 @@ class Listener : public util::ListenerInterface {
 class DispatchTracker {
  public:
   DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer = nullptr,
-                  bool ignore_paused = false);
+                  bool ignore_paused = false, bool ignore_blocked = false);
 
   void TrackAll();       // Track busy connection on all threads
   void TrackOnThread();  // Track busy connections on current thread
@@ -105,6 +105,7 @@ class DispatchTracker {
   facade::Connection* issuer_;
   util::fb2::BlockingCounter bc_{0};
   bool ignore_paused_;
+  bool ignore_blocked_;
 };
 
 }  // namespace facade

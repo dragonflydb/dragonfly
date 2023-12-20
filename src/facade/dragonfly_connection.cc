@@ -99,6 +99,17 @@ bool MatchHttp11Line(string_view line) {
   return absl::StartsWith(line, "GET ") && absl::EndsWith(line, "HTTP/1.1");
 }
 
+void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
+                         absl::FunctionRef<void()> f) {
+  const size_t prev_capacity = io_buf.Capacity();
+  f();
+  const size_t capacity = io_buf.Capacity();
+  if (stats != nullptr && prev_capacity != capacity) {
+    VLOG(1) << "Grown io_buf to " << capacity;
+    stats->read_buf_capacity += capacity - prev_capacity;
+  }
+}
+
 constexpr size_t kMinReadSize = 256;
 
 thread_local uint32_t free_req_release_weight = 0;
@@ -118,7 +129,7 @@ struct Connection::Shutdown {
   ShutdownHandle next_handle = 1;
 
   ShutdownHandle Add(ShutdownCb cb) {
-    map[next_handle] = move(cb);
+    map[next_handle] = std::move(cb);
     return next_handle++;
   }
 
@@ -129,7 +140,10 @@ struct Connection::Shutdown {
 
 Connection::PubMessage::PubMessage(string pattern, shared_ptr<char[]> buf, size_t channel_len,
                                    size_t message_len)
-    : pattern{move(pattern)}, buf{move(buf)}, channel_len{channel_len}, message_len{message_len} {
+    : pattern{std::move(pattern)},
+      buf{std::move(buf)},
+      channel_len{channel_len},
+      message_len{message_len} {
 }
 
 string_view Connection::PubMessage::Channel() const {
@@ -579,7 +593,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
       return MatchHttp11Line(ib);
     }
     last_len = io_buf_.InputLen();
-    io_buf_.EnsureCapacity(io_buf_.Capacity());
+    UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity()); });
   } while (last_len < 1024);
 
   return false;
@@ -612,7 +626,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // Main loop.
   if (parse_status != ERROR && !ec) {
     if (io_buf_.AppendLen() < 64) {
-      io_buf_.EnsureCapacity(io_buf_.Capacity() * 2);
+      UpdateIoBufCapacity(io_buf_, stats_,
+                          [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity() * 2); });
     }
     auto res = IoLoop(peer, orig_builder);
 
@@ -711,7 +726,7 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
       evc_.notify();
 
   } else {
-    SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), heap)});
+    SendAsync(MessageHandle{FromArgs(std::move(tmp_parse_args_), heap)});
     if (dispatch_q_.size() > 10)
       ThisFiber::Yield();
   }
@@ -931,7 +946,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         // (Note: The buffer object is only working in power-of-2 sizes,
         // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
-          io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
+          UpdateIoBufCapacity(io_buf_, stats_,
+                              [&]() { io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint)); });
         }
 
         // If we got a partial request and we couldn't parse the length, just
@@ -940,13 +956,11 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         // a reasonable limit to save on Recv() calls.
         if (io_buf_.AppendLen() < 64u || (is_iobuf_full && capacity < 4096)) {
           // Last io used most of the io_buf to the end.
-          io_buf_.Reserve(capacity * 2);  // Valid growth range.
+          UpdateIoBufCapacity(io_buf_, stats_, [&]() {
+            io_buf_.Reserve(capacity * 2);  // Valid growth range.
+          });
         }
 
-        if (capacity < io_buf_.Capacity()) {
-          VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
-          stats_->read_buf_capacity += (io_buf_.Capacity() - capacity);
-        }
         DCHECK_GT(io_buf_.AppendLen(), 0U);
       } else if (io_buf_.AppendLen() == 0) {
         // We have a full buffer and we can not progress with parsing.
@@ -1062,6 +1076,12 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
 
+  absl::StrAppend(&info, "state=");
+  if (cc_->paused)
+    absl::StrAppend(&info, "p");
+  if (cc_->blocked)
+    absl::StrAppend(&info, "b");
+
   absl::StrAppend(&info, "}");
   return info;
 }
@@ -1114,7 +1134,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
       SquashPipeline(builder);
     } else {
-      MessageHandle msg = move(dispatch_q_.front());
+      MessageHandle msg = std::move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
       if (ShouldEndDispatchFiber(msg)) {
@@ -1185,7 +1205,7 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
     return nullptr;
 
   free_req_release_weight = 0;  // Reset the release weight.
-  auto ptr = move(pipeline_req_pool_.back());
+  auto ptr = std::move(pipeline_req_pool_.back());
   stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
   pipeline_req_pool_.pop_back();
   return ptr;
@@ -1228,22 +1248,25 @@ bool Connection::IsCurrentlyDispatching() const {
 
 void Connection::SendPubMessageAsync(PubMessage msg) {
   void* ptr = mi_malloc(sizeof(PubMessage));
-  SendAsync({PubMessagePtr{new (ptr) PubMessage{move(msg)}, MessageDeleter{}}});
+  SendAsync({PubMessagePtr{new (ptr) PubMessage{std::move(msg)}, MessageDeleter{}}});
 }
 
 void Connection::SendMonitorMessageAsync(string msg) {
-  SendAsync({MonitorMessage{move(msg)}});
+  SendAsync({MonitorMessage{std::move(msg)}});
 }
 
 void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
 }
 
-void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused) {
+void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, bool ignore_blocked) {
   if (!IsCurrentlyDispatching())
     return;
 
-  if (cc_->paused && !ignore_paused)
+  if (cc_->paused && ignore_paused)
+    return;
+
+  if (cc_->blocked && ignore_blocked)
     return;
 
   VLOG(1) << "Sent checkpoint to " << DebugInfo();
@@ -1323,7 +1346,7 @@ void Connection::RecycleMessage(MessageHandle msg) {
     pending_pipeline_cmd_cnt_--;
     if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
       stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
-      pipeline_req_pool_.push_back(move(*pipe));
+      pipeline_req_pool_.push_back(std::move(*pipe));
     }
   }
 }

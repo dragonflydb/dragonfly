@@ -359,13 +359,22 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
     rb->StartArray(12);
     rb->SendSimpleString("reason");
     using Reason = AclLog::Reason;
-    std::string_view reason = entry.reason == Reason::COMMAND ? "COMMAND" : "AUTH";
+    std::string reason;
+    if (entry.reason == Reason::COMMAND) {
+      reason = "COMMAND";
+    } else if (entry.reason == Reason::KEY) {
+      reason = "KEY";
+    } else {
+      reason = "AUTH";
+    }
+
     rb->SendSimpleString(reason);
     rb->SendSimpleString("object");
     rb->SendSimpleString(entry.object);
     rb->SendSimpleString("username");
     rb->SendSimpleString(entry.username);
     rb->SendSimpleString("age-seconds");
+
     auto now_diff = std::chrono::system_clock::now() - entry.entry_creation;
     auto secs = std::chrono::duration_cast<std::chrono::seconds>(now_diff);
     auto left_over = now_diff - std::chrono::duration_cast<std::chrono::microseconds>(secs);
@@ -491,6 +500,7 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
 
   std::string acl = absl::StrCat(AclCatToString(user.AclCategory()), " ",
                                  AclCommandToString(user.AclCommandsRef()));
+
   rb->SendSimpleString(acl);
 
   rb->SendSimpleString("keys");
@@ -550,8 +560,10 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   }
 
   const auto& user = registry.find(username)->second;
-  if (IsUserAllowedToInvokeCommandGeneric(user.AclCategory(), user.AclCommandsRef(), {{}, true}, {},
-                                          *cid)) {
+  const bool is_allowed = IsUserAllowedToInvokeCommandGeneric(
+                              user.AclCategory(), user.AclCommandsRef(), {{}, true}, {}, *cid)
+                              .first;
+  if (is_allowed) {
     cntx->SendOk();
     return;
   }

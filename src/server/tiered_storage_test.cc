@@ -25,6 +25,7 @@ class TieredStorageTest : public BaseFamilyTest {
   }
 
   void FillExternalKeys(unsigned count, int val_size = 256);
+  void FillKeysWithExpire(unsigned count, int val_size = 256, uint32_t expire = 3);
 
   static void SetUpTestSuite();
 };
@@ -59,6 +60,13 @@ void TieredStorageTest::FillExternalKeys(unsigned count, int val_size) {
 
   for (unsigned i = batch_cnt * 50; i < count; ++i) {
     Run({"set", StrCat("k", i), val});
+  }
+}
+
+void TieredStorageTest::FillKeysWithExpire(unsigned count, int val_size, uint32_t expire) {
+  string val(val_size, 'a');
+  for (unsigned i = 0; i < count; ++i) {
+    Run({"set", StrCat("k", i), val, "ex", StrCat(expire)});
   }
 }
 
@@ -198,4 +206,50 @@ TEST_F(TieredStorageTest, DelBigValues) {
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
 }
 
+TEST_F(TieredStorageTest, AddBigValuesWithExpire) {
+  const int kKeyNum = 10;
+  for (int i = 0; i < 3; ++i) {
+    FillKeysWithExpire(kKeyNum, 8000);
+    usleep(20000);  // 0.02 milliseconds
+
+    Metrics m = GetMetrics();
+    EXPECT_EQ(m.db_stats[0].tiered_entries, 10);
+  }
+  for (int i = 0; i < kKeyNum; ++i) {
+    auto resp = Run({"ttl", StrCat("k", i)});
+    EXPECT_GT(resp.GetInt(), 0);
+  }
+}
+
+TEST_F(TieredStorageTest, AddSmallValuesWithExpire) {
+  const int kKeyNum = 100;
+  for (int i = 0; i < 3; ++i) {
+    FillKeysWithExpire(kKeyNum);
+    usleep(20000);  // 0.02 milliseconds
+
+    Metrics m = GetMetrics();
+    EXPECT_GT(m.db_stats[0].tiered_entries, 0);
+  }
+  for (int i = 0; i < kKeyNum; ++i) {
+    auto resp = Run({"ttl", StrCat("k", i)});
+    EXPECT_GT(resp.GetInt(), 0);
+  }
+}
+
+TEST_F(TieredStorageTest, SetAndExpire) {
+  string val(5000, 'a');
+  Run({"set", "key", val});
+  usleep(20000);  // 0.02 milliseconds
+
+  Metrics m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
+  Run({"expire", "key", "3"});
+
+  Run({"set", "key", val});
+  usleep(20000);  // 0.02 milliseconds
+
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
+  Run({"expire", "key", "3"});
+}
 }  // namespace dfly

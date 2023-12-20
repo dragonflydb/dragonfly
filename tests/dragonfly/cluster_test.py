@@ -1,5 +1,6 @@
 import pytest
 import re
+import json
 import redis
 from redis import asyncio as aioredis
 import asyncio
@@ -513,6 +514,50 @@ async def test_cluster_flush_slots_after_config_change(df_local_factory: DflyIns
 
     assert await c_master.execute_command("dbsize") == (100_000 - slot_0_size)
     assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "admin_port": 30001})
+async def test_cluster_blocking_command(df_server):
+    c_master = df_server.client()
+    c_master_admin = df_server.admin_client()
+
+    config = [
+        {
+            "slot_ranges": [{"start": 0, "end": 8000}],
+            "master": {"id": await get_node_id(c_master_admin), "ip": "10.0.0.1", "port": 7000},
+            "replicas": [],
+        },
+        {
+            "slot_ranges": [{"start": 8001, "end": 16383}],
+            "master": {"id": "other", "ip": "10.0.0.2", "port": 7000},
+            "replicas": [],
+        },
+    ]
+
+    assert (
+        await c_master_admin.execute_command("DFLYCLUSTER", "CONFIG", json.dumps(config))
+    ) == "OK"
+
+    assert (await c_master.execute_command("CLUSTER", "KEYSLOT", "keep-local")) == 3479
+    assert (await c_master.execute_command("CLUSTER", "KEYSLOT", "remove-key-4")) == 6103
+
+    v1 = asyncio.create_task(c_master.blpop("keep-local", 2))
+    v2 = asyncio.create_task(c_master.blpop("remove-key-4", 2))
+
+    await asyncio.sleep(0.1)
+
+    config[0]["slot_ranges"][0]["end"] = 5000
+    config[1]["slot_ranges"][0]["start"] = 5001
+    assert (
+        await c_master_admin.execute_command("DFLYCLUSTER", "CONFIG", json.dumps(config))
+    ) == "OK"
+
+    await c_master.lpush("keep-local", "WORKS")
+
+    assert (await v1) == ("keep-local", "WORKS")
+    with pytest.raises(aioredis.ResponseError) as e_info:
+        await v2
+    assert "MOVED" in str(e_info.value)
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})

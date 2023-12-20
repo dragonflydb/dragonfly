@@ -277,12 +277,7 @@ unsigned TieredStorage::InflightWriteRequest::ExternalizeEntries(PerDb::BinRecor
     if (it != bin_record->enqueued_entries.end() && it->second == this) {
       PrimeIterator pit = pt->Find(pkey);
       size_t item_offset = page_index_ * 4096 + offset + i * bin_size;
-
-      // TODO: the key may be deleted or overriden. The last one is especially dangerous.
-      // we should update active pending request with any change we make to the entry.
-      // it should not be a problem since we have HasIoPending tag that mean we must
-      // update the inflight request (or mark the entry as cancelled).
-      CHECK(!pit.is_done()) << "TBD";
+      CHECK(!pit.is_done());
 
       ExternalizeEntry(item_offset, stats, &pit->second);
       VLOG(2) << "ExternalizeEntry: " << it->first;
@@ -300,9 +295,7 @@ void TieredStorage::InflightWriteRequest::Undo(PerDb::BinRecord* bin_record, DbS
     if (it != bin_record->enqueued_entries.end() && it->second == this) {
       PrimeIterator pit = pt->Find(pkey);
 
-      // TODO: what happens when if the entry was deleted meanwhile
-      // or it has been serialized again?
-      CHECK(pit->second.HasIoPending()) << "TBD: fix inconsistencies";
+      CHECK(pit->second.HasIoPending());
       VLOG(2) << "Undo key:" << pkey;
       pit->second.SetIoPending(false);
 
@@ -580,7 +573,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
 
   DCHECK_EQ(res % kBlockLen, 0u);
 
-  off64_t file_offset = res;
+  int64_t file_offset = res;
   PrimeTable* pt = db_slice_.GetTables(db_index).first;
   auto& bin_record = db->bin_map[bin_index];
 
@@ -638,7 +631,7 @@ void TieredStorage::InitiateGrow(size_t grow_size) {
     }
   };
 
-  error_code ec = io_mgr_.GrowAsync(grow_size, move(cb));
+  error_code ec = io_mgr_.GrowAsync(grow_size, std::move(cb));
   CHECK(!ec) << "TBD";  // TODO
 }
 

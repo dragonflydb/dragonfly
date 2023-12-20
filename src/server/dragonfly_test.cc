@@ -538,17 +538,23 @@ TEST_F(DflyEngineTest, Bug496) {
     uint32_t cb_id =
         db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
 
-    auto [_, added] = db.AddOrFind({}, "key-1");
-    EXPECT_TRUE(added);
-    EXPECT_EQ(cb_hits, 1);
+    {
+      auto res = db.AddOrFind({}, "key-1");
+      EXPECT_TRUE(res.is_new);
+      EXPECT_EQ(cb_hits, 1);
+    }
 
-    tie(_, added) = db.AddOrFind({}, "key-1");
-    EXPECT_FALSE(added);
-    EXPECT_EQ(cb_hits, 1);
+    {
+      auto res = db.AddOrFind({}, "key-1");
+      EXPECT_FALSE(res.is_new);
+      EXPECT_EQ(cb_hits, 2);
+    }
 
-    tie(_, added) = db.AddOrFind({}, "key-2");
-    EXPECT_TRUE(added);
-    EXPECT_EQ(cb_hits, 2);
+    {
+      auto res = db.AddOrFind({}, "key-2");
+      EXPECT_TRUE(res.is_new);
+      EXPECT_EQ(cb_hits, 3);
+    }
 
     db.UnregisterOnChange(cb_id);
   });

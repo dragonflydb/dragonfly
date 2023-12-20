@@ -288,6 +288,7 @@ class ElementAccess {
   std::string_view key_;
   DbContext context_;
   EngineShard* shard_ = nullptr;
+  mutable DbSlice::AutoUpdater post_updater_;
 
  public:
   ElementAccess(std::string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
@@ -314,7 +315,7 @@ class ElementAccess {
 };
 
 std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
-  auto res = shard->db_slice().Find(context_, key_, OBJ_STRING);
+  auto res = shard->db_slice().FindReadOnly(context_, key_, OBJ_STRING);
   if (res.status() == OpStatus::WRONG_TYPE) {
     return {};
   }
@@ -323,15 +324,16 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
   try {
-    std::pair<PrimeIterator, bool> add_res = shard->db_slice().AddOrFind(context_, key_);
-    if (!add_res.second) {
-      if (add_res.first->second.ObjType() != OBJ_STRING) {
+    auto add_res = shard->db_slice().AddOrFind(context_, key_);
+    if (!add_res.is_new) {
+      if (add_res.it->second.ObjType() != OBJ_STRING) {
         return OpStatus::WRONG_TYPE;
       }
     }
-    element_iter_ = add_res.first;
-    added_ = add_res.second;
+    element_iter_ = add_res.it;
+    added_ = add_res.is_new;
     shard_ = shard;
+    post_updater_ = std::move(add_res.post_updater);
     return OpStatus::OK;
   } catch (const std::bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
@@ -349,10 +351,8 @@ std::string ElementAccess::Value() const {
 
 void ElementAccess::Commit(std::string_view new_value) const {
   if (shard_) {
-    auto& db_slice = shard_->db_slice();
-    db_slice.PreUpdate(Index(), element_iter_);
     element_iter_->second.SetString(new_value);
-    db_slice.PostUpdate(Index(), element_iter_, key_, !added_);
+    post_updater_.Run();
   }
 }
 
@@ -458,7 +458,8 @@ OpResult<std::string> RunBitOpNot(const OpArgs& op_args, ArgSlice keys) {
   EngineShard* es = op_args.shard;
   // if we found the value, just return, if not found then skip, otherwise report an error
   auto key = keys.front();
-  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> find_res =
+      es->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
     return GetString(find_res.value()->second, es);
   } else {
@@ -479,7 +480,8 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
 
   // collect all the value for this shard
   for (auto& key : keys) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
+    OpResult<PrimeConstIterator> find_res =
+        es->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (find_res) {
       values.emplace_back(GetString(find_res.value()->second, es));
     } else {
@@ -908,7 +910,8 @@ using CommandList = std::vector<Command>;
 // Helper class used in the shard cb that abstracts away the iteration and execution of subcommands
 class StateExecutor {
  public:
-  StateExecutor(ElementAccess access, EngineShard* shard) : access_{access}, shard_(shard) {
+  StateExecutor(ElementAccess access, EngineShard* shard)
+      : access_{std::move(access)}, shard_(shard) {
   }
 
   //  Iterates over all of the parsed subcommands and executes them one by one. At the end,
@@ -1261,7 +1264,7 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
 
 OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
                                 EngineShard* shard) {
-  OpResult<PrimeIterator> it_res = shard->db_slice().Find(context, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it_res = shard->db_slice().FindReadOnly(context, key, OBJ_STRING);
   if (!it_res.ok()) {
     return it_res.status();
   }

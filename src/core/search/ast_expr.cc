@@ -23,7 +23,7 @@ AstRangeNode::AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl)
     : lo{lo_excl ? nextafter(lo, hi) : lo}, hi{hi_excl ? nextafter(hi, lo) : hi} {
 }
 
-AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(move(node))} {
+AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
 }
 
 AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, nodes{} {
@@ -31,30 +31,30 @@ AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, n
   // we can re-use it, as logical ops are associative.
   for (auto* node : {&l, &r}) {
     if (auto* ln = get_if<AstLogicalNode>(node); ln && ln->op == op) {
-      *this = move(*ln);
-      nodes.emplace_back(move(*(node == &l ? &r : &l)));
+      *this = std::move(*ln);
+      nodes.emplace_back(std::move(*(node == &l ? &r : &l)));
       return;
     }
   }
 
-  nodes.emplace_back(move(l));
-  nodes.emplace_back(move(r));
+  nodes.emplace_back(std::move(l));
+  nodes.emplace_back(std::move(r));
 }
 
 AstFieldNode::AstFieldNode(string field, AstNode&& node)
-    : field{field.substr(1)}, node{make_unique<AstNode>(move(node))} {
+    : field{field.substr(1)}, node{make_unique<AstNode>(std::move(node))} {
 }
 
 AstTagsNode::AstTagsNode(std::string tag) {
-  tags = {move(tag)};
+  tags = {std::move(tag)};
 }
 
 AstTagsNode::AstTagsNode(AstExpr&& l, std::string tag) {
   DCHECK(holds_alternative<AstTagsNode>(l));
   auto& tags_node = get<AstTagsNode>(l);
 
-  tags = move(tags_node.tags);
-  tags.push_back(move(tag));
+  tags = std::move(tags_node.tags);
+  tags.push_back(std::move(tag));
 }
 
 AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,

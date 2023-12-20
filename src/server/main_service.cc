@@ -678,6 +678,12 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
     for (const auto& scmd : exec_info.body) {
       transactional |= scmd.Cid()->IsTransactional();
       contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
+
+      // We can't run no-key-transactional commands in lock-ahead mode currently,
+      // because it means we have to schedule on all shards
+      if (scmd.Cid()->opt_mask() & CO::NO_KEY_TRANSACTIONAL)
+        contains_global = true;
+
       if (contains_global)
         break;
     }
@@ -1441,7 +1447,8 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
   owner->RegisterBreakHook([res, this](uint32_t) {
-    res->CancelBlocking();
+    if (res->transaction)
+      res->transaction->CancelBlocking(nullptr);
     this->server_family().BreakOnShutdown();
   });
 
@@ -1586,7 +1593,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
       auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
-      info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
+      info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ArgS(ca.args, 0));
     }
@@ -2191,6 +2198,18 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
   cntx->SendLong(pattern_count);
 }
 
+void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
+  int channels_size = args.size();
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(channels_size * 2);
+
+  for (auto i = 0; i < channels_size; i++) {
+    auto channel = ArgS(args, i);
+    rb->SendBulkString(channel);
+    rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
+  }
+}
+
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "starting monitor on this connection: " << cntx->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
@@ -2215,6 +2234,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
         "\tReturn the currently active channels matching a <pattern> (default: '*').",
         "NUMPAT",
         "\tReturn number of subscriptions to patterns.",
+        "NUMSUB [<channel> <channel...>]",
+        "\tReturns the number of subscribers for the specified channels, excluding",
+        "\tpattern subscriptions.",
         "HELP",
         "\tPrints this help."};
 
@@ -2232,6 +2254,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
     PubsubChannels(pattern, cntx);
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
+  } else if (subcmd == "NUMSUB") {
+    args.remove_prefix(1);
+    PubsubNumSub(args, cntx);
   } else {
     cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
@@ -2401,7 +2426,7 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   if (server_cntx->conn_state.subscribe_info)
     buf[index++] = 'P';
 
-  if (server_cntx->conn_state.is_blocking)
+  if (server_cntx->blocked)
     buf[index++] = 'b';
 
   if (index) {
