@@ -801,10 +801,12 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     )
     assert "OK" == res
 
+    await asyncio.sleep(0.5)
+
     status = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
     )
-    assert "CONNECTING" == status
+    assert "FULL_SYNC" == status
 
     try:
         await c_nodes_admin[1].execute_command(
