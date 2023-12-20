@@ -202,7 +202,6 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
     DVLOG(1) << "Del: " << key;
     auto& db_slice = op_args.shard->db_slice();
 
-    res.post_updater.Run();
     CHECK(db_slice.Del(op_args.db_cntx.db_index, res.it));
 
     return key_bearer;

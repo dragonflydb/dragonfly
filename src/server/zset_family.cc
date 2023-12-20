@@ -962,7 +962,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   auto& db_slice = op_args.shard->db_slice();
 
   if (zparams.override && members.empty()) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // We can ignore post_updater
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     db_slice.Del(op_args.db_cntx.db_index, it);
     return OpStatus::OK;
   }

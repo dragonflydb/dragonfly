@@ -591,7 +591,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   long total_deletions = 0;
   if (path.empty()) {
     auto& db_slice = op_args.shard->db_slice();
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // We can ignore post_updater
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     total_deletions += long(db_slice.Del(op_args.db_cntx.db_index, it));
     return total_deletions;
   }
