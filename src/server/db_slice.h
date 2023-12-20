@@ -324,7 +324,7 @@ class DbSlice {
     ExpireIterator exp_it;
   };
   ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
-  
+
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
 

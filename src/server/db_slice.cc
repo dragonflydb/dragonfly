@@ -1035,7 +1035,6 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   SendInvalidationTrackingMessage(key);
 }
 
-
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
   DCHECK(it->second.HasExpire());
   auto& db = db_arr_[cntx.db_index];
