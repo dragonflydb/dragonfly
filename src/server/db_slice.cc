@@ -1051,15 +1051,18 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it)
     return {it, expire_it};
 
   string tmp_key_buf;
-  string_view tmp_key = it->first.GetSlice(&tmp_key_buf);
+  string_view tmp_key;
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
+    tmp_key = it->first.GetSlice(&tmp_key_buf);
     RecordExpiry(cntx.db_index, tmp_key);
   }
 
   auto obj_type = it->second.ObjType();
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
+    if (tmp_key.empty())
+      tmp_key = it->first.GetSlice(&tmp_key_buf);
     doc_del_cb_(tmp_key, cntx, it->second);
   }
 
