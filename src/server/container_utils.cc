@@ -186,8 +186,8 @@ OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_typ
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    OpResult<std::pair<PrimeIterator, unsigned>> ff_res =
-        shard->db_slice().FindFirst(t->GetDbContext(), args, req_obj_type);
+    OpResult<std::pair<PrimeConstIterator, unsigned>> ff_res =
+        shard->db_slice().FindFirstReadOnly(t->GetDbContext(), args, req_obj_type);
 
     if (ff_res) {
       FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);

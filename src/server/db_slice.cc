@@ -330,20 +330,6 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->prime.Reserve(key_size);
 }
 
-OpResult<PrimeIterator> DbSlice::Find(const Context& cntx, string_view key,
-                                      unsigned req_obj_type) const {
-  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats).it;
-
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
-
-  if (it->second.ObjType() != req_obj_type) {
-    return OpStatus::WRONG_TYPE;
-  }
-
-  return it;
-}
-
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 
@@ -503,13 +489,14 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
   return res;
 }
 
-OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(const Context& cntx, ArgSlice args,
-                                                           int req_obj_type) {
+OpResult<pair<PrimeConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Context& cntx,
+                                                                        ArgSlice args,
+                                                                        int req_obj_type) {
   DCHECK(!args.empty());
 
   for (unsigned i = 0; i < args.size(); ++i) {
     string_view s = args[i];
-    OpResult<PrimeIterator> res = Find(cntx, s, req_obj_type);
+    OpResult<PrimeConstIterator> res = FindReadOnly(cntx, s, req_obj_type);
     if (res)
       return make_pair(res.value(), i);
     if (res.status() != OpStatus::KEY_NOTFOUND)

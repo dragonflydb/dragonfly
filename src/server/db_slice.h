@@ -207,8 +207,9 @@ class DbSlice {
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
-  OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(const Context& cntx, ArgSlice args,
-                                                         int req_obj_type);
+  OpResult<std::pair<PrimeConstIterator, unsigned>> FindFirstReadOnly(const Context& cntx,
+                                                                      ArgSlice args,
+                                                                      int req_obj_type);
 
   struct AddOrFindResult {
     PrimeIterator it;
@@ -393,9 +394,6 @@ class DbSlice {
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
                          unsigned count);
-
-  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
-                               unsigned req_obj_type) const;
 
   AddOrFindResult AddOrUpdateInternal(const Context& cntx, std::string_view key, PrimeValue obj,
                                       uint64_t expire_at_ms, bool force_update) noexcept(false);
