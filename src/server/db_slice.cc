@@ -330,20 +330,6 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->prime.Reserve(key_size);
 }
 
-OpResult<PrimeIterator> DbSlice::Find(const Context& cntx, string_view key,
-                                      unsigned req_obj_type) const {
-  auto it = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats).it;
-
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
-
-  if (it->second.ObjType() != req_obj_type) {
-    return OpStatus::WRONG_TYPE;
-  }
-
-  return it;
-}
-
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 

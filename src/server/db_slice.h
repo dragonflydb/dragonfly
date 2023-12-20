@@ -395,9 +395,6 @@ class DbSlice {
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
                          unsigned count);
 
-  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
-                               unsigned req_obj_type) const;
-
   AddOrFindResult AddOrUpdateInternal(const Context& cntx, std::string_view key, PrimeValue obj,
                                       uint64_t expire_at_ms, bool force_update) noexcept(false);
 
