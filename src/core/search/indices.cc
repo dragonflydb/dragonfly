@@ -109,7 +109,7 @@ const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(strin
 template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_view word) {
   auto* mr = entries_.get_allocator().resource();
-  return &entries_.try_emplace(PMR_NS::string{word, mr}, mr).first->second;
+  return &entries_.try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;
 }
 
 template <typename C>

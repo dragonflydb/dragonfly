@@ -69,11 +69,6 @@ class CompressedSortedSet {
   // Split into two equally sized halves
   std::pair<CompressedSortedSet, CompressedSortedSet> Split() &&;
 
-  // To use transparently in templates together with stl containers
-  size_t size() const {
-    return Size();
-  }
-
  private:
   struct EntryLocation {
     IntType value;                        // Value or 0

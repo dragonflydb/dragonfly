@@ -205,14 +205,14 @@ void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
 }
 
 std::pair<CompressedSortedSet, CompressedSortedSet> CompressedSortedSet::Split() && {
-  DCHECK_GT(Size(), 2u);
+  DCHECK_GT(Size(), 5u);
 
   CompressedSortedSet second(diffs_.get_allocator().resource());
 
   // Move iterator to middle position and save size of diffs tail
   auto it = begin();
   std::advance(it, size_ / 2);
-  size_t keep_bytes = it.diffs_.data() - diffs_.data();
+  size_t keep_bytes = it.last_read_.data() - diffs_.data();
 
   // Copy second half into second set
   for (; it != end(); ++it)

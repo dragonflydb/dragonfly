@@ -9,7 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <map>
+#include <set>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -18,21 +18,28 @@ namespace dfly::search {
 
 using namespace std;
 
-class BlockListTest : public ::testing::Test {
- protected:
+template <typename C> class BlockListTest : public testing::Test {
+ public:
+  auto Make() {
+    // Create list with small block size to test blocking mechanism more extensively
+    return BlockList<C>{PMR_NS::get_default_resource(), 10};
+  }
 };
 
-TEST_F(BlockListTest, LoopMidInsertErase) {
-  const size_t kNumElements = 1000;
+using ContainerTypes = ::testing::Types<CompressedSortedSet, SortedVector>;
+TYPED_TEST_SUITE(BlockListTest, ContainerTypes);
 
-  // Create list with small block size to test blocking mechanism more extensively
-  BlockList<CompressedSortedSet> list{PMR_NS::get_default_resource(), 10};
+TYPED_TEST(BlockListTest, LoopMidInsertErase) {
+  const size_t kNumElements = 50;
+  auto list = this->Make();
+
   for (size_t i = 0; i < kNumElements / 2; i++) {
     list.Insert(i);
     list.Insert(i + kNumElements / 2);
   }
 
   vector<int> out(list.begin(), list.end());
+  ASSERT_EQ(list.Size(), kNumElements);
   ASSERT_EQ(out.size(), kNumElements);
   for (size_t i = 0; i < kNumElements; i++)
     ASSERT_EQ(out[i], i);
@@ -46,10 +53,9 @@ TEST_F(BlockListTest, LoopMidInsertErase) {
   EXPECT_EQ(out.size(), 0u);
 }
 
-TEST_F(BlockListTest, InsertReverseRemoveSteps) {
+TYPED_TEST(BlockListTest, InsertReverseRemoveSteps) {
   const size_t kNumElements = 1000;
-
-  BlockList<CompressedSortedSet> list{PMR_NS::get_default_resource(), 10};
+  auto list = this->Make();
 
   for (size_t i = 0; i < kNumElements; i++) {
     list.Insert(kNumElements - i - 1);
@@ -74,6 +80,27 @@ TEST_F(BlockListTest, InsertReverseRemoveSteps) {
   }
 
   EXPECT_EQ(list.size(), 0u);
+}
+
+TYPED_TEST(BlockListTest, RandomNumbers) {
+  const size_t kNumIterations = 1'000;
+  auto list = this->Make();
+  std::set<DocId> list_copy;
+
+  for (size_t i = 0; i < kNumIterations; i++) {
+    if (list_copy.size() > 100 && rand() % 5 == 0) {
+      auto it = list_copy.begin();
+      std::advance(it, rand() % list_copy.size());
+      list.Remove(*it);
+      list_copy.erase(it);
+    } else {
+      DocId t = rand() % 1'000'000;
+      list.Insert(t);
+      list_copy.insert(t);
+    }
+
+    ASSERT_TRUE(std::equal(list.begin(), list.end(), list_copy.begin(), list_copy.end()));
+  }
 }
 
 static void BM_Erase90PctTail(benchmark::State& state) {
