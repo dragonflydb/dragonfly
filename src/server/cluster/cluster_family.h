@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/container/btree_map.h>
+
 #include <string>
 
 #include "facade/conn_context.h"
@@ -46,22 +48,75 @@ class ClusterFamily {
   void DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterMyId(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
+
+ private:  // Slots migration section
   void DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx);
   void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+
+  // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
 
+  // DFLYMIGRATE CONF initiate first step in slots migration procedure
+  // MigrationConf process this request and saving slots range and
+  // target node port in migration_infos_.
+  // return sync_id and shard number to the target node
   void MigrationConf(CmdArgList args, ConnectionContext* cntx);
+
+  // DFLYMIGRATE FLOW initiate second step in slots migration procedure
+  // this request should be done for every shard on the target node
+  // this method assocciate connection and shard that will be the data
+  // source for migration
+  void Flow(CmdArgList args, ConnectionContext* cntx);
+
+  // DFLYMIGRATE SYNC is the third step that trigger data transferring
+  // for all flows simultaneously
+  // This method can be removed in the future if we decide to tranfser
+  // data without any synchronization in FLOW step
+  void Sync(CmdArgList args, ConnectionContext* cntx);
+
+  // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
 
+  // store info about migration and create unique session id
+  uint32_t CreateMigrationSession(ConnectionContext* cntx, uint16_t port,
+                                  std::vector<ClusterConfig::SlotRange> slots);
+
+  // FlowInfo is used to store state, connection, and all auxiliary data
+  // that is needed for correct slots (per shard) data transfer
+  struct FlowInfo {
+    facade::Connection* conn = nullptr;
+  };
+
+  // Whole slots migration process information
+  struct MigrationInfo {
+    MigrationInfo() = default;
+    MigrationInfo(std::uint32_t flows_num, std::string ip, uint32_t sync_id, uint16_t port,
+                  std::vector<ClusterConfig::SlotRange> slots)
+        : host_ip(ip), flows(flows_num), slots(slots), sync_id(sync_id), port(port) {
+    }
+    std::string host_ip;
+    std::vector<FlowInfo> flows;
+    std::vector<ClusterConfig::SlotRange> slots;
+    uint32_t sync_id;
+    uint16_t port;
+  };
+
+  std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);
+
+  mutable Mutex migration_mu_;  // guard migrations operations
+  // holds all slots migrations that are currently in progress.
+  std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
+      ABSL_GUARDED_BY(migration_mu_);
+
+  uint32_t next_sync_id_ = 1;
+  using MigrationInfoMap = absl::btree_map<uint32_t, std::shared_ptr<MigrationInfo>>;
+  MigrationInfoMap migration_infos_;
+
+ private:
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   ServerFamily* server_family_ = nullptr;
-
-  mutable Mutex migrations_jobs_mu_;
-  // holds all slot migrations that are currently in progress.
-  std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
-      ABSL_GUARDED_BY(migrations_jobs_mu_);
 };
 
 }  // namespace dfly

@@ -47,6 +47,12 @@ inline bool IsValid(ExpireConstIterator it) {
   return !it.is_done();
 }
 
+struct PrimeHasher {
+  size_t operator()(const PrimeKey& o) const {
+    return o.HashCode();
+  }
+};
+
 struct SlotStats {
   uint64_t key_count = 0;
   uint64_t total_reads = 0;

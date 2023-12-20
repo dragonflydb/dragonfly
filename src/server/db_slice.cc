@@ -166,10 +166,16 @@ class PrimeEvictionPolicy {
 
 class PrimeBumpPolicy {
  public:
-  // returns true if key can be made less important for eviction (opposite of bump up)
-  bool CanBumpDown(const CompactObj& key) const {
-    return !key.IsSticky();
+  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items)
+      : bumped_items_(bumped_items) {
   }
+  // returns true if key can be made less important for eviction (opposite of bump up)
+  bool CanBumpDown(const CompactObj& obj) const {
+    return !obj.IsSticky() && !bumped_items_.contains(obj);
+  }
+
+ private:
+  const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items_;
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
@@ -468,12 +474,11 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
           ccb.second(cntx.db_index, bit);
         }
       };
-
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
-
-    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{});
+    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bumped_items_});
     ++events_.bumpups;
+    bumped_items_.insert(res.it->first.AsRef());
   }
 
   db.top_keys.Touch(key);
@@ -625,7 +630,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     DbContext cntx{db_ind, GetCurrentTimeMs()};
     doc_del_cb_(key, cntx, it->second);
   }
-
+  bumped_items_.erase(it->first.AsRef());
   PerformDeletion(it, shard_owner(), db.get());
   deletion_count_++;
 
@@ -686,7 +691,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
       tiered->CancelAllIos(index);
     }
   }
-
+  CHECK(bumped_items_.empty());
   auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
     for (auto& db_ptr : flush_db_arr) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
@@ -1494,6 +1499,10 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable*
   }
 
   PerformDeletion(del_it, exp_it, shard, table);
-};
+}
+
+void DbSlice::OnCbFinish() {
+  bumped_items_.clear();
+}
 
 }  // namespace dfly
