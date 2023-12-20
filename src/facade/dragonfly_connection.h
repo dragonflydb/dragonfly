@@ -117,7 +117,7 @@ class Connection : public util::Connection {
   };
 
   struct InvalidationMessage {
-    std::string_view key;
+    std::string key;
     bool invalidate_due_to_flush = false;
   };
 
@@ -147,7 +147,7 @@ class Connection : public util::Connection {
         handle;
   };
 
-  static_assert(sizeof(MessageHandle) <= 40,
+  static_assert(sizeof(MessageHandle) <= 80,
                 "Big structs should use indirection to avoid wasting deque space!");
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };

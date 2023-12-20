@@ -300,7 +300,7 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
   if (msg.invalidate_due_to_flush) {
     rbuilder->SendNull();
   } else {
-    std::vector<string_view> keys{msg.key};
+    std::string_view keys[] = {msg.key};
     rbuilder->SendStringArr(keys);
   }
 }
