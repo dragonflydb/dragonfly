@@ -201,9 +201,9 @@ class DbSlice {
     PrimeConstIterator it;
     ExpireConstIterator exp_it;
   };
-  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
+  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                            unsigned req_obj_type) const;
+                                            unsigned req_obj_type);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -323,7 +323,7 @@ class DbSlice {
     PrimeIterator it;
     ExpireIterator exp_it;
   };
-  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -423,7 +423,7 @@ class DbSlice {
     kUpdateCacheStats,
     kDontUpdateCacheStats,
   };
-  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode) const;
+  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode);
 
   uint64_t NextVersion() {
     return version_++;

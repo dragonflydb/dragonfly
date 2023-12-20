@@ -421,13 +421,13 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
            AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
 }
 
-DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
+DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
   return {res.it, res.exp_it};
 }
 
 OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                   unsigned req_obj_type) const {
+                                                   unsigned req_obj_type) {
   auto it = FindReadOnly(cntx, key).it;
 
   if (!IsValid(it))
@@ -441,7 +441,7 @@ OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_v
 }
 
 DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view key,
-                                        FindInternalMode mode) const {
+                                        FindInternalMode mode) {
   DbSlice::ItAndExp res;
 
   if (!IsDbValid(cntx.db_index))
@@ -1035,7 +1035,7 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   SendInvalidationTrackingMessage(key);
 }
 
-DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
+DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
   DCHECK(it->second.HasExpire());
   auto& db = db_arr_[cntx.db_index];
 
