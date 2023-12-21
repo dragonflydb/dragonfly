@@ -552,8 +552,7 @@ void PrintBasicUsageInfo() {
 
 void ParseFlagsFromEnv() {
   if (getenv("DFLY_PASSWORD")) {
-    LOG(FATAL)
-        << "DFLY_PASSWORD environment variable is being deprecated in favour of DFLY_requirepass";
+    LOG(FATAL) << "DFLY_PASSWORD environment variable was deprecated in favor of DFLY_requirepass";
   }
 
   // Allowed environment variable names that can have
