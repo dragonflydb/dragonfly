@@ -706,6 +706,9 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
+  // clear client tracking map.
+  client_tracking_map_.clear();
+
   if (db_ind != kDbAll) {
     // Flush a single database if a specific index is provided
     FlushDbIndexes({db_ind});
