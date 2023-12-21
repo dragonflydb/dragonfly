@@ -151,27 +151,6 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
                 assert response == str(hash(dbfilename))
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "save_schedule": "*:*"})
-class TestPeriodicSnapshot(SnapshotTestBase):
-    """Test periodic snapshotting"""
-
-    @pytest.fixture(autouse=True)
-    def setup(self, tmp_dir: Path):
-        super().setup(tmp_dir)
-
-    @pytest.mark.asyncio
-    @pytest.mark.slow
-    async def test_snapshot(self, df_seeder_factory, df_server):
-        seeder = df_seeder_factory.create(
-            port=df_server.port, keys=10, multi_transaction_probability=0
-        )
-        await seeder.run(target_deviation=0.5)
-
-        await super().wait_for_save("test-periodic-summary.dfs")
-
-        assert super().get_main_file("test-periodic-summary.dfs")
-
-
 # save every 1 minute
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
 class TestCronPeriodicSnapshot(SnapshotTestBase):
