@@ -227,11 +227,6 @@ class DenseSet {
     return entries_.size();
   }
 
-  // those that are chained to the entries stored inline in the bucket array.
-  size_t NumChainEntries() const {
-    return num_chain_entries_;
-  }
-
   size_t NumUsedBuckets() const {
     return num_used_buckets_;
   }
@@ -241,7 +236,7 @@ class DenseSet {
   }
 
   size_t SetMallocUsed() const {
-    return (num_chain_entries_ + entries_.capacity()) * sizeof(DensePtr);
+    return entries_.capacity() * sizeof(DensePtr) + num_links_ * sizeof(DenseLinkKey);
   }
 
   using ItemCb = std::function<void(const void*)>;
@@ -344,7 +339,8 @@ class DenseSet {
 
   // return a ChainVectorIterator (a.k.a iterator) or end if there is an empty chain found
   ChainVectorIterator FindEmptyAround(uint32_t bid);
-  // return if bucket has no item which is not displaced and right/left bucket has no displaced item
+
+  // Return if bucket has no item which is not displaced and right/left bucket has no displaced item
   // belong to given bid
   bool NoItemBelongsBucket(uint32_t bid) const;
   void Grow(size_t prev_size);
@@ -376,6 +372,7 @@ class DenseSet {
   inline void FreeLink(DenseLinkKey* plink) {
     // deallocate the link if it is no longer a link as it is now in an empty list
     mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    --num_links_;
   }
 
   // Returns true if *node was deleted.
@@ -395,9 +392,9 @@ class DenseSet {
   std::vector<DensePtr, DensePtrAllocator> entries_;
 
   mutable size_t obj_malloc_used_ = 0;
-  mutable uint32_t size_ = 0;
-  mutable uint32_t num_chain_entries_ = 0;
-  mutable uint32_t num_used_buckets_ = 0;
+  mutable uint32_t size_ = 0;              // number of elements in the set.
+  mutable uint32_t num_links_ = 0;         // number of links in the set.
+  mutable uint32_t num_used_buckets_ = 0;  // number of buckets used in entries_ array.
   unsigned capacity_log_ = 0;
 
   uint32_t time_now_ = 0;
