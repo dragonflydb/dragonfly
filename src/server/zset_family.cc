@@ -1276,7 +1276,6 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   range_spec.interval = ZSetFamily::TopNScored(1);
 
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
-  db_slice.PreUpdate(t->GetDbIndex(), it);
 
   PrimeValue& pv = it->second;
   IntervalVisitor iv{Action::POP, range_spec.params, &pv};

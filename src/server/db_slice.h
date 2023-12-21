@@ -89,11 +89,11 @@ class DbSlice {
       DbIndex db_ind = 0;
       PrimeIterator it;
       std::string_view key;
-      bool key_existed = false;
 
+      // The following fields are calculated at init time
       size_t db_size = 0;
       size_t deletion_count = 0;
-      // TODO(#2252): Add heap size here, and only update memory in d'tor
+      size_t orig_heap_size = 0;
     };
 
     AutoUpdater(const Fields& fields);
@@ -310,11 +310,6 @@ class DbSlice {
   size_t DbSize(DbIndex db_ind) const;
 
   // Callback functions called upon writing to the existing key.
-  //  TODO(#2252): Remove these (or make them private)
-  void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
-                  bool existing_entry = true);
-
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
@@ -393,6 +388,9 @@ class DbSlice {
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
  private:
+  void PreUpdate(DbIndex db_ind, PrimeIterator it);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
+
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
                          unsigned count);

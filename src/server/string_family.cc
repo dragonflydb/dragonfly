@@ -277,7 +277,6 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
     CompactObj cobj;
     cobj.SetInt(incr);
 
-    // AddNew calls PostUpdate inside.
     try {
       res = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
     } catch (bad_alloc&) {
@@ -449,7 +448,6 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
       CompactObj cobj;
       cobj.SetInt(new_tat_ms);
 
-      // AddNew calls PostUpdate inside.
       try {
         db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
       } catch (bad_alloc&) {
