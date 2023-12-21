@@ -1067,7 +1067,7 @@ SortedMap::~SortedMap() {
 }
 
 // taken from zsetConvert
-unique_ptr<SortedMap> SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp) {
+SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp) {
   uint8_t* zl = (uint8_t*)lp;
   unsigned char *eptr, *sptr;
   unsigned char* vstr;
@@ -1075,7 +1075,8 @@ unique_ptr<SortedMap> SortedMap::FromListPack(PMR_NS::memory_resource* res, cons
   long long vlong;
   sds ele;
 
-  unique_ptr<SortedMap> zs(new SortedMap(res));
+  void* ptr = res->allocate(sizeof(SortedMap), alignof(SortedMap));
+  SortedMap* zs = new (ptr) SortedMap{res};
 
   eptr = lpSeek(zl, 0);
   if (eptr != NULL) {
