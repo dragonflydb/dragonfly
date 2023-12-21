@@ -23,7 +23,7 @@ class TestKeys:
 @pytest.fixture(scope="function")
 def export_dfly_password() -> str:
     pwd = "flypwd"
-    with EnvironCntx(DFLY_PASSWORD=pwd):
+    with EnvironCntx(DFLY_requirepass=pwd):
         yield pwd
 
 
