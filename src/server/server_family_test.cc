@@ -200,4 +200,114 @@ TEST_F(ServerFamilyTest, ClientPause) {
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
+  // case 1. can't use the feature for resp2
+  auto resp = Run({"CLIENT", "TRACKING", "ON"});
+  EXPECT_THAT(resp.GetString(),
+              "ERR Client tracking is currently not supported for RESP2. Please use RESP3.");
+
+  // case 2. allows when resp3 is used
+  Run({"HELLO", "3"});
+  resp = Run({"CLIENT", "TRACKING", "ON"});
+  EXPECT_THAT(resp.GetString(), "OK");
+
+  // case 3. turn off client tracking
+  resp = Run({"CLIENT", "TRACKING", "OFF"});
+  EXPECT_THAT(resp.GetString(), "OK");
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
+  // case 1. only read the keys doesn't trigger any notification.
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+
+  Run({"SET", "FOO", "10"});
+  Run({"GET", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+
+  Run({"GET", "BAR"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "10"});
+  const auto& msg = GetInvalidationMessage("IO0", 0);
+  EXPECT_EQ(msg.key, "FOO");
+
+  // make sure invalidation message only gets sent once.
+  Run({"GET", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+
+  // update string from another connection
+  // need to do another read to re-initialize the tracking of the key.
+  Run({"GET", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"SET", "FOO", "30"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  const auto& msg2 = GetInvalidationMessage("IO0", 1);
+  EXPECT_EQ(msg2.key, "FOO");
+
+  // case 4. test multi command
+  Run({"MGET", "X1", "X2", "X3", "X4", "Y1", "Y2", "Y3", "Y4", "Z1", "Z2", "Z3", "Z4"});
+  pp_->at(1)->Await([&] { return Run({"MSET", "X1", "1", "Y3", "2", "Z2", "3", "Z4", "5"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 6);
+  std::vector<std::string_view> keys_invalidated;
+  for (unsigned int i = 2; i < 6; ++i)
+    keys_invalidated.push_back(GetInvalidationMessage("IO0", i).key);
+  ASSERT_THAT(keys_invalidated, ElementsAre("X1", "Y3", "Z2", "Z4"));
+
+  // The following doesn't work correctly as we currently can't mock listener.
+  // flushdb command
+  // Run({"FLUSHDB"});
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingDeleteKey) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+  Run({"SET", "FOO", "10"});
+  Run({"GET", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"DEL", "FOO"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingRenameKey) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+  Run({"SET", "FOO", "10"});
+  Run({"GET", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"RENAME", "FOO", "BAR"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingExpireKey) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+  Run({"SET", "C", "10"});
+  Run({"GET", "C"});
+  Run({"EXPIRE", "C", "1"});
+  AdvanceTime(1000);
+  auto resp = Run({"GET", "C"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "C");
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingSelectDB) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+  Run({"SET", "C", "10"});
+  Run({"GET", "C"});
+  pp_->at(1)->Await([&] { return Run({"SELECT", "2"}); });
+  pp_->at(1)->Await([&] { return Run({"SET", "C", "1000"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "C");
+}
+
 }  // namespace dfly

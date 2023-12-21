@@ -116,6 +116,11 @@ class Connection : public util::Connection {
     util::fb2::BlockingCounter bc;  // Decremented counter when processed
   };
 
+  struct InvalidationMessage {
+    std::string key;
+    bool invalidate_due_to_flush = false;
+  };
+
   struct MessageDeleter {
     void operator()(PipelineMessage* msg) const;
     void operator()(PubMessage* msg) const;
@@ -138,11 +143,11 @@ class Connection : public util::Connection {
     bool IsPubMsg() const;
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
-                 MigrationRequestMessage, CheckpointMessage>
+                 MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
         handle;
   };
 
-  static_assert(sizeof(MessageHandle) <= 40,
+  static_assert(sizeof(MessageHandle) <= 80,
                 "Big structs should use indirection to avoid wasting deque space!");
 
   enum Phase { SETUP, READ_SOCKET, PROCESS, SHUTTING_DOWN, PRECLOSE, NUM_PHASES };
@@ -198,6 +203,9 @@ class Connection : public util::Connection {
   // decrement it once finished.
   void SendCheckpoint(util::fb2::BlockingCounter bc, bool ignore_paused = false,
                       bool ignore_blocked = false);
+
+  // Add InvalidationMessage to dispatch queue.
+  virtual void SendInvalidationMessageAsync(InvalidationMessage);
 
   // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
   // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.

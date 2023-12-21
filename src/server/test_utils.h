@@ -25,6 +25,8 @@ class TestConnection : public facade::Connection {
 
   void SendPubMessageAsync(PubMessage pmsg) final;
 
+  void SendInvalidationMessageAsync(InvalidationMessage msg) final;
+
   bool IsPrivileged() const override {
     return is_privileged_;
   }
@@ -33,6 +35,8 @@ class TestConnection : public facade::Connection {
   }
 
   std::vector<PubMessage> messages;
+
+  std::vector<InvalidationMessage> invalidate_messages;
 
  private:
   io::StringSink* sink_;
@@ -121,8 +125,13 @@ class BaseFamilyTest : public ::testing::Test {
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
 
+  size_t InvalidationMessagesLen(std::string_view conn_id) const;
+
   const facade::Connection::PubMessage& GetPublishedMessage(std::string_view conn_id,
                                                             size_t index) const;
+
+  const facade::Connection::InvalidationMessage& GetInvalidationMessage(std::string_view conn_id,
+                                                                        size_t index) const;
 
   static absl::flat_hash_set<std::string> GetLastUsedKeys();
   static void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
