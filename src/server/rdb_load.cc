@@ -803,7 +803,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
       maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
-    delete zs;
+    CompactObj::DeleteMR<detail::SortedMap>(zs);
   }
 
   std::move(cleanup).Cancel();
