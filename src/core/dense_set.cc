@@ -184,7 +184,7 @@ void DenseSet::ClearInternal() {
 
   entries_.clear();
   num_used_buckets_ = 0;
-  num_chain_entries_ = 0;
+  num_links_ = 0;
   size_ = 0;
   expiration_used_ = false;
 }
@@ -426,10 +426,6 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
     bucket_id -= unlinked.GetDisplacedDirection();
   }
 
-  if (!entries_[bucket_id].IsEmpty()) {
-    ++num_chain_entries_;
-  }
-
   DCHECK_EQ(BucketId(to_insert.GetObject(), 0), bucket_id);
   ChainVectorIterator list = entries_.begin() + bucket_id;
   PushFront(list, to_insert);
@@ -497,7 +493,6 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
     } else {
       DCHECK(prev->IsLink());
 
-      --num_chain_entries_;
       DenseLinkKey* plink = prev->AsLink();
       DensePtr tmp = DensePtr::From(plink);
       DCHECK(ObjectAllocSize(tmp.GetObject()));
@@ -512,7 +507,6 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
     DenseLinkKey* link = ptr->AsLink();
     obj = link->Raw();
     *ptr = link->next;
-    --num_chain_entries_;
     FreeLink(link);
   }
 
@@ -538,10 +532,7 @@ void* DenseSet::PopInternal() {
     ExpireIfNeeded(nullptr, &(*bucket_iter));
   } while (bucket_iter->IsEmpty());
 
-  if (bucket_iter->IsLink()) {
-    --num_chain_entries_;
-  } else {
-    DCHECK(bucket_iter->IsObject());
+  if (bucket_iter->IsObject()) {
     --num_used_buckets_;
   }
 
@@ -663,6 +654,8 @@ auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
 
   lk->next = next;
   lk->SetObject(data);
+  ++num_links_;
+
   return lk;
 }
 

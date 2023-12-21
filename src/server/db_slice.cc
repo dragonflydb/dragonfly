@@ -236,7 +236,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     }
 
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
-    PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
+    db_slice_->PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
   }
   me->ShiftRight(bucket_it);
@@ -437,13 +437,13 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
                         .key = key})}};
 }
 
-DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
+DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
   return {res.it, res.exp_it};
 }
 
 OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                   unsigned req_obj_type) const {
+                                                   unsigned req_obj_type) {
   auto it = FindReadOnly(cntx, key).it;
 
   if (!IsValid(it))
@@ -457,7 +457,7 @@ OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_v
 }
 
 DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view key,
-                                        FindInternalMode mode) const {
+                                        FindInternalMode mode) {
   DbSlice::ItAndExp res;
 
   if (!IsDbValid(cntx.db_index))
@@ -638,8 +638,8 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   }
 
   auto& db = db_arr_[db_ind];
-
   auto obj_type = it->second.ObjType();
+
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
@@ -712,9 +712,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     for (auto& db_ptr : flush_db_arr) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-          if (it->second.IsExternal()) {
+          if (it->second.IsExternal())
             PerformDeletion(it, shard_owner(), db_ptr.get());
-          }
         }
 
         DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
@@ -728,6 +727,9 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
+  // clear client tracking map.
+  client_tracking_map_.clear();
+
   if (db_ind != kDbAll) {
     // Flush a single database if a specific index is provided
     FlushDbIndexes({db_ind});
@@ -741,6 +743,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
       indexes.push_back(i);
     }
   }
+
   FlushDbIndexes(indexes);
 }
 
@@ -1050,9 +1053,11 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   if (ClusterConfig::IsEnabled()) {
     db.slots_stats[ClusterConfig::KeySlot(key)].total_writes += 1;
   }
+
+  SendInvalidationTrackingMessage(key);
 }
 
-DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
+DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
   DCHECK(it->second.HasExpire());
   auto& db = db_arr_[cntx.db_index];
 
@@ -1324,6 +1329,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
 
       PerformDeletion(evict_it, shard_owner(), table);
       ++evicted;
+
       if (freed_memory_fun() > memory_to_free) {
         evict_succeeded = true;
         break;
@@ -1427,6 +1433,89 @@ void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice&
              << " into the tracking client set of key " << key;
     client_tracking_map_[key].insert(conn);
   }
+}
+
+void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
+  auto it = client_tracking_map_.find(key);
+  if (it != client_tracking_map_.end()) {
+    // notify all the clients.
+    auto& client_set = it->second;
+    auto cb = [key, client_set = std::move(client_set)](unsigned idx, util::ProactorBase*) {
+      for (auto it = client_set.begin(); it != client_set.end(); ++it) {
+        if ((unsigned int)it->Thread() != idx)
+          continue;
+        facade::Connection* conn = it->Get();
+        if ((conn != nullptr) && conn->IsTrackingOn()) {
+          std::string key_str = {key.begin(), key.end()};
+          conn->SendInvalidationMessageAsync({key_str});
+        }
+      }
+    };
+    shard_set->pool()->DispatchBrief(std::move(cb));
+    // remove this key from the tracking table as the key no longer exists
+    client_tracking_map_.erase(key);
+  }
+}
+
+void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
+                              DbTable* table) {
+  std::string tmp;
+  std::string_view key = del_it->first.GetSlice(&tmp);
+
+  if (!exp_it.is_done()) {
+    table->expire.Erase(exp_it);
+  }
+
+  if (del_it->second.HasFlag()) {
+    if (table->mcflag.Erase(del_it->first) == 0) {
+      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
+                 << del_it->first.ToString();
+    }
+  }
+
+  DbTableStats& stats = table->stats;
+  const PrimeValue& pv = del_it->second;
+  if (pv.IsExternal()) {
+    auto [offset, size] = pv.GetExternalSlice();
+
+    stats.tiered_entries--;
+    stats.tiered_size -= size;
+    TieredStorage* tiered = shard->tiered_storage();
+    tiered->Free(offset, size);
+  }
+  if (pv.HasIoPending()) {
+    TieredStorage* tiered = shard->tiered_storage();
+    tiered->CancelIo(table->index, del_it);
+  }
+
+  size_t value_heap_size = pv.MallocUsed();
+  stats.inline_keys -= del_it->first.IsInline();
+  int64_t delta = del_it->first.MallocUsed() + value_heap_size;
+  stats.obj_memory_usage -= delta;
+  stats.AddTypeMemoryUsage(pv.ObjType(), -delta);
+  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
+    --stats.listpack_blob_cnt;
+  } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+    --stats.listpack_blob_cnt;
+  }
+
+  if (ClusterConfig::IsEnabled()) {
+    SlotId sid = ClusterConfig::KeySlot(key);
+    table->slots_stats[sid].key_count -= 1;
+  }
+
+  table->prime.Erase(del_it);
+  SendInvalidationTrackingMessage(key);
+}
+
+void DbSlice::PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table) {
+  ExpireIterator exp_it;
+  if (del_it->second.HasExpire()) {
+    exp_it = table->expire.Find(del_it->first);
+    DCHECK(!exp_it.is_done());
+  }
+
+  PerformDeletion(del_it, exp_it, shard, table);
 }
 
 void DbSlice::OnCbFinish() {

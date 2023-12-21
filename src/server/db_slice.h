@@ -201,9 +201,9 @@ class DbSlice {
     PrimeConstIterator it;
     ExpireConstIterator exp_it;
   };
-  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
+  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                            unsigned req_obj_type) const;
+                                            unsigned req_obj_type);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -320,7 +320,7 @@ class DbSlice {
     PrimeIterator it;
     ExpireIterator exp_it;
   };
-  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -387,6 +387,9 @@ class DbSlice {
   // Track keys for the client represented by the the weak reference to its connection.
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
+  // Delete a key referred by its iterator.
+  void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
+
  private:
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
@@ -407,6 +410,12 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
 
+  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
+                       DbTable* table);
+
+  // Send invalidation message to the clients that are tracking the change to a key.
+  void SendInvalidationTrackingMessage(std::string_view key);
+
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
@@ -414,7 +423,7 @@ class DbSlice {
     kUpdateCacheStats,
     kDontUpdateCacheStats,
   };
-  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode) const;
+  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode);
 
   uint64_t NextVersion() {
     return version_++;

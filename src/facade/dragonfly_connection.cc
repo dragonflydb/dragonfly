@@ -165,6 +165,7 @@ struct Connection::DispatchOperations {
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
   void operator()(CheckpointMessage msg);
+  void operator()(const InvalidationMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -233,6 +234,9 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const CheckpointMessage& msg) {
       return 0;  // no access to internal type, memory usage negligible
     }
+    size_t operator()(const InvalidationMessage& msg) {
+      return 0;
+    }
   };
 
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
@@ -300,6 +304,19 @@ void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
   VLOG(1) << "Decremented checkpoint at " << self->DebugInfo();
 
   msg.bc.Dec();
+}
+
+void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  DCHECK(rbuilder->IsResp3());
+  rbuilder->StartCollection(2, facade::RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->SendBulkString("invalidate");
+  if (msg.invalidate_due_to_flush) {
+    rbuilder->SendNull();
+  } else {
+    std::string_view keys[] = {msg.key};
+    rbuilder->SendStringArr(keys);
+  }
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -1258,6 +1275,10 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, boo
   SendAsync({CheckpointMessage{bc}});
 }
 
+void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
+  SendAsync({std::move(msg)});
+}
+
 void Connection::LaunchDispatchFiberIfNeeded() {
   if (!dispatch_fb_.IsJoinable()) {
     dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
@@ -1424,10 +1445,10 @@ unsigned Connection::WeakRef::Thread() const {
 
 Connection* Connection::WeakRef::Get() const {
   DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
-  // The connection can only be deleted on this thread, so
-  // this pointer is valid until the next suspension.
-  // Note: keeping a shared_ptr doesn't prolong the lifetime because
-  // it doesn't manage the underlying connection. See definition of `self_`.
+  //  The connection can only be deleted on this thread, so
+  //  this pointer is valid until the next suspension.
+  //  Note: keeping a shared_ptr doesn't prolong the lifetime because
+  //  it doesn't manage the underlying connection. See definition of `self_`.
   return ptr_.lock().get();
 }
 
