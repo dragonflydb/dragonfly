@@ -313,31 +313,6 @@ bool IsCloudPath(string_view path) {
   return absl::StartsWith(path, kS3Prefix);
 }
 
-bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
-  /*
-   * a nibble is valid iff there exists one time that matches the pattern
-   * and that time is <= max. For any wildcard the minimum value is 0.
-   * Therefore the minimum time the pattern can match is the time with
-   * all *s replaced with 0s. If this time is > max all other times that
-   * match the pattern are > max and the pattern is invalid. Otherwise
-   * there exists at least one valid nibble specified by this pattern
-   *
-   * Note the edge case of "*" is equivalent to "**". While using this
-   * approach "*" and "**" both map to 0.
-   */
-  unsigned int min_match = 0;
-  for (size_t i = 0; i < time.size(); ++i) {
-    // check for valid characters
-    if (time[i] != '*' && (time[i] < '0' || time[i] > '9')) {
-      return false;
-    }
-    min_match *= 10;
-    min_match += time[i] == '*' ? 0 : time[i] - '0';
-  }
-
-  return min_match <= max;
-}
-
 // Check that if TLS is used at least one form of client authentication is
 // enabled. That means either using a password or giving a root
 // certificate for authenticating client certificates which will
@@ -379,86 +354,23 @@ void SetMasterFlagOnAllThreads(bool is_master) {
   shard_set->pool()->DispatchBrief(cb);
 }
 
-}  // namespace
-
-std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
-  if (time.length() < 3 || time.length() > 5) {
-    return std::nullopt;
-  }
-
-  size_t separator_idx = time.find(':');
-  // the time cannot start with ':' and it must be present in the first 3 characters of any time
-  if (separator_idx == 0 || separator_idx >= 3) {
-    return std::nullopt;
-  }
-
-  SnapshotSpec spec{string(time.substr(0, separator_idx)), string(time.substr(separator_idx + 1))};
-  // a minute should be 2 digits as it is zero padded, unless it is a '*' in which case this
-  // greedily can make up both digits
-  if (spec.minute_spec != "*" && spec.minute_spec.length() != 2) {
-    return std::nullopt;
-  }
-
-  return IsValidSaveScheduleNibble(spec.hour_spec, 23) &&
-                 IsValidSaveScheduleNibble(spec.minute_spec, 59)
-             ? std::optional<SnapshotSpec>(spec)
-             : std::nullopt;
-}
-
-bool DoesTimeNibbleMatchSpecifier(string_view time_spec, unsigned int current_time) {
-  // single greedy wildcard matches everything
-  if (time_spec == "*") {
-    return true;
-  }
-
-  for (int i = time_spec.length() - 1; i >= 0; --i) {
-    // if the current digit is not a wildcard and it does not match the digit in the current time it
-    // does not match
-    if (time_spec[i] != '*' && int(current_time % 10) != (time_spec[i] - '0')) {
-      return false;
-    }
-    current_time /= 10;
-  }
-
-  return current_time == 0;
-}
-
-bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
-  unsigned hour = (now / 3600) % 24;
-  unsigned min = (now / 60) % 60;
-  return DoesTimeNibbleMatchSpecifier(spec.hour_spec, hour) &&
-         DoesTimeNibbleMatchSpecifier(spec.minute_spec, min);
-}
-
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   string save_time = GetFlag(FLAGS_save_schedule);
   auto cron_expr = GetFlag(FLAGS_snapshot_cron);
 
+  if (!save_time.empty()) {
+    LOG(ERROR) << "save_schedule flag is deprecated, please use snapshot_cron instead";
+    exit(1);
+  }
+
   if (cron_expr.cron_expr) {
-    if (!save_time.empty()) {
-      LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
-      exit(1);
-    }
     return std::move(cron_expr.cron_expr);
   }
 
-  if (!save_time.empty()) {
-    if (std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time); spec) {
-      // Setting snapshot to HH:mm everyday, as specified by `save_schedule` flag
-      string raw_cron_expr = absl::StrCat(CronExprFlag::kCronPrefix, spec.value().minute_spec, " ",
-                                          spec.value().hour_spec, " * * *");
-      try {
-        VLOG(1) << "creating cron from: `" << raw_cron_expr << "`";
-        return cron::make_cron(raw_cron_expr);
-      } catch (const cron::bad_cronexpr& ex) {
-        LOG(WARNING) << "Invalid cron expression: " << raw_cron_expr;
-      }
-    } else {
-      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
-    }
-  }
   return std::nullopt;
 }
+
+}  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
