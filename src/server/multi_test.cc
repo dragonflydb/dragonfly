@@ -511,9 +511,9 @@ TEST_F(MultiTest, MultiOOO) {
   // OOO works in LOCK_AHEAD mode.
   int mode = absl::GetFlag(FLAGS_multi_exec_mode);
   if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
-    EXPECT_EQ(200, metrics.coordinator_stats.ooo_tx_cnt);
+    EXPECT_EQ(200, metrics.coordinator_stats.tx_type_cnt[ServerState::OOO]);
   else
-    EXPECT_EQ(0, metrics.coordinator_stats.ooo_tx_cnt);
+    EXPECT_EQ(0, metrics.coordinator_stats.tx_type_cnt[ServerState::OOO]);
 }
 
 // Lua scripts lock their keys ahead and thus can run out of order.
@@ -620,16 +620,19 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   Run({"set", "a", "1"});  // won't run ooo, because it became part of global
   Run({"move", "a", "1"});
   Run({"exec"});
-  EXPECT_EQ(0, GetMetrics().coordinator_stats.ooo_tx_cnt);
+  EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_type_cnt[ServerState::GLOBAL]);
+
+  ClearMetrics();
 
   // Check non atomic mode does not fall back to global.
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
   Run({"multi"});
-  Run({"set", "a", "1"});  // will run ooo
+  Run({"set", "a", "1"});  // will run ooo(quick)
   Run({"move", "a", "1"});
   Run({"exec"});
-  // TODO: Stats with squashed cmds are broken
-  //  EXPECT_EQ(1, GetMetrics().ooo_tx_transaction_cnt);
+
+  auto stats = GetMetrics().coordinator_stats;
+  EXPECT_EQ(1, stats.tx_type_cnt[ServerState::QUICK] + stats.tx_type_cnt[ServerState::INLINE]);
 }
 
 TEST_F(MultiTest, ScriptFlagsCommand) {

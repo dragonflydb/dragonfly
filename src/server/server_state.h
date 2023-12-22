@@ -93,8 +93,9 @@ class ServerState {  // public struct - to allow initialization.
   void operator=(const ServerState&) = delete;
 
  public:
+  enum TxType { GLOBAL, NORMAL, OOO, QUICK, INLINE, NUM_TX_TYPES };
   struct Stats {
-    uint64_t ooo_tx_cnt = 0;
+    std::array<uint64_t, NUM_TX_TYPES> tx_type_cnt;
 
     uint64_t eval_io_coordination_cnt = 0;
     uint64_t eval_shardlocal_coordination_cnt = 0;
@@ -102,7 +103,23 @@ class ServerState {  // public struct - to allow initialization.
 
     uint64_t tx_schedule_cancel_cnt = 0;
 
-    Stats& operator+=(const Stats& other);
+    // Array of size of number of shards.
+    // Each entry is how many transactions we had with this width (unique_shard_cnt).
+    uint64_t* tx_width_freq_arr = nullptr;
+
+    Stats();
+    ~Stats();
+
+    Stats(Stats&& other) {
+      *this = std::move(other);
+    }
+
+    Stats& operator=(Stats&& other);
+
+    Stats& Add(unsigned num_shards, const Stats& other);
+
+    Stats(const Stats&) = delete;
+    Stats& operator=(const Stats&) = delete;
   };
 
   static ServerState* tlocal() {
@@ -116,7 +133,7 @@ class ServerState {  // public struct - to allow initialization.
   ServerState();
   ~ServerState();
 
-  static void Init(uint32_t thread_index, acl::UserRegistry* registry);
+  static void Init(uint32_t thread_index, uint32_t num_shards, acl::UserRegistry* registry);
   static void Destroy();
 
   void EnterLameDuck() {

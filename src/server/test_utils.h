@@ -115,6 +115,8 @@ class BaseFamilyTest : public ::testing::Test {
     return service_->server_family().GetMetrics();
   }
 
+  void ClearMetrics();
+
   void AdvanceTime(int64_t ms) {
     TEST_current_time_ms += ms;
   }
