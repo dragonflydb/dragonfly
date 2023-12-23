@@ -39,7 +39,7 @@ TYPED_TEST(BlockListTest, LoopMidInsertErase) {
   }
 
   vector<int> out(list.begin(), list.end());
-  ASSERT_EQ(list.Size(), kNumElements);
+  ASSERT_EQ(list.size(), kNumElements);
   ASSERT_EQ(out.size(), kNumElements);
   for (size_t i = 0; i < kNumElements; i++)
     ASSERT_EQ(out[i], i);

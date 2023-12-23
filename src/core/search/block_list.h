@@ -62,7 +62,7 @@ template <typename C /* underlying container */> class BlockList {
     }
 
     friend bool operator!=(const BlockListIterator& l, const BlockListIterator& r) {
-      return !(l == r);
+      return !operator==(l, r);
     }
 
    private:

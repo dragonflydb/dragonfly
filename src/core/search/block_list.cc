@@ -38,7 +38,7 @@ template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(Doc
                              [](DocId t, const C& l) { return *l.begin() > t; });
 
   // Move to previous if possible
-  if (it != blocks_.begin() && blocks_.size() > 0)
+  if (it != blocks_.begin())
     --it;
 
   return it;
@@ -114,6 +114,9 @@ bool SortedVector::Remove(DocId t) {
 }
 
 void SortedVector::Merge(SortedVector&& other) {
+  // NLog compexity in theory, but in pactice used only to merge with larger values.
+  // Tail insert optimization makes it linear
+  entries_.reserve(entries_.size() + other.entries_.size());
   for (int t : other.entries_)
     Insert(t);
 }
