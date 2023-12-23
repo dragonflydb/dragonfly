@@ -48,6 +48,7 @@ struct SliceEvents {
   // hits/misses on keys
   size_t hits = 0;
   size_t misses = 0;
+  size_t mutations = 0;
 
   // how many insertions were rejected due to OOM.
   size_t insertion_rejections = 0;
@@ -422,8 +423,8 @@ class DbSlice {
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
   enum class FindInternalMode {
-    kUpdateCacheStats,
-    kDontUpdateCacheStats,
+    kUpdateReadStats,
+    kUpdateMutableStats,
   };
   ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode);
 

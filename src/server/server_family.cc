@@ -817,6 +817,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("keyspace_misses_total", "", m.events.misses, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("keyspace_mutations_total", "", m.events.mutations, MetricType::COUNTER,
+                            &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
@@ -1666,6 +1668,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("delete_ttl_sec", m.delete_ttl_per_sec);
     append("keyspace_hits", m.events.hits);
     append("keyspace_misses", m.events.misses);
+    append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);

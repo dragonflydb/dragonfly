@@ -50,6 +50,9 @@ TEST_F(StringFamilyTest, SetGet) {
   auto metrics = GetMetrics();
   auto tc = metrics.coordinator_stats.tx_type_cnt;
   EXPECT_EQ(6, tc[ServerState::QUICK] + tc[ServerState::INLINE]);
+  EXPECT_EQ(3, metrics.events.hits);
+  EXPECT_EQ(0, metrics.events.misses);
+  EXPECT_EQ(3, metrics.events.mutations);
 }
 
 TEST_F(StringFamilyTest, Incr) {
@@ -67,6 +70,10 @@ TEST_F(StringFamilyTest, Incr) {
 
   ASSERT_THAT(Run({"incrby", "ne", "0"}), IntArg(0));
   ASSERT_THAT(Run({"decrby", "a", "-9223372036854775808"}), ErrArg("overflow"));
+  auto metrics = GetMetrics();
+  EXPECT_EQ(10, metrics.events.mutations);
+  EXPECT_EQ(0, metrics.events.misses);
+  EXPECT_EQ(0, metrics.events.hits);
 }
 
 TEST_F(StringFamilyTest, Append) {
