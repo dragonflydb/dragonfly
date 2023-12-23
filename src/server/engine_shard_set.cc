@@ -173,8 +173,6 @@ EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  ooo_runs += o.ooo_runs;
-  quick_runs += o.quick_runs;
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
   defrag_task_invocation_total += o.defrag_task_invocation_total;
@@ -516,7 +514,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     if (VLOG_IS_ON(1)) {
       dbg_id = trans->DebugId();
     }
-    ++stats_.ooo_runs;
 
     bool txq_ooo = trans_mask & Transaction::OUT_OF_ORDER;
     bool keep = trans->RunInShard(this, txq_ooo);

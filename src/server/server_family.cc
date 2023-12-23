@@ -760,13 +760,14 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::COUNTER, &resp->body());
 
   // Clients metrics
-  AppendMetricWithoutLabels("connected_clients", "", m.conn_stats.num_conns, MetricType::GAUGE,
+  const auto& conn_stats = m.conn_stats;
+  AppendMetricWithoutLabels("connected_clients", "", conn_stats.num_conns, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("client_read_buffer_bytes", "", m.conn_stats.read_buf_capacity,
+  AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
+  AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("dispatch_queue_bytes", "", m.conn_stats.dispatch_queue_bytes,
+  AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                             MetricType::GAUGE, &resp->body());
 
   // Memory metrics
@@ -807,10 +808,10 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   }
 
   // Stats metrics
-  AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
+  AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
 
-  AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
+  AppendMetricWithoutLabels("commands_processed_total", "", conn_stats.command_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
                             &resp->body());
@@ -818,9 +819,9 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
 
   // Net metrics
-  AppendMetricWithoutLabels("net_input_bytes_total", "", m.conn_stats.io_read_bytes,
+  AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("net_output_bytes_total", "", m.conn_stats.io_write_bytes,
+  AppendMetricWithoutLabels("net_output_bytes_total", "", conn_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
 
   // DB stats
@@ -1477,11 +1478,11 @@ Metrics ServerFamily::GetMetrics() const {
     result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
 
-    result.coordinator_stats += ss->stats;
-    result.conn_stats += ss->connection_stats;
+    result.coordinator_stats.Add(shard_set->size(), ss->stats);
 
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
+    result.conn_stats += ss->connection_stats;
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
@@ -1670,11 +1671,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
-    append("eval_shardlocal_coordination_total",
-           m.coordinator_stats.eval_shardlocal_coordination_cnt);
-    append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
-    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
   }
 
   if (should_enter("TIERED", true)) {
@@ -1705,6 +1701,30 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
     append("rdb_changes_since_last_save", m.events.update);
+  }
+
+  if (should_enter("TRANSACTION", true)) {
+    const auto& tc = m.coordinator_stats.tx_type_cnt;
+    string val = StrCat("global=", tc[ServerState::GLOBAL], ",normal=", tc[ServerState::NORMAL],
+                        ",ooo=", tc[ServerState::OOO], ",quick=", tc[ServerState::QUICK],
+                        ",inline=", tc[ServerState::INLINE]);
+    append("tx_type_cnt", val);
+    val.clear();
+    for (unsigned width = 0; width < shard_set->size(); ++width) {
+      if (m.coordinator_stats.tx_width_freq_arr[width] > 0) {
+        absl::StrAppend(&val, "w", width + 1, "=", m.coordinator_stats.tx_width_freq_arr[width],
+                        ",");
+      }
+    }
+    if (!val.empty()) {
+      val.pop_back();  // last comma.
+      append("tx_width_freq", val);
+    }
+    append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
+    append("eval_shardlocal_coordination_total",
+           m.coordinator_stats.eval_shardlocal_coordination_cnt);
+    append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
+    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
   }
 
   if (should_enter("REPLICATION")) {
@@ -1945,6 +1965,12 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   if (replica_)
     replica_->Stop();
 
+  // If we are called by "Replicate", cntx->transaction will be null but we do not need
+  // to flush anything.
+  if (cntx->transaction) {
+    Drakarys(cntx->transaction, DbSlice::kDbAll);
+  }
+
   // Create a new replica and assing it
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
   replica_ = new_replica;
@@ -1980,9 +2006,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   string_view host = ArgS(args, 0);
   string_view port = ArgS(args, 1);
 
-  if (!IsReplicatingNoOne(host, port))
-    Drakarys(cntx->transaction, DbSlice::kDbAll);
-
   ReplicaOfInternal(host, port, cntx, ActionOnConnectionFail::kReturnOnError);
 }
 
@@ -1991,8 +2014,6 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ConnectionContext ctxt{&sink, nullptr};
   ctxt.skip_acl_validation = true;
 
-  // we don't flush the database as the context is null
-  // (and also because there is nothing to flush)
   ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
