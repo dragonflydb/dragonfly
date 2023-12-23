@@ -1225,12 +1225,21 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(cntx, cid->name());
 #endif
-
+  uint64_t invoke_time_usec = 0;
   try {
-    cid->Invoke(tail_args, cntx);
+    invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
+  }
+
+  // TODO: we should probably discard more commands here,
+  // not just the blocking ones
+  const auto* conn = cntx->conn();
+  if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr && etl.GetSlowLog().IsEnabled() &&
+      invoke_time_usec > etl.log_slower_than_usec) {
+    etl.GetSlowLog().Add(cid->name(), tail_args, conn->GetName(), conn->RemoteEndpointStr(),
+                         invoke_time_usec, absl::GetCurrentTimeNanos() / 1000);
   }
 
   if (cntx->transaction && !cntx->conn_state.exec_info.IsRunning() &&

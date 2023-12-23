@@ -20,7 +20,7 @@ void SlowLogShard::Reset() {
 
 void SlowLogShard::Add(const string_view command_name, CmdArgList args,
                        const string_view client_name, const string_view client_ip,
-                       uint64_t execution_time_usec, uint64_t unix_ts) {
+                       uint64_t exec_time_usec, uint64_t unix_ts_usec) {
   DCHECK_GT(log_entries_.capacity(), 0u);
 
   vector<pair<string, uint32_t>> slowlog_args;
@@ -47,7 +47,7 @@ void SlowLogShard::Add(const string_view command_name, CmdArgList args,
                               extra_bytes);
   }
 
-  log_entries_.push_back(SlowLogEntry{slowlog_entry_id_++, unix_ts, execution_time_usec,
+  log_entries_.push_back(SlowLogEntry{slowlog_entry_id_++, unix_ts_usec, exec_time_usec,
                                       /* +1 for the command */ args.size() + 1,
                                       std::move(slowlog_args), string(client_ip),
                                       string(client_name)});

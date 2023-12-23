@@ -203,82 +203,6 @@ std::string AbslUnparseFlag(const CronExprFlag& flag) {
   return "";
 }
 
-void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
-                std::string_view sub_cmd) {
-  size_t requested_slow_log_length = UINT32_MAX;
-  size_t argc = args.size();
-  if (argc >= 3) {
-    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
-    return;
-  } else if (argc == 2) {
-    string_view length = facade::ArgS(args, 1);
-    int64_t num;
-    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
-      cntx->SendError("count should be greater than or equal to -1");
-      return;
-    }
-    if (num >= 0) {
-      requested_slow_log_length = num;
-    }
-  }
-
-  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
-  std::vector<boost::circular_buffer<dfly::SlowLogEntry>> entries(service.proactor_pool().size());
-  service.proactor_pool().AwaitFiberOnAll([&](auto index, auto* context) {
-    auto shard_entries = dfly::ServerState::tlocal()->GetSlowLog().Entries();
-    entries[index] = shard_entries;
-  });
-  std::vector<std::pair<dfly::SlowLogEntry, unsigned>> merged_slow_log;
-  for (size_t i = 0; i < entries.size(); ++i) {
-    for (const auto& log_item : entries[i]) {
-      merged_slow_log.emplace_back(log_item, i);
-    }
-  }
-  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
-    return e1.first.unix_timestamp > e2.first.unix_timestamp;
-  });
-
-  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
-
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(requested_slow_log_length);
-  for (size_t i = 0; i < requested_slow_log_length; ++i) {
-    const auto& entry = merged_slow_log[i].first;
-    const auto& args = entry.cmd_args;
-
-    rb->StartArray(6);
-
-    rb->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
-    rb->SendLong(entry.unix_timestamp / 1000000000);
-    rb->SendLong(entry.execution_time_micro);
-
-    // if we truncated the args, there is one pseudo-element containing the number of truncated
-    // args that we must add, so the result length is increased by 1
-    size_t len = args.size() + int(args.size() < entry.original_length);
-
-    rb->StartArray(len);
-
-    for (const auto& arg : args) {
-      if (arg.second > 0) {
-        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
-        auto cmd_arg = arg.first.substr(0, dfly::kMaximumSlowlogArgLength - suffix.length());
-        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
-      } else {
-        rb->SendBulkString(arg.first);
-      }
-    }
-    // if we truncated arguments - add a special string to indicate that.
-    if (args.size() < entry.original_length) {
-      rb->SendBulkString(
-          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
-    }
-
-    rb->SendBulkString(entry.client_ip);
-    rb->SendBulkString(entry.client_name);
-  }
-  return;
-}
-
 namespace dfly {
 
 namespace fs = std::filesystem;
@@ -368,6 +292,82 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   }
 
   return std::nullopt;
+}
+
+void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
+                std::string_view sub_cmd) {
+  size_t requested_slow_log_length = UINT32_MAX;
+  size_t argc = args.size();
+  if (argc >= 3) {
+    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
+    return;
+  } else if (argc == 2) {
+    string_view length = facade::ArgS(args, 1);
+    int64_t num;
+    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
+      cntx->SendError("count should be greater than or equal to -1");
+      return;
+    }
+    if (num >= 0) {
+      requested_slow_log_length = num;
+    }
+  }
+
+  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
+  std::vector<boost::circular_buffer<SlowLogEntry>> entries(service.proactor_pool().size());
+  service.proactor_pool().AwaitFiberOnAll([&](auto index, auto* context) {
+    auto shard_entries = ServerState::tlocal()->GetSlowLog().Entries();
+    entries[index] = shard_entries;
+  });
+  std::vector<std::pair<SlowLogEntry, unsigned>> merged_slow_log;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    for (const auto& log_item : entries[i]) {
+      merged_slow_log.emplace_back(log_item, i);
+    }
+  }
+
+  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
+    return e1.first.unix_ts_usec > e2.first.unix_ts_usec;
+  });
+
+  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
+
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(requested_slow_log_length);
+  for (size_t i = 0; i < requested_slow_log_length; ++i) {
+    const auto& entry = merged_slow_log[i].first;
+    const auto& args = entry.cmd_args;
+
+    rb->StartArray(6);
+
+    rb->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
+    rb->SendLong(entry.unix_ts_usec / 1000000);
+    rb->SendLong(entry.exec_time_usec);
+
+    // if we truncated the args, there is one pseudo-element containing the number of truncated
+    // args that we must add, so the result length is increased by 1
+    size_t len = args.size() + int(args.size() < entry.original_length);
+
+    rb->StartArray(len);
+
+    for (const auto& arg : args) {
+      if (arg.second > 0) {
+        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
+        auto cmd_arg = arg.first.substr(0, kMaximumSlowlogArgLength - suffix.length());
+        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
+      } else {
+        rb->SendBulkString(arg.first);
+      }
+    }
+    // if we truncated arguments - add a special string to indicate that.
+    if (args.size() < entry.original_length) {
+      rb->SendBulkString(
+          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
+    }
+
+    rb->SendBulkString(entry.client_ip);
+    rb->SendBulkString(entry.client_name);
+  }
 }
 
 }  // namespace
