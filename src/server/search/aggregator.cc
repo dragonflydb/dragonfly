@@ -6,11 +6,6 @@ namespace dfly::aggregate {
 
 namespace {
 
-struct Reducer {
-  std::string field;
-  std::function<Value(absl::Span<const DocValues> values)> func;
-};
-
 struct GroupStep {
   GroupStep(std::vector<std::string> fields, std::vector<Reducer> reducers)
       : fields_{std::move(fields)}, reducers_{std::move(reducers)} {
@@ -28,7 +23,7 @@ struct GroupStep {
       auto node = groups.extract(groups.begin());
       DocValues doc = Unpack(std::move(node.key()));
       for (auto& reducer : reducers_) {
-        doc[reducer.field] = reducer.func(node.mapped());
+        doc[reducer.result_field] = reducer.func({reducer.source_field, node.mapped()});
       }
       out.push_back(std::move(doc));
     }
@@ -59,8 +54,36 @@ struct GroupStep {
 
 }  // namespace
 
-PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields) {
-  return GroupStep{std::vector<std::string>(fields.begin(), fields.end()), {}};
+Reducer::Func FindReducerFunc(std::string_view name) {
+  const static auto kCountReducer = [](ValueIterator it) -> double {
+    return static_cast<double>(std::distance(it, it.end()));
+  };
+
+  const static auto kSumReducer = [](ValueIterator it) -> double {
+    double sum = 0;
+    for (; it != it.end(); ++it)
+      sum += std::holds_alternative<double>(*it) ? std::get<double>(*it) : 0.0;
+    return sum;
+  };
+
+  static const std::unordered_map<std::string_view, std::function<Value(ValueIterator)>> kReducers =
+      {{"COUNT", [](auto it) { return kCountReducer(it); }},
+       {"COUNT_DISTINCT",
+        [](auto it) {
+          return static_cast<double>(std::unordered_set<Value>(it, it.end()).size());
+        }},
+       {"SUM", [](auto it) { return kSumReducer(it); }},
+       {"AVG", [](auto it) { return kSumReducer(it) / kCountReducer(it); }},
+       {"MAX", [](auto it) { return *std::max_element(it, it.end()); }},
+       {"MIN", [](auto it) { return *std::min_element(it, it.end()); }}};
+
+  auto it = kReducers.find(name);
+  return it != kReducers.end() ? it->second : Reducer::Func{};
+}
+
+PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
+                           std::vector<Reducer> reducers) {
+  return GroupStep{std::vector<std::string>(fields.begin(), fields.end()), std::move(reducers)};
 }
 
 PipelineStep MakeSortStep(std::string field, bool descending) {
