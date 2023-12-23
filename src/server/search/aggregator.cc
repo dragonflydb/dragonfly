@@ -7,15 +7,12 @@ namespace dfly::aggregate {
 namespace {
 
 struct GroupStep {
-  GroupStep(std::vector<std::string> fields, std::vector<Reducer> reducers)
-      : fields_{std::move(fields)}, reducers_{std::move(reducers)} {
-  }
-
   PipelineResult operator()(std::vector<DocValues> values) {
     // Separate items into groups
     absl::flat_hash_map<absl::FixedArray<Value>, std::vector<DocValues>> groups;
-    for (auto& value : values)
+    for (auto& value : values) {
       groups[Extract(value)].push_back(std::move(value));
+    }
 
     // Restore DocValues and appy reducers
     std::vector<DocValues> out;
@@ -30,12 +27,11 @@ struct GroupStep {
     return out;
   }
 
- private:
   absl::FixedArray<Value> Extract(const DocValues& dv) {
     absl::FixedArray<Value> out(fields_.size());
     for (size_t i = 0; i < fields_.size(); i++) {
       auto it = dv.find(fields_[i]);
-      out[i] = (it != dv.end()) ? it->second : Value{0.0};
+      out[i] = (it != dv.end()) ? it->second : Value{};
     }
     return out;
   }
@@ -54,9 +50,11 @@ struct GroupStep {
 
 }  // namespace
 
+const Value ValueIterator::kEmpty = Value{};
+
 Reducer::Func FindReducerFunc(std::string_view name) {
   const static auto kCountReducer = [](ValueIterator it) -> double {
-    return static_cast<double>(std::distance(it, it.end()));
+    return std::distance(it, it.end());
   };
 
   const static auto kSumReducer = [](ValueIterator it) -> double {
@@ -69,9 +67,7 @@ Reducer::Func FindReducerFunc(std::string_view name) {
   static const std::unordered_map<std::string_view, std::function<Value(ValueIterator)>> kReducers =
       {{"COUNT", [](auto it) { return kCountReducer(it); }},
        {"COUNT_DISTINCT",
-        [](auto it) {
-          return static_cast<double>(std::unordered_set<Value>(it, it.end()).size());
-        }},
+        [](auto it) { return double(std::unordered_set<Value>(it, it.end()).size()); }},
        {"SUM", [](auto it) { return kSumReducer(it); }},
        {"AVG", [](auto it) { return kSumReducer(it) / kCountReducer(it); }},
        {"MAX", [](auto it) { return *std::max_element(it, it.end()); }},
@@ -107,7 +103,7 @@ PipelineStep MakeLimitStep(size_t offset, size_t num) {
   };
 }
 
-PipelineResult Execute(std::vector<DocValues> values, absl::Span<PipelineStep> steps) {
+PipelineResult Process(std::vector<DocValues> values, absl::Span<PipelineStep> steps) {
   for (auto& step : steps) {
     auto result = step(std::move(values));
     if (!result.has_value())

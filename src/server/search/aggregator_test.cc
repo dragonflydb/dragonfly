@@ -14,7 +14,7 @@ TEST(AggregatorTest, Sort) {
   };
   PipelineStep steps[] = {MakeSortStep("a", false)};
 
-  auto result = Execute(values, steps);
+  auto result = Process(values, steps);
 
   EXPECT_TRUE(result);
   EXPECT_EQ(result->at(0)["a"], Value(0.5));
@@ -31,7 +31,7 @@ TEST(AggregatorTest, Limit) {
   };
   PipelineStep steps[] = {MakeLimitStep(1, 2)};
 
-  auto result = Execute(values, steps);
+  auto result = Process(values, steps);
 
   EXPECT_TRUE(result);
   EXPECT_EQ(result->size(), 2);
@@ -50,7 +50,7 @@ TEST(AggregatorTest, SimpleGroup) {
   std::string_view fields[] = {"tag"};
   PipelineStep steps[] = {MakeGroupStep(fields, {})};
 
-  auto result = Execute(values, steps);
+  auto result = Process(values, steps);
   EXPECT_TRUE(result);
   EXPECT_EQ(result->size(), 2);
 
@@ -78,7 +78,7 @@ TEST(AggregatorTest, GroupWithReduce) {
       Reducer{"null-field", "distinct-null", FindReducerFunc("COUNT_DISTINCT")}};
   PipelineStep steps[] = {MakeGroupStep(fields, std::move(reducers))};
 
-  auto result = Execute(values, steps);
+  auto result = Process(values, steps);
   EXPECT_TRUE(result);
   EXPECT_EQ(result->size(), 2);
 
