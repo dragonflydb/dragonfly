@@ -287,6 +287,18 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         for counter, value in memory_before.items():
             assert memory_after[counter] >= 0.5 * value
 
+        # Delete all keys from all DBs
+        for i in range(0, SEEDER_ARGS["dbcount"]):
+            await a_client.select(i)
+            while True:
+                keys = await a_client.keys("*")
+                if len(keys) == 0:
+                    break
+                await a_client.delete(*keys)
+
+        memory_empty = await getInfoMemoryFields()
+        assert memory_empty == {"object_used_memory": 0.0}
+
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-info-persistence"})
 class TestDflyInfoPersistenceLoadingField(SnapshotTestBase):
