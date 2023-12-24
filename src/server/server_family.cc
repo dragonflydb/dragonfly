@@ -753,9 +753,9 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
-  AppendMetricHeader("role", "", MetricType::GAUGE, &resp->body());
-  AppendMetricValue("role", 1, {"role"}, {m.is_master ? "master" : "replica"}, &resp->body());
-  AppendMetricWithoutLabels("master", "1 if master 0 if replica", m.is_master ? 1 : 0,
+
+  bool is_master = ServerState::tlocal()->is_master;
+  AppendMetricWithoutLabels("master", "1 if master 0 if replica", is_master ? 1 : 0,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::COUNTER, &resp->body());
 
@@ -886,7 +886,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   double longrun_seconds = m.fiber_longrun_usec * 1e-6;
   AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
-
+  AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
@@ -1498,6 +1498,8 @@ Metrics ServerFamily::GetMetrics() const {
 
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
+      if (result.tx_queue_len < shard->txq()->size())
+        result.tx_queue_len = shard->txq()->size();
     }
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
@@ -1510,11 +1512,12 @@ Metrics ServerFamily::GetMetrics() const {
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  result.is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
-  if (result.is_master)
+  bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
+  if (is_master)
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
 
-  // Update peak stats
+  // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
+  // update peak_stats_ from it.
   lock_guard lk{peak_stats_mu_};
   UpdateMax(&peak_stats_.conn_dispatch_queue_bytes, result.conn_stats.dispatch_queue_bytes);
   UpdateMax(&peak_stats_.conn_read_buf_capacity, result.conn_stats.read_buf_capacity);
@@ -1631,7 +1634,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("maxmemory_policy", "noeviction");
     }
 
-    if (m.is_master && !m.replication_metrics.empty()) {
+    if (!m.replication_metrics.empty()) {
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
@@ -1728,6 +1731,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
+    append("tx_queue_len", m.tx_queue_len);
   }
 
   if (should_enter("REPLICATION")) {
