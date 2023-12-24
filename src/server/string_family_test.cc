@@ -46,12 +46,13 @@ TEST_F(StringFamilyTest, SetGet) {
   EXPECT_EQ(Run({"get", "key1"}), "1");
   EXPECT_EQ(Run({"set", "key", "2"}), "OK");
   EXPECT_EQ(Run({"get", "key"}), "2");
+  EXPECT_THAT(Run({"get", "key3"}), ArgType(RespExpr::NIL));
 
   auto metrics = GetMetrics();
   auto tc = metrics.coordinator_stats.tx_type_cnt;
-  EXPECT_EQ(6, tc[ServerState::QUICK] + tc[ServerState::INLINE]);
+  EXPECT_EQ(7, tc[ServerState::QUICK] + tc[ServerState::INLINE]);
   EXPECT_EQ(3, metrics.events.hits);
-  EXPECT_EQ(0, metrics.events.misses);
+  EXPECT_EQ(1, metrics.events.misses);
   EXPECT_EQ(3, metrics.events.mutations);
 }
 

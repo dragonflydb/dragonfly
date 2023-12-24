@@ -458,10 +458,14 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
   res.it = db.prime.Find(key);
   FiberAtomicGuard fg;
   if (!IsValid(res.it)) {
-    if (mode == FindInternalMode::kUpdateReadStats)
-      events_.misses++;
-    else
-      events_.mutations++;
+    switch (mode) {
+      case FindInternalMode::kUpdateMutableStats:
+        events_.mutations++;
+        break;
+      case FindInternalMode::kUpdateReadStats:
+        events_.misses++;
+        break;
+    }
     return res;
   }
 
@@ -486,16 +490,17 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
 
   db.top_keys.Touch(key);
 
-  if (mode == FindInternalMode::kUpdateReadStats) {
-    events_.hits++;
-
-    if (ClusterConfig::IsEnabled()) {
-      db.slots_stats[ClusterConfig::KeySlot(key)].total_reads += 1;
-    }
-  } else {
-    events_.mutations++;
+  switch (mode) {
+    case FindInternalMode::kUpdateMutableStats:
+      events_.mutations++;
+      break;
+    case FindInternalMode::kUpdateReadStats:
+      events_.hits++;
+      if (ClusterConfig::IsEnabled()) {
+        db.slots_stats[ClusterConfig::KeySlot(key)].total_reads++;
+      }
+      break;
   }
-
   return res;
 }
 
