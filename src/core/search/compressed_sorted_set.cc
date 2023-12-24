@@ -200,7 +200,7 @@ size_t CompressedSortedSet::ByteSize() const {
 }
 
 void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
-  // Quadratic compexity in theory, but in pactice used only to merge with larger values.
+  // Quadratic compexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear
   for (int v : other)
     Insert(v);

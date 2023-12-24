@@ -14,13 +14,13 @@
 namespace dfly::search {
 // BlockList is a container wrapper for CompressedSortedSet / vector<DocId>
 // to divide the full sorted id range into separate blocks. This reduces modification
-// complexity from O(N) to O(logN + K), where K is the max bock size.
+// complexity from O(N) to O(logN + K), where K is the max block size.
 //
-// It tires to balance block sizes in the range [block_size / 2, block_size * 2]
+// It tries to balance block sizes in the range [block_size / 2, block_size * 2]
 // by splitting or merging nodes when needed.
-template <typename C /* underlying container */> class BlockList {
-  using BlockIt = typename PMR_NS::vector<C>::iterator;
-  using ConstBlockIt = typename PMR_NS::vector<C>::const_iterator;
+template <typename Container /* underlying container */> class BlockList {
+  using BlockIt = typename PMR_NS::vector<Container>::iterator;
+  using ConstBlockIt = typename PMR_NS::vector<Container>::const_iterator;
 
  public:
   BlockList(PMR_NS::memory_resource* mr, size_t block_size = 1000)
@@ -57,12 +57,12 @@ template <typename C /* underlying container */> class BlockList {
 
     friend class BlockList;
 
-    friend bool operator==(const BlockListIterator& l, const BlockListIterator& r) {
-      return l.block_it == r.block_it;
+    bool operator==(const BlockListIterator& other) const {
+      return it == other.it && block_it == other.block_it;
     }
 
-    friend bool operator!=(const BlockListIterator& l, const BlockListIterator& r) {
-      return !operator==(l, r);
+    bool operator!=(const BlockListIterator& other) const {
+      return !operator==(other);
     }
 
    private:
@@ -74,7 +74,7 @@ template <typename C /* underlying container */> class BlockList {
     }
 
     ConstBlockIt it, it_end;
-    std::optional<typename C::iterator> block_it, block_end;
+    std::optional<typename Container::iterator> block_it, block_end;
   };
 
   BlockListIterator begin() const {
@@ -89,22 +89,19 @@ template <typename C /* underlying container */> class BlockList {
   // Find block that should contain t. Returns end() only if empty
   BlockIt FindBlock(DocId t);
 
-  // If needed, try merging with previous block
-  void TryMerge(BlockIt block);
-
-  // If needed, try splitting
-  void TrySplit(BlockIt block);
+  void TryMerge(BlockIt block);  // If needed, merge with previous block
+  void TrySplit(BlockIt block);  // If needed, split into two blocks
 
  private:
   const size_t block_size_ = 1000;
   size_t size_ = 0;
-  PMR_NS::vector<C> blocks_;
+  PMR_NS::vector<Container> blocks_;
 };
 
 // Supports Insert and Remove operations for keeping a sorted vector internally.
 // Wrapper to use vectors with BlockList
 struct SortedVector {
-  SortedVector(PMR_NS::memory_resource* mr) : entries_(mr) {
+  explicit SortedVector(PMR_NS::memory_resource* mr) : entries_(mr) {
   }
 
   bool Insert(DocId t);
