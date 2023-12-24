@@ -30,15 +30,9 @@ struct ValueIterator {
       : field_{field}, values_{values} {
   }
 
-  const Value& operator*() const {
-    auto it = values_.front().find(field_);
-    return it == values_.front().end() ? kEmpty : it->second;
-  }
+  const Value& operator*() const;
 
-  ValueIterator& operator++() {
-    values_.remove_prefix(1);
-    return *this;
-  }
+  ValueIterator& operator++();
 
   bool operator==(const ValueIterator& other) const {
     return values_.size() == other.values_.size();
@@ -57,8 +51,6 @@ struct ValueIterator {
 
   std::string_view field_;
   absl::Span<const DocValues> values_;
-
-  static const Value kEmpty;
 };
 
 struct Reducer {

@@ -14,7 +14,7 @@ struct GroupStep {
       groups[Extract(value)].push_back(std::move(value));
     }
 
-    // Restore DocValues and appy reducers
+    // Restore DocValues and apply reducers
     std::vector<DocValues> out;
     while (!groups.empty()) {
       auto node = groups.extract(groups.begin());
@@ -48,9 +48,19 @@ struct GroupStep {
   std::vector<Reducer> reducers_;
 };
 
+const Value kEmptyValue = Value{};
+
 }  // namespace
 
-const Value ValueIterator::kEmpty = Value{};
+const Value& ValueIterator::operator*() const {
+  auto it = values_.front().find(field_);
+  return it == values_.front().end() ? kEmptyValue : it->second;
+}
+
+ValueIterator& ValueIterator::operator++() {
+  values_.remove_prefix(1);
+  return *this;
+}
 
 Reducer::Func FindReducerFunc(std::string_view name) {
   const static auto kCountReducer = [](ValueIterator it) -> double {
