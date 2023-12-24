@@ -4,10 +4,13 @@
 
 #include "core/search/compressed_sorted_set.h"
 
+#include <absl/container/btree_set.h>
+
 #include <algorithm>
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/bptree_set.h"
 
 namespace dfly::search {
 
