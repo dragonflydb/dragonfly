@@ -739,7 +739,7 @@ void DebugCmd::ObjHist() {
 
   absl::StrAppend(&result, "___end object histogram___\n");
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
-  rb->SendBulkString(result);
+  rb->SendVerbatimString(result);
 }
 
 void DebugCmd::Stacktrace() {
@@ -803,7 +803,7 @@ void DebugCmd::Shards() {
 #undef ADD_STAT
 #undef MAXMIN_STAT
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
-  rb->SendBulkString(out);
+  rb->SendVerbatimString(out);
 }
 
 }  // namespace dfly

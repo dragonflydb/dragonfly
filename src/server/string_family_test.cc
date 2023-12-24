@@ -46,9 +46,14 @@ TEST_F(StringFamilyTest, SetGet) {
   EXPECT_EQ(Run({"get", "key1"}), "1");
   EXPECT_EQ(Run({"set", "key", "2"}), "OK");
   EXPECT_EQ(Run({"get", "key"}), "2");
+  EXPECT_THAT(Run({"get", "key3"}), ArgType(RespExpr::NIL));
 
   auto metrics = GetMetrics();
-  EXPECT_EQ(6, metrics.coordinator_stats.ooo_tx_cnt);
+  auto tc = metrics.coordinator_stats.tx_type_cnt;
+  EXPECT_EQ(7, tc[ServerState::QUICK] + tc[ServerState::INLINE]);
+  EXPECT_EQ(3, metrics.events.hits);
+  EXPECT_EQ(1, metrics.events.misses);
+  EXPECT_EQ(3, metrics.events.mutations);
 }
 
 TEST_F(StringFamilyTest, Incr) {
@@ -66,6 +71,10 @@ TEST_F(StringFamilyTest, Incr) {
 
   ASSERT_THAT(Run({"incrby", "ne", "0"}), IntArg(0));
   ASSERT_THAT(Run({"decrby", "a", "-9223372036854775808"}), ErrArg("overflow"));
+  auto metrics = GetMetrics();
+  EXPECT_EQ(10, metrics.events.mutations);
+  EXPECT_EQ(0, metrics.events.misses);
+  EXPECT_EQ(0, metrics.events.hits);
 }
 
 TEST_F(StringFamilyTest, Append) {

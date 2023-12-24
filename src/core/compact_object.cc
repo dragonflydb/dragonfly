@@ -56,7 +56,7 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
       break;
     }
     case kEncodingStrMap2: {
-      delete (StringSet*)ptr;
+      CompactObj::DeleteMR<StringSet>(ptr);
       break;
     }
 
@@ -74,7 +74,7 @@ size_t MallocUsedSet(unsigned encoding, void* ptr) {
       return 0;  // TODO
     case kEncodingStrMap2: {
       StringSet* ss = (StringSet*)ptr;
-      return ss->ObjMallocUsed() + ss->SetMallocUsed();
+      return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
     }
     case kEncodingIntSet:
       return intsetBlobLen((intset*)ptr);
@@ -90,7 +90,7 @@ size_t MallocUsedHSet(unsigned encoding, void* ptr) {
       return zmalloc_usable_size(reinterpret_cast<uint8_t*>(ptr));
     case kEncodingStrMap2: {
       StringMap* sm = (StringMap*)ptr;
-      return sm->ObjMallocUsed() + sm->SetMallocUsed();
+      return sm->ObjMallocUsed() + sm->SetMallocUsed() + zmalloc_usable_size(ptr);
     }
   }
   LOG(DFATAL) << "Unknown set encoding type " << encoding;
@@ -103,7 +103,7 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
       return zmalloc_usable_size(reinterpret_cast<uint8_t*>(ptr));
     case OBJ_ENCODING_SKIPLIST: {
       detail::SortedMap* ss = (detail::SortedMap*)ptr;
-      return ss->MallocSize();  // DictMallocSize(zs->dict);
+      return ss->MallocSize() + zmalloc_usable_size(ptr);  // DictMallocSize(zs->dict);
     }
   }
   LOG(DFATAL) << "Unknown set encoding type " << encoding;
@@ -118,7 +118,7 @@ size_t MallocUsedStream(unsigned encoding, void* streamv) {
 inline void FreeObjHash(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingStrMap2:
-      delete ((StringMap*)ptr);
+      CompactObj::DeleteMR<StringMap>(ptr);
       break;
     case kEncodingListPack:
       lpFree((uint8_t*)ptr);
@@ -129,10 +129,9 @@ inline void FreeObjHash(unsigned encoding, void* ptr) {
 }
 
 inline void FreeObjZset(unsigned encoding, void* ptr) {
-  detail::SortedMap* zs = (detail::SortedMap*)ptr;
   switch (encoding) {
     case OBJ_ENCODING_SKIPLIST:
-      delete zs;
+      CompactObj::DeleteMR<detail::SortedMap>(ptr);
       break;
     case OBJ_ENCODING_LISTPACK:
       zfree(ptr);
@@ -472,9 +471,8 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
        * becomes too long *before* executing zzlInsert. */
       if (zl_len >= server.zset_max_listpack_entries ||
           sdslen(ele) > server.zset_max_listpack_value) {
-        unique_ptr<SortedMap> ss = SortedMap::FromListPack(tl.local_mr, lp);
+        inner_obj_ = SortedMap::FromListPack(tl.local_mr, lp);
         lpFree(lp);
-        inner_obj_ = ss.release();
         encoding_ = OBJ_ENCODING_SKIPLIST;
       } else {
         lp = detail::ZzlInsert(lp, ele, score);

@@ -263,7 +263,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 88, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 96, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -274,6 +274,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(garbage_checked);
   ADD(hits);
   ADD(misses);
+  ADD(mutations);
   ADD(insertion_rejections);
   ADD(update);
 
@@ -401,7 +402,7 @@ DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) 
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats);
+  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
 
   if (IsValid(it)) {
     PreUpdate(cntx.db_index, it);
@@ -419,7 +420,7 @@ DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key)
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
   // Don't use FindMutable() so that we don't call PreUpdate()
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats);
+  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -438,7 +439,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
-  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateCacheStats);
+  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateReadStats);
   return {res.it, res.exp_it};
 }
 
@@ -467,8 +468,14 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
   res.it = db.prime.Find(key);
   FiberAtomicGuard fg;
   if (!IsValid(res.it)) {
-    if (mode == FindInternalMode::kUpdateCacheStats)
-      events_.misses++;
+    switch (mode) {
+      case FindInternalMode::kUpdateMutableStats:
+        events_.mutations++;
+        break;
+      case FindInternalMode::kUpdateReadStats:
+        events_.misses++;
+        break;
+    }
     return res;
   }
 
@@ -493,14 +500,17 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
 
   db.top_keys.Touch(key);
 
-  if (mode == FindInternalMode::kUpdateCacheStats) {
-    events_.hits++;
-
-    if (ClusterConfig::IsEnabled()) {
-      db.slots_stats[ClusterConfig::KeySlot(key)].total_reads += 1;
-    }
+  switch (mode) {
+    case FindInternalMode::kUpdateMutableStats:
+      events_.mutations++;
+      break;
+    case FindInternalMode::kUpdateReadStats:
+      events_.hits++;
+      if (ClusterConfig::IsEnabled()) {
+        db.slots_stats[ClusterConfig::KeySlot(key)].total_reads++;
+      }
+      break;
   }
-
   return res;
 }
 
@@ -527,7 +537,7 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
 
   DbTable& db = *db_arr_[cntx.db_index];
 
-  auto res = FindInternal(cntx, key, FindInternalMode::kDontUpdateCacheStats);
+  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
 
   if (IsValid(res.it)) {
     PreUpdate(cntx.db_index, res.it);

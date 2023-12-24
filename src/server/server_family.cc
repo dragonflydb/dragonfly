@@ -203,82 +203,6 @@ std::string AbslUnparseFlag(const CronExprFlag& flag) {
   return "";
 }
 
-void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
-                std::string_view sub_cmd) {
-  size_t requested_slow_log_length = UINT32_MAX;
-  size_t argc = args.size();
-  if (argc >= 3) {
-    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
-    return;
-  } else if (argc == 2) {
-    string_view length = facade::ArgS(args, 1);
-    int64_t num;
-    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
-      cntx->SendError("count should be greater than or equal to -1");
-      return;
-    }
-    if (num >= 0) {
-      requested_slow_log_length = num;
-    }
-  }
-
-  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
-  std::vector<boost::circular_buffer<dfly::SlowLogEntry>> entries(service.proactor_pool().size());
-  service.proactor_pool().AwaitFiberOnAll([&](auto index, auto* context) {
-    auto shard_entries = dfly::ServerState::tlocal()->GetSlowLog().Entries();
-    entries[index] = shard_entries;
-  });
-  std::vector<std::pair<dfly::SlowLogEntry, unsigned>> merged_slow_log;
-  for (size_t i = 0; i < entries.size(); ++i) {
-    for (const auto& log_item : entries[i]) {
-      merged_slow_log.emplace_back(log_item, i);
-    }
-  }
-  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
-    return e1.first.unix_timestamp > e2.first.unix_timestamp;
-  });
-
-  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
-
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(requested_slow_log_length);
-  for (size_t i = 0; i < requested_slow_log_length; ++i) {
-    const auto& entry = merged_slow_log[i].first;
-    const auto& args = entry.cmd_args;
-
-    rb->StartArray(6);
-
-    rb->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
-    rb->SendLong(entry.unix_timestamp / 1000000000);
-    rb->SendLong(entry.execution_time_micro);
-
-    // if we truncated the args, there is one pseudo-element containing the number of truncated
-    // args that we must add, so the result length is increased by 1
-    size_t len = args.size() + int(args.size() < entry.original_length);
-
-    rb->StartArray(len);
-
-    for (const auto& arg : args) {
-      if (arg.second > 0) {
-        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
-        auto cmd_arg = arg.first.substr(0, dfly::kMaximumSlowlogArgLength - suffix.length());
-        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
-      } else {
-        rb->SendBulkString(arg.first);
-      }
-    }
-    // if we truncated arguments - add a special string to indicate that.
-    if (args.size() < entry.original_length) {
-      rb->SendBulkString(
-          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
-    }
-
-    rb->SendBulkString(entry.client_ip);
-    rb->SendBulkString(entry.client_name);
-  }
-  return;
-}
-
 namespace dfly {
 
 namespace fs = std::filesystem;
@@ -311,31 +235,6 @@ string UnknownCmd(string cmd, CmdArgList args) {
 
 bool IsCloudPath(string_view path) {
   return absl::StartsWith(path, kS3Prefix);
-}
-
-bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
-  /*
-   * a nibble is valid iff there exists one time that matches the pattern
-   * and that time is <= max. For any wildcard the minimum value is 0.
-   * Therefore the minimum time the pattern can match is the time with
-   * all *s replaced with 0s. If this time is > max all other times that
-   * match the pattern are > max and the pattern is invalid. Otherwise
-   * there exists at least one valid nibble specified by this pattern
-   *
-   * Note the edge case of "*" is equivalent to "**". While using this
-   * approach "*" and "**" both map to 0.
-   */
-  unsigned int min_match = 0;
-  for (size_t i = 0; i < time.size(); ++i) {
-    // check for valid characters
-    if (time[i] != '*' && (time[i] < '0' || time[i] > '9')) {
-      return false;
-    }
-    min_match *= 10;
-    min_match += time[i] == '*' ? 0 : time[i] - '0';
-  }
-
-  return min_match <= max;
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -379,86 +278,99 @@ void SetMasterFlagOnAllThreads(bool is_master) {
   shard_set->pool()->DispatchBrief(cb);
 }
 
-}  // namespace
-
-std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
-  if (time.length() < 3 || time.length() > 5) {
-    return std::nullopt;
-  }
-
-  size_t separator_idx = time.find(':');
-  // the time cannot start with ':' and it must be present in the first 3 characters of any time
-  if (separator_idx == 0 || separator_idx >= 3) {
-    return std::nullopt;
-  }
-
-  SnapshotSpec spec{string(time.substr(0, separator_idx)), string(time.substr(separator_idx + 1))};
-  // a minute should be 2 digits as it is zero padded, unless it is a '*' in which case this
-  // greedily can make up both digits
-  if (spec.minute_spec != "*" && spec.minute_spec.length() != 2) {
-    return std::nullopt;
-  }
-
-  return IsValidSaveScheduleNibble(spec.hour_spec, 23) &&
-                 IsValidSaveScheduleNibble(spec.minute_spec, 59)
-             ? std::optional<SnapshotSpec>(spec)
-             : std::nullopt;
-}
-
-bool DoesTimeNibbleMatchSpecifier(string_view time_spec, unsigned int current_time) {
-  // single greedy wildcard matches everything
-  if (time_spec == "*") {
-    return true;
-  }
-
-  for (int i = time_spec.length() - 1; i >= 0; --i) {
-    // if the current digit is not a wildcard and it does not match the digit in the current time it
-    // does not match
-    if (time_spec[i] != '*' && int(current_time % 10) != (time_spec[i] - '0')) {
-      return false;
-    }
-    current_time /= 10;
-  }
-
-  return current_time == 0;
-}
-
-bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
-  unsigned hour = (now / 3600) % 24;
-  unsigned min = (now / 60) % 60;
-  return DoesTimeNibbleMatchSpecifier(spec.hour_spec, hour) &&
-         DoesTimeNibbleMatchSpecifier(spec.minute_spec, min);
-}
-
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   string save_time = GetFlag(FLAGS_save_schedule);
   auto cron_expr = GetFlag(FLAGS_snapshot_cron);
 
+  if (!save_time.empty()) {
+    LOG(ERROR) << "save_schedule flag is deprecated, please use snapshot_cron instead";
+    exit(1);
+  }
+
   if (cron_expr.cron_expr) {
-    if (!save_time.empty()) {
-      LOG(ERROR) << "snapshot_cron and save_schedule flags should not be set simultaneously";
-      exit(1);
-    }
     return std::move(cron_expr.cron_expr);
   }
 
-  if (!save_time.empty()) {
-    if (std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time); spec) {
-      // Setting snapshot to HH:mm everyday, as specified by `save_schedule` flag
-      string raw_cron_expr = absl::StrCat(CronExprFlag::kCronPrefix, spec.value().minute_spec, " ",
-                                          spec.value().hour_spec, " * * *");
-      try {
-        VLOG(1) << "creating cron from: `" << raw_cron_expr << "`";
-        return cron::make_cron(raw_cron_expr);
-      } catch (const cron::bad_cronexpr& ex) {
-        LOG(WARNING) << "Invalid cron expression: " << raw_cron_expr;
-      }
-    } else {
-      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
-    }
-  }
   return std::nullopt;
 }
+
+void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
+                std::string_view sub_cmd) {
+  size_t requested_slow_log_length = UINT32_MAX;
+  size_t argc = args.size();
+  if (argc >= 3) {
+    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
+    return;
+  } else if (argc == 2) {
+    string_view length = facade::ArgS(args, 1);
+    int64_t num;
+    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
+      cntx->SendError("count should be greater than or equal to -1");
+      return;
+    }
+    if (num >= 0) {
+      requested_slow_log_length = num;
+    }
+  }
+
+  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
+  std::vector<boost::circular_buffer<SlowLogEntry>> entries(service.proactor_pool().size());
+  service.proactor_pool().AwaitFiberOnAll([&](auto index, auto* context) {
+    auto shard_entries = ServerState::tlocal()->GetSlowLog().Entries();
+    entries[index] = shard_entries;
+  });
+  std::vector<std::pair<SlowLogEntry, unsigned>> merged_slow_log;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    for (const auto& log_item : entries[i]) {
+      merged_slow_log.emplace_back(log_item, i);
+    }
+  }
+
+  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
+    return e1.first.unix_ts_usec > e2.first.unix_ts_usec;
+  });
+
+  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
+
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(requested_slow_log_length);
+  for (size_t i = 0; i < requested_slow_log_length; ++i) {
+    const auto& entry = merged_slow_log[i].first;
+    const auto& args = entry.cmd_args;
+
+    rb->StartArray(6);
+
+    rb->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
+    rb->SendLong(entry.unix_ts_usec / 1000000);
+    rb->SendLong(entry.exec_time_usec);
+
+    // if we truncated the args, there is one pseudo-element containing the number of truncated
+    // args that we must add, so the result length is increased by 1
+    size_t len = args.size() + int(args.size() < entry.original_length);
+
+    rb->StartArray(len);
+
+    for (const auto& arg : args) {
+      if (arg.second > 0) {
+        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
+        auto cmd_arg = arg.first.substr(0, kMaximumSlowlogArgLength - suffix.length());
+        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
+      } else {
+        rb->SendBulkString(arg.first);
+      }
+    }
+    // if we truncated arguments - add a special string to indicate that.
+    if (args.size() < entry.original_length) {
+      rb->SendBulkString(
+          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
+    }
+
+    rb->SendBulkString(entry.client_ip);
+    rb->SendBulkString(entry.client_name);
+  }
+}
+
+}  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
@@ -841,20 +753,21 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
-  AppendMetricHeader("role", "", MetricType::GAUGE, &resp->body());
-  AppendMetricValue("role", 1, {"role"}, {m.is_master ? "master" : "replica"}, &resp->body());
-  AppendMetricWithoutLabels("master", "1 if master 0 if replica", m.is_master ? 1 : 0,
+
+  bool is_master = ServerState::tlocal()->is_master;
+  AppendMetricWithoutLabels("master", "1 if master 0 if replica", is_master ? 1 : 0,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::COUNTER, &resp->body());
 
   // Clients metrics
-  AppendMetricWithoutLabels("connected_clients", "", m.conn_stats.num_conns, MetricType::GAUGE,
+  const auto& conn_stats = m.conn_stats;
+  AppendMetricWithoutLabels("connected_clients", "", conn_stats.num_conns, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("client_read_buffer_bytes", "", m.conn_stats.read_buf_capacity,
+  AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
+  AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("dispatch_queue_bytes", "", m.conn_stats.dispatch_queue_bytes,
+  AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                             MetricType::GAUGE, &resp->body());
 
   // Memory metrics
@@ -895,20 +808,22 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   }
 
   // Stats metrics
-  AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
+  AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
 
-  AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
+  AppendMetricWithoutLabels("commands_processed_total", "", conn_stats.command_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("keyspace_misses_total", "", m.events.misses, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("keyspace_mutations_total", "", m.events.mutations, MetricType::COUNTER,
+                            &resp->body());
 
   // Net metrics
-  AppendMetricWithoutLabels("net_input_bytes_total", "", m.conn_stats.io_read_bytes,
+  AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("net_output_bytes_total", "", m.conn_stats.io_write_bytes,
+  AppendMetricWithoutLabels("net_output_bytes_total", "", conn_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
 
   // DB stats
@@ -971,7 +886,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   double longrun_seconds = m.fiber_longrun_usec * 1e-6;
   AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
-
+  AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
@@ -1565,11 +1480,11 @@ Metrics ServerFamily::GetMetrics() const {
     result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
 
-    result.coordinator_stats += ss->stats;
-    result.conn_stats += ss->connection_stats;
+    result.coordinator_stats.Add(shard_set->size(), ss->stats);
 
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
+    result.conn_stats += ss->connection_stats;
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
@@ -1583,6 +1498,8 @@ Metrics ServerFamily::GetMetrics() const {
 
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
+      if (result.tx_queue_len < shard->txq()->size())
+        result.tx_queue_len = shard->txq()->size();
     }
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
@@ -1595,11 +1512,12 @@ Metrics ServerFamily::GetMetrics() const {
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  result.is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
-  if (result.is_master)
+  bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
+  if (is_master)
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
 
-  // Update peak stats
+  // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
+  // update peak_stats_ from it.
   lock_guard lk{peak_stats_mu_};
   UpdateMax(&peak_stats_.conn_dispatch_queue_bytes, result.conn_stats.dispatch_queue_bytes);
   UpdateMax(&peak_stats_.conn_read_buf_capacity, result.conn_stats.read_buf_capacity);
@@ -1716,7 +1634,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("maxmemory_policy", "noeviction");
     }
 
-    if (m.is_master && !m.replication_metrics.empty()) {
+    if (!m.replication_metrics.empty()) {
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
@@ -1753,16 +1671,12 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("delete_ttl_sec", m.delete_ttl_per_sec);
     append("keyspace_hits", m.events.hits);
     append("keyspace_misses", m.events.misses);
+    append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
-    append("eval_shardlocal_coordination_total",
-           m.coordinator_stats.eval_shardlocal_coordination_cnt);
-    append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
-    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
   }
 
   if (should_enter("TIERED", true)) {
@@ -1793,6 +1707,31 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
     append("rdb_changes_since_last_save", m.events.update);
+  }
+
+  if (should_enter("TRANSACTION", true)) {
+    const auto& tc = m.coordinator_stats.tx_type_cnt;
+    string val = StrCat("global=", tc[ServerState::GLOBAL], ",normal=", tc[ServerState::NORMAL],
+                        ",ooo=", tc[ServerState::OOO], ",quick=", tc[ServerState::QUICK],
+                        ",inline=", tc[ServerState::INLINE]);
+    append("tx_type_cnt", val);
+    val.clear();
+    for (unsigned width = 0; width < shard_set->size(); ++width) {
+      if (m.coordinator_stats.tx_width_freq_arr[width] > 0) {
+        absl::StrAppend(&val, "w", width + 1, "=", m.coordinator_stats.tx_width_freq_arr[width],
+                        ",");
+      }
+    }
+    if (!val.empty()) {
+      val.pop_back();  // last comma.
+      append("tx_width_freq", val);
+    }
+    append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
+    append("eval_shardlocal_coordination_total",
+           m.coordinator_stats.eval_shardlocal_coordination_cnt);
+    append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
+    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
+    append("tx_queue_len", m.tx_queue_len);
   }
 
   if (should_enter("REPLICATION")) {
@@ -2033,6 +1972,12 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   if (replica_)
     replica_->Stop();
 
+  // If we are called by "Replicate", cntx->transaction will be null but we do not need
+  // to flush anything.
+  if (cntx->transaction) {
+    Drakarys(cntx->transaction, DbSlice::kDbAll);
+  }
+
   // Create a new replica and assing it
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
   replica_ = new_replica;
@@ -2068,9 +2013,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   string_view host = ArgS(args, 0);
   string_view port = ArgS(args, 1);
 
-  if (!IsReplicatingNoOne(host, port))
-    Drakarys(cntx->transaction, DbSlice::kDbAll);
-
   ReplicaOfInternal(host, port, cntx, ActionOnConnectionFail::kReturnOnError);
 }
 
@@ -2079,8 +2021,6 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ConnectionContext ctxt{&sink, nullptr};
   ctxt.skip_acl_validation = true;
 
-  // we don't flush the database as the context is null
-  // (and also because there is nothing to flush)
   ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 

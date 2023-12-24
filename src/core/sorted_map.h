@@ -45,8 +45,9 @@ class SortedMap {
 
   ~SortedMap();
 
-  // The ownership for the returned SortedMap stays with the caller
-  static std::unique_ptr<SortedMap> FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp);
+  // The ownership for the returned SortedMap stays with the caller, and must be freed via
+  // placement delete and then res->deallocate().
+  static SortedMap* FromListPack(PMR_NS::memory_resource* res, const uint8_t* lp);
 
   size_t Size() const {
     return std::visit(Overload{[](const auto& impl) { return impl.Size(); }}, impl_);

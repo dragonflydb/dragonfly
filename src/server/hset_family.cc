@@ -636,8 +636,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       stats->listpack_blob_cnt++;
       stats->listpack_bytes += lpBytes(lp);
     } else {
-      StringMap* sm = new StringMap(CompactObj::memory_resource());
-      pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+      pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
     }
   } else {
     if (pv.ObjType() != OBJ_HASH)
@@ -1202,7 +1201,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
 }
 
 StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
-  StringMap* sm = new StringMap(CompactObj::memory_resource());
+  StringMap* sm = CompactObj::AllocateMR<StringMap>();
   size_t lplen = lpLength(lp);
   if (lplen == 0)
     return sm;

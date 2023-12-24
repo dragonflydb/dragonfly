@@ -158,7 +158,6 @@ There are also some Dragonfly-specific arguments:
    | `0 0 * * *`              | At 00:00 (midnight) every day              |
    | `0 6 * * 1-5`            | At 06:00 (dawn) from Monday through Friday |
 
- * `save_schedule`: Glob spec for the UTC to save a snapshot in HH:MM (24h time) format (`default: ""`). This argument is deprecated, and `snapshot_cron` should be preferred when available.
  * `primary_port_http_enabled`: Allows accessing HTTP console on main TCP port if `true` (`default: true`).
  * `admin_port`: To enable admin access to the console on the assigned port (`default: disabled`). Supports both HTTP and RESP protocols.
  * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols.
@@ -169,7 +168,7 @@ There are also some Dragonfly-specific arguments:
 ### Example start script with popular options:
 
 ```bash
-./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
+./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379 --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
 
 Arguments can be also provided via:

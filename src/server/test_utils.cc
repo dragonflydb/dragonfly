@@ -82,7 +82,7 @@ std::string TestConnection::RemoteEndpointStr() const {
 }
 
 void TransactionSuspension::Start() {
-  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
+  static CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
 
   transaction_ = new dfly::Transaction{&cid};
 
@@ -315,6 +315,14 @@ unsigned BaseFamilyTest::NumLocked() {
     }
   });
   return count;
+}
+
+void BaseFamilyTest::ClearMetrics() {
+  shard_set->pool()->Await([](auto*) {
+    ServerState::Stats stats;
+    stats.tx_width_freq_arr = new uint64_t[shard_set->size()];
+    ServerState::tlocal()->stats = std::move(stats);
+  });
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
@@ -659,8 +667,9 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
 
 Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
   TransactionSuspension tx;
-  tx.Start();
-  auto fb = pp_->at(0)->LaunchFiber([condition, tx = std::move(tx)]() mutable {
+  pp_->at(0)->Await([&] { tx.Start(); });
+
+  auto fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [condition, tx = std::move(tx)]() mutable {
     ExpectConditionWithinTimeout(condition);
     tx.Terminate();
   });

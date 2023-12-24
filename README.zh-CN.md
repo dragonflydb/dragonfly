@@ -123,9 +123,6 @@ Dragonfly 支持 Redis 的常见参数。
   | `5 */2 * * *` | 每隔 2 小时的第 5 分钟                   |
   | `0 0 * * *`   | 每天的 00:00 午夜                     |
   | `0 6 * * 1-5` | 从星期一到星期五的每天 06:00 黎明             |
-
-* `save_schedule`：以 UTC 时间规范保存快照，格式： HH:MM（24 小时制时间）。默认为空 `""`。该参数被标记为弃用，新版本中推荐使用 `snapshot_cron` 参数替代。
-
 * `primary_port_http_enabled`：如果为 true，则允许在主 TCP 端口上访问 HTTP 控制台。默认为 `true`。
 
 * `admin_port`：如果设置，将在指定的端口上启用对控制台的管理访问。支持 HTTP 和 RESP 协议。默认禁用。
@@ -141,7 +138,7 @@ Dragonfly 支持 Redis 的常见参数。
 ### 启动脚本示例，包含常用选项：
 
 ```bash
-./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
+./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379 --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
 还可以通过运行 `dragonfly --flagfile <filename>` 从配置文件中获取参数，配置文件的每行应该列出一个参数，并用等号代替键值参数的空格。
 

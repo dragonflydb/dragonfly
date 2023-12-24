@@ -37,8 +37,6 @@ class BlockingController;
 class EngineShard {
  public:
   struct Stats {
-    uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
-    uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
     uint64_t defrag_attempt_total = 0;
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
@@ -100,10 +98,6 @@ class EngineShard {
 
   // Remove current continuation trans if its equal to tx.
   void RemoveContTx(Transaction* tx);
-
-  void IncQuickRun() {
-    stats_.quick_runs++;
-  }
 
   const Stats& stats() const {
     return stats_;

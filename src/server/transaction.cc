@@ -591,6 +591,8 @@ void Transaction::ScheduleInternal() {
   }
 
   // Loop until successfully scheduled in all shards.
+  ServerState* ss = ServerState::tlocal();
+  DCHECK(ss);
   while (true) {
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
     time_now_ms_ = GetCurrentTimeMs();
@@ -605,13 +607,22 @@ void Transaction::ScheduleInternal() {
     };
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
-    bool ooo_disabled = IsGlobal() || (IsAtomicMulti() && multi_->mode != LOCK_AHEAD);
-
     if (success.load(memory_order_acquire) == num_shards) {
       coordinator_state_ |= COORD_SCHED;
-      // If we granted all locks, we can run out of order.
-      if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
+      bool ooo_disabled = IsAtomicMulti() && multi_->mode != LOCK_AHEAD;
+
+      DCHECK_GT(num_shards, 0u);
+
+      ss->stats.tx_width_freq_arr[num_shards - 1]++;
+
+      if (IsGlobal()) {
+        ss->stats.tx_type_cnt[ServerState::GLOBAL]++;
+      } else if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
+        // If we granted all locks, we can run out of order.
         coordinator_state_ |= COORD_OOO;
+        ss->stats.tx_type_cnt[ServerState::OOO]++;
+      } else {
+        ss->stats.tx_type_cnt[ServerState::NORMAL]++;
       }
       VLOG(2) << "Scheduled " << DebugId()
               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
@@ -678,6 +689,9 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
   bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
+  bool run_inline = false;
+  ServerState* ss = nullptr;
+
   if (schedule_fast) {
     DCHECK_NE(unique_shard_id_, kInvalidSid);
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
@@ -707,10 +721,11 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
       }
     };
 
-    if (auto* ss = ServerState::tlocal();
-        ss->thread_index() == unique_shard_id_ && ss->AllowInlineScheduling()) {
+    ss = ServerState::tlocal();
+    if (ss->thread_index() == unique_shard_id_ && ss->AllowInlineScheduling()) {
       DVLOG(2) << "Inline scheduling a transaction";
       schedule_cb();
+      run_inline = true;
     } else {
       shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
     }
@@ -727,12 +742,15 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   WaitForShardCallbacks();
   DVLOG(2) << "ScheduleSingleHop after Wait " << DebugId();
 
-  if (was_ooo) {
-    coordinator_state_ |= COORD_OOO;
-  }
-
   if (schedule_fast) {
     CHECK(!cb_ptr_);  // we should have reset it within the callback.
+    if (was_ooo) {
+      coordinator_state_ |= COORD_OOO;
+      ss->stats.tx_type_cnt[run_inline ? ServerState::INLINE : ServerState::QUICK]++;
+    } else {
+      ss->stats.tx_type_cnt[ServerState::NORMAL]++;
+    }
+    ss->stats.tx_width_freq_arr[0]++;
   }
   cb_ptr_ = nullptr;
   return local_result_;
@@ -933,8 +951,6 @@ void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
   DCHECK_NE(unique_shard_id_, kInvalidSid);
   DCHECK_EQ(0u, txid_);
-
-  shard->IncQuickRun();
 
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(0, sd.local_mask & (KEYLOCK_ACQUIRED | OUT_OF_ORDER));

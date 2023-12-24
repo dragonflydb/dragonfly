@@ -40,8 +40,9 @@ constexpr size_t kNumThreads = 3;
 void BlockingControllerTest::SetUp() {
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
-  pp_->Await([](unsigned index, ProactorBase* p) { ServerState::Init(index, nullptr); });
-  ServerState::Init(kNumThreads, nullptr);
+  pp_->Await(
+      [](unsigned index, ProactorBase* p) { ServerState::Init(index, kNumThreads, nullptr); });
+  ServerState::Init(kNumThreads, kNumThreads, nullptr);
 
   shard_set = new EngineShardSet(pp_.get());
   shard_set->Init(kNumThreads, false);

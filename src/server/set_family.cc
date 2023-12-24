@@ -154,8 +154,7 @@ unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec,
 
 void InitStrSet(CompactObj* set) {
   if (GetFlag(FLAGS_use_set2)) {
-    StringSet* ss = new StringSet{CompactObj::memory_resource()};
-    set->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
+    set->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
   } else {
     dict* ds = dictCreate(&setDictType);
     set->InitRobj(OBJ_SET, kEncodingStrMap, ds);
@@ -1637,7 +1636,7 @@ bool SetFamily::ConvertToStrSet(const intset* is, size_t expected_len, robj* des
   int ii = 0;
 
   if (GetFlag(FLAGS_use_set2)) {
-    StringSet* ss = new StringSet{CompactObj::memory_resource()};
+    StringSet* ss = CompactObj::AllocateMR<StringSet>();
     if (expected_len) {
       ss->Reserve(expected_len);
     }

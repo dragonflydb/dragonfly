@@ -23,14 +23,51 @@ namespace dfly {
 
 __thread ServerState* ServerState::state_ = nullptr;
 
-ServerState::Stats& ServerState::Stats::operator+=(const ServerState::Stats& other) {
-  this->ooo_tx_cnt += other.ooo_tx_cnt;
+ServerState::Stats::Stats() {
+  tx_type_cnt.fill(0);
+}
+
+ServerState::Stats::~Stats() {
+  delete[] tx_width_freq_arr;
+}
+
+auto ServerState::Stats::operator=(Stats&& other) -> Stats& {
+  for (int i = 0; i < NUM_TX_TYPES; ++i) {
+    this->tx_type_cnt[i] = other.tx_type_cnt[i];
+  }
+  this->eval_io_coordination_cnt = other.eval_io_coordination_cnt;
+  this->eval_shardlocal_coordination_cnt = other.eval_shardlocal_coordination_cnt;
+  this->eval_squashed_flushes = other.eval_squashed_flushes;
+  this->tx_schedule_cancel_cnt = other.tx_schedule_cancel_cnt;
+
+  delete[] this->tx_width_freq_arr;
+  this->tx_width_freq_arr = other.tx_width_freq_arr;
+  other.tx_width_freq_arr = nullptr;
+
+  return *this;
+}
+
+ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerState::Stats& other) {
+  static_assert(sizeof(Stats) == 10 * 8, "Stats size mismatch");
+
+  for (int i = 0; i < NUM_TX_TYPES; ++i) {
+    this->tx_type_cnt[i] += other.tx_type_cnt[i];
+  }
+
   this->eval_io_coordination_cnt += other.eval_io_coordination_cnt;
   this->eval_shardlocal_coordination_cnt += other.eval_shardlocal_coordination_cnt;
   this->eval_squashed_flushes += other.eval_squashed_flushes;
   this->tx_schedule_cancel_cnt += other.tx_schedule_cancel_cnt;
 
-  static_assert(sizeof(Stats) == 5 * 8);
+  if (this->tx_width_freq_arr == nullptr) {
+    this->tx_width_freq_arr = new uint64_t[num_shards];
+    std::copy_n(other.tx_width_freq_arr, num_shards, this->tx_width_freq_arr);
+  } else {
+    for (unsigned i = 0; i < num_shards; ++i) {
+      this->tx_width_freq_arr[i] += other.tx_width_freq_arr[i];
+    }
+  }
+
   return *this;
 }
 
@@ -73,11 +110,13 @@ ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_pe
 ServerState::~ServerState() {
 }
 
-void ServerState::Init(uint32_t thread_index, acl::UserRegistry* registry) {
+void ServerState::Init(uint32_t thread_index, uint32_t num_shards, acl::UserRegistry* registry) {
   state_ = new ServerState();
   state_->gstate_ = GlobalState::ACTIVE;
   state_->thread_index_ = thread_index;
   state_->user_registry = registry;
+  state_->stats.tx_width_freq_arr = new uint64_t[num_shards];
+  std::fill_n(state_->stats.tx_width_freq_arr, num_shards, 0);
 }
 
 void ServerState::Destroy() {
