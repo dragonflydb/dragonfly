@@ -278,10 +278,23 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
+        async def getInfoMemoryFields():
+            res = await a_client.execute_command("INFO MEMORY")
+            fields = {}
+            for line in res.decode("ascii").splitlines():
+                if line.startswith("#"):
+                    continue
+                k, v = line.split(":")
+                if k == "object_used_memory" or k.startswith("type_used_memory_"):
+                    fields.update({k: float(v)})
+            return fields
+
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
+        a_client = aioredis.Redis(port=df_server.port)
 
         start_capture = await seeder.capture()
+        memory_before = await getInfoMemoryFields()
 
         df_server.stop()
         df_server.start()
@@ -291,6 +304,9 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         await a_client.connection_pool.disconnect()
 
         assert await seeder.compare(start_capture, port=df_server.port)
+        memory_after = await getInfoMemoryFields()
+        for counter, value in memory_before.items():
+            assert memory_after[counter] >= 0.5 * value
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-info-persistence"})
