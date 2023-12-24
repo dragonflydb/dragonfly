@@ -700,6 +700,16 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
+  string result;
+  result.reserve(stored_cmds.size() * 10);
+  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "\n");
+  for (const auto& scmd : stored_cmds) {
+    absl::StrAppend(&result, "  ", scmd.Cid()->name(), " ", scmd.NumArgs(), "\n");
+  }
+  return result;
+}
+
 // Either take the interpreter from the preborrowed multi exec transaction or borrow one.
 struct BorrowedInterpreter {
   explicit BorrowedInterpreter(ConnectionContext* cntx) {
@@ -2060,10 +2070,14 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
+  ServerState* ss = ServerState::tlocal();
   if (state != ExecEvalState::NONE)
     exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
 
   if (!exec_info.body.empty()) {
+    string descr = CreateExecDescriptor(exec_info.body, cntx->transaction->GetUniqueShardCnt());
+    ss->exec_freq_count[descr]++;
+
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {

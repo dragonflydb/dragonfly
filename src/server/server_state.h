@@ -254,6 +254,9 @@ class ServerState {  // public struct - to allow initialization.
     return slow_log_shard_;
   };
 
+  // Exec descriptor frequency count for this thread.
+  absl::flat_hash_map<std::string, unsigned> exec_freq_count;
+
  private:
   int64_t live_transactions_ = 0;
   SlowLogShard slow_log_shard_;
