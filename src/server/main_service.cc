@@ -79,6 +79,8 @@ ABSL_FLAG(uint32_t, multi_exec_mode, 2,
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
+ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
+
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
@@ -2067,6 +2069,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   exec_info.state = ConnectionState::ExecInfo::EXEC_RUNNING;
 
   VLOG(1) << "StartExec " << exec_info.body.size();
+
+  // Make sure we flush whatever responses we aggregated in the reply builder.
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
@@ -2075,8 +2079,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
 
   if (!exec_info.body.empty()) {
-    string descr = CreateExecDescriptor(exec_info.body, cntx->transaction->GetUniqueShardCnt());
-    ss->exec_freq_count[descr]++;
+    if (GetFlag(FLAGS_track_exec_frequencies)) {
+      string descr = CreateExecDescriptor(exec_info.body, cntx->transaction->GetUniqueShardCnt());
+      ss->exec_freq_count[descr]++;
+    }
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
