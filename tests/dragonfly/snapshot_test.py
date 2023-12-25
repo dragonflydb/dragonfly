@@ -295,6 +295,11 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
+        """Checks that:
+        1. After reloading the snapshot file the data is the same
+        2. Memory counters after loading from snapshot is similar to before creating a snapshot
+        3. Memory counters after deleting all keys loaded by snapshot - this validates the memory
+           counting when loading from snapshot."""
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
 
