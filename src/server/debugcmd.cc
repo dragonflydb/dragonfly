@@ -248,6 +248,8 @@ void DebugCmd::Run(CmdArgList args) {
         "    Prints the stacktraces of all current fibers to the logs.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
+        "TX",
+        "    Performs transaction analysis per shard.",
         "HELP",
         "    Prints this help.",
     };
@@ -282,7 +284,7 @@ void DebugCmd::Run(CmdArgList args) {
     return Inspect(key);
   }
 
-  if (subcmd == "TRANSACTION") {
+  if (subcmd == "TX") {
     return TxAnalysis();
   }
 
@@ -659,60 +661,27 @@ void DebugCmd::Watched() {
 }
 
 void DebugCmd::TxAnalysis() {
-  atomic_uint32_t queue_len{0}, free_cnt{0}, armed_cnt{0};
-
-  using SvLockTable = absl::flat_hash_map<string_view, IntentLock>;
-  vector<SvLockTable> lock_table_arr(shard_set->size());
+  vector<EngineShard::TxQueueInfo> shard_info(shard_set->size());
 
   auto cb = [&](EngineShard* shard) {
-    ShardId sid = shard->shard_id();
-
-    TxQueue* queue = shard->txq();
-
-    if (queue->Empty())
-      return;
-
-    auto cur = queue->Head();
-    do {
-      auto value = queue->At(cur);
-      Transaction* trx = std::get<Transaction*>(value);
-      queue_len.fetch_add(1, std::memory_order_relaxed);
-
-      if (trx->IsArmedInShard(sid)) {
-        armed_cnt.fetch_add(1, std::memory_order_relaxed);
-
-        IntentLock::Mode mode = trx->Mode();
-
-        // We consider keys from the currently assigned command inside the transaction.
-        // Meaning that for multi-tx it does not take into account all the keys.
-        KeyLockArgs lock_args = trx->GetLockArgs(sid);
-        auto& lock_table = lock_table_arr[sid];
-
-        // We count locks ourselves and do not rely on the lock table inside dbslice.
-        // The reason for this - to account for ordering information.
-        // For example, consider T1, T2 both residing in the queue and both lock 'x' exclusively.
-        // DbSlice::CheckLock returns false for both transactions, but T1 in practice owns the lock.
-        bool can_take = true;
-        for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-          string_view s = lock_args.args[i];
-          bool was_ack = lock_table[s].Acquire(mode);
-          if (!was_ack) {
-            can_take = false;
-          }
-        }
-
-        if (can_take) {
-          free_cnt.fetch_add(1, std::memory_order_relaxed);
-        }
-      }
-      cur = queue->Next(cur);
-    } while (cur != queue->Head());
+    auto& info = shard_info[shard->shard_id()];
+    info = shard->AnalyzeTxQueue();
   };
 
   shard_set->RunBriefInParallel(cb);
 
-  cntx_->SendSimpleString(absl::StrCat("queue_len:", queue_len.load(), "armed: ", armed_cnt.load(),
-                                       " free:", free_cnt.load()));
+  string result;
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    const auto& info = shard_info[i];
+    StrAppend(&result, "shard", i, ":\n", "  tx armed ", info.tx_armed, ", total: ", info.tx_total,
+              ",global:", info.tx_global, ",runnable:", info.tx_runnable, "\n");
+    StrAppend(&result, "  locks total:", info.total_locks, ",contended:", info.contended_locks,
+              "\n");
+    StrAppend(&result, "  max contention score: ", info.max_contention_score,
+              ",lock_name:", info.max_contention_lock_name, "\n");
+  }
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  rb->SendVerbatimString(result);
 }
 
 void DebugCmd::ObjHist() {

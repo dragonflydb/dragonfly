@@ -14,6 +14,9 @@
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 
+ABSL_FLAG(uint32_t, tx_queue_warning_len, 30,
+          "Length threshold for warning about long transaction queue");
+
 namespace dfly {
 
 using namespace std;
@@ -1098,7 +1101,25 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   TxQueue::Iterator it = txq->Insert(this);
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
   sd.pq_pos = it;
+  unsigned q_limit = absl::GetFlag(FLAGS_tx_queue_warning_len);
 
+  if (txq->size() > q_limit) {
+    static thread_local time_t last_log_time = 0;
+    // TODO: glog provides LOG_EVERY_T, which uses precise clock.
+    // We should introduce inside helio LOG_PERIOD_ATLEAST macro that takes seconds and
+    // uses low precision clock.
+    time_t now = time(nullptr);
+    if (now >= last_log_time + 10) {
+      last_log_time = now;
+      EngineShard::TxQueueInfo info = shard->AnalyzeTxQueue();
+      LOG(WARNING) << "TxQueue is too long. Tx count:" << info.tx_total
+                   << ", armed:" << info.tx_armed << ", runnable:" << info.tx_runnable
+                   << ", total locks: " << info.total_locks
+                   << ", contended locks: " << info.contended_locks << "\n"
+                   << "max contention score: " << info.max_contention_score
+                   << ", lock: " << info.max_contention_lock_name;
+    }
+  }
   DVLOG(1) << "Insert into tx-queue, sid(" << sid << ") " << DebugId() << ", qlen " << txq->size();
 
   return {true, lock_granted};
@@ -1330,6 +1351,8 @@ inline uint32_t Transaction::DecreaseRunCnt() {
 }
 
 bool Transaction::IsGlobal() const {
+  // Please note that a transaction can be non-global even if multi_->mode == GLOBAL.
+  // It happens when a transaction is squashed and switches to execute differrent commands.
   return global_;
 }
 
