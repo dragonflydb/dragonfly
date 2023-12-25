@@ -388,11 +388,12 @@ class DbSlice {
   // Track keys for the client represented by the the weak reference to its connection.
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
-  // Delete a key referred by its iterator.
-  void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
-
  private:
-  void PreUpdate(DbIndex db_ind, PrimeIterator it);
+  enum class PreUpdateMode {
+    kRegular,
+    kNoIncVersion,
+  };
+  void PreUpdate(DbTable* table, PrimeIterator it, PreUpdateMode mode = PreUpdateMode::kRegular);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
 
   // Releases a single key. `key` must have been normalized by GetLockKey().
@@ -410,6 +411,9 @@ class DbSlice {
 
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
+
+  // Delete a key referred by its iterator.
+  void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
 
   void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
                        DbTable* table);

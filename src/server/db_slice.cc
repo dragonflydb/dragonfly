@@ -53,64 +53,6 @@ void AccountObjectMemory(unsigned type, int64_t size, DbTableStats* stats) {
   stats->AddTypeMemoryUsage(type, size);
 }
 
-void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
-                     DbTable* table) {
-  if (!exp_it.is_done()) {
-    table->expire.Erase(exp_it);
-  }
-
-  if (del_it->second.HasFlag()) {
-    if (table->mcflag.Erase(del_it->first) == 0) {
-      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
-                 << del_it->first.ToString();
-    }
-  }
-
-  DbTableStats& stats = table->stats;
-  const PrimeValue& pv = del_it->second;
-  if (pv.IsExternal()) {
-    auto [offset, size] = pv.GetExternalSlice();
-
-    stats.tiered_entries--;
-    stats.tiered_size -= size;
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->Free(offset, size);
-  }
-  if (pv.HasIoPending()) {
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->CancelIo(table->index, del_it);
-  }
-
-  stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(del_it->first.ObjType(), -del_it->first.MallocUsed(), &stats);    // Key
-  AccountObjectMemory(del_it->second.ObjType(), -del_it->second.MallocUsed(), &stats);  // Value
-
-  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
-    --stats.listpack_blob_cnt;
-  } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
-    --stats.listpack_blob_cnt;
-  }
-
-  if (ClusterConfig::IsEnabled()) {
-    string tmp;
-    string_view key = del_it->first.GetSlice(&tmp);
-    SlotId sid = ClusterConfig::KeySlot(key);
-    table->slots_stats[sid].key_count -= 1;
-  }
-
-  table->prime.Erase(del_it);
-}
-
-inline void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table) {
-  ExpireIterator exp_it;
-  if (del_it->second.HasExpire()) {
-    exp_it = table->expire.Find(del_it->first);
-    DCHECK(!exp_it.is_done());
-  }
-
-  PerformDeletion(del_it, exp_it, shard, table);
-};
-
 class PrimeEvictionPolicy {
  public:
   static constexpr bool can_evict = true;  // we implement eviction functionality.
@@ -235,8 +177,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
       return 0;
     }
 
-    DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
-    db_slice_->PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
+    db_slice_->Del(cntx_.db_index, last_slot_it);
     ++evicted_;
   }
   me->ShiftRight(bucket_it);
@@ -405,7 +346,7 @@ DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key)
   auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
 
   if (IsValid(it)) {
-    PreUpdate(cntx.db_index, it);
+    PreUpdate(GetDBTable(cntx.db_index), it);
     return {it, exp_it,
             AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                          .db_slice = this,
@@ -429,7 +370,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
     return OpStatus::WRONG_TYPE;
   }
 
-  PreUpdate(cntx.db_index, it);
+  PreUpdate(GetDBTable(cntx.db_index), it);
   return {{it, exp_it,
            AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                         .db_slice = this,
@@ -540,7 +481,7 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
   auto res = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
 
   if (IsValid(res.it)) {
-    PreUpdate(cntx.db_index, res.it);
+    PreUpdate(GetDBTable(cntx.db_index), res.it);
     return {.it = res.it,
             .exp_it = res.exp_it,
             .is_new = false,
@@ -1007,36 +948,43 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
   return true;
 }
 
-void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
+void DbSlice::PreUpdate(DbTable* table, PrimeIterator it, PreUpdateMode mode) {
+  DCHECK(table != nullptr);
   FiberAtomicGuard fg;
 
+  const DbIndex db_ind = table->index;
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it});
   }
 
-  auto* stats = MutableStats(db_ind);
-  if (it->second.ObjType() == OBJ_STRING) {
-    if (it->second.IsExternal()) {
-      // We assume here that the operation code either loaded the entry into memory
-      // before calling to PreUpdate or it does not need to read it at all.
-      // After this code executes, the external blob is lost.
-      TieredStorage* tiered = shard_owner()->tiered_storage();
-      auto [offset, size] = it->second.GetExternalSlice();
-      tiered->Free(offset, size);
-      bool has_expire = it->second.HasExpire();
-      it->second.Reset();
-      it->second.SetExpire(has_expire);  // we keep expire data
+  auto& stats = table->stats;
+  if (it->second.IsExternal()) {
+    // We assume here that the operation code either loaded the entry into memory
+    // before calling to PreUpdate or it does not need to read it at all.
+    // After this code executes, the external blob is lost.
+    TieredStorage* tiered = shard_owner()->tiered_storage();
+    auto [offset, size] = it->second.GetExternalSlice();
+    tiered->Free(offset, size);
+    bool has_expire = it->second.HasExpire();
+    it->second.Reset();
+    it->second.SetExpire(has_expire);  // we keep expire data
 
-      stats->tiered_entries -= 1;
-      stats->tiered_size -= size;
-    } else if (it->second.HasIoPending()) {
-      TieredStorage* tiered = shard_owner()->tiered_storage();
-      tiered->CancelIo(db_ind, it);
-    }
+    stats.tiered_entries--;
+    stats.tiered_size -= size;
+  }
+  if (it->second.HasIoPending()) {
+    TieredStorage* tiered = shard_owner()->tiered_storage();
+    tiered->CancelIo(db_ind, it);
   }
 
-  it.SetVersion(NextVersion());
+  switch (mode) {
+    case PreUpdateMode::kRegular:
+      it.SetVersion(NextVersion());
+      break;
+    case PreUpdateMode::kNoIncVersion:
+      break;
+  }
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size) {
@@ -1485,24 +1433,13 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, Engin
 
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
-  if (pv.IsExternal()) {
-    auto [offset, size] = pv.GetExternalSlice();
+  PreUpdate(table, del_it, PreUpdateMode::kNoIncVersion);
 
-    stats.tiered_entries--;
-    stats.tiered_size -= size;
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->Free(offset, size);
-  }
-  if (pv.HasIoPending()) {
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->CancelIo(table->index, del_it);
-  }
-
+  // We don't call PostUpdate(), but do custom accounting instead.
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
-  int64_t delta = del_it->first.MallocUsed() + value_heap_size;
-  stats.obj_memory_usage -= delta;
-  stats.AddTypeMemoryUsage(pv.ObjType(), -delta);
+  AccountObjectMemory(del_it->first.ObjType(), -del_it->first.MallocUsed(), &stats);  // Key
+  AccountObjectMemory(pv.ObjType(), -value_heap_size, &stats);                        // Value
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
   } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
