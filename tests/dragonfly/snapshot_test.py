@@ -286,7 +286,6 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         await seeder.run(target_deviation=0.1)
 
         memory_counters = await self._get_info_memory_fields(a_client)
-        assert memory_counters["object_used_memory"] > 0
         assert all(value > 0 for value in memory_counters.values())
 
         await self._delete_all_keys(a_client)
@@ -313,6 +312,9 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         assert await seeder.compare(start_capture, port=df_server.port)
         memory_after = await self._get_info_memory_fields(a_client)
         for counter, value in memory_before.items():
+            # Unfortunately memory usage sometimes depends on order of insertion / deletion, so
+            # it's usually not exactly the same. For the test to be stable we check that it's
+            # at least 50% that of the original value.
             assert memory_after[counter] >= 0.5 * value
 
         await self._delete_all_keys(a_client)
