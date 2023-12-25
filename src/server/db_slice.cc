@@ -46,11 +46,11 @@ static_assert(kPrimeSegmentSize == 32288);
 // 24576
 static_assert(kExpireSegmentSize == 23528);
 
-void AccountObjectMemory(const CompactObj& obj, DbTableStats* stats, int64_t multiplier) {
-  const int64_t value_heap_size = obj.MallocUsed() * multiplier;
-
-  stats->obj_memory_usage += value_heap_size;
-  stats->AddTypeMemoryUsage(obj.ObjType(), value_heap_size);
+void AccountObjectMemory(unsigned type, int64_t size, DbTableStats* stats) {
+  DCHECK_GE(static_cast<int64_t>(stats->obj_memory_usage) + size, 0)
+      << "Can't decrease " << size << " from " << stats->obj_memory_usage;
+  stats->obj_memory_usage += size;
+  stats->AddTypeMemoryUsage(type, size);
 }
 
 void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
@@ -82,8 +82,8 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   }
 
   stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(del_it->first, &stats, -1);   // Key
-  AccountObjectMemory(del_it->second, &stats, -1);  // Value
+  AccountObjectMemory(del_it->first.ObjType(), -del_it->first.MallocUsed(), &stats);    // Key
+  AccountObjectMemory(del_it->second.ObjType(), -del_it->second.MallocUsed(), &stats);  // Value
 
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
@@ -377,7 +377,7 @@ void DbSlice::AutoUpdater::Run() {
   DCHECK(fields_.action == DestructorAction::kRun);
   CHECK_NE(fields_.db_slice, nullptr);
 
-  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.it, fields_.key, fields_.key_existed);
+  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.it, fields_.key, fields_.orig_heap_size);
   Cancel();  // Reset to not run again
 }
 
@@ -387,8 +387,10 @@ void DbSlice::AutoUpdater::Cancel() {
 
 DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   DCHECK(fields_.action == DestructorAction::kRun);
+  DCHECK(IsValid(fields.it));
   fields_.db_size = fields_.db_slice->DbSize(fields_.db_ind);
   fields_.deletion_count = fields_.db_slice->deletion_count_;
+  fields_.orig_heap_size = fields.it->second.MallocUsed();
 }
 
 DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) {
@@ -405,7 +407,11 @@ DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key)
   if (IsValid(it)) {
     PreUpdate(cntx.db_index, it);
     return {it, exp_it,
-            AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})};
+            AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                         .db_slice = this,
+                         .db_ind = cntx.db_index,
+                         .it = it,
+                         .key = key})};
   } else {
     return {it, exp_it, {}};
   }
@@ -425,7 +431,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 
   PreUpdate(cntx.db_index, it);
   return {{it, exp_it,
-           AutoUpdater({AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, true})}};
+           AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                        .db_slice = this,
+                        .db_ind = cntx.db_index,
+                        .it = it,
+                        .key = key})}};
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
@@ -534,8 +544,11 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
     return {.it = res.it,
             .exp_it = res.exp_it,
             .is_new = false,
-            .post_updater = AutoUpdater(
-                {AutoUpdater::DestructorAction::kRun, this, cntx.db_index, res.it, key, true})};
+            .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                                         .db_slice = this,
+                                         .db_ind = cntx.db_index,
+                                         .it = res.it,
+                                         .key = key})};
   }
 
   // It's a new entry.
@@ -597,7 +610,7 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
   }
 
   db.stats.inline_keys += it->first.IsInline();
-  AccountObjectMemory(it->first, &db.stats, 1);  // Account for key
+  AccountObjectMemory(it->first.ObjType(), it->first.MallocUsed(), &db.stats);  // Account for key
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
@@ -616,8 +629,11 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
   return {.it = it,
           .exp_it = ExpireIterator{},
           .is_new = true,
-          .post_updater = AutoUpdater(
-              {AutoUpdater::DestructorAction::kRun, this, cntx.db_index, it, key, false})};
+          .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                                       .db_slice = this,
+                                       .db_ind = cntx.db_index,
+                                       .it = it,
+                                       .key = key})};
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -999,10 +1015,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
     ccb.second(db_ind, ChangeReq{it});
   }
 
-  // TODO(#2252): Remove and do accounting only in PostUpdate()
   auto* stats = MutableStats(db_ind);
-  AccountObjectMemory(it->second, stats, -1);
-
   if (it->second.ObjType() == OBJ_STRING) {
     if (it->second.IsExternal()) {
       // We assume here that the operation code either loaded the entry into memory
@@ -1026,10 +1039,11 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   it.SetVersion(NextVersion());
 }
 
-void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing) {
+void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size) {
   DbTableStats* stats = MutableStats(db_ind);
 
-  AccountObjectMemory(it->second, stats, 1);
+  int64_t delta = static_cast<int64_t>(it->second.MallocUsed()) - static_cast<int64_t>(orig_size);
+  AccountObjectMemory(it->second.ObjType(), delta, stats);
 
   auto& db = *db_arr_[db_ind];
   auto& watched_keys = db.watched_keys;

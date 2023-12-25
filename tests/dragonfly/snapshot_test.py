@@ -254,13 +254,58 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
 
+    async def _get_info_memory_fields(self, client):
+        res = await client.execute_command("INFO MEMORY")
+        fields = {}
+        for line in res.decode("ascii").splitlines():
+            if line.startswith("#"):
+                continue
+            k, v = line.split(":")
+            if k == "object_used_memory" or k.startswith("type_used_memory_"):
+                fields.update({k: int(v)})
+        return fields
+
+    async def _delete_all_keys(self, client):
+        # Delete all keys from all DBs
+        for i in range(0, SEEDER_ARGS["dbcount"]):
+            await client.select(i)
+            while True:
+                keys = await client.keys("*")
+                if len(keys) == 0:
+                    break
+                await client.delete(*keys)
+
+    @pytest.mark.asyncio
+    async def test_memory_counters(self, df_seeder_factory, df_server):
+        a_client = aioredis.Redis(port=df_server.port)
+
+        memory_counters = await self._get_info_memory_fields(a_client)
+        assert memory_counters == {"object_used_memory": 0}
+
+        seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
+        await seeder.run(target_deviation=0.1)
+
+        memory_counters = await self._get_info_memory_fields(a_client)
+        assert all(value > 0 for value in memory_counters.values())
+
+        await self._delete_all_keys(a_client)
+        memory_counters = await self._get_info_memory_fields(a_client)
+        assert memory_counters == {"object_used_memory": 0}
+
     @pytest.mark.asyncio
     @pytest.mark.slow
     async def test_snapshot(self, df_seeder_factory, df_server):
+        """Checks that:
+        1. After reloading the snapshot file the data is the same
+        2. Memory counters after loading from snapshot is similar to before creating a snapshot
+        3. Memory counters after deleting all keys loaded by snapshot - this validates the memory
+           counting when loading from snapshot."""
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
 
         start_capture = await seeder.capture()
+        a_client = aioredis.Redis(port=df_server.port)
+        memory_before = await self._get_info_memory_fields(a_client)
 
         df_server.stop()
         df_server.start()
@@ -270,6 +315,16 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         await a_client.connection_pool.disconnect()
 
         assert await seeder.compare(start_capture, port=df_server.port)
+        memory_after = await self._get_info_memory_fields(a_client)
+        for counter, value in memory_before.items():
+            # Unfortunately memory usage sometimes depends on order of insertion / deletion, so
+            # it's usually not exactly the same. For the test to be stable we check that it's
+            # at least 50% that of the original value.
+            assert memory_after[counter] >= 0.5 * value
+
+        await self._delete_all_keys(a_client)
+        memory_empty = await self._get_info_memory_fields(a_client)
+        assert memory_empty == {"object_used_memory": 0}
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-info-persistence"})
