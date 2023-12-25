@@ -24,8 +24,9 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             )
 
 if (NOT APPLE)
-  SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc)
+  SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc search/aggregator.cc)
   cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+  cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 endif()
 
 add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
