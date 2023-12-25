@@ -1732,6 +1732,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
     append("tx_queue_len", m.tx_queue_len);
+    append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
+    append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
+    append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);
   }
 
   if (should_enter("REPLICATION")) {

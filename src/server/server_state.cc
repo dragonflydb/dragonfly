@@ -48,7 +48,7 @@ auto ServerState::Stats::operator=(Stats&& other) -> Stats& {
 }
 
 ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 10 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 13 * 8, "Stats size mismatch");
 
   for (int i = 0; i < NUM_TX_TYPES; ++i) {
     this->tx_type_cnt[i] += other.tx_type_cnt[i];
@@ -58,6 +58,10 @@ ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerSta
   this->eval_shardlocal_coordination_cnt += other.eval_shardlocal_coordination_cnt;
   this->eval_squashed_flushes += other.eval_squashed_flushes;
   this->tx_schedule_cancel_cnt += other.tx_schedule_cancel_cnt;
+
+  this->multi_squash_executions += other.multi_squash_executions;
+  this->multi_squash_exec_hop_usec += other.multi_squash_exec_hop_usec;
+  this->multi_squash_exec_reply_usec += other.multi_squash_exec_reply_usec;
 
   if (this->tx_width_freq_arr == nullptr) {
     this->tx_width_freq_arr = new uint64_t[num_shards];

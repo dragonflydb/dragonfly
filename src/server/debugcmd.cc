@@ -220,6 +220,11 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "HELP") {
     string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "EXEC",
+        "    Show the descriptors of the MULTI/EXEC transactions that were processed by ",
+        "    the server. For each EXEC/i descriptor, 'i' is the number of shards it touches. ",
+        "    Each descriptor details the commands it contained followed by number of their ",
+        "    arguments. Each descriptor is prefixed by its frequency count",
         "OBJECT <key>",
         "    Show low-level info about `key` and associated value.",
         "LOAD <filename>",
@@ -300,6 +305,9 @@ void DebugCmd::Run(CmdArgList args) {
     return Shards();
   }
 
+  if (subcmd == "EXEC") {
+    return Exec();
+  }
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cntx_->SendError(reply, kSyntaxErrType);
 }
@@ -560,6 +568,26 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values, params,
                     ps[shard->shard_id()]);
   });
+}
+
+void DebugCmd::Exec() {
+  EngineShardSet& ess = *shard_set;
+  fb2::Mutex mu;
+  std::map<string, unsigned> freq_cnt;
+
+  ess.pool()->Await([&](auto*) {
+    for (const auto& k_v : ServerState::tlocal()->exec_freq_count) {
+      unique_lock lk(mu);
+      freq_cnt[k_v.first] += k_v.second;
+    }
+  });
+
+  string res;
+  for (const auto& k_v : freq_cnt) {
+    StrAppend(&res, k_v.second, ":", k_v.first, "\n");
+  }
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  rb->SendVerbatimString(res);
 }
 
 void DebugCmd::Inspect(string_view key) {
