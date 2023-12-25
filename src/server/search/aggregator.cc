@@ -1,3 +1,7 @@
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "server/search/aggregator.h"
 
 #include "base/logging.h"
