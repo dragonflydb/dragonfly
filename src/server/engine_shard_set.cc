@@ -735,17 +735,20 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
       if (trx->IsGlobal() || (trx->IsMulti() && trx->GetMultiMode() == Transaction::GLOBAL)) {
         info.tx_global++;
       } else {
-        KeyLockArgs lock_args = trx->GetLockArgs(sid);
         DbTable* table = db_slice().GetDBTable(trx->GetDbIndex());
         bool can_run = true;
-        for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-          string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-          auto it = table->trans_locks.find(s);
-          DCHECK(it != table->trans_locks.end());
-          if (it != table->trans_locks.end()) {
-            if (it->second.IsContended()) {
-              can_run = false;
-              break;
+
+        if (!trx->IsMulti()) {
+          KeyLockArgs lock_args = trx->GetLockArgs(sid);
+          for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
+            string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+            auto it = table->trans_locks.find(s);
+            DCHECK(it != table->trans_locks.end());
+            if (it != table->trans_locks.end()) {
+              if (it->second.IsContended()) {
+                can_run = false;
+                break;
+              }
             }
           }
         }
@@ -760,6 +763,9 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
   // Analyze locks
   for (unsigned i = 0; i <= max_db_id; ++i) {
     DbTable* table = db_slice().GetDBTable(i);
+    if (table == nullptr)
+      continue;
+
     info.total_locks += table->trans_locks.size();
     for (const auto& k_v : table->trans_locks) {
       if (k_v.second.IsContended()) {
