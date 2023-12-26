@@ -214,6 +214,7 @@ using namespace util;
 using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
+using SendStatsType = facade::SinkReplyBuilder::SendStatsType;
 
 namespace {
 
@@ -825,6 +826,40 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("net_output_bytes_total", "", conn_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
+  {
+    string send_latency_metrics;
+    constexpr string_view kReplyLatency = "reply_latency_seconds_total";
+    AppendMetricHeader(kReplyLatency, "Reply latency per type", MetricType::COUNTER,
+                       &send_latency_metrics);
+
+    string send_count_metrics;
+    constexpr string_view kReplyCount = "reply_total";
+    AppendMetricHeader(kReplyCount, "Reply count per type", MetricType::COUNTER,
+                       &send_count_metrics);
+
+    for (unsigned i = 0; i < SendStatsType::kNumTypes; ++i) {
+      auto& stats = m.reply_stats[i];
+      string_view type;
+      switch (SendStatsType(i)) {
+        case SendStatsType::kRegular:
+          type = "regular";
+          break;
+        case SendStatsType::kBatch:
+          type = "batch";
+          break;
+        case SendStatsType::kNumTypes:
+          type = "other";
+          break;
+      }
+
+      AppendMetricValue(kReplyLatency, stats.total_duration * 1'000'000, {"type"}, {type},
+                        &send_latency_metrics);
+      AppendMetricValue(kReplyCount, stats.count, {"type"}, {type}, &send_count_metrics);
+    }
+
+    absl::StrAppend(&resp->body(), send_latency_metrics);
+    absl::StrAppend(&resp->body(), send_count_metrics);
+  }
 
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
@@ -1498,6 +1533,7 @@ Metrics ServerFamily::GetMetrics() const {
   auto cb = [&](unsigned index, ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
     ServerState* ss = ServerState::tlocal();
+    auto reply_stats = SinkReplyBuilder::GetThreadLocalStats();
 
     lock_guard lk(mu);
 
@@ -1511,6 +1547,10 @@ Metrics ServerFamily::GetMetrics() const {
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
     result.conn_stats += ss->connection_stats;
+
+    for (size_t i = 0; i < reply_stats.size(); ++i) {
+      result.reply_stats[i] += reply_stats[i];
+    }
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
@@ -1703,6 +1743,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
+    append("reply_count", m.reply_stats[SendStatsType::kRegular].count);
+    append("reply_latency_usec", m.reply_stats[SendStatsType::kRegular].total_duration);
+    append("reply_batch_count", m.reply_stats[SendStatsType::kBatch].count);
+    append("reply_batch_latency_usec", m.reply_stats[SendStatsType::kBatch].total_duration);
   }
 
   if (should_enter("TIERED", true)) {
