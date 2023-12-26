@@ -487,6 +487,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
+  const auto create_snapshot_schedule_fb = [this] {
+    snapshot_schedule_fb_ =
+        service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
+  };
+  config_registry.RegisterMutable(
+      "snapshot_cron", [this, create_snapshot_schedule_fb](const absl::CommandLineFlag& flag) {
+        JoinSnapshotSchedule();
+        create_snapshot_schedule_fb();
+        return true;
+      });
+  create_snapshot_schedule_fb();
+
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     service_.proactor_pool().GetNextProactor()->Await(
@@ -507,19 +519,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
     }
   }
-
-  const auto create_snapshot_schedule_fb = [this] {
-    snapshot_schedule_fb_ =
-        service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
-  };
-  config_registry.RegisterMutable(
-      "snapshot_cron", [this, create_snapshot_schedule_fb](const absl::CommandLineFlag& flag) {
-        JoinSnapshotSchedule();
-        create_snapshot_schedule_fb();
-        return true;
-      });
-
-  create_snapshot_schedule_fb();
 }
 
 void ServerFamily::JoinSnapshotSchedule() {
@@ -1936,8 +1935,12 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
+  // We should not execute replica of command while loading from snapshot.
+  if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
+    cntx->SendError("Can not execute during LOADING");
+    return;
+  }
   LOG(INFO) << "Replicating " << host << ":" << port_sv;
-
   unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
   // If NO ONE was supplied, just stop the current replica (if it exists)
