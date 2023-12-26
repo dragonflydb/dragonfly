@@ -1814,7 +1814,7 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     replica = df_local_factory.create(dbfilename=f"dump_{tmp_file_name}")
     df_local_factory.start_all([master, replica])
 
-    seeder = df_seeder_factory.create(port=replica.port, keys=10000)
+    seeder = df_seeder_factory.create(port=replica.port, keys=30000)
     await seeder.run(target_deviation=0.1)
     c_replica = replica.client()
     dbsize = await c_replica.dbsize()
@@ -1832,3 +1832,7 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     # Check one we finish loading snapshot replicaof success
     await wait_available_async(c_replica)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    await c_replica.close()
+    master.stop()
+    replica.stop()
