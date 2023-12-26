@@ -156,9 +156,9 @@ class SinkReplyBuilder {
   virtual size_t UsedMemory() const;
 
   enum SendStatsType {
-    kRegular,
-    kBatch,
-    kCount,
+    kRegular,   // Send() operations that are written to sockets
+    kBatch,     // Send() operations that are internally batched to a buffer
+    kNumTypes,  // Number of types, do not use directly
   };
 
   struct SendStats {
@@ -172,7 +172,7 @@ class SinkReplyBuilder {
     }
   };
 
-  using StatsType = std::array<SendStats, SendStatsType::kCount>;
+  using StatsType = std::array<SendStats, SendStatsType::kNumTypes>;
 
   static StatsType GetThreadLocalStats();
 

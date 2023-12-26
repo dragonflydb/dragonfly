@@ -828,16 +828,16 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::COUNTER, &resp->body());
   {
     string send_latency_metrics;
-    constexpr string_view kReplyLatency = "reply_latency_usec_total";
-    AppendMetricHeader(kReplyLatency, "Reply latency per mode", MetricType::COUNTER,
+    constexpr string_view kReplyLatency = "reply_latency_seconds_total";
+    AppendMetricHeader(kReplyLatency, "Reply latency per type", MetricType::COUNTER,
                        &send_latency_metrics);
 
     string send_count_metrics;
-    constexpr string_view kReplyCount = "reply_count";
-    AppendMetricHeader(kReplyCount, "Reply count per mode", MetricType::COUNTER,
+    constexpr string_view kReplyCount = "reply_total";
+    AppendMetricHeader(kReplyCount, "Reply count per type", MetricType::COUNTER,
                        &send_count_metrics);
 
-    for (unsigned i = 0; i < SendStatsType::kCount; ++i) {
+    for (unsigned i = 0; i < SendStatsType::kNumTypes; ++i) {
       auto& stats = m.reply_stats[i];
       string_view type;
       switch (SendStatsType(i)) {
@@ -847,12 +847,12 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
         case SendStatsType::kBatch:
           type = "batch";
           break;
-        case SendStatsType::kCount:
+        case SendStatsType::kNumTypes:
           type = "other";
           break;
       }
 
-      AppendMetricValue(kReplyLatency, stats.total_duration, {"type"}, {type},
+      AppendMetricValue(kReplyLatency, stats.total_duration * 1'000'000, {"type"}, {type},
                         &send_latency_metrics);
       AppendMetricValue(kReplyCount, stats.count, {"type"}, {type}, &send_count_metrics);
     }
