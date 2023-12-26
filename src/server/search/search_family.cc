@@ -24,6 +24,7 @@
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/transaction.h"
 
@@ -592,6 +593,53 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
         rb->StartArray(children);
     }
   }
+}
+
+void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
+  string_view index_name = ArgS(args, 0);
+  string_view query_str = ArgS(args, 1);
+
+  SearchParams params;
+  search::SearchAlgorithm search_algo;
+  if (!search_algo.Init(query_str, &params.query_params, nullptr))
+    return cntx->SendError("Query syntax error");
+
+  using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
+      declval<OpArgs>(), params, &search_algo));
+
+  vector<ResultContainer> results(shard_set->size());
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    if (auto* index = es->search_indices()->GetIndex(index_name); index)
+      results[es->shard_id()] = index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
+    return OpStatus::OK;
+  });
+
+  auto convert = [](const search::ResultScore& score) -> aggregate::Value {
+    if (holds_alternative<search::WrappedStrPtr>(score))
+      return string(string_view(get<search::WrappedStrPtr>(score)));
+
+    if (holds_alternative<double>(score))
+      return get<double>(score);
+
+    return std::monostate{};
+  };
+
+  vector<aggregate::DocValues> values;
+  for (const auto& sub_results : results) {
+    for (const auto& entry : sub_results) {
+      aggregate::DocValues entry_kv;
+      for (const auto& [k, v] : entry) {
+        entry_kv[k] = convert(v);
+      }
+    }
+  }
+
+  vector<aggregate::PipelineStep> steps;
+
+  auto aggregate_results = aggregate::Process(std::move(values), absl::MakeSpan(steps));
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendOk();
 }
 
 #define HFUNC(x) SetHandler(&SearchFamily::x)

@@ -64,12 +64,13 @@ class FieldIndices {
 
   BaseIndex* GetIndex(std::string_view field) const;
   BaseSortIndex* GetSortIndex(std::string_view field) const;
-
   std::vector<TextIndex*> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
-
   const Schema& GetSchema() const;
+
+  // Extract values stored in sort indices
+  std::vector<std::pair<std::string, ResultScore>> ExtractStoredValues(DocId doc) const;
 
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);

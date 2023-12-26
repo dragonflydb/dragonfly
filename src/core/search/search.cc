@@ -558,6 +558,14 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
+vector<pair<string, ResultScore>> FieldIndices::ExtractStoredValues(DocId doc) const {
+  vector<pair<string, ResultScore>> out;
+  for (const auto& [ident, index] : sort_indices_) {
+    out.emplace_back(ident, index->Lookup(doc));
+  }
+  return out;
+}
+
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 

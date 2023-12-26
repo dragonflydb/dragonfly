@@ -229,6 +229,36 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
                       std::move(search_results.profile)};
 }
 
+vector<vector<pair<string, search::ResultScore>>> ShardDocIndex::SearchForAggregator(
+    const OpArgs& op_args, const SearchParams& params, search::SearchAlgorithm* search_algo) const {
+  auto& db_slice = op_args.shard->db_slice();
+  auto search_results = search_algo->Search(&indices_, params.limit_offset + params.limit_total);
+
+  if (!search_results.error.empty())
+    return {};
+
+  vector<vector<pair<string, search::ResultScore>>> out;
+  for (DocId doc : search_results.ids) {
+    auto key = key_index_.Get(doc);
+    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+
+    if (!it || !IsValid(*it))  // Item must have expired
+      continue;
+
+    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+    auto extracted = indices_.ExtractStoredValues(doc);
+
+    auto loaded = accessor->Serialize(base_->schema, *params.return_fields);
+    for (const auto& [field, value] : loaded) {
+      extracted.emplace_back(field, value);
+    }
+
+    out.push_back(std::move(extracted));
+  }
+
+  return out;
+}
+
 DocIndexInfo ShardDocIndex::GetInfo() const {
   return {*base_, key_index_.Size()};
 }

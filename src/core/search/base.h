@@ -46,8 +46,11 @@ struct SortOption {
 struct WrappedStrPtr {
   // Intentionally implicit and const std::string& for use in templates
   WrappedStrPtr(const PMR_NS::string& s);
+  WrappedStrPtr(const std::string& s);
   bool operator<(const WrappedStrPtr& other) const;
   bool operator>=(const WrappedStrPtr& other) const;
+
+  operator std::string_view() const;
 
  private:
   std::unique_ptr<char[]> ptr;
@@ -78,6 +81,7 @@ struct BaseIndex {
 
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
+  virtual ResultScore Lookup(DocId doc) const = 0;
   virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
 };
 
