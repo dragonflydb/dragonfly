@@ -487,6 +487,26 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
+  // check for '--replicaof' before loading anything
+  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
+    service_.proactor_pool().GetNextProactor()->Await(
+        [this, &flag]() { this->Replicate(flag.host, flag.port); });
+  } else {  // load from snapshot only if --replicaof is empty
+    const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
+    if (load_path_result) {
+      const std::string load_path = *load_path_result;
+      if (!load_path.empty()) {
+        load_result_ = Load(load_path);
+      }
+    } else {
+      if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
+        LOG(WARNING) << "Load snapshot: No snapshot found";
+      } else {
+        LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+      }
+    }
+  }
+
   const auto create_snapshot_schedule_fb = [this] {
     snapshot_schedule_fb_ =
         service_.proactor_pool().GetNextProactor()->LaunchFiber([this] { SnapshotScheduling(); });
@@ -498,27 +518,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
         return true;
       });
   create_snapshot_schedule_fb();
-
-  // check for '--replicaof' before loading anything
-  if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
-    service_.proactor_pool().GetNextProactor()->Await(
-        [this, &flag]() { this->Replicate(flag.host, flag.port); });
-    return;  // DONT load any snapshots
-  }
-
-  const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
-  if (load_path_result) {
-    const std::string load_path = *load_path_result;
-    if (!load_path.empty()) {
-      load_result_ = Load(load_path);
-    }
-  } else {
-    if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
-      LOG(WARNING) << "Load snapshot: No snapshot found";
-    } else {
-      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
-    }
-  }
 }
 
 void ServerFamily::JoinSnapshotSchedule() {
