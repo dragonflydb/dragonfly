@@ -1934,13 +1934,14 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
+  LOG(INFO) << "Replicating " << host << ":" << port_sv;
+  unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
+
   // We should not execute replica of command while loading from snapshot.
   if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
     cntx->SendError("Can not execute during LOADING");
     return;
   }
-  LOG(INFO) << "Replicating " << host << ":" << port_sv;
-  unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
   // If NO ONE was supplied, just stop the current replica (if it exists)
   if (IsReplicatingNoOne(host, port_sv)) {
