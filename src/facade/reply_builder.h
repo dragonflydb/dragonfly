@@ -155,6 +155,27 @@ class SinkReplyBuilder {
 
   virtual size_t UsedMemory() const;
 
+  enum SendStatsType {
+    kRegular,
+    kBatch,
+    kCount,
+  };
+
+  struct SendStats {
+    int64_t count = 0;
+    int64_t total_duration = 0;
+
+    SendStats& operator+=(const SendStats& other) {
+      count += other.count;
+      total_duration += other.total_duration;
+      return *this;
+    }
+  };
+
+  using StatsType = std::array<SendStats, SendStatsType::kCount>;
+
+  static StatsType GetThreadLocalStats();
+
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
   void SendRawVec(absl::Span<const std::string_view> msg_vec);

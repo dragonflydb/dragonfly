@@ -10,6 +10,7 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/redis_parser.h"
+#include "facade/reply_builder.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
@@ -76,6 +77,8 @@ struct Metrics {
   TieredStats tiered_stats;            // stats for tiered storage
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
+
+  facade::SinkReplyBuilder::StatsType reply_stats{};  // Stats for Send*() ops
 
   PeakStats peak_stats;
 
