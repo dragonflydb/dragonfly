@@ -887,6 +887,32 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
+
+  AppendMetricHeader("transaction_widths_total", "Transaction counts by their widths",
+                     MetricType::COUNTER, &resp->body());
+
+  for (unsigned width = 0; width < shard_set->size(); ++width) {
+    uint64_t count = m.coordinator_stats.tx_width_freq_arr[width];
+
+    if (count > 0) {
+      AppendMetricValue("transaction_widths_total", count, {"width"}, {StrCat("w", width + 1)},
+                        &resp->body());
+    }
+  }
+
+  const auto& tc = m.coordinator_stats.tx_type_cnt;
+  AppendMetricHeader("transaction_types_total", "Transaction counts by their types",
+                     MetricType::COUNTER, &resp->body());
+
+  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "ooo", "quick",
+                                                         "inline"};
+  for (unsigned type = 0; type < ServerState::NUM_TX_TYPES; ++type) {
+    if (tc[type] > 0) {
+      AppendMetricValue("transaction_types_total", tc[type], {"type"}, {kTxTypeNames[type]},
+                        &resp->body());
+    }
+  }
+
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
