@@ -356,6 +356,8 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
     } else {
       shard_data_[i].local_mask &= ~ACTIVE;
     }
+    shard_data_[i].arg_start = 0;
+    shard_data_[i].arg_count = 0;
   }
 }
 
