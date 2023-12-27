@@ -204,6 +204,7 @@ class ServerFamily {
 
  private:
   void JoinSnapshotSchedule();
+  void LoadFromSnapshot();
 
   uint32_t shard_count() const {
     return shard_set->size();

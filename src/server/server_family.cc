@@ -492,19 +492,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     service_.proactor_pool().GetNextProactor()->Await(
         [this, &flag]() { this->Replicate(flag.host, flag.port); });
   } else {  // load from snapshot only if --replicaof is empty
-    const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
-    if (load_path_result) {
-      const std::string load_path = *load_path_result;
-      if (!load_path.empty()) {
-        load_result_ = Load(load_path);
-      }
-    } else {
-      if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
-        LOG(WARNING) << "Load snapshot: No snapshot found";
-      } else {
-        LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
-      }
-    }
+    LoadFromSnapshot();
   }
 
   const auto create_snapshot_schedule_fb = [this] {
@@ -518,6 +506,23 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
         return true;
       });
   create_snapshot_schedule_fb();
+}
+
+void ServerFamily::LoadFromSnapshot() {
+  const auto load_path_result =
+      snapshot_storage_->LoadPath(GetFlag(FLAGS_dir), GetFlag(FLAGS_dbfilename));
+  if (load_path_result) {
+    const std::string load_path = *load_path_result;
+    if (!load_path.empty()) {
+      load_result_ = Load(load_path);
+    }
+  } else {
+    if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
+      LOG(WARNING) << "Load snapshot: No snapshot found";
+    } else {
+      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+    }
+  }
 }
 
 void ServerFamily::JoinSnapshotSchedule() {
