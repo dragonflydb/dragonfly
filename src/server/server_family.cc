@@ -214,6 +214,7 @@ using namespace util;
 using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
+using SendStatsType = facade::SinkReplyBuilder::SendStatsType;
 
 namespace {
 
@@ -491,21 +492,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     service_.proactor_pool().GetNextProactor()->Await(
         [this, &flag]() { this->Replicate(flag.host, flag.port); });
-    return;  // DONT load any snapshots
-  }
-
-  const auto load_path_result = snapshot_storage_->LoadPath(flag_dir, GetFlag(FLAGS_dbfilename));
-  if (load_path_result) {
-    const std::string load_path = *load_path_result;
-    if (!load_path.empty()) {
-      load_result_ = Load(load_path);
-    }
-  } else {
-    if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
-      LOG(WARNING) << "Load snapshot: No snapshot found";
-    } else {
-      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
-    }
+  } else {  // load from snapshot only if --replicaof is empty
+    LoadFromSnapshot();
   }
 
   const auto create_snapshot_schedule_fb = [this] {
@@ -518,8 +506,24 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
         create_snapshot_schedule_fb();
         return true;
       });
-
   create_snapshot_schedule_fb();
+}
+
+void ServerFamily::LoadFromSnapshot() {
+  const auto load_path_result =
+      snapshot_storage_->LoadPath(GetFlag(FLAGS_dir), GetFlag(FLAGS_dbfilename));
+  if (load_path_result) {
+    const std::string load_path = *load_path_result;
+    if (!load_path.empty()) {
+      load_result_ = Load(load_path);
+    }
+  } else {
+    if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
+      LOG(WARNING) << "Load snapshot: No snapshot found";
+    } else {
+      LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
+    }
+  }
 }
 
 void ServerFamily::JoinSnapshotSchedule() {
@@ -825,6 +829,40 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("net_output_bytes_total", "", conn_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
+  {
+    string send_latency_metrics;
+    constexpr string_view kReplyLatency = "reply_latency_seconds_total";
+    AppendMetricHeader(kReplyLatency, "Reply latency per type", MetricType::COUNTER,
+                       &send_latency_metrics);
+
+    string send_count_metrics;
+    constexpr string_view kReplyCount = "reply_total";
+    AppendMetricHeader(kReplyCount, "Reply count per type", MetricType::COUNTER,
+                       &send_count_metrics);
+
+    for (unsigned i = 0; i < SendStatsType::kNumTypes; ++i) {
+      auto& stats = m.reply_stats[i];
+      string_view type;
+      switch (SendStatsType(i)) {
+        case SendStatsType::kRegular:
+          type = "regular";
+          break;
+        case SendStatsType::kBatch:
+          type = "batch";
+          break;
+        case SendStatsType::kNumTypes:
+          type = "other";
+          break;
+      }
+
+      AppendMetricValue(kReplyLatency, stats.total_duration * 1'000'000, {"type"}, {type},
+                        &send_latency_metrics);
+      AppendMetricValue(kReplyCount, stats.count, {"type"}, {type}, &send_count_metrics);
+    }
+
+    absl::StrAppend(&resp->body(), send_latency_metrics);
+    absl::StrAppend(&resp->body(), send_count_metrics);
+  }
 
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
@@ -887,6 +925,32 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
+
+  AppendMetricHeader("transaction_widths_total", "Transaction counts by their widths",
+                     MetricType::COUNTER, &resp->body());
+
+  for (unsigned width = 0; width < shard_set->size(); ++width) {
+    uint64_t count = m.coordinator_stats.tx_width_freq_arr[width];
+
+    if (count > 0) {
+      AppendMetricValue("transaction_widths_total", count, {"width"}, {StrCat("w", width + 1)},
+                        &resp->body());
+    }
+  }
+
+  const auto& tc = m.coordinator_stats.tx_type_cnt;
+  AppendMetricHeader("transaction_types_total", "Transaction counts by their types",
+                     MetricType::COUNTER, &resp->body());
+
+  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "ooo", "quick",
+                                                         "inline"};
+  for (unsigned type = 0; type < ServerState::NUM_TX_TYPES; ++type) {
+    if (tc[type] > 0) {
+      AppendMetricValue("transaction_types_total", tc[type], {"type"}, {kTxTypeNames[type]},
+                        &resp->body());
+    }
+  }
+
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
@@ -1472,6 +1536,7 @@ Metrics ServerFamily::GetMetrics() const {
   auto cb = [&](unsigned index, ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
     ServerState* ss = ServerState::tlocal();
+    auto reply_stats = SinkReplyBuilder::GetThreadLocalStats();
 
     lock_guard lk(mu);
 
@@ -1485,6 +1550,10 @@ Metrics ServerFamily::GetMetrics() const {
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
     result.conn_stats += ss->connection_stats;
+
+    for (size_t i = 0; i < reply_stats.size(); ++i) {
+      result.reply_stats[i] += reply_stats[i];
+    }
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
@@ -1677,6 +1746,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
+    append("reply_count", m.reply_stats[SendStatsType::kRegular].count);
+    append("reply_latency_usec", m.reply_stats[SendStatsType::kRegular].total_duration);
+    append("reply_batch_count", m.reply_stats[SendStatsType::kBatch].count);
+    append("reply_batch_latency_usec", m.reply_stats[SendStatsType::kBatch].total_duration);
   }
 
   if (should_enter("TIERED", true)) {
@@ -1732,6 +1805,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
     append("tx_queue_len", m.tx_queue_len);
+    append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
+    append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
+    append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);
   }
 
   if (should_enter("REPLICATION")) {
@@ -1934,8 +2010,13 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
   LOG(INFO) << "Replicating " << host << ":" << port_sv;
-
   unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
+
+  // We should not execute replica of command while loading from snapshot.
+  if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
+    cntx->SendError("Can not execute during LOADING");
+    return;
+  }
 
   // If NO ONE was supplied, just stop the current replica (if it exists)
   if (IsReplicatingNoOne(host, port_sv)) {

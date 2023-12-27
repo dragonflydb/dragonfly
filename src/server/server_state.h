@@ -102,6 +102,9 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t eval_squashed_flushes = 0;
 
     uint64_t tx_schedule_cancel_cnt = 0;
+    uint64_t multi_squash_executions = 0;
+    uint64_t multi_squash_exec_hop_usec = 0;
+    uint64_t multi_squash_exec_reply_usec = 0;
 
     // Array of size of number of shards.
     // Each entry is how many transactions we had with this width (unique_shard_cnt).
@@ -253,6 +256,9 @@ class ServerState {  // public struct - to allow initialization.
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
   };
+
+  // Exec descriptor frequency count for this thread.
+  absl::flat_hash_map<std::string, unsigned> exec_freq_count;
 
  private:
   int64_t live_transactions_ = 0;

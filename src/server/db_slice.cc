@@ -863,12 +863,12 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
     lock_acquired = lt[key].Acquire(mode);
-    uniq_keys_ = {key};
+    uniq_keys_ = {key};  // needed only for tests.
   } else {
     uniq_keys_.clear();
 
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
         bool res = lt[s].Acquire(mode);
         lock_acquired &= res;

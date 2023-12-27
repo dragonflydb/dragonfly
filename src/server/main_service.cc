@@ -79,6 +79,8 @@ ABSL_FLAG(uint32_t, multi_exec_mode, 2,
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
+ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
+
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
@@ -698,6 +700,16 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
     multi_mode = Transaction::GLOBAL;
 
   return multi_mode;
+}
+
+string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
+  string result;
+  result.reserve(stored_cmds.size() * 10);
+  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "\n");
+  for (const auto& scmd : stored_cmds) {
+    absl::StrAppend(&result, "  ", scmd.Cid()->name(), " ", scmd.NumArgs(), "\n");
+  }
+  return result;
 }
 
 // Either take the interpreter from the preborrowed multi exec transaction or borrow one.
@@ -2057,13 +2069,21 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   exec_info.state = ConnectionState::ExecInfo::EXEC_RUNNING;
 
   VLOG(1) << "StartExec " << exec_info.body.size();
+
+  // Make sure we flush whatever responses we aggregated in the reply builder.
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
+  ServerState* ss = ServerState::tlocal();
   if (state != ExecEvalState::NONE)
     exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
 
   if (!exec_info.body.empty()) {
+    if (GetFlag(FLAGS_track_exec_frequencies)) {
+      string descr = CreateExecDescriptor(exec_info.body, cntx->transaction->GetUniqueShardCnt());
+      ss->exec_freq_count[descr]++;
+    }
+
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {

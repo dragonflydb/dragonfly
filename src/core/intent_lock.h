@@ -23,12 +23,24 @@ class IntentLock {
     return m == SHARED || cnt_[EXCLUSIVE] == 1;
   }
 
+  // Returns true if lock can be acquired using `m` mode.
   bool Check(Mode m) const {
     unsigned s = cnt_[EXCLUSIVE];
     if (s)
       return false;
 
-    return (m == SHARED) ? true : IsFree();
+    return (m == SHARED) ? true : cnt_[SHARED] == 0;
+  }
+
+  // Returns true if this lock would block transactions from running unless they are at the head
+  // of the transaction queue (first ones)
+  bool IsContended() const {
+    return (cnt_[EXCLUSIVE] > 1) || (cnt_[EXCLUSIVE] == 1 && cnt_[SHARED] > 0);
+  }
+
+  // A heuristic function to estimate the contention amount with a single score.
+  unsigned ContentionScore() const {
+    return cnt_[EXCLUSIVE] * 256 + cnt_[SHARED];
   }
 
   void Release(Mode m, unsigned val = 1) {
