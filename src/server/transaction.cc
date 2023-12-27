@@ -347,6 +347,9 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
   multi_->role = SQUASHER;
   InitBase(db_index_, {});
 
+  // Because squashing already determines active shards by partitioning commands,
+  // we don't have to work with keys manually and can just mark active shards.
+  // The partitioned commands know it's keys and assume they have correct access.
   DCHECK_EQ(shard_data_.size(), shard_set->size());
   for (unsigned i = 0; i < shard_data_.size(); i++) {
     if (enabled(i)) {
@@ -356,6 +359,8 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
     } else {
       shard_data_[i].local_mask &= ~ACTIVE;
     }
+    shard_data_[i].arg_start = 0;
+    shard_data_[i].arg_count = 0;
   }
 }
 
