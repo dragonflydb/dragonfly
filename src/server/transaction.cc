@@ -166,7 +166,6 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   IntentLock::Mode mode = Mode();
 
   auto& tmp_uniques = tmp_space.uniq_keys;
-  tmp_uniques.clear();
 
   auto lock_key = [this, mode, &tmp_uniques](string_view key) {
     if (auto [_, inserted] = tmp_uniques.insert(KeyLockArgs::GetLockKey(key)); !inserted)
@@ -178,13 +177,16 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   // With EVAL, we call this function for EVAL itself as well as for each command
   // for eval. currently, we lock everything only during the eval call.
   if (!multi_->locks_recorded) {
+    tmp_uniques.clear();
+
     for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
       lock_key(ArgS(full_args_, i));
     if (key_index.bonus)
       lock_key(ArgS(full_args_, *key_index.bonus));
+
+    multi_->locks_recorded = true;
   }
 
-  multi_->locks_recorded = true;
   DCHECK(IsAtomicMulti());
   DCHECK(multi_->mode == GLOBAL || !multi_->lock_counts.empty());
 }
@@ -1167,6 +1169,8 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 
 // runs in engine-shard thread.
 ArgSlice Transaction::GetShardArgs(ShardId sid) const {
+  DCHECK(!multi_ || multi_->role != SQUASHER);
+
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
   // barrier.
   if (unique_shard_cnt_ == 1) {

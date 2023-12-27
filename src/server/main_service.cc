@@ -1250,6 +1250,15 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   const auto* conn = cntx->conn();
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr && etl.GetSlowLog().IsEnabled() &&
       invoke_time_usec > etl.log_slower_than_usec) {
+    vector<string> aux_params;
+    CmdArgVec aux_slices;
+
+    if (tail_args.empty() && cid->name() == "EXEC") {
+      // abuse tail_args to pass more information about the slow EXEC.
+      aux_params.emplace_back(StrCat("CMDCOUNT/", cntx->last_command_debug.exec_body_len));
+      aux_slices.emplace_back(aux_params.back());
+      tail_args = absl::MakeSpan(aux_slices);
+    }
     etl.GetSlowLog().Add(cid->name(), tail_args, conn->GetName(), conn->RemoteEndpointStr(),
                          invoke_time_usec, absl::GetCurrentTimeNanos() / 1000);
   }
@@ -2043,6 +2052,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendNull();
   }
 
+  cntx->last_command_debug.exec_body_len = exec_info.body.size();
   const CommandId* const exec_cid = cntx->cid;
   CmdArgVec arg_vec;
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
