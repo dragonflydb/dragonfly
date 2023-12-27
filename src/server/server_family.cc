@@ -831,7 +831,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::COUNTER, &resp->body());
   {
     string send_latency_metrics;
-    constexpr string_view kReplyLatency = "reply_latency_seconds_total";
+    constexpr string_view kReplyLatency = "reply_duration_seconds";
     AppendMetricHeader(kReplyLatency, "Reply latency per type", MetricType::COUNTER,
                        &send_latency_metrics);
 
@@ -855,7 +855,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
           break;
       }
 
-      AppendMetricValue(kReplyLatency, stats.total_duration * 1'000'000, {"type"}, {type},
+      AppendMetricValue(kReplyLatency, stats.total_duration / 1'000'000, {"type"}, {type},
                         &send_latency_metrics);
       AppendMetricValue(kReplyCount, stats.count, {"type"}, {type}, &send_count_metrics);
     }
@@ -894,7 +894,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
       const auto calls = stat.first;
       const double duration_seconds = stat.second * 1e-6;
       AppendMetricValue("commands_total", calls, {"cmd"}, {name}, &command_metrics);
-      AppendMetricValue("commands_duration_seconds_total", duration_seconds, {"cmd"}, {name},
+      AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
                         &command_metrics);
     }
     absl::StrAppend(&resp->body(), command_metrics);
