@@ -368,7 +368,7 @@ void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
   });
 }
 
-void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, uint64 max_file_size) {
+void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t max_file_size) {
   CHECK(shard_ == nullptr) << pb->GetPoolIndex();
 
   mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
@@ -809,7 +809,7 @@ uint64_t GetDiskLimit() {
     uint64_t limit = stat.f_frsize * stat.f_blocks;
     return limit;
   }
-  LOG(ERROR) << "Error getting filesystem information\n";
+  LOG(WARNING) << "Error getting filesystem information";
   return 0;
 }
 
@@ -819,9 +819,10 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   shard_queue_.resize(sz);
 
   string file_prefix = GetFlag(FLAGS_spill_file_prefix);
-  uint64 max_file_size = absl::GetFlag(FLAGS_max_file_size).value;
+  size_t max_shard_file_size = 0;
   if (!file_prefix.empty()) {
-    uint64_t max_file_size_limit = GetDiskLimit();
+    size_t max_file_size = absl::GetFlag(FLAGS_max_file_size).value;
+    size_t max_file_size_limit = GetDiskLimit();
     if (max_file_size == 0) {
       LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
       max_file_size = (max_file_size_limit * 0.8);
@@ -832,12 +833,18 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
                      << " disk space was found.";
       }
     }
+    max_shard_file_size = max_file_size / shard_queue_.size();
+    if (max_shard_file_size < 256_MB) {
+      LOG(ERROR) << "Max tiering file size is too small. Requeried at least "
+                 << strings::HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
+      exit(1);
+    }
     LOG(INFO) << "Max file size is: " << strings::HumanReadableNumBytes(max_file_size);
   }
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
-      InitThreadLocal(pb, update_db_time, max_file_size / shard_queue_.size());
+      InitThreadLocal(pb, update_db_time, max_shard_file_size);
     }
   });
 }
@@ -846,7 +853,7 @@ void EngineShardSet::Shutdown() {
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
-void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time, uint64 max_file_size) {
+void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t max_file_size) {
   EngineShard::InitThreadLocal(pb, update_db_time, max_file_size);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();

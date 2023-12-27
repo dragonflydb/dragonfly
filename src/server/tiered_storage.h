@@ -21,7 +21,7 @@ class TieredStorage {
  public:
   enum : uint16_t { kMinBlobLen = 64 };
 
-  explicit TieredStorage(DbSlice* db_slice, uint64_t max_file_size);
+  explicit TieredStorage(DbSlice* db_slice, size_t max_file_size);
   ~TieredStorage();
 
   std::error_code Open(const std::string& path);
@@ -69,6 +69,8 @@ class TieredStorage {
   absl::flat_hash_map<uint32_t, uint8_t> page_refcnt_;
 
   TieredStats stats_;
+  size_t max_file_size_;
+  size_t allocated_size_ = 0;
 };
 
 }  // namespace dfly
