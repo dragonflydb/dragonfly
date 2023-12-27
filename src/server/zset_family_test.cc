@@ -677,6 +677,26 @@ TEST_F(ZSetFamilyTest, BlockingIsReleased) {
   }
 }
 
+TEST_F(ZSetFamilyTest, BlockingWithIncorrectType) {
+  RespExpr resp0;
+  RespExpr resp1;
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"BLPOP", "list1", "0"});
+  });
+  auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp1 = Run({"BZPOPMIN", "list1", "0"});
+  });
+
+  ThisFiber::SleepFor(50us);
+  pp_->at(2)->Await([&] { return Run({"ZADD", "list1", "1", "a"}); });
+  pp_->at(2)->Await([&] { return Run({"LPUSH", "list1", "0"}); });
+  fb0.Join();
+  fb1.Join();
+
+  EXPECT_THAT(resp1.GetVec(), ElementsAre("list1", "a", "1"));
+  EXPECT_THAT(resp0.GetVec(), ElementsAre("list1", "0"));
+}
+
 TEST_F(ZSetFamilyTest, BlockingTimeout) {
   RespExpr resp0;
 
