@@ -66,6 +66,7 @@ namespace dfly {
 
 using namespace util;
 using absl::GetFlag;
+using strings::HumanReadableNumBytes;
 
 namespace {
 
@@ -824,19 +825,19 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
       max_file_size = (max_file_size_limit * 0.8);
     } else {
       if (max_file_size_limit < max_file_size) {
-        LOG(WARNING) << "Got max file size " << strings::HumanReadableNumBytes(max_file_size)
-                     << ", however only " << strings::HumanReadableNumBytes(max_file_size_limit)
+        LOG(WARNING) << "Got max file size " << HumanReadableNumBytes(max_file_size)
+                     << ", however only " << HumanReadableNumBytes(max_file_size_limit)
                      << " disk space was found.";
       }
     }
     max_shard_file_size = max_file_size / shard_queue_.size();
     if (max_shard_file_size < 256_MB) {
       LOG(ERROR) << "Max tiering file size is too small. Setting: "
-                 << strings::HumanReadableNumBytes(max_file_size) << " Requeried at least "
-                 << strings::HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
+                 << HumanReadableNumBytes(max_file_size) << " Requeried at least "
+                 << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
       exit(1);
     }
-    LOG(INFO) << "Max file size is: " << strings::HumanReadableNumBytes(max_file_size);
+    LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
   }
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
