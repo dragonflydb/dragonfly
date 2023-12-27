@@ -1806,3 +1806,33 @@ async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=replica.port)
 
     await disconnect_clients(c_master, c_replica)
+
+
+async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
+    tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
+    master = df_local_factory.create()
+    replica = df_local_factory.create(dbfilename=f"dump_{tmp_file_name}")
+    df_local_factory.start_all([master, replica])
+
+    seeder = df_seeder_factory.create(port=replica.port, keys=30000)
+    await seeder.run(target_deviation=0.1)
+    c_replica = replica.client()
+    dbsize = await c_replica.dbsize()
+    assert dbsize >= 9000
+
+    replica.stop()
+    replica.start()
+    c_replica = replica.client()
+    # Check replica of not alowed while loading snapshot
+    try:
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        assert False
+    except aioredis.ResponseError as e:
+        assert "Can not execute during LOADING" in str(e)
+    # Check one we finish loading snapshot replicaof success
+    await wait_available_async(c_replica)
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    await c_replica.close()
+    master.stop()
+    replica.stop()
