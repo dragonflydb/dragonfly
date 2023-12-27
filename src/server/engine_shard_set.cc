@@ -797,12 +797,8 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
  */
 
 uint64_t GetDiskLimit() {
-  string file_prefix = GetFlag(FLAGS_spill_file_prefix);
-
-  std::filesystem::path file_path(file_prefix);
-  std::filesystem::path dir_name = file_path.parent_path();
-
-  std::string dir_name_str = dir_name.string();
+  std::filesystem::path file_path(GetFlag(FLAGS_spill_file_prefix));
+  std::string dir_name_str = file_path.parent_path().string();
 
   struct statvfs stat;
   if (statvfs(dir_name_str.c_str(), &stat) == 0) {
@@ -835,7 +831,8 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
     }
     max_shard_file_size = max_file_size / shard_queue_.size();
     if (max_shard_file_size < 256_MB) {
-      LOG(ERROR) << "Max tiering file size is too small. Requeried at least "
+      LOG(ERROR) << "Max tiering file size is too small. Setting: "
+                 << strings::HumanReadableNumBytes(max_file_size) << " Requeried at least "
                  << strings::HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
       exit(1);
     }
