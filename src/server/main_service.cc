@@ -59,13 +59,6 @@ using namespace std;
 using facade::ErrorReply;
 using dfly::operator""_KB;
 
-struct MaxMemoryFlag {
-  uint64_t value = 0;
-};
-
-static bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err);
-static std::string AbslUnparseFlag(const MaxMemoryFlag& flag);
-
 ABSL_FLAG(int32_t, port, 6379,
           "Redis port. 0 disables the port, -1 will bind on a random available port.");
 
@@ -88,28 +81,13 @@ ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without "
           "authorization needed.");
 
-ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
+ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
 ABSL_FLAG(double, oom_deny_ratio, 1.1,
           "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
           "memory is above this value");
-
-bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err) {
-  int64_t val;
-  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
-    flag->value = val;
-    return true;
-  }
-
-  *err = "Use human-readable format, eg.: 500MB, 1G, 1TB";
-  return false;
-}
-
-std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
-  return strings::HumanReadableNumBytes(flag.value);
-}
 
 namespace dfly {
 
@@ -787,7 +765,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   InitRedisTables();
 
   config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<MaxMemoryFlag>();
+    auto res = flag.TryGet<MemoryBytesFlag>();
     if (!res)
       return false;
 

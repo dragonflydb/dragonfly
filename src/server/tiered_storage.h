@@ -21,7 +21,7 @@ class TieredStorage {
  public:
   enum : uint16_t { kMinBlobLen = 64 };
 
-  explicit TieredStorage(DbSlice* db_slice);
+  explicit TieredStorage(DbSlice* db_slice, uint64_t max_file_size);
   ~TieredStorage();
 
   std::error_code Open(const std::string& path);

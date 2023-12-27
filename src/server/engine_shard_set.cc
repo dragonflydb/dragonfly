@@ -10,6 +10,9 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/zmalloc.h"
 }
+#include <sys/statvfs.h>
+
+#include <filesystem>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -19,6 +22,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "strings/human_readable.h"
 #include "util/varz.h"
 
 using namespace std;
@@ -28,6 +32,11 @@ ABSL_FLAG(string, spill_file_prefix, "",
           "The string denotes the path and prefix of the files "
           " associated with tiered storage. E.g,"
           "spill_file_prefix=/path/to/file-prefix");
+
+ABSL_FLAG(dfly::MemoryBytesFlag, max_file_size, dfly::MemoryBytesFlag{},
+          "Limit on maximum file size that is used by the database for tiered storage. "
+          "0 - means the program will automatically determine its maximum file size. "
+          "default: 0");
 
 ABSL_FLAG(uint32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
@@ -359,7 +368,7 @@ void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
   });
 }
 
-void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
+void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, uint64 max_file_size) {
   CHECK(shard_ == nullptr) << pb->GetPoolIndex();
 
   mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
@@ -376,7 +385,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
       exit(1);
     }
 
-    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
+    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_, max_file_size));
     error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
   }
@@ -787,14 +796,48 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
 
  */
 
+uint64_t GetDiskLimit() {
+  string file_prefix = GetFlag(FLAGS_spill_file_prefix);
+
+  std::filesystem::path file_path(file_prefix);
+  std::filesystem::path dir_name = file_path.parent_path();
+
+  std::string dir_name_str = dir_name.string();
+
+  struct statvfs stat;
+  if (statvfs(dir_name_str.c_str(), &stat) == 0) {
+    uint64_t limit = stat.f_frsize * stat.f_blocks;
+    return limit;
+  }
+  LOG(ERROR) << "Error getting filesystem information\n";
+  return 0;
+}
+
 void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   CHECK_EQ(0u, size());
   cached_stats.resize(sz);
   shard_queue_.resize(sz);
 
+  string file_prefix = GetFlag(FLAGS_spill_file_prefix);
+  uint64 max_file_size = absl::GetFlag(FLAGS_max_file_size).value;
+  if (!file_prefix.empty()) {
+    uint64_t max_file_size_limit = GetDiskLimit();
+    if (max_file_size == 0) {
+      LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
+      max_file_size = (max_file_size_limit * 0.8);
+    } else {
+      if (max_file_size_limit < max_file_size) {
+        LOG(WARNING) << "Got max file size " << strings::HumanReadableNumBytes(max_file_size)
+                     << ", however only " << strings::HumanReadableNumBytes(max_file_size_limit)
+                     << " disk space was found.";
+      }
+    }
+    LOG(INFO) << "Max file size is: " << strings::HumanReadableNumBytes(max_file_size);
+  }
+
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
-      InitThreadLocal(pb, update_db_time);
+      InitThreadLocal(pb, update_db_time, max_file_size / shard_queue_.size());
     }
   });
 }
@@ -803,8 +846,8 @@ void EngineShardSet::Shutdown() {
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
-void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
-  EngineShard::InitThreadLocal(pb, update_db_time);
+void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time, uint64 max_file_size) {
+  EngineShard::InitThreadLocal(pb, update_db_time, max_file_size);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();
 }

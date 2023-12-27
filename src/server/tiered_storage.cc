@@ -298,7 +298,7 @@ void TieredStorage::InflightWriteRequest::Undo(PerDb::BinRecord* bin_record, DbS
   }
 }
 
-TieredStorage::TieredStorage(DbSlice* db_slice) : db_slice_(*db_slice) {
+TieredStorage::TieredStorage(DbSlice* db_slice, uint64_t max_file_size) : db_slice_(*db_slice) {
 }
 
 TieredStorage::~TieredStorage() {
