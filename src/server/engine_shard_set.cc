@@ -33,7 +33,7 @@ ABSL_FLAG(string, spill_file_prefix, "",
           " associated with tiered storage. E.g,"
           "spill_file_prefix=/path/to/file-prefix");
 
-ABSL_FLAG(dfly::MemoryBytesFlag, max_file_size, dfly::MemoryBytesFlag{},
+ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "
           "0 - means the program will automatically determine its maximum file size. "
           "default: 0");
@@ -797,7 +797,7 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
 
  */
 
-uint64_t GetDiskLimit() {
+uint64_t GetFsLimit() {
   std::filesystem::path file_path(GetFlag(FLAGS_spill_file_prefix));
   std::string dir_name_str = file_path.parent_path().string();
 
@@ -818,8 +818,8 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   string file_prefix = GetFlag(FLAGS_spill_file_prefix);
   size_t max_shard_file_size = 0;
   if (!file_prefix.empty()) {
-    size_t max_file_size = absl::GetFlag(FLAGS_max_file_size).value;
-    size_t max_file_size_limit = GetDiskLimit();
+    size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;
+    size_t max_file_size_limit = GetFsLimit();
     if (max_file_size == 0) {
       LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
       max_file_size = (max_file_size_limit * 0.8);
@@ -833,7 +833,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
     max_shard_file_size = max_file_size / shard_queue_.size();
     if (max_shard_file_size < 256_MB) {
       LOG(ERROR) << "Max tiering file size is too small. Setting: "
-                 << HumanReadableNumBytes(max_file_size) << " Requeried at least "
+                 << HumanReadableNumBytes(max_file_size) << " Required at least "
                  << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
       exit(1);
     }
