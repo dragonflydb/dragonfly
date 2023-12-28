@@ -99,6 +99,17 @@ bool MatchHttp11Line(string_view line) {
   return absl::StartsWith(line, "GET ") && absl::EndsWith(line, "HTTP/1.1");
 }
 
+void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
+                         absl::FunctionRef<void()> f) {
+  const size_t prev_capacity = io_buf.Capacity();
+  f();
+  const size_t capacity = io_buf.Capacity();
+  if (stats != nullptr && prev_capacity != capacity) {
+    VLOG(1) << "Grown io_buf to " << capacity;
+    stats->read_buf_capacity += capacity - prev_capacity;
+  }
+}
+
 constexpr size_t kMinReadSize = 256;
 
 thread_local uint32_t free_req_release_weight = 0;
@@ -154,6 +165,7 @@ struct Connection::DispatchOperations {
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
   void operator()(CheckpointMessage msg);
+  void operator()(const InvalidationMessage& msg);
 
   template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
     operator()(*ptr.get());
@@ -222,6 +234,9 @@ size_t Connection::MessageHandle::UsedMemory() const {
     size_t operator()(const CheckpointMessage& msg) {
       return 0;  // no access to internal type, memory usage negligible
     }
+    size_t operator()(const InvalidationMessage& msg) {
+      return 0;
+    }
   };
 
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
@@ -289,6 +304,19 @@ void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
   VLOG(1) << "Decremented checkpoint at " << self->DebugInfo();
 
   msg.bc.Dec();
+}
+
+void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  DCHECK(rbuilder->IsResp3());
+  rbuilder->StartCollection(2, facade::RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->SendBulkString("invalidate");
+  if (msg.invalidate_due_to_flush) {
+    rbuilder->SendNull();
+  } else {
+    std::string_view keys[] = {msg.key};
+    rbuilder->SendStringArr(keys);
+  }
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -565,7 +593,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
       return MatchHttp11Line(ib);
     }
     last_len = io_buf_.InputLen();
-    io_buf_.EnsureCapacity(io_buf_.Capacity());
+    UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity()); });
   } while (last_len < 1024);
 
   return false;
@@ -598,7 +626,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // Main loop.
   if (parse_status != ERROR && !ec) {
     if (io_buf_.AppendLen() < 64) {
-      io_buf_.EnsureCapacity(io_buf_.Capacity() * 2);
+      UpdateIoBufCapacity(io_buf_, stats_,
+                          [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity() * 2); });
     }
     auto res = IoLoop(peer, orig_builder);
 
@@ -917,7 +946,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         // (Note: The buffer object is only working in power-of-2 sizes,
         // so there's no danger of accidental O(n^2) behavior.)
         if (parser_hint > capacity) {
-          io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint));
+          UpdateIoBufCapacity(io_buf_, stats_,
+                              [&]() { io_buf_.Reserve(std::min(max_iobfuf_len, parser_hint)); });
         }
 
         // If we got a partial request and we couldn't parse the length, just
@@ -926,13 +956,11 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
         // a reasonable limit to save on Recv() calls.
         if (io_buf_.AppendLen() < 64u || (is_iobuf_full && capacity < 4096)) {
           // Last io used most of the io_buf to the end.
-          io_buf_.Reserve(capacity * 2);  // Valid growth range.
+          UpdateIoBufCapacity(io_buf_, stats_, [&]() {
+            io_buf_.Reserve(capacity * 2);  // Valid growth range.
+          });
         }
 
-        if (capacity < io_buf_.Capacity()) {
-          VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
-          stats_->read_buf_capacity += (io_buf_.Capacity() - capacity);
-        }
         DCHECK_GT(io_buf_.AppendLen(), 0U);
       } else if (io_buf_.AppendLen() == 0) {
         // We have a full buffer and we can not progress with parsing.
@@ -1047,6 +1075,12 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
+
+  absl::StrAppend(&info, "state=");
+  if (cc_->paused)
+    absl::StrAppend(&info, "p");
+  if (cc_->blocked)
+    absl::StrAppend(&info, "b");
 
   absl::StrAppend(&info, "}");
   return info;
@@ -1225,17 +1259,24 @@ void Connection::SendAclUpdateAsync(AclUpdateMessage msg) {
   SendAsync({make_unique<AclUpdateMessage>(std::move(msg))});
 }
 
-void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused) {
+void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, bool ignore_blocked) {
   if (!IsCurrentlyDispatching())
     return;
 
   if (cc_->paused && ignore_paused)
     return;
 
+  if (cc_->blocked && ignore_blocked)
+    return;
+
   VLOG(1) << "Sent checkpoint to " << DebugInfo();
 
   bc.Add(1);
   SendAsync({CheckpointMessage{bc}});
+}
+
+void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
+  SendAsync({std::move(msg)});
 }
 
 void Connection::LaunchDispatchFiberIfNeeded() {
@@ -1404,10 +1445,10 @@ unsigned Connection::WeakRef::Thread() const {
 
 Connection* Connection::WeakRef::Get() const {
   DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_));
-  // The connection can only be deleted on this thread, so
-  // this pointer is valid until the next suspension.
-  // Note: keeping a shared_ptr doesn't prolong the lifetime because
-  // it doesn't manage the underlying connection. See definition of `self_`.
+  //  The connection can only be deleted on this thread, so
+  //  this pointer is valid until the next suspension.
+  //  Note: keeping a shared_ptr doesn't prolong the lifetime because
+  //  it doesn't manage the underlying connection. See definition of `self_`.
   return ptr_.lock().get();
 }
 

@@ -186,7 +186,7 @@ class Transaction {
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
-  bool WaitOnWatch(const time_point& tp, WaitKeysProvider cb);
+  facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeysProvider cb);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue.
@@ -194,7 +194,7 @@ class Transaction {
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
-  void CancelBlocking();
+  void CancelBlocking(std::function<OpStatus(ArgSlice)>);
 
   // In some cases for non auto-journaling commands we want to enable the auto journal flow.
   void RenableAutoJournal() {

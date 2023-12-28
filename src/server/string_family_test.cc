@@ -46,9 +46,14 @@ TEST_F(StringFamilyTest, SetGet) {
   EXPECT_EQ(Run({"get", "key1"}), "1");
   EXPECT_EQ(Run({"set", "key", "2"}), "OK");
   EXPECT_EQ(Run({"get", "key"}), "2");
+  EXPECT_THAT(Run({"get", "key3"}), ArgType(RespExpr::NIL));
 
   auto metrics = GetMetrics();
-  EXPECT_EQ(6, metrics.coordinator_stats.ooo_tx_cnt);
+  auto tc = metrics.coordinator_stats.tx_type_cnt;
+  EXPECT_EQ(7, tc[ServerState::QUICK] + tc[ServerState::INLINE]);
+  EXPECT_EQ(3, metrics.events.hits);
+  EXPECT_EQ(1, metrics.events.misses);
+  EXPECT_EQ(3, metrics.events.mutations);
 }
 
 TEST_F(StringFamilyTest, Incr) {
@@ -66,6 +71,10 @@ TEST_F(StringFamilyTest, Incr) {
 
   ASSERT_THAT(Run({"incrby", "ne", "0"}), IntArg(0));
   ASSERT_THAT(Run({"decrby", "a", "-9223372036854775808"}), ErrArg("overflow"));
+  auto metrics = GetMetrics();
+  EXPECT_EQ(10, metrics.events.mutations);
+  EXPECT_EQ(0, metrics.events.misses);
+  EXPECT_EQ(0, metrics.events.hits);
 }
 
 TEST_F(StringFamilyTest, Append) {
@@ -226,6 +235,48 @@ TEST_F(StringFamilyTest, MGetSet) {
 
   mget_fb.Join();
   set_fb.Join();
+}
+
+TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "true");
+  ResetService();
+  Run({"debug", "populate", "100000", "key", "32", "RAND"});
+
+  // Scan starts traversing the database, because we populated the database with lots of items we
+  // assume that scan will return items from the same bucket that reside next to each other.
+  auto resp = Run({"scan", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  StringVec vec = StrArray(resp.GetVec()[1]);
+  ASSERT_GE(vec.size(), 10);
+
+  auto get_bump_ups = [](const string& str) -> size_t {
+    const string matcher = "bump_ups:";
+    const auto pos = str.find(matcher) + matcher.size();
+    const auto sub = str.substr(pos, 1);
+    return atoi(sub.c_str());
+  };
+
+  resp = Run({"info", "stats"});
+  EXPECT_EQ(get_bump_ups(resp.GetString()), 0);
+
+  auto mget_resp = StrArray(Run(
+      {"mget", vec[0], vec[1], vec[2], vec[3], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9]}));
+
+  resp = Run({"info", "stats"});
+  size_t bumps1 = get_bump_ups(resp.GetString());
+  EXPECT_GT(bumps1, 0);
+  EXPECT_LT(bumps1, 10);  // we assume that some bumps are blocked because items reside next to each
+                          // other in the slot.
+
+  for (int i = 0; i < 10; ++i) {
+    auto get_resp = Run({"get", vec[i]});
+    EXPECT_EQ(get_resp, mget_resp[i]);
+  }
+
+  resp = Run({"info", "stats"});
+  size_t bumps2 = get_bump_ups(resp.GetString());
+  EXPECT_GT(bumps2, bumps1);
 }
 
 TEST_F(StringFamilyTest, MSetGet) {

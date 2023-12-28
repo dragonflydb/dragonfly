@@ -288,6 +288,7 @@ class ElementAccess {
   std::string_view key_;
   DbContext context_;
   EngineShard* shard_ = nullptr;
+  mutable DbSlice::AutoUpdater post_updater_;
 
  public:
   ElementAccess(std::string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
@@ -323,15 +324,16 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
   try {
-    std::pair<PrimeIterator, bool> add_res = shard->db_slice().AddOrFind(context_, key_);
-    if (!add_res.second) {
-      if (add_res.first->second.ObjType() != OBJ_STRING) {
+    auto add_res = shard->db_slice().AddOrFind(context_, key_);
+    if (!add_res.is_new) {
+      if (add_res.it->second.ObjType() != OBJ_STRING) {
         return OpStatus::WRONG_TYPE;
       }
     }
-    element_iter_ = add_res.first;
-    added_ = add_res.second;
+    element_iter_ = add_res.it;
+    added_ = add_res.is_new;
     shard_ = shard;
+    post_updater_ = std::move(add_res.post_updater);
     return OpStatus::OK;
   } catch (const std::bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
@@ -349,10 +351,8 @@ std::string ElementAccess::Value() const {
 
 void ElementAccess::Commit(std::string_view new_value) const {
   if (shard_) {
-    auto& db_slice = shard_->db_slice();
-    db_slice.PreUpdate(Index(), element_iter_);
     element_iter_->second.SetString(new_value);
-    db_slice.PostUpdate(Index(), element_iter_, key_, !added_);
+    post_updater_.Run();
   }
 }
 
@@ -910,7 +910,8 @@ using CommandList = std::vector<Command>;
 // Helper class used in the shard cb that abstracts away the iteration and execution of subcommands
 class StateExecutor {
  public:
-  StateExecutor(ElementAccess access, EngineShard* shard) : access_{access}, shard_(shard) {
+  StateExecutor(ElementAccess access, EngineShard* shard)
+      : access_{std::move(access)}, shard_(shard) {
   }
 
   //  Iterates over all of the parsed subcommands and executes them one by one. At the end,

@@ -29,6 +29,7 @@ using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>
 using PrimeIterator = PrimeTable::iterator;
 using PrimeConstIterator = PrimeTable::const_iterator;
 using ExpireIterator = ExpireTable::iterator;
+using ExpireConstIterator = ExpireTable::const_iterator;
 
 inline bool IsValid(PrimeIterator it) {
   return !it.is_done();
@@ -41,6 +42,16 @@ inline bool IsValid(ExpireIterator it) {
 inline bool IsValid(PrimeConstIterator it) {
   return !it.is_done();
 }
+
+inline bool IsValid(ExpireConstIterator it) {
+  return !it.is_done();
+}
+
+struct PrimeHasher {
+  size_t operator()(const PrimeKey& o) const {
+    return o.HashCode();
+  }
+};
 
 struct SlotStats {
   uint64_t key_count = 0;
@@ -57,8 +68,6 @@ struct DbTableStats {
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
 
-  // how much we we increased or decreased the existing entries.
-  ssize_t update_value_amount = 0;
   size_t listpack_blob_cnt = 0;
   size_t listpack_bytes = 0;
   size_t tiered_entries = 0;

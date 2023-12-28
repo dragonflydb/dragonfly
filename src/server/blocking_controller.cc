@@ -214,7 +214,7 @@ void BlockingController::NotifyPending() {
       DVLOG(1) << "Processing awakened key " << sv_key;
 
       // Double verify we still got the item.
-      auto [it, exp_it] = owner_->db_slice().FindExt(context, sv_key);
+      auto [it, exp_it] = owner_->db_slice().FindReadOnly(context, sv_key);
       // Only LIST, ZSET and STREAM are allowed to block.
       if (!IsValid(it) || !(it->second.ObjType() == OBJ_LIST || it->second.ObjType() == OBJ_ZSET ||
                             it->second.ObjType() == OBJ_STREAM))

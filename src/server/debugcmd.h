@@ -36,6 +36,7 @@ class DebugCmd {
   void Reload(CmdArgList args);
   void Replica(CmdArgList args);
   void Load(std::string_view filename);
+  void Exec();
   void Inspect(std::string_view key);
   void Watched();
   void TxAnalysis();

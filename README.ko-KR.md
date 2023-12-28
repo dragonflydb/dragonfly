@@ -104,7 +104,6 @@ Dragonfly는 현재 아래와 같은 Redis 인수들을 지원합니다 :
   * `dbnum`: `select` 명령에 대해 지원되는 최대 데이터베이스 수.
   * `cache_mode`: 아래의 섹션 [새로운 캐시 설계](#novel-cache-design)을 참고해주시기 바랍니다.
   * `hz`: 키가 만료되었는지를 판단하는 빈도(`기본값: 100`). 낮은 빈도는 키 방출이 느려지는 대신, 유휴 상태일 때 CPU 사용량을 줄입니다.
-  * `save_schedule`: UTC 기준으로 스냅샷을 HH:MM(24시간제) 형식으로 저장하기 위한 Glob 패턴 (`기본값: ""`).
   * `primary_port_http_enabled`: `true` 인 경우 HTTP 콘솔로 메인 TCP 포트 접근을 허용합니다. (`기본값: true`).
   * `admin_port`: 할당된 포트에서 관리자 콘솔 접근을 활성화합니다. (`기본값: disabled`). HTTP와 RESP 프로토콜 모두를 지원합니다.
   * `admin_bind`: 주어진 주소에 관리자 콘솔 TCP 연결을 바인딩합니다. (`기본값: any`). HTTP와 RESP 프로토콜 모두를 지원합니다.
@@ -116,7 +115,7 @@ Dragonfly는 현재 아래와 같은 Redis 인수들을 지원합니다 :
 ### 주요 옵션을 활용한 실행 스크립트 예시:
 
 ```bash
-./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
+./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
 
 인수들은 `dragonfly --flagfile <filename>`을 실행하여 설정 파일을 통해서도 전달할 수 있습니다. 전달될 파일은 각 줄에 키-값 형태의 플래그 나열 하기위해 등호를 사용합니다.

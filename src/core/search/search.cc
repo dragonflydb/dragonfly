@@ -45,20 +45,18 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
   using DocVec = vector<DocId>;
-  using BorrowedView = variant<const DocVec*, const CompressedSortedSet*>;
+  using BorrowedView =
+      variant<const DocVec*, const BlockList<CompressedSortedSet>*, const BlockList<SortedVector>*>;
 
   IndexResult() : value_{DocVec{}} {
-  }
-
-  IndexResult(const CompressedSortedSet* css) : value_{css} {
-    if (css == nullptr)
-      value_ = DocVec{};
   }
 
   IndexResult(DocVec&& dv) : value_{std::move(dv)} {
   }
 
-  IndexResult(const DocVec* dv) : value_{dv} {
+  template <typename C> IndexResult(const C* container = nullptr) : value_{container} {
+    if (container == nullptr)
+      value_ = DocVec{};
   }
 
   size_t Size() const {
@@ -108,7 +106,9 @@ struct IndexResult {
   }
 
  private:
-  variant<DocVec /*owned*/, const CompressedSortedSet*, const DocVec*> value_;
+  variant<DocVec /*owned*/, const DocVec*, const BlockList<CompressedSortedSet>*,
+          const BlockList<SortedVector>*>
+      value_;
 };
 
 struct ProfileBuilder {

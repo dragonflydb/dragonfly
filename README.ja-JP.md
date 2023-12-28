@@ -106,7 +106,6 @@ Dragonfly 特有の議論もある:
  * `dbnum`: `select` でサポートされるデータベースの最大数。
  * `cache_mode`: 以下の[斬新なキャッシュデザイン](#斬新なキャッシュデザイン)のセクションを参照してください。
  * `hz`: キーの有効期限評価頻度 (`default: 100`)。この頻度が低いと、アイドル時の CPU 使用量が少なくなるが、その分古くなったキーをクリアする速度が遅くなる。
- * `save_schedule`: スナップショットを HH:MM (24 時間)フォーマットで保存する UTC のグローブ指定 (`default: ""`)。
  * `primary_port_http_enabled`: もし `true` (`default: true`) なら、メイン TCP ポートで HTTP コンソールにアクセスできるようにする。
  * `admin_port`: 割り当てられたポートのコンソールへの管理者アクセスを有効にする(`default: disabled`)。HTTP と RESP プロトコルの両方をサポートする。
  * `admin_bind`: 管理コンソールの TCP 接続を指定されたアドレスにバインドする(`default: any`)。HTTP と RESP の両方のプロトコルをサポートする。
@@ -117,7 +116,7 @@ Dragonfly 特有の議論もある:
 ### 一般的なオプションを使用した開始スクリプトの例:
 
 ```bash
-./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
+./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
 
 また、`dragonfly --flagfile <filename>` を実行することで、設定ファイルから引数を指定することもできる。ファイルには 1 行に 1 つのフラグを記述し、キーと値のフラグには空白の代わりに等号を記述します。

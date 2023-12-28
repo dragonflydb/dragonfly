@@ -48,6 +48,7 @@ struct SliceEvents {
   // hits/misses on keys
   size_t hits = 0;
   size_t misses = 0;
+  size_t mutations = 0;
 
   // how many insertions were rejected due to OOM.
   size_t insertion_rejections = 0;
@@ -66,6 +67,8 @@ class DbSlice {
   class AutoUpdater {
    public:
     AutoUpdater();
+    AutoUpdater(const AutoUpdater& o) = delete;
+    AutoUpdater& operator=(const AutoUpdater& o) = delete;
     AutoUpdater(AutoUpdater&& o);
     AutoUpdater& operator=(AutoUpdater&& o);
     ~AutoUpdater();
@@ -87,11 +90,11 @@ class DbSlice {
       DbIndex db_ind = 0;
       PrimeIterator it;
       std::string_view key;
-      bool key_existed = false;
 
+      // The following fields are calculated at init time
       size_t db_size = 0;
       size_t deletion_count = 0;
-      // TODO(#2252): Add heap size here, and only update memory in d'tor
+      size_t orig_heap_size = 0;
     };
 
     AutoUpdater(const Fields& fields);
@@ -178,7 +181,7 @@ class DbSlice {
   }
 
   // returns absolute time of the expiration.
-  time_t ExpireTime(ExpireIterator it) const {
+  time_t ExpireTime(ExpireConstIterator it) const {
     return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
   }
 
@@ -186,52 +189,49 @@ class DbSlice {
     return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
-  // TODO(#2252): Remove this in favor of FindMutable() / FindReadOnly()
-  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
-                               unsigned req_obj_type) const;
-
   struct ItAndUpdater {
     PrimeIterator it;
+    ExpireIterator exp_it;
     AutoUpdater post_updater;
   };
+  ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
                                      unsigned req_obj_type);
 
+  struct ItAndExpConst {
+    PrimeConstIterator it;
+    ExpireConstIterator exp_it;
+  };
+  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                            unsigned req_obj_type) const;
-
-  // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
-  std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
+                                            unsigned req_obj_type);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
-  OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(const Context& cntx, ArgSlice args,
-                                                         int req_obj_type);
+  OpResult<std::pair<PrimeConstIterator, unsigned>> FindFirstReadOnly(const Context& cntx,
+                                                                      ArgSlice args,
+                                                                      int req_obj_type);
 
-  // Return .second=true if insertion occurred, false if we return the existing key.
-  // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrFind(const Context& cntx,
-                                           std::string_view key) noexcept(false);
+  struct AddOrFindResult {
+    PrimeIterator it;
+    ExpireIterator exp_it;
+    bool is_new = false;
+    AutoUpdater post_updater;
 
-  std::tuple<PrimeIterator, ExpireIterator, bool> AddOrFind2(const Context& cntx,
-                                                             std::string_view key) noexcept(false);
+    AddOrFindResult& operator=(ItAndUpdater&& o);
+  };
+
+  AddOrFindResult AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
-  // Returns second=true if insertion took place.
-  std::pair<PrimeIterator, bool> AddOrUpdate(const Context& cntx, std::string_view key,
-                                             PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
-
-  // Returns second=true if insertion took place, false otherwise.
-  // expire_at_ms equal to 0 - means no expiry.
-  // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrSkip(const Context& cntx, std::string_view key,
-                                           PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
+  AddOrFindResult AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
+                              uint64_t expire_at_ms) noexcept(false);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  PrimeIterator AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
-                       uint64_t expire_at_ms) noexcept(false);
+  ItAndUpdater AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
+                      uint64_t expire_at_ms) noexcept(false);
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
@@ -277,6 +277,8 @@ class DbSlice {
     return shard_id_;
   }
 
+  void OnCbFinish();
+
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
@@ -309,19 +311,17 @@ class DbSlice {
   size_t DbSize(DbIndex db_ind) const;
 
   // Callback functions called upon writing to the existing key.
-  //  TODO(#2252): Remove these (or make them private)
-  void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
-                  bool existing_entry = true);
-
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return PrimeIterator{}.
-  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx,
-                                                          PrimeIterator it) const;
+  struct ItAndExp {
+    PrimeIterator it;
+    ExpireIterator exp_it;
+  };
+  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -388,14 +388,19 @@ class DbSlice {
   // Track keys for the client represented by the the weak reference to its connection.
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
+  // Delete a key referred by its iterator.
+  void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
+
  private:
+  void PreUpdate(DbIndex db_ind, PrimeIterator it);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
+
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
                          unsigned count);
 
-  std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
-                                                     PrimeValue obj, uint64_t expire_at_ms,
-                                                     bool force_update) noexcept(false);
+  AddOrFindResult AddOrUpdateInternal(const Context& cntx, std::string_view key, PrimeValue obj,
+                                      uint64_t expire_at_ms, bool force_update) noexcept(false);
 
   void FlushSlotsFb(const SlotSet& slot_ids);
   void FlushDbIndexes(const std::vector<DbIndex>& indexes);
@@ -406,8 +411,20 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
 
+  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
+                       DbTable* table);
+
+  // Send invalidation message to the clients that are tracking the change to a key.
+  void SendInvalidationTrackingMessage(std::string_view key);
+
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
+
+  enum class FindInternalMode {
+    kUpdateReadStats,
+    kUpdateMutableStats,
+  };
+  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode);
 
   uint64_t NextVersion() {
     return version_++;
@@ -437,6 +454,9 @@ class DbSlice {
 
   // ordered from the smallest to largest version.
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
+
+  // Used in temporary computations in Find item and CbFinish
+  mutable absl::flat_hash_set<CompactObjectView, PrimeHasher> bumped_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;

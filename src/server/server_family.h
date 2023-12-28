@@ -10,6 +10,7 @@
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/redis_parser.h"
+#include "facade/reply_builder.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
@@ -77,6 +78,8 @@ struct Metrics {
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
 
+  facade::SinkReplyBuilder::StatsType reply_stats{};  // Stats for Send*() ops
+
   PeakStats peak_stats;
 
   size_t uptime = 0;
@@ -93,10 +96,11 @@ struct Metrics {
   uint64_t fiber_longrun_cnt = 0;
   uint64_t fiber_longrun_usec = 0;
 
+  // Max length of the all the tx shard-queues.
+  uint32_t tx_queue_len = 0;
+
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
-
-  bool is_master = true;
   std::vector<ReplicaRoleInfo> replication_metrics;
 };
 
@@ -196,13 +200,14 @@ class ServerFamily {
 
   void BreakOnShutdown();
 
-  void CancelBlockingCommands();
+  void CancelBlockingOnThread(std::function<facade::OpStatus(ArgSlice)> = {});
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);
 
  private:
   void JoinSnapshotSchedule();
+  void LoadFromSnapshot();
 
   uint32_t shard_count() const {
     return shard_set->size();
@@ -253,6 +258,8 @@ class ServerFamily {
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
 
   void SnapshotScheduling();
+
+  void SendInvalidationMessages() const;
 
   Fiber snapshot_schedule_fb_;
   Future<GenericError> load_result_;

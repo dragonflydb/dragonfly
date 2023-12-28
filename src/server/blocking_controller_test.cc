@@ -40,8 +40,9 @@ constexpr size_t kNumThreads = 3;
 void BlockingControllerTest::SetUp() {
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
-  pp_->Await([](unsigned index, ProactorBase* p) { ServerState::Init(index, nullptr); });
-  ServerState::Init(kNumThreads, nullptr);
+  pp_->Await(
+      [](unsigned index, ProactorBase* p) { ServerState::Init(index, kNumThreads, nullptr); });
+  ServerState::Init(kNumThreads, kNumThreads, nullptr);
 
   shard_set = new EngineShardSet(pp_.get());
   shard_set->Init(kNumThreads, false);
@@ -88,9 +89,9 @@ TEST_F(BlockingControllerTest, Timeout) {
   trans_->Schedule();
   auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->GetShardArgs(0); };
 
-  bool res = trans_->WaitOnWatch(tp, cb);
+  facade::OpStatus status = trans_->WaitOnWatch(tp, cb);
 
-  EXPECT_FALSE(res);
+  EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(
       0, [&] { return EngineShard::tlocal()->blocking_controller()->NumWatched(0); });
 

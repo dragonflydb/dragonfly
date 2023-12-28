@@ -65,6 +65,7 @@ class ClusterConfig {
 
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
+  bool IsMySlot(std::string_view key) const;
 
   // Returns the master configured for `id`.
   Node GetMasterNodeForSlot(SlotId id) const;

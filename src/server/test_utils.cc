@@ -73,12 +73,16 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
   messages.push_back(std::move(pmsg));
 }
 
+void TestConnection::SendInvalidationMessageAsync(InvalidationMessage msg) {
+  invalidate_messages.push_back(move(msg));
+}
+
 std::string TestConnection::RemoteEndpointStr() const {
   return "";
 }
 
 void TransactionSuspension::Start() {
-  CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
+  static CommandId cid{"TEST", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::NONE};
 
   transaction_ = new dfly::Transaction{&cid};
 
@@ -105,6 +109,8 @@ class BaseFamilyTest::TestConnWrapper {
 
   // returns: type(pmessage), pattern, channel, message.
   const facade::Connection::PubMessage& GetPubMessage(size_t index) const;
+
+  const facade::Connection::InvalidationMessage& GetInvalidationMessage(size_t index) const;
 
   ConnectionContext* cmd_cntx() {
     return static_cast<ConnectionContext*>(dummy_conn_->cntx());
@@ -309,6 +315,14 @@ unsigned BaseFamilyTest::NumLocked() {
     }
   });
   return count;
+}
+
+void BaseFamilyTest::ClearMetrics() {
+  shard_set->pool()->Await([](auto*) {
+    ServerState::Stats stats;
+    stats.tx_width_freq_arr = new uint64_t[shard_set->size()];
+    ServerState::tlocal()->stats = std::move(stats);
+  });
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
@@ -528,6 +542,12 @@ const facade::Connection::PubMessage& BaseFamilyTest::TestConnWrapper::GetPubMes
   return dummy_conn_->messages[index];
 }
 
+const facade::Connection::InvalidationMessage&
+BaseFamilyTest::TestConnWrapper::GetInvalidationMessage(size_t index) const {
+  CHECK_LT(index, dummy_conn_->invalidate_messages.size());
+  return dummy_conn_->invalidate_messages[index];
+}
+
 bool BaseFamilyTest::IsLocked(DbIndex db_index, std::string_view key) const {
   ShardId sid = Shard(key, shard_set->size());
   KeyLockArgs args;
@@ -553,12 +573,27 @@ size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
   return it->second->conn()->messages.size();
 }
 
+size_t BaseFamilyTest::InvalidationMessagesLen(string_view conn_id) const {
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return 0;
+
+  return it->second->conn()->invalidate_messages.size();
+}
+
 const facade::Connection::PubMessage& BaseFamilyTest::GetPublishedMessage(string_view conn_id,
                                                                           size_t index) const {
   auto it = connections_.find(conn_id);
   CHECK(it != connections_.end());
 
   return it->second->GetPubMessage(index);
+}
+
+const facade::Connection::InvalidationMessage& BaseFamilyTest::GetInvalidationMessage(
+    string_view conn_id, size_t index) const {
+  auto it = connections_.find(conn_id);
+  CHECK(it != connections_.end());
+  return it->second->GetInvalidationMessage(index);
 }
 
 ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id) const {
@@ -632,8 +667,9 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
 
 Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
   TransactionSuspension tx;
-  tx.Start();
-  auto fb = pp_->at(0)->LaunchFiber([condition, tx = std::move(tx)]() mutable {
+  pp_->at(0)->Await([&] { tx.Start(); });
+
+  auto fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [condition, tx = std::move(tx)]() mutable {
     ExpectConditionWithinTimeout(condition);
     tx.Terminate();
   });

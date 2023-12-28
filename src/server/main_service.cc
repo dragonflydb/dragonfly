@@ -79,6 +79,8 @@ ABSL_FLAG(uint32_t, multi_exec_mode, 2,
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
+ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
+
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
@@ -700,6 +702,16 @@ optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
   return multi_mode;
 }
 
+string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
+  string result;
+  result.reserve(stored_cmds.size() * 10);
+  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "\n");
+  for (const auto& scmd : stored_cmds) {
+    absl::StrAppend(&result, "  ", scmd.Cid()->name(), " ", scmd.NumArgs(), "\n");
+  }
+  return result;
+}
+
 // Either take the interpreter from the preborrowed multi exec transaction or borrow one.
 struct BorrowedInterpreter {
   explicit BorrowedInterpreter(ConnectionContext* cntx) {
@@ -791,9 +803,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
 
-  acl::UserRegistry* reg = &user_registry_;
-  pp_.Await([reg](uint32_t index, ProactorBase* pb) { ServerState::Init(index, reg); });
-
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
     LOG_IF(WARNING, shard_num > pp_.size())
@@ -801,6 +810,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         << "), using num_shards=" << pp_.size();
     shard_num = pp_.size();
   }
+
+  // Must initialize before the shard_set because EngineShard::Init references ServerState.
+  pp_.Await([&](uint32_t index, ProactorBase* pb) {
+    ServerState::Init(index, shard_num, &user_registry_);
+  });
 
   shard_set->Init(shard_num, !opts.disable_time_update);
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
@@ -969,7 +983,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
   bool is_write_cmd = cid->IsWriteOnly();
-  bool under_multi = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
+  bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
 
   // Check if the command is allowed to execute under this global state
   bool allowed_by_state = true;
@@ -1008,7 +1022,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
     return ErrorReply{"-READONLY You can't write against a read only replica."};
 
-  if (under_multi) {
+  if (multi_active) {
     if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE"))
       return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
 
@@ -1069,8 +1083,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool under_script = bool(dfly_cntx->conn_state.script_info);
-  bool under_multi = dfly_cntx->conn_state.exec_info.IsRunning();
-  bool dispatching_in_multi = under_script || under_multi;
+  bool under_exec = dfly_cntx->conn_state.exec_info.IsRunning();
+  bool dispatching_in_multi = under_script || under_exec;
 
   if (VLOG_IS_ON(2) && cntx->conn() /* no owner in replica context */) {
     LOG(INFO) << "Got (" << cntx->conn()->GetClientId() << "): " << (under_script ? "LUA " : "")
@@ -1152,11 +1166,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   dfly_cntx->cid = cid;
 
-  // Collect stats for all regular transactions and all multi transactions from scripts, except EVAL
-  // itself. EXEC does not use DispatchCommand for dispatching.
-  bool collect_stats =
-      dfly_cntx->transaction && (!dfly_cntx->transaction->IsMulti() || dispatching_in_multi);
-  if (!InvokeCmd(cid, args_no_cmd, dfly_cntx, collect_stats)) {
+  if (!InvokeCmd(cid, args_no_cmd, dfly_cntx)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
@@ -1204,8 +1214,7 @@ class ReplyGuard {
   SinkReplyBuilder* builder_ = nullptr;
 };
 
-bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx,
-                        bool record_stats) {
+bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
 
@@ -1225,22 +1234,41 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   }
 
 #ifndef NDEBUG
+  // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(cntx, cid->name());
 #endif
+  uint64_t invoke_time_usec = 0;
   try {
-    cid->Invoke(tail_args, cntx);
+    invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
   }
 
-  if (record_stats) {
-    DCHECK(cntx->transaction);
+  // TODO: we should probably discard more commands here,
+  // not just the blocking ones
+  const auto* conn = cntx->conn();
+  if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr && etl.GetSlowLog().IsEnabled() &&
+      invoke_time_usec > etl.log_slower_than_usec) {
+    vector<string> aux_params;
+    CmdArgVec aux_slices;
+
+    if (tail_args.empty() && cid->name() == "EXEC") {
+      // abuse tail_args to pass more information about the slow EXEC.
+      aux_params.emplace_back(StrCat("CMDCOUNT/", cntx->last_command_debug.exec_body_len));
+      aux_slices.emplace_back(aux_params.back());
+      tail_args = absl::MakeSpan(aux_slices);
+    }
+    etl.GetSlowLog().Add(cid->name(), tail_args, conn->GetName(), conn->RemoteEndpointStr(),
+                         invoke_time_usec, absl::GetCurrentTimeNanos() / 1000);
+  }
+
+  if (cntx->transaction && !cntx->conn_state.exec_info.IsRunning() &&
+      cntx->conn_state.script_info == nullptr) {
     bool is_ooo = cntx->transaction->IsOOO();
 
     cntx->last_command_debug.clock = cntx->transaction->txid();
     cntx->last_command_debug.is_ooo = is_ooo;
-    etl.stats.ooo_tx_cnt += is_ooo;
   }
 
   return true;
@@ -1447,7 +1475,8 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
   owner->RegisterBreakHook([res, this](uint32_t) {
-    res->CancelBlocking();
+    if (res->transaction)
+      res->transaction->CancelBlocking(nullptr);
     this->server_family().BreakOnShutdown();
   });
 
@@ -1592,7 +1621,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
       auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
-      info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
+      info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
       findcmd_err = ReportUnknownCmd(ArgS(ca.args, 0));
     }
@@ -1985,7 +2014,7 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
 void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
                     Transaction::MultiMode multi_mode) {
   CmdArgVec tmp_keys;
-  switch ((Transaction::MultiMode)multi_mode) {
+  switch (multi_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       break;
@@ -2023,6 +2052,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendNull();
   }
 
+  cntx->last_command_debug.exec_body_len = exec_info.body.size();
   const CommandId* const exec_cid = cntx->cid;
   CmdArgVec arg_vec;
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
@@ -2049,13 +2079,21 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   exec_info.state = ConnectionState::ExecInfo::EXEC_RUNNING;
 
   VLOG(1) << "StartExec " << exec_info.body.size();
+
+  // Make sure we flush whatever responses we aggregated in the reply builder.
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
+  ServerState* ss = ServerState::tlocal();
   if (state != ExecEvalState::NONE)
     exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
 
   if (!exec_info.body.empty()) {
+    if (GetFlag(FLAGS_track_exec_frequencies)) {
+      string descr = CreateExecDescriptor(exec_info.body, cntx->transaction->GetUniqueShardCnt());
+      ss->exec_freq_count[descr]++;
+    }
+
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {
@@ -2078,7 +2116,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
           }
         }
 
-        bool ok = InvokeCmd(scmd.Cid(), args, cntx, true);
+        bool ok = InvokeCmd(scmd.Cid(), args, cntx);
         if (!ok || rb->GetError())  // checks for i/o error, not logical error.
           break;
       }
@@ -2197,6 +2235,18 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
   cntx->SendLong(pattern_count);
 }
 
+void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
+  int channels_size = args.size();
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(channels_size * 2);
+
+  for (auto i = 0; i < channels_size; i++) {
+    auto channel = ArgS(args, i);
+    rb->SendBulkString(channel);
+    rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
+  }
+}
+
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "starting monitor on this connection: " << cntx->conn()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
@@ -2221,6 +2271,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
         "\tReturn the currently active channels matching a <pattern> (default: '*').",
         "NUMPAT",
         "\tReturn number of subscriptions to patterns.",
+        "NUMSUB [<channel> <channel...>]",
+        "\tReturns the number of subscribers for the specified channels, excluding",
+        "\tpattern subscriptions.",
         "HELP",
         "\tPrints this help."};
 
@@ -2238,6 +2291,9 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
     PubsubChannels(pattern, cntx);
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
+  } else if (subcmd == "NUMSUB") {
+    args.remove_prefix(1);
+    PubsubNumSub(args, cntx);
   } else {
     cntx->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
@@ -2407,7 +2463,7 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   if (server_cntx->conn_state.subscribe_info)
     buf[index++] = 'P';
 
-  if (server_cntx->conn_state.is_blocking)
+  if (server_cntx->blocked)
     buf[index++] = 'b';
 
   if (index) {

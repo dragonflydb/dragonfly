@@ -12,6 +12,7 @@ namespace dfly {
 
 using namespace std;
 using namespace facade;
+using namespace util;
 
 namespace {
 
@@ -193,6 +194,10 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     sd.replies.reserve(sd.cmds.size());
 
   Transaction* tx = cntx_->transaction;
+  ServerState* ss = ServerState::tlocal();
+  ss->stats.multi_squash_executions++;
+  ProactorBase* proactor = ProactorBase::me();
+  uint64_t start = proactor->GetMonotonicTimeNs();
 
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
@@ -206,6 +211,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
                                      [this](auto sid) { return !sharded_[sid].cmds.empty(); });
   }
 
+  uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
 
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
@@ -221,6 +227,9 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     if (aborted)
       break;
   }
+  uint64_t after_reply = proactor->GetMonotonicTimeNs();
+  ss->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
+  ss->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
 
   for (auto& sinfo : sharded_)
     sinfo.cmds.clear();

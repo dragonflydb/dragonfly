@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 
+#include "base/logging.h"
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 
@@ -48,7 +49,7 @@ class CompressedSortedSet {
     absl::Span<const uint8_t> diffs_{};
   };
 
-  friend struct Iterator;
+  using iterator = ConstIterator;
 
  public:
   explicit CompressedSortedSet(PMR_NS::memory_resource* mr);
@@ -56,16 +57,17 @@ class CompressedSortedSet {
   ConstIterator begin() const;
   ConstIterator end() const;
 
-  void Insert(IntType value);  // Insert arbitrary element, needs to scan whole list
-  void Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
+  bool Insert(IntType value);  // Insert arbitrary element, needs to scan whole list
+  bool Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
 
   size_t Size() const;
   size_t ByteSize() const;
 
-  // To use transparently in templates together with stl containers
-  size_t size() const {
-    return Size();
-  }
+  // Add all values from other
+  void Merge(CompressedSortedSet&& other);
+
+  // Split into two equally sized halves
+  std::pair<CompressedSortedSet, CompressedSortedSet> Split() &&;
 
  private:
   struct EntryLocation {
@@ -90,6 +92,7 @@ class CompressedSortedSet {
 
  private:
   uint32_t size_{0};
+  IntType head_value_{0};
   std::optional<IntType> tail_value_{};
   std::vector<uint8_t, PMR_NS::polymorphic_allocator<uint8_t>> diffs_;
 };

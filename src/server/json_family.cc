@@ -52,16 +52,13 @@ inline OpStatus JsonReplaceVerifyNoOp(JsonType&) {
 
 void SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
   auto& db_slice = op_args.shard->db_slice();
-  DbIndex db_index = op_args.db_cntx.db_index;
-  auto [it_output, added] = db_slice.AddOrFind(op_args.db_cntx, key);
+  auto res = db_slice.AddOrFind(op_args.db_cntx, key);
 
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_output->second);
-  db_slice.PreUpdate(db_index, it_output);
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  it_output->second.SetJson(std::move(value));
+  res.it->second.SetJson(std::move(value));
 
-  db_slice.PostUpdate(db_index, it_output, key);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_output->second);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
 }
 
 string JsonTypeToName(const JsonType& val) {
@@ -594,7 +591,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   long total_deletions = 0;
   if (path.empty()) {
     auto& db_slice = op_args.shard->db_slice();
-    auto [it, _] = db_slice.FindExt(op_args.db_cntx, key);
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     total_deletions += long(db_slice.Del(op_args.db_cntx.db_index, it));
     return total_deletions;
   }

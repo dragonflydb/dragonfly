@@ -15,6 +15,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
 #include <absl/types/span.h>
 
@@ -66,6 +67,7 @@ template <typename T> size_t HeapSize(const std::deque<T>& d);
 template <typename T1, typename T2> size_t HeapSize(const std::pair<T1, T2>& p);
 template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>& v);
 template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V>& m);
+template <typename K> size_t HeapSize(const absl::flat_hash_set<K>& s);
 
 template <typename T> size_t HeapSize(const std::unique_ptr<T>& t) {
   if (t == nullptr) {
@@ -102,6 +104,18 @@ template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V
   if constexpr (!heap_size_detail::StackOnlyType<K>() || !heap_size_detail::StackOnlyType<V>()) {
     for (const auto& kv : m) {
       size += HeapSize(kv);
+    }
+  }
+
+  return size;
+}
+
+template <typename K> size_t HeapSize(const absl::flat_hash_set<K>& s) {
+  size_t size = s.capacity() * sizeof(typename absl::flat_hash_set<K>::value_type);
+
+  if constexpr (!heap_size_detail::StackOnlyType<K>()) {
+    for (const auto& k : s) {
+      size += HeapSize(k);
     }
   }
 

@@ -13,6 +13,7 @@ enum class OpStatus : uint16_t {
   OK,
   KEY_EXISTS,
   KEY_NOTFOUND,
+  KEY_MOVED,
   SKIPPED,
   INVALID_VALUE,
   OUT_OF_RANGE,

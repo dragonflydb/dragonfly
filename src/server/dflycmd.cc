@@ -421,12 +421,13 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   absl::Time start = absl::Now();
   AggregateStatus status;
 
-  sf_->CancelBlockingCommands();
-
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
   facade::DispatchTracker tracker{sf_->GetListeners(), cntx->conn()};
-  tracker.TrackAll();
+  shard_set->pool()->Await([&](unsigned index, auto* pb) {
+    sf_->CancelBlockingOnThread();
+    tracker.TrackOnThread();
+  });
 
   if (!tracker.Wait(timeout_dur)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;

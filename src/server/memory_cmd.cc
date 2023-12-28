@@ -149,7 +149,7 @@ void MemoryCmd::Run(CmdArgList args) {
     string res = shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStats(backing, tid); });
 
     auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
-    return rb->SendBulkString(res);
+    return rb->SendVerbatimString(res);
   }
 
   string err = UnknownSubCmd(sub_cmd, "MEMORY");
@@ -190,14 +190,6 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
         mems[thread_index].replication_connection_count++;
         mems[thread_index].replication_connection_size += usage.mem;
         mems[thread_index].replication_memory += usage.buf_mem;
-      }
-
-      if (cntx != nullptr) {
-        mems[thread_index].pipelined_bytes +=
-            cntx->conn_state.exec_info.body.capacity() * sizeof(StoredCmd);
-        for (const auto& pipeline : cntx->conn_state.exec_info.body) {
-          mems[thread_index].pipelined_bytes += pipeline.UsedHeapMemory();
-        }
       }
     });
   }

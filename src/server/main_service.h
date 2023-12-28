@@ -52,8 +52,7 @@ class Service : public facade::ServiceInterface {
                               facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
-  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* reply_cntx,
-                 bool record_stats = false);
+  bool InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* reply_cntx);
 
   // Verify command can be executed now (check out of memory), always called immediately before
   // execution
@@ -150,6 +149,7 @@ class Service : public facade::ServiceInterface {
 
   void PubsubChannels(std::string_view pattern, ConnectionContext* cntx);
   void PubsubPatterns(ConnectionContext* cntx);
+  void PubsubNumSub(CmdArgList channels, ConnectionContext* cntx);
 
   struct EvalArgs {
     std::string_view sha;  // only one of them is defined.

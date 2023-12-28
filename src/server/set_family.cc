@@ -154,8 +154,7 @@ unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec,
 
 void InitStrSet(CompactObj* set) {
   if (GetFlag(FLAGS_use_set2)) {
-    StringSet* ss = new StringSet{CompactObj::memory_resource()};
-    set->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
+    set->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
   } else {
     dict* ds = dictCreate(&setDictType);
     set->InitRobj(OBJ_SET, kEncodingStrMap, ds);
@@ -559,7 +558,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && vals.empty()) {
-    auto it = db_slice.FindExt(op_args.db_cntx, key).first;
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     db_slice.Del(op_args.db_cntx.db_index, it);
     if (journal_update && op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
@@ -567,27 +566,23 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     return 0;
   }
 
-  PrimeIterator it;
-  bool new_key = false;
+  DbSlice::AddOrFindResult add_res;
 
   try {
-    tie(it, new_key) = db_slice.AddOrFind(op_args.db_cntx, key);
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
   } catch (bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  CompactObj& co = it->second;
+  CompactObj& co = add_res.it->second;
 
-  if (!new_key) {
+  if (!add_res.is_new) {
     // for non-overwrite case it must be set.
     if (!overwrite && co.ObjType() != OBJ_SET)
       return OpStatus::WRONG_TYPE;
-
-    // Update stats and trigger any handle the old value if needed.
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
-  if (new_key || overwrite) {
+  if (add_res.is_new || overwrite) {
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
     InitSet(vals, &co);
@@ -633,7 +628,6 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     res = AddStrSet(op_args.db_cntx, vals, UINT32_MAX, &co);
   }
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
   if (journal_update && op_args.shard->journal()) {
     if (overwrite) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
@@ -651,18 +645,17 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
 
-  PrimeIterator it;
-  bool new_key = false;
+  DbSlice::AddOrFindResult add_res;
 
   try {
-    tie(it, new_key) = db_slice.AddOrFind(op_args.db_cntx, key);
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
   } catch (bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  CompactObj& co = it->second;
+  CompactObj& co = add_res.it->second;
 
-  if (new_key) {
+  if (add_res.is_new) {
     CHECK(absl::GetFlag(FLAGS_use_set2));
     InitStrSet(&co);
   } else {
@@ -671,7 +664,6 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
       return OpStatus::WRONG_TYPE;
 
     // Update stats and trigger any handle the old value if needed.
-    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     if (co.Encoding() == kEncodingIntSet) {
       intset* is = (intset*)co.RObjPtr();
       robj tmp;
@@ -685,8 +677,6 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   }
 
   uint32_t res = AddStrSet(op_args.db_cntx, std::move(vals), ttl_sec, &co);
-
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
 
   return res;
 }
@@ -1646,7 +1636,7 @@ bool SetFamily::ConvertToStrSet(const intset* is, size_t expected_len, robj* des
   int ii = 0;
 
   if (GetFlag(FLAGS_use_set2)) {
-    StringSet* ss = new StringSet{CompactObj::memory_resource()};
+    StringSet* ss = CompactObj::AllocateMR<StringSet>();
     if (expected_len) {
       ss->Reserve(expected_len);
     }
