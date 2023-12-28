@@ -1,58 +1,80 @@
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#pragma once
 
-#include "core/simple_lru_counter.h"
+#include <absl/container/node_hash_map.h>
+
+#include <optional>
 
 #include "base/logging.h"
 
 namespace dfly {
 
-using namespace std;
+template <typename T> class Lru {
+  struct Node {
+    const T* data_ptr;
 
-SimpleLruCounter::SimpleLruCounter(size_t capacity) : head_(0), grow_size_(capacity) {
-  CHECK_GT(capacity, 1u);
-  node_arr_.resize(capacity);
-}
+    uint32_t prev;
+    uint32_t next;
 
-SimpleLruCounter::~SimpleLruCounter() {
-}
+    Node() : prev(0), next(0) {
+    }
+  };
 
-optional<uint64_t> SimpleLruCounter::Get(string_view key) const {
-  auto it = table_.find(key);
+ public:
+  explicit Lru(size_t capacity) : head_(0), grow_size_(capacity) {
+    CHECK_GT(capacity, 1u);
+    node_arr_.resize(capacity);
+  }
+  ~Lru() {
+  }
+
+  std::optional<T> GetPrev(const T& data) const;
+  std::optional<T> GetLast() const;
+  enum class Position {
+    kHead,
+    kTail,
+  };
+  void Put(const T& data, Position position = Position::kHead);
+  void Remove(const T& data);
+
+  size_t Size() const {
+    return table_.size();
+  }
+
+ private:
+  void MoveToPosition(uint32_t index, Position position);
+
+  absl::node_hash_map<T, uint32_t> table_;  // map from item to index in node arr
+  std::vector<Node> node_arr_;
+  uint32_t head_;
+  size_t grow_size_;
+};
+
+template <typename T> std::optional<T> Lru<T>::GetPrev(const T& data) const {
+  auto it = table_.find(data);
   if (it == table_.end()) {
-    return nullopt;
+    return std::nullopt;
   }
   const auto& node = node_arr_[it->second];
 
-  DCHECK_EQ(node.key, key);
-
-  return node.count;
-}
-
-optional<uint64_t> SimpleLruCounter::GetPrev(string_view key) const {
-  auto it = table_.find(key);
-  if (it == table_.end()) {
-    return nullopt;
-  }
-  const auto& node = node_arr_[it->second];
-
-  DCHECK_EQ(node.key, key);
+  DCHECK_EQ(node.data_ptr, &it->first);
   const auto& node_prev = node_arr_[node.prev];
 
-  return node_prev.count;
+  return *node_prev.data_ptr;
 }
 
-optional<uint64_t> SimpleLruCounter::GetLast() const {
+template <typename T> std::optional<T> Lru<T>::GetLast() const {
   if (table_.size() == 0) {
-    return nullopt;
+    return std::nullopt;
   }
   unsigned tail = node_arr_[head_].prev;
-  return node_arr_[tail].count;
+  return *node_arr_[tail].data_ptr;
 }
 
-void SimpleLruCounter::Put(string_view key, uint64_t value, Position position) {
-  auto [it, inserted] = table_.emplace(key, table_.size());
+template <typename T> void Lru<T>::Put(const T& data, Position position) {
+  auto [it, inserted] = table_.emplace(data, table_.size());
   if (inserted) {
     if (it->second < node_arr_.size()) {
       node_arr_.resize(node_arr_.size() + grow_size_);
@@ -66,21 +88,18 @@ void SimpleLruCounter::Put(string_view key, uint64_t value, Position position) {
     node_arr_[tail].next = it->second;
     node_arr_[head_].prev = it->second;
 
-    node.key = it->first;  // reference the key. We need it to erase the key referencing tail above.
-    node.count = value;
+    node.data_ptr = &(it->first);
 
     if (position == Position::kHead) {
       head_ = it->second;
     }
   } else {  // not inserted.
-    auto& node = node_arr_[it->second];
-    node.count = value;
     MoveToPosition(it->second, position);
   }
 }
 
-void SimpleLruCounter::Remove(std::string_view key) {
-  auto it = table_.find(key);
+template <typename T> void Lru<T>::Remove(const T& data) {
+  auto it = table_.find(data);
   if (it == table_.end()) {
     return;
   }
@@ -91,11 +110,11 @@ void SimpleLruCounter::Remove(std::string_view key) {
   node_arr_[node.prev].next = node.next;
   node_arr_[node.next].prev = node.prev;
 
-  // remove key from table.
+  // remove item from table.
   if (remove_index == head_) {
     head_ = node.next;
   }
-  table_.erase(key);
+  table_.erase(data);
 
   if (table_.size() == remove_index) {
     return;  // if the removed item was the last in the node array nothing else to do.
@@ -104,7 +123,7 @@ void SimpleLruCounter::Remove(std::string_view key) {
   // move last item from node array to the removed index
   uint32_t move_index = table_.size();
   auto& node_to_move = node_arr_[move_index];
-  it = table_.find(string_view(node_to_move.key));
+  it = table_.find(*node_to_move.data_ptr);
   CHECK(it != table_.end());
 
   it->second = remove_index;
@@ -120,7 +139,7 @@ void SimpleLruCounter::Remove(std::string_view key) {
   }
 }
 
-void SimpleLruCounter::MoveToPosition(uint32_t index, Position position) {
+template <typename T> void Lru<T>::MoveToPosition(uint32_t index, Position position) {
   DCHECK_LT(index, node_arr_.size());
   uint32_t tail = node_arr_[head_].prev;
   uint32_t curr_node_index = position == Position::kHead ? head_ : tail;
