@@ -325,6 +325,8 @@ class Transaction {
 
   void Refurbish();
 
+  void IterateMultiLocks(ShardId sid, std::function<void(const std::string&)> cb) const;
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
@@ -341,7 +343,7 @@ class Transaction {
   };
 
   // owned std::string because callbacks its used in run fully async and can outlive the entries.
-  using KeyList = std::vector<std::pair<std::string, LockCnt>>;
+  using KeyList = std::vector<std::string>;
 
   struct alignas(64) PerShardData {
     PerShardData(PerShardData&&) noexcept {
@@ -377,15 +379,14 @@ class Transaction {
     MultiRole role;
     MultiMode mode;
 
-    absl::flat_hash_map<std::string, LockCnt> lock_counts;
+    std::optional<IntentLock::Mode> lock_mode;
+    absl::flat_hash_set<std::string> locks;
 
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
     // executing multi-command. For every write to a shard journal, the corresponding index in the
     // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
-
-    bool locks_recorded = false;
   };
 
   enum CoordinatorState : uint8_t {
@@ -416,20 +417,20 @@ class Transaction {
   void InitGlobal();
 
   // Init with a set of keys.
-  void InitByKeys(KeyIndex keys);
+  void InitByKeys(const KeyIndex& keys);
 
   void EnableShard(ShardId sid);
   void EnableAllShards();
 
   // Build shard index by distributing the arguments by shards based on the key index.
-  void BuildShardIndex(KeyIndex keys, bool rev_mapping, std::vector<PerShardCache>* out);
+  void BuildShardIndex(const KeyIndex& keys, bool rev_mapping, std::vector<PerShardCache>* out);
 
   // Init shard data from shard index.
   void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
                      bool rev_mapping);
 
   // Init multi. Record locks if needed.
-  void InitMultiData(KeyIndex keys);
+  void RecordMultiLocks(const KeyIndex& keys);
 
   // Store all key index keys in args_. Used only for single shard initialization.
   void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
@@ -467,7 +468,7 @@ class Transaction {
   // Run callback inline as part of multi stub.
   OpStatus RunSquashedMultiCb(RunnableType cb);
 
-  void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
+  void UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* shard,
                           uint32_t shard_journals_cnt);
 
   // In a multi-command transaction, we determine the number of shard journals that we wrote entries
@@ -585,8 +586,6 @@ class Transaction {
 
  private:
   struct TLTmpSpace {
-    absl::flat_hash_set<std::string_view> uniq_keys;
-
     std::vector<PerShardCache>& GetShardIndex(unsigned size);
 
    private:
