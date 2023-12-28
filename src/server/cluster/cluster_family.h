@@ -93,13 +93,19 @@ class ClusterFamily {
     MigrationInfo() = default;
     MigrationInfo(std::uint32_t flows_num, std::string ip, uint32_t sync_id, uint16_t port,
                   std::vector<ClusterConfig::SlotRange> slots)
-        : host_ip(ip), flows(flows_num), slots(slots), sync_id(sync_id), port(port) {
+        : host_ip(ip),
+          flows(flows_num),
+          slots(slots),
+          sync_id(sync_id),
+          port(port),
+          state(ClusterSlotMigration::State::C_CONNECTING) {
     }
     std::string host_ip;
     std::vector<FlowInfo> flows;
     std::vector<ClusterConfig::SlotRange> slots;
     uint32_t sync_id;
     uint16_t port;
+    ClusterSlotMigration::State state = ClusterSlotMigration::State::C_NO_STATE;
   };
 
   std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);

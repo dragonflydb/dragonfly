@@ -631,23 +631,7 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
 }
 
 void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser(args);
-  auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
-
-  if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
-
-  auto state = [&] {
-    lock_guard lk(migration_mu_);
-    for (const auto& m : migrations_jobs_) {
-      const auto& info = m->GetInfo();
-      if (info.host == host_ip && info.port == port)
-        return info.state;
-    }
-    return ClusterSlotMigration::C_NO_STATE;
-  }();
-
-  auto state_str = [state] {
+  const auto& state_to_str = [](ClusterSlotMigration::State state) {
     switch (state) {
       case ClusterSlotMigration::C_NO_STATE:
         return "NO_STATE"sv;
@@ -660,9 +644,43 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     }
     assert(false);
     return "UNDEFINED_STATE"sv;
-  }();
+  };
 
-  return cntx->SendSimpleString(state_str);
+  CmdArgParser parser(args);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+
+  if (parser.HasNext()) {
+    auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
+    if (auto err = parser.Error(); err)
+      return rb->SendError(err->MakeReply());
+
+    lock_guard lk(migration_mu_);
+    for (const auto& m : migrations_jobs_) {
+      const auto& info = m->GetInfo();
+      if (info.host == host_ip && info.port == port)
+        return rb->SendSimpleString(state_to_str(info.state));
+    }
+    for (const auto& m : migration_infos_) {
+      if (m.second->host_ip == host_ip && m.second->port == port)
+        return rb->SendSimpleString(state_to_str(m.second->state));
+    }
+  } else if (auto arr_size = migrations_jobs_.size() + migration_infos_.size(); arr_size != 0) {
+    rb->StartArray(arr_size);
+    const auto& sendAnswer = [&state_to_str, rb](std::string_view direction, std::string_view host,
+                                                 uint16_t port, auto state) {
+      auto str = absl::StrCat(direction, " ", host, ":", port, " ", state_to_str(state));
+      rb->SendSimpleString(str);
+    };
+    lock_guard lk(migration_mu_);
+    for (const auto& m : migrations_jobs_) {
+      const auto& info = m->GetInfo();
+      sendAnswer("in", info.host, info.port, info.state);
+    }
+    for (const auto& m : migration_infos_) {
+      sendAnswer("out", m.second->host_ip, m.second->port, m.second->state);
+    }
+  }
+  return rb->SendSimpleString(state_to_str(ClusterSlotMigration::C_NO_STATE));
 }
 
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
@@ -762,6 +780,7 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendError(kIdNotFound);
 
   info->flows[shard_id].conn = cntx->conn();
+  info->state = ClusterSlotMigration::State::C_FULL_SYNC;
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
 
