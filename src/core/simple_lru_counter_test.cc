@@ -13,9 +13,10 @@ namespace dfly {
 
 class SimpleLruTest : public ::testing::Test {
  protected:
-  SimpleLruTest() : cache_(4) {
+  SimpleLruTest() : cache_(kSize) {
   }
 
+  const size_t kSize = 4;
   SimpleLruCounter cache_;
 };
 
@@ -43,6 +44,31 @@ TEST_F(SimpleLruTest, Basic) {
   ASSERT_EQ(nullopt, cache_.Get("c"));
   ASSERT_EQ(5, cache_.Get("e"));
   ASSERT_EQ(6, cache_.Get("f"));
+}
+
+TEST_F(SimpleLruTest, DifferentOrder) {
+  for (uint32_t i = 0; i < kSize * 2; ++i) {
+    cache_.Put(absl::StrCat(i), i);
+  }
+
+  for (uint32_t i = 0; i < kSize; ++i) {
+    EXPECT_EQ(nullopt, cache_.Get(absl::StrCat(i)));
+  }
+  for (uint32_t i = kSize; i < kSize * 2; ++i) {
+    EXPECT_EQ(i, cache_.Get(absl::StrCat(i)));
+  }
+
+  for (uint32_t i = kSize; i > 0; --i) {
+    cache_.Put(absl::StrCat(i), i);
+  }
+  cache_.Put("0", 0);
+
+  for (uint32_t i = 0; i < kSize; ++i) {
+    EXPECT_EQ(i, cache_.Get(absl::StrCat(i)));
+  }
+  for (uint32_t i = kSize; i < kSize * 2; ++i) {
+    EXPECT_EQ(nullopt, cache_.Get(absl::StrCat(i)));
+  }
 }
 
 }  // namespace dfly
