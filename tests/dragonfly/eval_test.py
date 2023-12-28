@@ -262,5 +262,5 @@ async def test_lua_auto_async(async_client: aioredis.Redis):
 
     await async_client.eval(TEST_SCRIPT, 4, "a", "b", "c", "d")
 
-    flushes = (await async_client.info("stats"))["eval_squashed_flushes"]
+    flushes = (await async_client.info("transaction"))["eval_squashed_flushes"]
     assert 1 <= flushes <= 3  # all 100 commands are executed in at most 3 batches

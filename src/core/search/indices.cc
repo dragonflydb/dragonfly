@@ -88,10 +88,12 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
   return out;
 }
 
-BaseStringIndex::BaseStringIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
+template <typename C>
+BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
-const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
+template <typename C>
+const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(string_view str) const {
   str = absl::StripAsciiWhitespace(str);
 
   string word;
@@ -104,12 +106,14 @@ const CompressedSortedSet* BaseStringIndex::Matching(string_view str) const {
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
-CompressedSortedSet* BaseStringIndex::GetOrCreate(string_view word) {
+template <typename C>
+typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_view word) {
   auto* mr = entries_.get_allocator().resource();
-  return &entries_.try_emplace(PMR_NS::string{word, mr}, mr).first->second;
+  return &entries_.try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;
 }
 
-void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+template <typename C>
+void BaseStringIndex<C>::Add(DocId id, DocumentAccessor* doc, string_view field) {
   absl::flat_hash_set<std::string> tokens;
   for (string_view str : doc->GetStrings(field))
     tokens.merge(Tokenize(str));
@@ -118,7 +122,8 @@ void BaseStringIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
     GetOrCreate(token)->Insert(id);
 }
 
-void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+template <typename C>
+void BaseStringIndex<C>::Remove(DocId id, DocumentAccessor* doc, string_view field) {
   absl::flat_hash_set<std::string> tokens;
   for (string_view str : doc->GetStrings(field))
     tokens.merge(Tokenize(str));
@@ -133,6 +138,9 @@ void BaseStringIndex::Remove(DocId id, DocumentAccessor* doc, string_view field)
       entries_.erase(it);
   }
 }
+
+template struct BaseStringIndex<CompressedSortedSet>;
+template struct BaseStringIndex<SortedVector>;
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
   return TokenizeWords(value);

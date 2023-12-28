@@ -3,6 +3,7 @@
 //
 #include "facade/reply_builder.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/fixed_array.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
@@ -39,6 +40,8 @@ const char* NullString(bool resp3) {
   return resp3 ? "_\r\n" : "$-1\r\n";
 }
 
+static thread_local SinkReplyBuilder::StatsType tl_stats;
+
 }  // namespace
 
 SinkReplyBuilder::MGetResponse::~MGetResponse() {
@@ -58,7 +61,20 @@ void SinkReplyBuilder::CloseConnection() {
     ec_ = std::make_error_code(std::errc::connection_aborted);
 }
 
+SinkReplyBuilder::StatsType SinkReplyBuilder::GetThreadLocalStats() {
+  return tl_stats;
+}
+
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
+  int64_t before = absl::GetCurrentTimeNanos();
+  SendStatsType stats_type = SendStatsType::kRegular;
+
+  auto cleanup = absl::MakeCleanup([&]() {
+    int64_t after = absl::GetCurrentTimeNanos();
+    tl_stats[stats_type].count++;
+    tl_stats[stats_type].total_duration += (after - before) / 1'000;
+  });
+
   has_replied_ = true;
   DCHECK(sink_);
   constexpr size_t kMaxBatchSize = 1024;
@@ -70,6 +86,8 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
 
   // Allow batching with up to kMaxBatchSize of data.
   if ((should_batch_ || should_aggregate_) && (batch_.size() + bsize < kMaxBatchSize)) {
+    stats_type = SendStatsType::kBatch;
+
     batch_.reserve(batch_.size() + bsize);
     for (unsigned i = 0; i < len; ++i) {
       std::string_view src((char*)v[i].iov_base, v[i].iov_len);

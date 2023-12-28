@@ -84,7 +84,7 @@ void SimpleLruCounter::BumpToHead(uint32_t index) {
   node_arr_[node.prev].next = node.next;
   node_arr_[node.next].prev = node.prev;
   node.prev = tail;
-  node.prev = head_;
+  node.next = head_;
   head_ = index;
 }
 };  // namespace dfly

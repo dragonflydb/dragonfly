@@ -149,7 +149,7 @@ void MemoryCmd::Run(CmdArgList args) {
     string res = shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStats(backing, tid); });
 
     auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
-    return rb->SendBulkString(res);
+    return rb->SendVerbatimString(res);
   }
 
   string err = UnknownSubCmd(sub_cmd, "MEMORY");

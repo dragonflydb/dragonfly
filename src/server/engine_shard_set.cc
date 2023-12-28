@@ -173,8 +173,6 @@ EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  ooo_runs += o.ooo_runs;
-  quick_runs += o.quick_runs;
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
   defrag_task_invocation_total += o.defrag_task_invocation_total;
@@ -516,7 +514,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     if (VLOG_IS_ON(1)) {
       dbg_id = trans->DebugId();
     }
-    ++stats_.ooo_runs;
 
     bool txq_ooo = trans_mask & Transaction::OUT_OF_ORDER;
     bool keep = trans->RunInShard(this, txq_ooo);
@@ -709,6 +706,79 @@ void EngineShard::TEST_EnableHeartbeat() {
   fiber_periodic_ = fb2::Fiber("shard_periodic_TEST", [this, period_ms = 1] {
     RunPeriodic(std::chrono::milliseconds(period_ms));
   });
+}
+
+auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
+  const TxQueue* queue = txq();
+
+  TxQueueInfo info;
+  if (queue->Empty())
+    return info;
+
+  auto cur = queue->Head();
+  info.tx_total = queue->size();
+  unsigned max_db_id = 0;
+  ShardId sid = shard_id();
+
+  do {
+    auto value = queue->At(cur);
+    Transaction* trx = std::get<Transaction*>(value);
+
+    // find maximum index of databases used by transactions
+    if (trx->GetDbIndex() > max_db_id) {
+      max_db_id = trx->GetDbIndex();
+    }
+
+    if (trx->IsArmedInShard(sid)) {
+      info.tx_armed++;
+
+      if (trx->IsGlobal() || (trx->IsMulti() && trx->GetMultiMode() == Transaction::GLOBAL)) {
+        info.tx_global++;
+      } else {
+        DbTable* table = db_slice().GetDBTable(trx->GetDbIndex());
+        bool can_run = true;
+
+        if (!trx->IsMulti()) {
+          KeyLockArgs lock_args = trx->GetLockArgs(sid);
+          for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
+            string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+            auto it = table->trans_locks.find(s);
+            DCHECK(it != table->trans_locks.end());
+            if (it != table->trans_locks.end()) {
+              if (it->second.IsContended()) {
+                can_run = false;
+                break;
+              }
+            }
+          }
+        }
+        if (can_run) {
+          info.tx_runnable++;
+        }
+      }
+    }
+    cur = queue->Next(cur);
+  } while (cur != queue->Head());
+
+  // Analyze locks
+  for (unsigned i = 0; i <= max_db_id; ++i) {
+    DbTable* table = db_slice().GetDBTable(i);
+    if (table == nullptr)
+      continue;
+
+    info.total_locks += table->trans_locks.size();
+    for (const auto& k_v : table->trans_locks) {
+      if (k_v.second.IsContended()) {
+        info.contended_locks++;
+        if (k_v.second.ContentionScore() > info.max_contention_score) {
+          info.max_contention_score = k_v.second.ContentionScore();
+          info.max_contention_lock_name = k_v.first;
+        }
+      }
+    }
+  }
+
+  return info;
 }
 
 /**

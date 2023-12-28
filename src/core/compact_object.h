@@ -324,6 +324,17 @@ class CompactObj {
   static void InitThreadLocal(MemoryResource* mr);
   static MemoryResource* memory_resource();  // thread-local.
 
+  template <typename T> static T* AllocateMR() {
+    void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
+    return new (ptr) T{memory_resource()};
+  }
+
+  template <typename T> static void DeleteMR(void* ptr) {
+    T* t = (T*)ptr;
+    t->~T();
+    memory_resource()->deallocate(ptr, alignof(T));
+  }
+
  private:
   size_t DecodedLen(size_t sz) const;
 

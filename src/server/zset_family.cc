@@ -202,8 +202,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs&
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   if (add_res.is_new || zparams.override) {
     if (member_len > server.max_map_field_len) {
-      detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
-      pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, zs);
+      pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
     } else {
       unsigned char* lp = lpNew(0);
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
@@ -1276,7 +1275,6 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   range_spec.interval = ZSetFamily::TopNScored(1);
 
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
-  db_slice.PreUpdate(t->GetDbIndex(), it);
 
   PrimeValue& pv = it->second;
   IntervalVisitor iv{Action::POP, range_spec.params, &pv};

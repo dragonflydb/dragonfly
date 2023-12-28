@@ -37,8 +37,6 @@ class BlockingController;
 class EngineShard {
  public:
   struct Stats {
-    uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
-    uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
     uint64_t defrag_attempt_total = 0;
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
@@ -101,10 +99,6 @@ class EngineShard {
   // Remove current continuation trans if its equal to tx.
   void RemoveContTx(Transaction* tx);
 
-  void IncQuickRun() {
-    stats_.quick_runs++;
-  }
-
   const Stats& stats() const {
     return stats_;
   }
@@ -158,6 +152,29 @@ class EngineShard {
   }
 
   void TEST_EnableHeartbeat();
+
+  struct TxQueueInfo {
+    // Armed - those that the coordinator has armed with callbacks and wants them to run.
+    // Runnable - those that could run (they own the locks) but probably can not run due
+    // to head of line blocking in the transaction queue i.e. there is a transaction that
+    // either is not armed or not runnable that is blocking the runnable transactions.
+    // tx_total is the size of the transaction queue.
+    unsigned tx_armed = 0, tx_total = 0, tx_runnable = 0, tx_global = 0;
+
+    // total_locks - total number of the transaction locks in the shard.
+    unsigned total_locks = 0;
+
+    // contended_locks - number of locks that are contended by more than one transaction.
+    unsigned contended_locks = 0;
+
+    // The score of the lock with maximum contention (see IntentLock::ContetionScore for details).
+    unsigned max_contention_score = 0;
+
+    // the lock name with maximum contention
+    std::string max_contention_lock_name;
+  };
+
+  TxQueueInfo AnalyzeTxQueue();
 
  private:
   struct DefragTaskState {

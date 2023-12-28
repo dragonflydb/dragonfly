@@ -85,7 +85,8 @@ class CommandId : public facade::CommandId {
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
-  void Invoke(CmdArgList args, ConnectionContext* cntx) const;
+  // Returns the invoke time in usec.
+  uint64_t Invoke(CmdArgList args, ConnectionContext* cntx) const;
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;

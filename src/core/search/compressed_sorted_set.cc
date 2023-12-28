@@ -97,27 +97,27 @@ CompressedSortedSet::EntryLocation CompressedSortedSet::LowerBound(IntType value
 // needs to be inserted. Then it computes the differences dif1 = V - A and diff2 = B - V that need
 // to be stored to encode the triple A V B. Those are stored where diff0 = B - A was previously
 // stored, possibly extending the vector
-void CompressedSortedSet::Insert(IntType value) {
+bool CompressedSortedSet::Insert(IntType value) {
   if (tail_value_ && *tail_value_ == value)
-    return;
+    return false;
 
   if (tail_value_ && value > *tail_value_) {
     PushBackDiff(value - *tail_value_);
     tail_value_ = value;
-    return;
+    return true;
   }
 
   auto bound = LowerBound(value);
 
   // At least one element was read and it's equal to value: return to avoid duplicate
   if (bound.value == value && !bound.diff_span.empty())
-    return;
+    return false;
 
   // Value is bigger than any other (or list is empty): append required diff at the end
   if (value > bound.value || bound.diff_span.empty()) {
     PushBackDiff(value - bound.value);
     tail_value_ = value;
-    return;
+    return true;
   }
 
   size_++;
@@ -141,17 +141,19 @@ void CompressedSortedSet::Insert(IntType value) {
   // Now overwrite diff0 and 0s with the two new differences
   copy(diff1_span.begin(), diff1_span.end(), diffs_.begin() + diff_offset);
   copy(diff2_span.begin(), diff2_span.end(), diffs_.begin() + diff_offset + diff1_span.size());
+
+  return true;
 }
 
 // Remove has linear complexity. It tries to find the element V and its neighbors A and B,
 // which are encoded as diff1 = V - A and diff2 = B - V. Adjacently stored diff1 and diff2
 // need to be replaced with diff3 = diff1 + diff2s
-void CompressedSortedSet::Remove(IntType value) {
+bool CompressedSortedSet::Remove(IntType value) {
   auto bound = LowerBound(value);
 
   // Nothing was read or the element was not found
   if (bound.diff_span.empty() || bound.value != value)
-    return;
+    return false;
 
   // We're removing below unconditionally
   size_--;
@@ -166,7 +168,7 @@ void CompressedSortedSet::Remove(IntType value) {
     tail_value_ = bound.prev_value;
     if (diffs_.empty())
       tail_value_ = nullopt;
-    return;
+    return true;
   }
 
   // Now the list certainly contains a succeeding element B > V and possibly A < V (or 0)
@@ -185,6 +187,8 @@ void CompressedSortedSet::Remove(IntType value) {
 
   // Overwrite diff1/diff2 with new diff3
   copy(diff3_buf.begin(), diff3_buf.end(), diffs_.begin() + diff_offset);
+
+  return true;
 }
 
 size_t CompressedSortedSet::Size() const {
@@ -193,6 +197,35 @@ size_t CompressedSortedSet::Size() const {
 
 size_t CompressedSortedSet::ByteSize() const {
   return diffs_.size();
+}
+
+void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
+  // Quadratic compexity in theory, but in practice used only to merge with larger values.
+  // Tail insert optimization makes it linear
+  for (int v : other)
+    Insert(v);
+}
+
+std::pair<CompressedSortedSet, CompressedSortedSet> CompressedSortedSet::Split() && {
+  DCHECK_GT(Size(), 5u);
+
+  CompressedSortedSet second(diffs_.get_allocator().resource());
+
+  // Move iterator to middle position and save size of diffs tail
+  auto it = begin();
+  std::advance(it, size_ / 2);
+  size_t keep_bytes = it.last_read_.data() - diffs_.data();
+
+  // Copy second half into second set
+  for (; it != end(); ++it)
+    second.Insert(*it);
+
+  // Erase diffs tail
+  diffs_.resize(keep_bytes);
+  tail_value_ = std::nullopt;
+  size_ -= second.Size();
+
+  return std::make_pair(std::move(*this), std::move(second));
 }
 
 // The leftmost three bits of the first byte store the number of additional bytes. All following

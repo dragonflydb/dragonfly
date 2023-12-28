@@ -13,6 +13,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
+#include "core/search/block_list.h"
 #include "core/search/compressed_sorted_set.h"
 
 // TODO: move core field definitions out of big header
@@ -36,7 +37,9 @@ struct NumericIndex : public BaseIndex {
 };
 
 // Base index for string based indices.
-struct BaseStringIndex : public BaseIndex {
+template <typename C> struct BaseStringIndex : public BaseIndex {
+  using Container = BlockList<C>;
+
   BaseStringIndex(PMR_NS::memory_resource* mr);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -46,10 +49,10 @@ struct BaseStringIndex : public BaseIndex {
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
 
   // Pointer is valid as long as index is not mutated. Nullptr if not found
-  const CompressedSortedSet* Matching(std::string_view str) const;
+  const Container* Matching(std::string_view str) const;
 
  protected:
-  CompressedSortedSet* GetOrCreate(std::string_view word);
+  Container* GetOrCreate(std::string_view word);
 
   struct PmrEqual {
     using is_transparent = void;
@@ -71,14 +74,14 @@ struct BaseStringIndex : public BaseIndex {
     }
   };
 
-  absl::flat_hash_map<PMR_NS::string, CompressedSortedSet, PmrHash, PmrEqual,
-                      PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, CompressedSortedSet>>>
+  absl::flat_hash_map<PMR_NS::string, Container, PmrHash, PmrEqual,
+                      PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, Container>>>
       entries_;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
-struct TextIndex : public BaseStringIndex {
+struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
   TextIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
   }
 
@@ -87,7 +90,7 @@ struct TextIndex : public BaseStringIndex {
 
 // Index for text fields.
 // Hashmap based lookup per word.
-struct TagIndex : public BaseStringIndex {
+struct TagIndex : public BaseStringIndex<SortedVector> {
   TagIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
   }
 

@@ -510,7 +510,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     bool use_set2 = GetFlag(FLAGS_use_set2);
 
     if (use_set2) {
-      StringSet* set = new StringSet{CompactObj::memory_resource()};
+      StringSet* set = CompactObj::AllocateMR<StringSet>();
       set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       res = createObject(OBJ_SET, set);
       res->encoding = OBJ_ENCODING_HT;
@@ -641,10 +641,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     lp = lpShrinkToFit(lp);
     pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
   } else {
-    StringMap* string_map = new StringMap;
+    StringMap* string_map = CompactObj::AllocateMR<StringMap>();
     string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
 
-    auto cleanup = absl::MakeCleanup([&] { delete string_map; });
+    auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<StringMap>(string_map); });
     std::string key;
     string_map->Reserve(len);
     for (const auto& seg : ltrace->arr) {
@@ -761,9 +761,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t zsetlen = ltrace->blob_count();
-  detail::SortedMap* zs = new detail::SortedMap(CompactObj::memory_resource());
+  detail::SortedMap* zs = CompactObj::AllocateMR<detail::SortedMap>();
   unsigned encoding = OBJ_ENCODING_SKIPLIST;
-  auto cleanup = absl::MakeCleanup([&] { delete zs; });
+  auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<detail::SortedMap>(zs); });
 
   if (zsetlen > DICT_HT_INITIAL_SIZE && !zs->Reserve(zsetlen)) {
     LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
@@ -803,7 +803,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
       maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
-    delete zs;
+    CompactObj::DeleteMR<detail::SortedMap>(zs);
   }
 
   std::move(cleanup).Cancel();
@@ -977,7 +977,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     const bool use_set2 = GetFlag(FLAGS_use_set2);
     robj* res = nullptr;
     if (use_set2) {
-      StringSet* set = new StringSet{CompactObj::memory_resource()};
+      StringSet* set = CompactObj::AllocateMR<StringSet>();
       res = createObject(OBJ_SET, set);
       res->encoding = OBJ_ENCODING_HT;
       auto f = [this, res](unsigned char* val, unsigned int slen, long long lval) {
@@ -1060,7 +1060,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned encoding = OBJ_ENCODING_LISTPACK;
     void* inner;
     if (lpBytes(lp) >= server.max_listpack_map_bytes) {
-      inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp).release();
+      inner = detail::SortedMap::FromListPack(CompactObj::memory_resource(), lp);
       lpFree(lp);
       encoding = OBJ_ENCODING_SKIPLIST;
     } else {

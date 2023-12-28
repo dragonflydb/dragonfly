@@ -1,4 +1,4 @@
-add_executable(dragonfly dfly_main.cc)
+add_executable(dragonfly dfly_main.cc version_monitor.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -16,6 +16,7 @@ endif()
 
 
 add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
+            command_registry.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -23,11 +24,12 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             )
 
 if (NOT APPLE)
-  SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc)
+  SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc search/aggregator.cc)
   cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+  cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 endif()
 
-add_library(dragonfly_lib engine_shard_set.cc channel_store.cc command_registry.cc
+add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc json_family.cc
             ${SEARCH_FILES}
@@ -80,7 +82,6 @@ cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rd
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
-cxx_test(snapshot_test dragonfly_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
@@ -97,6 +98,6 @@ cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
-                 redis_parser_test snapshot_test stream_family_test string_family_test
+                 redis_parser_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test hll_family_test
                  cluster_config_test cluster_family_test user_registry_test acl_family_test)

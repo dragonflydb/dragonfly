@@ -14,6 +14,9 @@
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 
+ABSL_FLAG(uint32_t, tx_queue_warning_len, 30,
+          "Length threshold for warning about long transaction queue");
+
 namespace dfly {
 
 using namespace std;
@@ -163,7 +166,6 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   IntentLock::Mode mode = Mode();
 
   auto& tmp_uniques = tmp_space.uniq_keys;
-  tmp_uniques.clear();
 
   auto lock_key = [this, mode, &tmp_uniques](string_view key) {
     if (auto [_, inserted] = tmp_uniques.insert(KeyLockArgs::GetLockKey(key)); !inserted)
@@ -175,13 +177,16 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   // With EVAL, we call this function for EVAL itself as well as for each command
   // for eval. currently, we lock everything only during the eval call.
   if (!multi_->locks_recorded) {
+    tmp_uniques.clear();
+
     for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
       lock_key(ArgS(full_args_, i));
     if (key_index.bonus)
       lock_key(ArgS(full_args_, *key_index.bonus));
+
+    multi_->locks_recorded = true;
   }
 
-  multi_->locks_recorded = true;
   DCHECK(IsAtomicMulti());
   DCHECK(multi_->mode == GLOBAL || !multi_->lock_counts.empty());
 }
@@ -344,6 +349,9 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
   multi_->role = SQUASHER;
   InitBase(db_index_, {});
 
+  // Because squashing already determines active shards by partitioning commands,
+  // we don't have to work with keys manually and can just mark active shards.
+  // The partitioned commands know it's keys and assume they have correct access.
   DCHECK_EQ(shard_data_.size(), shard_set->size());
   for (unsigned i = 0; i < shard_data_.size(); i++) {
     if (enabled(i)) {
@@ -353,6 +361,8 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
     } else {
       shard_data_[i].local_mask &= ~ACTIVE;
     }
+    shard_data_[i].arg_start = 0;
+    shard_data_[i].arg_count = 0;
   }
 }
 
@@ -591,6 +601,8 @@ void Transaction::ScheduleInternal() {
   }
 
   // Loop until successfully scheduled in all shards.
+  ServerState* ss = ServerState::tlocal();
+  DCHECK(ss);
   while (true) {
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
     time_now_ms_ = GetCurrentTimeMs();
@@ -605,13 +617,22 @@ void Transaction::ScheduleInternal() {
     };
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
-    bool ooo_disabled = IsGlobal() || (IsAtomicMulti() && multi_->mode != LOCK_AHEAD);
-
     if (success.load(memory_order_acquire) == num_shards) {
       coordinator_state_ |= COORD_SCHED;
-      // If we granted all locks, we can run out of order.
-      if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
+      bool ooo_disabled = IsAtomicMulti() && multi_->mode != LOCK_AHEAD;
+
+      DCHECK_GT(num_shards, 0u);
+
+      ss->stats.tx_width_freq_arr[num_shards - 1]++;
+
+      if (IsGlobal()) {
+        ss->stats.tx_type_cnt[ServerState::GLOBAL]++;
+      } else if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
+        // If we granted all locks, we can run out of order.
         coordinator_state_ |= COORD_OOO;
+        ss->stats.tx_type_cnt[ServerState::OOO]++;
+      } else {
+        ss->stats.tx_type_cnt[ServerState::NORMAL]++;
       }
       VLOG(2) << "Scheduled " << DebugId()
               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
@@ -678,6 +699,9 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
   bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
+  bool run_inline = false;
+  ServerState* ss = nullptr;
+
   if (schedule_fast) {
     DCHECK_NE(unique_shard_id_, kInvalidSid);
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
@@ -707,10 +731,11 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
       }
     };
 
-    if (auto* ss = ServerState::tlocal();
-        ss->thread_index() == unique_shard_id_ && ss->AllowInlineScheduling()) {
+    ss = ServerState::tlocal();
+    if (ss->thread_index() == unique_shard_id_ && ss->AllowInlineScheduling()) {
       DVLOG(2) << "Inline scheduling a transaction";
       schedule_cb();
+      run_inline = true;
     } else {
       shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
     }
@@ -727,12 +752,15 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   WaitForShardCallbacks();
   DVLOG(2) << "ScheduleSingleHop after Wait " << DebugId();
 
-  if (was_ooo) {
-    coordinator_state_ |= COORD_OOO;
-  }
-
   if (schedule_fast) {
     CHECK(!cb_ptr_);  // we should have reset it within the callback.
+    if (was_ooo) {
+      coordinator_state_ |= COORD_OOO;
+      ss->stats.tx_type_cnt[run_inline ? ServerState::INLINE : ServerState::QUICK]++;
+    } else {
+      ss->stats.tx_type_cnt[ServerState::NORMAL]++;
+    }
+    ss->stats.tx_width_freq_arr[0]++;
   }
   cb_ptr_ = nullptr;
   return local_result_;
@@ -934,8 +962,6 @@ void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK_NE(unique_shard_id_, kInvalidSid);
   DCHECK_EQ(0u, txid_);
 
-  shard->IncQuickRun();
-
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(0, sd.local_mask & (KEYLOCK_ACQUIRED | OUT_OF_ORDER));
 
@@ -1082,7 +1108,25 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   TxQueue::Iterator it = txq->Insert(this);
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
   sd.pq_pos = it;
+  unsigned q_limit = absl::GetFlag(FLAGS_tx_queue_warning_len);
 
+  if (txq->size() > q_limit) {
+    static thread_local time_t last_log_time = 0;
+    // TODO: glog provides LOG_EVERY_T, which uses precise clock.
+    // We should introduce inside helio LOG_PERIOD_ATLEAST macro that takes seconds and
+    // uses low precision clock.
+    time_t now = time(nullptr);
+    if (now >= last_log_time + 10) {
+      last_log_time = now;
+      EngineShard::TxQueueInfo info = shard->AnalyzeTxQueue();
+      LOG(WARNING) << "TxQueue is too long. Tx count:" << info.tx_total
+                   << ", armed:" << info.tx_armed << ", runnable:" << info.tx_runnable
+                   << ", total locks: " << info.total_locks
+                   << ", contended locks: " << info.contended_locks << "\n"
+                   << "max contention score: " << info.max_contention_score
+                   << ", lock: " << info.max_contention_lock_name;
+    }
+  }
   DVLOG(1) << "Insert into tx-queue, sid(" << sid << ") " << DebugId() << ", qlen " << txq->size();
 
   return {true, lock_granted};
@@ -1125,6 +1169,8 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 
 // runs in engine-shard thread.
 ArgSlice Transaction::GetShardArgs(ShardId sid) const {
+  DCHECK(!multi_ || multi_->role != SQUASHER);
+
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
   // barrier.
   if (unique_shard_cnt_ == 1) {
@@ -1314,6 +1360,8 @@ inline uint32_t Transaction::DecreaseRunCnt() {
 }
 
 bool Transaction::IsGlobal() const {
+  // Please note that a transaction can be non-global even if multi_->mode == GLOBAL.
+  // It happens when a transaction is squashed and switches to execute differrent commands.
   return global_;
 }
 
