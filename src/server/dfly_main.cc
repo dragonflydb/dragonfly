@@ -405,7 +405,8 @@ void GetCGroupPath(string* memory_path, string* cpu_path) {
   }
 }
 
-void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
+// returns true on success.
+bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
   using absl::StrCat;
 
   // did we succeed in reading *something*? if not, exit.
@@ -433,8 +434,7 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   GetCGroupPath(&mem_path, &cpu_path);
 
   if (mem_path.empty() || cpu_path.empty()) {
-    VLOG(1) << "Failed to get cgroup path, error";
-    return;
+    return true;  // not a container
   }
 
   VLOG(1) << "mem_path = " << mem_path;
@@ -519,9 +519,10 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
   if (!read_something) {
     LOG(ERROR) << "Failed in deducing any cgroup limits with paths " << mem_path << " and "
-               << cpu_path << ". Exiting.";
-    exit(1);
+               << cpu_path;
+    return false;
   }
+  return true;
 }
 
 #endif
