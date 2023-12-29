@@ -111,11 +111,12 @@ class ClusterFamily {
   std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);
 
   mutable Mutex migration_mu_;  // guard migrations operations
-  // holds all slots migrations that are currently in progress.
+  // holds all incoming slots migrations that are currently in progress.
   std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   uint32_t next_sync_id_ = 1;
+  // holds all outcoming slots migrations that are currently in progress
   using MigrationInfoMap = absl::btree_map<uint32_t, std::shared_ptr<MigrationInfo>>;
   MigrationInfoMap migration_infos_;
 

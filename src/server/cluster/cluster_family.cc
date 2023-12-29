@@ -630,22 +630,22 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
   return cntx->SendOk();
 }
 
-void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
-  const auto& state_to_str = [](ClusterSlotMigration::State state) {
-    switch (state) {
-      case ClusterSlotMigration::C_NO_STATE:
-        return "NO_STATE"sv;
-      case ClusterSlotMigration::C_CONNECTING:
-        return "CONNECTING"sv;
-      case ClusterSlotMigration::C_FULL_SYNC:
-        return "FULL_SYNC"sv;
-      case ClusterSlotMigration::C_STABLE_SYNC:
-        return "STABLE_SYNC"sv;
-    }
-    assert(false);
-    return "UNDEFINED_STATE"sv;
-  };
+static std::string_view state_to_str(ClusterSlotMigration::State state) {
+  switch (state) {
+    case ClusterSlotMigration::C_NO_STATE:
+      return "NO_STATE"sv;
+    case ClusterSlotMigration::C_CONNECTING:
+      return "CONNECTING"sv;
+    case ClusterSlotMigration::C_FULL_SYNC:
+      return "FULL_SYNC"sv;
+    case ClusterSlotMigration::C_STABLE_SYNC:
+      return "STABLE_SYNC"sv;
+  }
+  assert(false);
+  return "UNDEFINED_STATE"sv;
+}
 
+void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
@@ -655,30 +655,33 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
       return rb->SendError(err->MakeReply());
 
     lock_guard lk(migration_mu_);
+    // find incoming slot migration
     for (const auto& m : migrations_jobs_) {
       const auto& info = m->GetInfo();
       if (info.host == host_ip && info.port == port)
         return rb->SendSimpleString(state_to_str(info.state));
     }
+    // find outcoming slot migration
     for (const auto& m : migration_infos_) {
       if (m.second->host_ip == host_ip && m.second->port == port)
         return rb->SendSimpleString(state_to_str(m.second->state));
     }
   } else if (auto arr_size = migrations_jobs_.size() + migration_infos_.size(); arr_size != 0) {
     rb->StartArray(arr_size);
-    const auto& sendAnswer = [&state_to_str, rb](std::string_view direction, std::string_view host,
-                                                 uint16_t port, auto state) {
+    const auto& send_answer = [rb](std::string_view direction, std::string_view host, uint16_t port,
+                                   auto state) {
       auto str = absl::StrCat(direction, " ", host, ":", port, " ", state_to_str(state));
       rb->SendSimpleString(str);
     };
     lock_guard lk(migration_mu_);
     for (const auto& m : migrations_jobs_) {
       const auto& info = m->GetInfo();
-      sendAnswer("in", info.host, info.port, info.state);
+      send_answer("in", info.host, info.port, info.state);
     }
     for (const auto& m : migration_infos_) {
-      sendAnswer("out", m.second->host_ip, m.second->port, m.second->state);
+      send_answer("out", m.second->host_ip, m.second->port, m.second->state);
     }
+    return;
   }
   return rb->SendSimpleString(state_to_str(ClusterSlotMigration::C_NO_STATE));
 }
@@ -780,7 +783,6 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendError(kIdNotFound);
 
   info->flows[shard_id].conn = cntx->conn();
-  info->state = ClusterSlotMigration::State::C_FULL_SYNC;
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
 
@@ -799,6 +801,8 @@ void ClusterFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
   auto info = GetMigrationInfo(sync_id);
   if (!info)
     cntx->SendError(kIdNotFound);
+
+  info->state = ClusterSlotMigration::State::C_FULL_SYNC;
 
   auto cb = [info](EngineShard* shard) {
     info->flows[shard->shard_id()].conn->socket()->Write(io::Buffer("OK"));
