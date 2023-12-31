@@ -575,7 +575,7 @@ void DebugCmd::Exec() {
   fb2::Mutex mu;
   std::map<string, unsigned> freq_cnt;
 
-  ess.pool()->Await([&](auto*) {
+  ess.pool()->AwaitFiberOnAll([&](auto*) {
     for (const auto& k_v : ServerState::tlocal()->exec_freq_count) {
       unique_lock lk(mu);
       freq_cnt[k_v.first] += k_v.second;
