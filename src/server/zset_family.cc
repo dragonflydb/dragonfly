@@ -2796,16 +2796,19 @@ OpStatus MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const G
 
   // get all the matching members and add them to the potential result list
   vector<OpResult<vector<ScoredArray>>> result_arrays;
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto res_it = OpRanges(range_specs, t->GetOpArgs(shard), key);
-    if (res_it) {
-      result_arrays.emplace_back(res_it);
-    }
-    return res_it.status();
-  };
   if (write_mode) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto res_it = OpRanges(range_specs, t->GetOpArgs(shard), key);
+      if (res_it) {
+        result_arrays.emplace_back(res_it);
+      }
+      return res_it.status();
+    };
     cntx->transaction->Execute(std::move(cb), false);
   } else {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpRanges(range_specs, t->GetOpArgs(shard), key);
+    };
     cntx->transaction->ScheduleSingleHopT(std::move(cb));
   }
 
