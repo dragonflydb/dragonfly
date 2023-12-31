@@ -158,6 +158,34 @@ class RoundRobinSharder {
   static Mutex mutex_;
 };
 
+bool HasContendedLocks(unsigned shard_id, Transaction* trx, DbTable* table) {
+  bool has_contended_locks = false;
+
+  if (trx->IsMulti()) {
+    trx->IterateMultiLocks(shard_id, [&](const string& key) {
+      auto it = table->trans_locks.find(key);
+      DCHECK(it != table->trans_locks.end());
+      if (it->second.IsContended()) {
+        has_contended_locks = true;
+      }
+    });
+  } else {
+    KeyLockArgs lock_args = trx->GetLockArgs(shard_id);
+    for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
+      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+      auto it = table->trans_locks.find(s);
+      DCHECK(it != table->trans_locks.end());
+      if (it != table->trans_locks.end()) {
+        if (it->second.IsContended()) {
+          has_contended_locks = true;
+          break;
+        }
+      }
+    }
+  }
+  return has_contended_locks;
+}
+
 thread_local string RoundRobinSharder::round_robin_prefix_;
 thread_local vector<ShardId> RoundRobinSharder::round_robin_shards_tl_cache_;
 vector<ShardId> RoundRobinSharder::round_robin_shards_;
@@ -533,44 +561,6 @@ void EngineShard::RemoveContTx(Transaction* tx) {
   }
 }
 
-#if 0
-// There are several cases that contain proof of convergence for this shard:
-// 1. txq_ empty - it means that anything that is goonna be scheduled will already be scheduled
-//    with txid > notifyid.
-// 2. committed_txid_ > notifyid - similarly, this shard can not affect the result with timestamp
-//    notifyid.
-// 3. committed_txid_ == notifyid, then if a transaction in progress (continuation_trans_ != NULL)
-//    the this transaction can still affect the result, hence we require continuation_trans_ is null
-//    which will point to converged result @notifyid. However, we never awake a transaction
-//    when there is a multi-hop transaction in progress to avoid false positives.
-//    Therefore, continuation_trans_ must always be null when calling this function.
-// 4. Finally with committed_txid_ < notifyid.
-//    we can check if the next in line (HeadScore) is after notifyid in that case we can also
-//    conclude regarding the result convergence for this shard.
-//
-bool EngineShard::HasResultConverged(TxId notifyid) const {
-  CHECK(continuation_trans_ == nullptr);
-
-  if (committed_txid_ >= notifyid)
-    return true;
-
-  // This could happen if a single lpush (not in transaction) woke multi-shard blpop.
-  DVLOG(1) << "HasResultConverged: cmtxid - " << committed_txid_ << " vs " << notifyid;
-
-  // We must check for txq head - it's not an optimization - we need it for correctness.
-  // If a multi-transaction has been scheduled and it does not have any presence in
-  // this shard (no actual keys) and we won't check for it HasResultConverged will
-  // return false. The blocked transaction will wait for this shard to progress and
-  // will also block other shards from progressing (where it has been notified).
-  // If this multi-transaction has presence in those shards, it won't progress there as well.
-  // Therefore, we will get a deadlock. By checking txid of the head we will avoid this situation:
-  // if the head.txid is after notifyid then this shard obviously converged.
-  // if the head.txid <= notifyid that transaction will be able to progress in other shards.
-  // and we must wait for it to finish.
-  return txq_.Empty() || txq_.HeadScore() > notifyid;
-}
-#endif
-
 void EngineShard::Heartbeat() {
   CacheStats();
 
@@ -736,22 +726,7 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
         info.tx_global++;
       } else {
         DbTable* table = db_slice().GetDBTable(trx->GetDbIndex());
-        bool can_run = true;
-
-        if (!trx->IsMulti()) {
-          KeyLockArgs lock_args = trx->GetLockArgs(sid);
-          for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-            string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-            auto it = table->trans_locks.find(s);
-            DCHECK(it != table->trans_locks.end());
-            if (it != table->trans_locks.end()) {
-              if (it->second.IsContended()) {
-                can_run = false;
-                break;
-              }
-            }
-          }
-        }
+        bool can_run = !HasContendedLocks(sid, trx, table);
         if (can_run) {
           info.tx_runnable++;
         }

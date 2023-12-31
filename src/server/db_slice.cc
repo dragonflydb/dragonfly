@@ -941,11 +941,6 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   return lock_acquired;
 }
 
-void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
-                      unsigned count) {
-  return ReleaseNormalized(mode, db_index, KeyLockArgs::GetLockKey(key), count);
-}
-
 void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
                                 unsigned count) {
   DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));

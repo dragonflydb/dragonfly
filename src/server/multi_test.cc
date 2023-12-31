@@ -904,7 +904,8 @@ TEST_F(MultiTest, TestLockedKeys) {
   EXPECT_EQ(Run({"multi"}), "OK");
   EXPECT_EQ(Run({"set", "key1", "val1"}), "QUEUED");
   EXPECT_EQ(Run({"set", "key2", "val2"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK")));
+  EXPECT_EQ(Run({"mset", "key1", "val3", "key1", "val4"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK", "OK")));
   fb.Join();
   EXPECT_FALSE(service_->IsLocked(0, "key1"));
   EXPECT_FALSE(service_->IsLocked(0, "key2"));
