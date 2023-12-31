@@ -2795,35 +2795,35 @@ OpStatus MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const G
   }
 
   // get all the matching members and add them to the potential result list
-  OpResult<vector<ScoredArray>> result_arrays;
+  vector<OpResult<vector<ScoredArray>>> result_arrays;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto res_it = OpRanges(range_specs, t->GetOpArgs(shard), key);
+    if (res_it) {
+      result_arrays.emplace_back(res_it);
+    }
+    return res_it.status();
+  };
   if (write_mode) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      result_arrays = OpRanges(range_specs, t->GetOpArgs(shard), key);
-      return OpStatus::OK;
-    };
     cntx->transaction->Execute(std::move(cb), false);
   } else {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpRanges(range_specs, t->GetOpArgs(shard), key);
-    };
-    result_arrays = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  }
-  if (result_arrays.status() != OpStatus::OK) {
-    return result_arrays.status();
+    cntx->transaction->ScheduleSingleHopT(std::move(cb));
   }
 
   // filter potential result list
   double xy[2];
   double distance;
-  for (auto& arr : *result_arrays) {
-    for (auto& p : arr) {
-      if (geoWithinShape(shape, p.second, xy, &distance) == 0) {
-        ga->emplace_back(xy[0], xy[1], distance, p.second, p.first);
-        if (limit > 0 && ga->size() >= limit)
-          break;
+  for (auto& result_array : result_arrays) {
+    for (auto& arr : *result_array) {
+      for (auto& p : arr) {
+        if (geoWithinShape(shape, p.second, xy, &distance) == 0) {
+          ga->emplace_back(xy[0], xy[1], distance, p.second, p.first);
+          if (limit > 0 && ga->size() >= limit)
+            break;
+        }
       }
     }
   }
+
   return OpStatus::OK;
 }
 
@@ -2891,7 +2891,7 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
   if (geo_ops.store == GeoStoreType::kNoStore) {
     // case 1: read mode
     // case 2: write mode, kNoStore
-    //  generate reply array withdist, withcoords, withhash
+    // generate reply array withdist, withcoords, withhash
     int record_size = 1;
     if (geo_ops.withdist) {
       record_size++;
@@ -2922,7 +2922,7 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
   } else {
     // case 3: write mode, !kNoStore
     DCHECK(geo_ops.store == GeoStoreType::kStoreDist || geo_ops.store == GeoStoreType::kStoreHash);
-    ShardId dest_shard = Shard(store_key, ga.size());
+    ShardId dest_shard = Shard(store_key, shard_set->size());
     DVLOG(1) << "store shard:" << dest_shard << ", key " << store_key;
     AddResult add_result;
     vector<ScoredMemberView> smvec;
@@ -3107,7 +3107,10 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
   OpResult<double> member_score;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    member_score = OpScore(t->GetOpArgs(shard), key, member);
+    auto res_it = OpScore(t->GetOpArgs(shard), key, member);
+    if (res_it) {
+      member_score = res_it;
+    }
     return OpStatus::OK;
   };
   cntx->transaction->Schedule();
@@ -3298,12 +3301,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
       << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
-      << CI{"GEORADIUSBYMEMBER",
-            CO::WRITE | CO::STORE_LAST_KEY | CO::DENYOOM | CO::REVERSE_MAPPING,
-            -4,
-            1,
-            1,
-            acl::kGeoRadiusByMember}
+      << CI{"GEORADIUSBYMEMBER", CO::WRITE | CO::STORE_LAST_KEY, -4, 1, 1, acl::kGeoRadiusByMember}
              .HFUNC(GeoRadiusByMember);
 }
 
