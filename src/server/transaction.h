@@ -261,7 +261,7 @@ class Transaction {
     return txid_;
   }
 
-  IntentLock::Mode Mode() const;  // Based on command mask
+  IntentLock::Mode LockMode() const;  // Based on command mask
 
   std::string_view Name() const;  // Based on command name
 
@@ -387,6 +387,7 @@ class Transaction {
     // executing multi-command. For every write to a shard journal, the corresponding index in the
     // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
+    unsigned cmd_seq_num = 0;  // used for debugging purposes.
   };
 
   enum CoordinatorState : uint8_t {
