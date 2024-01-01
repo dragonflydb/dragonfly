@@ -1836,3 +1836,46 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     await c_replica.close()
     master.stop()
     replica.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+async def test_eviction_propagation(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(proactor_threads=1, cache_mode="true", maxmemory="290mb")
+    replica = df_local_factory.create(proactor_threads=1)
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    seeder = df_seeder_factory.create(port=master.port, val_size=1000, stop_on_failure=False)
+
+    await c_master.execute_command("DEBUG POPULATE 6200000")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica, timeout=3000)
+
+    # Check data after full sync
+    await check_all_replicas_finished([c_replica], c_master)
+    await check_data(seeder, [replica], [c_replica])
+
+    # Stream more data in stable state
+    await seeder.run(target_ops=10000000, target_deviation=0.0001)
+
+    info = await c_master.info("stats")
+    assert info["evicted_keys"] > 0, "Weak testcase. No eviction was triggered"
+
+    while True:
+        info = await c_master.info("stats")
+        evicted_1 = info["evicted_keys"]
+        time.sleep(2)
+        info = await c_master.info("stats")
+        evicted_2 = info["evicted_keys"]
+        if evicted_2 == evicted_1:
+            break
+        else:
+            print("waiting for eviction to finish...", end="\r", flush=True)
+
+    # Check data after stable state stream
+    await check_all_replicas_finished([c_replica], c_master)
+    await check_data(seeder, [replica], [c_replica])
+    await disconnect_clients(c_master, *[c_replica])
