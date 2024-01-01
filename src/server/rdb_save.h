@@ -66,7 +66,8 @@ enum class SaveMode {
   RDB,                        // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };
+enum class CompressionMode { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
+CompressionMode GetDefaultCompressionMode();
 
 class RdbSaver {
  public:
@@ -75,6 +76,9 @@ class RdbSaver {
     const StringVec lua_scripts;     // bodies of lua scripts
     const StringVec search_indices;  // ft.create commands to re-create search indices
   };
+
+  // Dumps `obj` in DUMP command format. Uses default compression mode.
+  static std::string DumpObject(const CompactObj& obj);
 
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
   // to snapshot all the datastore shards.
