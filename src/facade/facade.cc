@@ -7,27 +7,20 @@
 
 #include "base/logging.h"
 #include "facade/command_id.h"
-#include "facade/conn_context.h"
-#include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/resp_expr.h"
 
 namespace facade {
 
 using namespace std;
 
 #define ADD(x) (x) += o.x
-#define ADD_M(m)                  \
-  do {                            \
-    for (const auto& k_v : o.m) { \
-      m[k_v.first] += k_v.second; \
-    }                             \
-  } while (0)
 
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 144u);
+  static_assert(kSizeConnStats == 96u);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
@@ -36,16 +29,12 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(pipeline_cmd_cache_bytes);
   ADD(io_read_cnt);
   ADD(io_read_bytes);
-  ADD(io_write_cnt);
-  ADD(io_write_bytes);
   ADD(command_cnt);
   ADD(pipelined_cmd_cnt);
   ADD(conn_received_cnt);
   ADD(num_conns);
   ADD(num_replicas);
   ADD(num_blocked_clients);
-
-  ADD_M(err_count_map);
 
   return *this;
 }
@@ -108,35 +97,6 @@ const char* RespExpr::TypeName(Type t) {
       return "error";
   }
   ABSL_UNREACHABLE();
-}
-
-ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : owner_(owner) {
-  if (owner) {
-    protocol_ = owner->protocol();
-  }
-
-  if (stream) {
-    switch (protocol_) {
-      case Protocol::REDIS:
-        rbuilder_.reset(new RedisReplyBuilder(stream));
-        break;
-      case Protocol::MEMCACHE:
-        rbuilder_.reset(new MCReplyBuilder(stream));
-        break;
-    }
-  }
-
-  conn_closing = false;
-  req_auth = false;
-  replica_conn = false;
-  authenticated = false;
-  async_dispatch = false;
-  sync_dispatch = false;
-  journal_emulated = false;
-  paused = false;
-  blocked = false;
-
-  subscriptions = 0;
 }
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,

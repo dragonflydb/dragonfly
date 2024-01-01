@@ -87,10 +87,7 @@ class ConnectionContext {
     rbuilder_->SendProtocolError(str);
   }
 
-  virtual size_t UsedMemory() const {
-    return dfly::HeapSize(rbuilder_) + dfly::HeapSize(authed_username) +
-           dfly::HeapSize(acl_commands);
-  }
+  virtual size_t UsedMemory() const;
 
   // connection state / properties.
   bool conn_closing : 1;
@@ -101,7 +98,9 @@ class ConnectionContext {
   bool sync_dispatch : 1;     // whether this connection is amid a sync dispatch
   bool journal_emulated : 1;  // whether it is used to dispatch journal commands
   bool paused : 1;            // whether this connection is paused due to CLIENT PAUSE
-  bool blocked;  // whether it's blocked on blocking commands like BLPOP, needs to be addressable
+
+  // whether it's blocked on blocking commands like BLPOP, needs to be addressable
+  bool blocked;
 
   // How many async subscription sources are active: monitor and/or pubsub - at most 2.
   uint8_t subscriptions;

@@ -78,7 +78,7 @@ struct Metrics {
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
 
-  facade::SinkReplyBuilder::StatsType reply_stats{};  // Stats for Send*() ops
+  facade::SinkReplyBuilder::ReplyStats reply_stats;  // Stats for Send*() ops
 
   PeakStats peak_stats;
 

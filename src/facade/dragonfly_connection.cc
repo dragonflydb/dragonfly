@@ -82,16 +82,6 @@ void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
   }
 }
 
-void FetchBuilderStats(ConnectionStats* stats, SinkReplyBuilder* builder) {
-  stats->io_write_cnt += builder->io_write_cnt();
-  stats->io_write_bytes += builder->io_write_bytes();
-
-  for (const auto& k_v : builder->err_count()) {
-    stats->err_count_map[k_v.first] += k_v.second;
-  }
-  builder->reset_io_stats();
-}
-
 // TODO: to implement correct matcher according to HTTP spec
 // https://www.w3.org/Protocols/rfc2616/rfc2616-sec5.html
 // One place to find a good implementation would be https://github.com/h2o/picohttpparser
@@ -113,6 +103,9 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
 constexpr size_t kMinReadSize = 256;
 
 thread_local uint32_t free_req_release_weight = 0;
+
+const char* kPhaseName[Connection::NUM_PHASES] = {"SETUP", "READ", "PROCESS", "SHUTTING_DOWN",
+                                                  "PRECLOSE"};
 
 }  // namespace
 
@@ -513,13 +506,15 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
-  absl::StrAppend(&after, " phase=", PHASE_NAMES[phase_]);
+  string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get());
+    if (cc_->reply_builder()->IsSendActive())
+      phase_name = "send";
     absl::StrAppend(&after, " ", cc_info);
   }
-
+  absl::StrAppend(&after, " phase=", phase_name);
   return {std::move(before), std::move(after)};
 }
 
@@ -684,14 +679,12 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
         }
       }
     }
-
-    FetchBuilderStats(stats_, orig_builder);
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     string conn_info = service_->GetContextInfo(cc_.get());
-    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName() << ": " << ec
-                 << " " << ec.message();
+    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName()
+                 << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message();
   }
 }
 
@@ -899,8 +892,6 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   size_t max_iobfuf_len = absl::GetFlag(FLAGS_max_client_iobuf_len);
 
   do {
-    FetchBuilderStats(stats_, orig_builder);
-
     HandleMigrateRequest();
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
@@ -974,8 +965,6 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     }
     ec = orig_builder->GetError();
   } while (peer->IsOpen() && !ec);
-
-  FetchBuilderStats(stats_, orig_builder);
 
   if (ec)
     return ec;
