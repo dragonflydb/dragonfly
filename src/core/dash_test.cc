@@ -465,7 +465,7 @@ TEST_F(DashTest, Custom) {
 }
 
 TEST_F(DashTest, Reserve) {
-  unsigned bc = dt_.bucket_count();
+  unsigned bc = dt_.capacity();
   for (unsigned i = 0; i <= bc * 2; ++i) {
     dt_.Reserve(i);
     ASSERT_GE((1 << dt_.depth()) * Dash64::kSegCapacity, i);
@@ -562,7 +562,7 @@ struct TestEvictionPolicy {
   }
 
   bool CanGrow(const Dash64& tbl) const {
-    return tbl.bucket_count() < max_capacity;
+    return tbl.capacity() < max_capacity;
   }
 
   void RecordSplit(Dash64::Segment_t*) {
@@ -876,7 +876,7 @@ struct SimpleEvictPolicy {
   static constexpr bool can_evict = true;
 
   bool CanGrow(const U64Dash& tbl) {
-    return tbl.bucket_count() + U64Dash::kSegCapacity < max_capacity;
+    return tbl.capacity() + U64Dash::kSegCapacity < max_capacity;
   }
 
   void RecordSplit(U64Dash::Segment_t* segment) {
@@ -921,7 +921,7 @@ struct ShiftRightPolicy {
   static constexpr bool can_evict = true;
 
   bool CanGrow(const U64Dash& tbl) {
-    return tbl.bucket_count() + U64Dash::kSegCapacity < max_capacity;
+    return tbl.capacity() + U64Dash::kSegCapacity < max_capacity;
   }
 
   void RecordSplit(U64Dash::Segment_t* segment) {
