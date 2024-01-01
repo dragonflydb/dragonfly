@@ -46,11 +46,18 @@ static_assert(kPrimeSegmentSize == 32288);
 // 24576
 static_assert(kExpireSegmentSize == 23528);
 
-void AccountObjectMemory(unsigned type, int64_t size, DbTableStats* stats) {
-  DCHECK_GE(static_cast<int64_t>(stats->obj_memory_usage) + size, 0)
-      << "Can't decrease " << size << " from " << stats->obj_memory_usage;
-  stats->obj_memory_usage += size;
-  stats->AddTypeMemoryUsage(type, size);
+void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* db) {
+  DCHECK_NE(db, nullptr);
+  DbTableStats& stats = db->stats;
+  DCHECK_GE(static_cast<int64_t>(stats.obj_memory_usage) + size, 0)
+      << "Can't decrease " << size << " from " << stats.obj_memory_usage;
+
+  stats.obj_memory_usage += size;
+  stats.AddTypeMemoryUsage(type, size);
+
+  if (ClusterConfig::IsEnabled()) {
+    db->slots_stats[ClusterConfig::KeySlot(key)].memory_bytes += size;
+  }
 }
 
 void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
@@ -82,8 +89,14 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   }
 
   stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(del_it->first.ObjType(), -del_it->first.MallocUsed(), &stats);    // Key
-  AccountObjectMemory(del_it->second.ObjType(), -del_it->second.MallocUsed(), &stats);  // Value
+
+  {
+    string tmp;
+    string_view key = del_it->first.GetSlice(&tmp);
+    AccountObjectMemory(key, del_it->first.ObjType(), -del_it->first.MallocUsed(), table);  // Key
+    AccountObjectMemory(key, del_it->second.ObjType(), -del_it->second.MallocUsed(),
+                        table);  // Value
+  }
 
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
@@ -624,7 +637,7 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
   }
 
   db.stats.inline_keys += it->first.IsInline();
-  AccountObjectMemory(it->first.ObjType(), it->first.MallocUsed(), &db.stats);  // Account for key
+  AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
@@ -955,11 +968,6 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   return lock_acquired;
 }
 
-void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
-                      unsigned count) {
-  return ReleaseNormalized(mode, db_index, KeyLockArgs::GetLockKey(key), count);
-}
-
 void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
                                 unsigned count) {
   DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));
@@ -1054,10 +1062,8 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size) {
-  DbTableStats* stats = MutableStats(db_ind);
-
   int64_t delta = static_cast<int64_t>(it->second.MallocUsed()) - static_cast<int64_t>(orig_size);
-  AccountObjectMemory(it->second.ObjType(), delta, stats);
+  AccountObjectMemory(key, it->second.ObjType(), delta, GetDBTable(db_ind));
 
   auto& db = *db_arr_[db_ind];
   auto& watched_keys = db.watched_keys;
@@ -1514,9 +1520,8 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, Engin
 
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
-  int64_t delta = del_it->first.MallocUsed() + value_heap_size;
-  stats.obj_memory_usage -= delta;
-  stats.AddTypeMemoryUsage(pv.ObjType(), -delta);
+  AccountObjectMemory(key, del_it->first.ObjType(), -del_it->first.MallocUsed(), table);  // Key
+  AccountObjectMemory(key, pv.ObjType(), -value_heap_size, table);                        // Value
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
   } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
