@@ -40,9 +40,24 @@ const char* NullString(bool resp3) {
   return resp3 ? "_\r\n" : "$-1\r\n";
 }
 
-static thread_local SinkReplyBuilder::StatsType tl_stats;
+static thread_local SinkReplyBuilder::ReplyStats tl_stats;
 
 }  // namespace
+
+SinkReplyBuilder::ReplyStats& SinkReplyBuilder::ReplyStats::operator+=(const ReplyStats& o) {
+  io_write_cnt += o.io_write_cnt;
+  io_write_bytes += o.io_write_bytes;
+
+  for (const auto& k_v : o.err_count) {
+    err_count[k_v.first] += k_v.second;
+  }
+
+  for (unsigned i = 0; i < kNumTypes; ++i) {
+    send_stats[i] += o.send_stats[i];
+  }
+
+  return *this;
+}
 
 SinkReplyBuilder::MGetResponse::~MGetResponse() {
   while (storage_list) {
@@ -53,7 +68,11 @@ SinkReplyBuilder::MGetResponse::~MGetResponse() {
 }
 
 SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink)
-    : sink_(sink), should_batch_(false), should_aggregate_(false), has_replied_(true) {
+    : sink_(sink),
+      should_batch_(false),
+      should_aggregate_(false),
+      has_replied_(true),
+      send_active_(false) {
 }
 
 void SinkReplyBuilder::CloseConnection() {
@@ -61,8 +80,12 @@ void SinkReplyBuilder::CloseConnection() {
     ec_ = std::make_error_code(std::errc::connection_aborted);
 }
 
-SinkReplyBuilder::StatsType SinkReplyBuilder::GetThreadLocalStats() {
+const SinkReplyBuilder::ReplyStats& SinkReplyBuilder::GetThreadLocalStats() {
   return tl_stats;
+}
+
+void SinkReplyBuilder::ResetThreadLocalStats() {
+  tl_stats = {};
 }
 
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
@@ -71,8 +94,8 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
 
   auto cleanup = absl::MakeCleanup([&]() {
     int64_t after = absl::GetCurrentTimeNanos();
-    tl_stats[stats_type].count++;
-    tl_stats[stats_type].total_duration += (after - before) / 1'000;
+    tl_stats.send_stats[stats_type].count++;
+    tl_stats.send_stats[stats_type].total_duration += (after - before) / 1'000;
   });
 
   has_replied_ = true;
@@ -99,8 +122,9 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   }
 
   error_code ec;
-  ++io_write_cnt_;
-  io_write_bytes_ += bsize;
+  send_active_ = true;
+  tl_stats.io_write_cnt++;
+  tl_stats.io_write_bytes += bsize;
   DVLOG(2) << "Writing " << bsize << " bytes of len " << len;
 
   if (batch_.empty()) {
@@ -108,7 +132,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   } else {
     DVLOG(3) << "Sending batch to stream :" << absl::CHexEscape(batch_);
 
-    io_write_bytes_ += batch_.size();
+    tl_stats.io_write_bytes += batch_.size();
 
     iovec tmp[len + 1];
     tmp[0].iov_base = batch_.data();
@@ -117,7 +141,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
     ec = sink_->Write(tmp, len + 1);
     batch_.clear();
   }
-
+  send_active_ = false;
   if (ec) {
     DVLOG(1) << "Error writing to stream: " << ec.message();
     ec_ = ec;
@@ -197,7 +221,7 @@ void SinkReplyBuilder::FlushBatch() {
 }
 
 size_t SinkReplyBuilder::UsedMemory() const {
-  return dfly::HeapSize(batch_) + dfly::HeapSize(err_count_);
+  return dfly::HeapSize(batch_);
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
@@ -300,7 +324,7 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
       err_type = kSyntaxErrType;
   }
 
-  err_count_[err_type]++;
+  tl_stats.err_count[err_type]++;
 
   if (str[0] == '-') {
     iovec v[] = {IoVec(str), IoVec(kCRLF)};
