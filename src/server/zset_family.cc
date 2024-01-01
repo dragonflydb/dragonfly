@@ -50,6 +50,9 @@ static const char kStoreTypeErr[] =
 static const char kScoreNaN[] = "resulting score is not a number (NaN)";
 static const char kFloatRangeErr[] = "min or max is not a float";
 static const char kLexRangeErr[] = "min or max not valid string range item";
+static const char kStoreCompatErr[] =
+    "STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options";
+static const char kMemberNotFound[] = "could not decode requested zset member";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
 using MScoreResponse = std::vector<std::optional<double>>;
@@ -1609,7 +1612,14 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, ArgSlice member
   return deleted;
 }
 
-OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view member) {
+OpResult<double> OpKeyExisted(const OpArgs& op_args, string_view key) {
+  OpResult<PrimeConstIterator> res_it =
+      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  return res_it.status();
+}
+
+OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view member,
+                         bool use_member_not_found = false) {
   OpResult<PrimeConstIterator> res_it =
       op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
@@ -1621,8 +1631,12 @@ OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view mem
 
   const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
   auto res = GetZsetScore(robj_wrapper, tmp_str);
-  if (!res)
+  if (!res) {
+    if (use_member_not_found) {
+      return OpStatus::MEMBER_NOTFOUND;
+    }
     return OpStatus::KEY_NOTFOUND;
+  }
   return *res;
 }
 
@@ -2802,12 +2816,16 @@ OpStatus MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const G
       if (res_it) {
         result_arrays.emplace_back(res_it);
       }
-      return res_it.status();
+      return OpStatus::OK;
     };
     cntx->transaction->Execute(std::move(cb), false);
   } else {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpRanges(range_specs, t->GetOpArgs(shard), key);
+      auto res_it = OpRanges(range_specs, t->GetOpArgs(shard), key);
+      if (res_it) {
+        result_arrays.emplace_back(res_it);
+      }
+      return res_it;
     };
     cntx->transaction->ScheduleSingleHopT(std::move(cb));
   }
@@ -2972,7 +2990,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
     ToUpper(&args[i]);
 
     string_view cur_arg = ArgS(args, i);
-
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     if (cur_arg == "FROMMEMBER") {
       if (from_set) {
         return cntx->SendError(kFromMemberLonglatErr);
@@ -2982,13 +3000,21 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
 
         // member to latlong, set shape.xy
         auto cb = [&](Transaction* t, EngineShard* shard) {
-          return OpScore(t->GetOpArgs(shard), key, member);
+          return OpScore(t->GetOpArgs(shard), key, member, true);
         };
         OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-        if (result.status() == OpStatus::WRONG_TYPE) {
-          return cntx->SendError(kWrongTypeErr);
-        } else if (!result) {
-          return cntx->SendError("Member not found");
+        auto result_sts = result.status();
+        if (result_sts != OpStatus::OK) {
+          switch (result_sts) {
+            case OpStatus::WRONG_TYPE:
+              return cntx->SendError(kWrongTypeErr);
+            case OpStatus::KEY_NOTFOUND:
+              return rb->StartArray(0);
+            case OpStatus::MEMBER_NOTFOUND:
+              return cntx->SendError(kMemberNotFound);
+            default:
+              return cntx->SendError(result_sts);
+          }
         }
         ScoreToLongLat(*result, shape.xy);
         from_set = true;
@@ -3000,6 +3026,21 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
       if (from_set) {
         return cntx->SendError(kFromMemberLonglatErr);
       } else if (i + 2 < args.size()) {
+        auto cb = [&](Transaction* t, EngineShard* shard) {
+          return OpKeyExisted(t->GetOpArgs(shard), key);
+        };
+        OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+        auto result_sts = result.status();
+        if (result_sts != OpStatus::OK) {
+          switch (result_sts) {
+            case OpStatus::WRONG_TYPE:
+              return cntx->SendError(kWrongTypeErr);
+            case OpStatus::KEY_NOTFOUND:
+              return rb->StartArray(0);
+            default:
+              return cntx->SendError(result_sts);
+          }
+        }
         string_view longitude_str = ArgS(args, i + 1);
         string_view latitude_str = ArgS(args, i + 2);
         pair<double, double> longlat;
@@ -3107,24 +3148,40 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   // member to latlong, set shape.xy
   string_view member = ArgS(args, 1);
+  bool member_score_set = false;
   OpResult<double> member_score;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto res_it = OpScore(t->GetOpArgs(shard), key, member);
-    if (res_it) {
+    auto res_it = OpScore(t->GetOpArgs(shard), key, member, true);
+    if (!member_score_set) {
+      member_score = res_it;
+      member_score_set = true;
+    } else if (res_it || (member_score.status() == OpStatus::KEY_NOTFOUND &&
+                          res_it.status() == OpStatus::MEMBER_NOTFOUND)) {
+      // OK overwrites others
+      // MEMBER_NOTFOUND overwrites KEY_NOTFOUND
       member_score = res_it;
     }
     return OpStatus::OK;
   };
   cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(cb), false);
-  if (member_score.status() == OpStatus::WRONG_TYPE) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto member_sts = member_score.status();
+  if (member_sts != OpStatus::OK) {
     cntx->transaction->Conclude();
-    return cntx->SendError(kWrongTypeErr);
-  } else if (!member_score) {
-    cntx->transaction->Conclude();
-    return cntx->SendError("Member not found");
+    switch (member_sts) {
+      case OpStatus::WRONG_TYPE:
+        return cntx->SendError(kWrongTypeErr);
+      case OpStatus::KEY_NOTFOUND:
+        return rb->StartArray(0);
+      case OpStatus::MEMBER_NOTFOUND:
+        return cntx->SendError(kMemberNotFound);
+      default:
+        return cntx->SendError(member_sts);
+    }
   }
+
   ScoreToLongLat(*member_score, shape.xy);
 
   if (!ParseDouble(ArgS(args, 2), &shape.t.radius)) {
@@ -3172,15 +3229,30 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
         i++;
       }
     } else if (cur_arg == "WITHCOORD") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        cntx->transaction->Conclude();
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withcoord = true;
     } else if (cur_arg == "WITHDIST") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        cntx->transaction->Conclude();
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withdist = true;
     } else if (cur_arg == "WITHHASH") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        cntx->transaction->Conclude();
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withhash = true;
     } else if (cur_arg == "STORE") {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         cntx->transaction->Conclude();
         return cntx->SendError(kStoreTypeErr);
+      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
+        cntx->transaction->Conclude();
+        return cntx->SendError(kStoreCompatErr);
       }
       if (i + 1 < args.size()) {
         store_key = ArgS(args, i + 1);
@@ -3194,6 +3266,9 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         cntx->transaction->Conclude();
         return cntx->SendError(kStoreTypeErr);
+      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
+        cntx->transaction->Conclude();
+        return cntx->SendError(kStoreCompatErr);
       }
       if (i + 1 < args.size()) {
         store_key = ArgS(args, i + 1);

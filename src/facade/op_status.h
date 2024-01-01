@@ -29,6 +29,7 @@ enum class OpStatus : uint16_t {
   INVALID_NUMERIC_RESULT,
   CANCELLED,
   AT_LEAST_ONE_KEY,
+  MEMBER_NOTFOUND
 };
 
 class OpResultBase {

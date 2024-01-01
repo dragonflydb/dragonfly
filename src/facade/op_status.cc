@@ -30,6 +30,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kInvalidNumericResult;
     case OpStatus::AT_LEAST_ONE_KEY:
       return "at least 1 input key is needed for this command";
+    case OpStatus::MEMBER_NOTFOUND:
+      return kKeyNotFoundErr;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";
