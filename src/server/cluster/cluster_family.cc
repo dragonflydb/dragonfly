@@ -582,7 +582,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
   rb->StartArray(slots_stats.size());
 
   for (const auto& slot_data : slots_stats) {
-    rb->StartArray(7);
+    rb->StartArray(9);
     rb->SendLong(slot_data.first);
     rb->SendBulkString("key_count");
     rb->SendLong(static_cast<long>(slot_data.second.key_count));
@@ -590,6 +590,8 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
     rb->SendLong(static_cast<long>(slot_data.second.total_reads));
     rb->SendBulkString("total_writes");
     rb->SendLong(static_cast<long>(slot_data.second.total_writes));
+    rb->SendBulkString("memory_bytes");
+    rb->SendLong(static_cast<long>(slot_data.second.memory_bytes));
   }
 }
 
