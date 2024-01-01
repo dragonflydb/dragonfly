@@ -283,8 +283,6 @@ class DbSlice {
 
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
-  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count);
-
   // Returns true if the key can be locked under m. Does not lock.
   bool CheckLock(IntentLock::Mode m, DbIndex dbid, std::string_view key) const;
 
@@ -391,13 +389,13 @@ class DbSlice {
   // Delete a key referred by its iterator.
   void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
 
- private:
-  void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
-
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
                          unsigned count);
+
+ private:
+  void PreUpdate(DbIndex db_ind, PrimeIterator it);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
 
   AddOrFindResult AddOrUpdateInternal(const Context& cntx, std::string_view key, PrimeValue obj,
                                       uint64_t expire_at_ms, bool force_update) noexcept(false);
