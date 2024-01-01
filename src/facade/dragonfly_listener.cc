@@ -192,6 +192,12 @@ error_code Listener::ConfigureServerSocket(int fd) {
   }
   bool success = ConfigureKeepAlive(fd);
 
+#ifdef __linux__
+  int user_timeout = 2000;
+  if (setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(int)) < 0) {
+    LOG(WARNING) << "Could not set user timeout on socket " << SafeErrorMessage(errno);
+  }
+#endif
   if (!success) {
 #ifndef __APPLE__
     int myerr = errno;

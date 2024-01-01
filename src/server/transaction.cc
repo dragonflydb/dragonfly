@@ -1129,7 +1129,7 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
                  ", contended locks: ", info.contended_locks, "\n");
       absl::StrAppend(&msg, "max contention score: ", info.max_contention_score,
                       ", lock: ", info.max_contention_lock_name,
-                      "poll_executions:", shard->stats().poll_execution_total);
+                      ", poll_executions:", shard->stats().poll_execution_total);
       const Transaction* cont_tx = shard->GetContTx();
       if (cont_tx) {
         absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(), " ",
