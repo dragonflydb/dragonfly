@@ -449,7 +449,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
 
   if (IsValid(it)) {
     DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
-    std::unique_ptr<::io::StringSink> sink = std::make_unique<::io::StringSink>();
+    io::StringSink sink;
     int compression_mode = absl::GetFlag(FLAGS_compression_mode);
     CompressionMode serializer_compression_mode =
         compression_mode == 0 ? CompressionMode::NONE : CompressionMode::SINGLE_ENTRY;
@@ -464,9 +464,9 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     CHECK(!ec);
     ec = serializer.SaveValue(it->second);
     CHECK(!ec);  // make sure that fully was successful
-    ec = serializer.FlushToSink(sink.get());
+    ec = serializer.FlushToSink(&sink);
     CHECK(!ec);  // make sure that fully was successful
-    std::string dump_payload(sink->str());
+    std::string dump_payload(sink.str());
     AppendFooter(&dump_payload);  // version and crc
     CHECK_GT(dump_payload.size(), 10u);
     return dump_payload;

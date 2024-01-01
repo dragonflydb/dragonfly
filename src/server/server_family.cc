@@ -827,7 +827,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("net_output_bytes_total", "", conn_stats.io_write_bytes,
+  AppendMetricWithoutLabels("net_output_bytes_total", "", m.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
     string send_latency_metrics;
@@ -841,7 +841,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                        &send_count_metrics);
 
     for (unsigned i = 0; i < SendStatsType::kNumTypes; ++i) {
-      auto& stats = m.reply_stats[i];
+      auto& stats = m.reply_stats.send_stats[i];
       string_view type;
       switch (SendStatsType(i)) {
         case SendStatsType::kRegular:
@@ -1049,7 +1049,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   ADD_LINE(total_connections, -1);
   ADD_LINE(rejected_connections, -1);
   ADD_LINE(bytes_read, m.conn_stats.io_read_bytes);
-  ADD_LINE(bytes_written, m.conn_stats.io_write_bytes);
+  ADD_LINE(bytes_written, m.reply_stats.io_write_bytes);
   ADD_LINE(limit_maxbytes, -1);
 
   absl::StrAppend(&info, "END\r\n");
@@ -1450,7 +1450,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       registry->ResetCallStats(index);
       auto& sstate = *ServerState::tlocal();
       auto& stats = sstate.connection_stats;
-      stats.err_count_map.clear();
+      SinkReplyBuilder::ResetThreadLocalStats();
       stats.command_cnt = 0;
       stats.pipelined_cmd_cnt = 0;
     });
@@ -1550,10 +1550,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
     result.conn_stats += ss->connection_stats;
-
-    for (size_t i = 0; i < reply_stats.size(); ++i) {
-      result.reply_stats[i] += reply_stats[i];
-    }
+    result.reply_stats += reply_stats;
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
@@ -1724,7 +1721,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", m.conn_stats.pipelined_cmd_cnt);
     append("total_net_input_bytes", m.conn_stats.io_read_bytes);
-    append("total_net_output_bytes", m.conn_stats.io_write_bytes);
+    append("total_net_output_bytes", m.reply_stats.io_write_bytes);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
@@ -1742,14 +1739,15 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("keyspace_misses", m.events.misses);
     append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
-    append("total_writes_processed", m.conn_stats.io_write_cnt);
+    append("total_writes_processed", m.reply_stats.io_write_cnt);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("reply_count", m.reply_stats[SendStatsType::kRegular].count);
-    append("reply_latency_usec", m.reply_stats[SendStatsType::kRegular].total_duration);
-    append("reply_batch_count", m.reply_stats[SendStatsType::kBatch].count);
-    append("reply_batch_latency_usec", m.reply_stats[SendStatsType::kBatch].total_duration);
+    append("reply_count", m.reply_stats.send_stats[SendStatsType::kRegular].count);
+    append("reply_latency_usec", m.reply_stats.send_stats[SendStatsType::kRegular].total_duration);
+    append("reply_batch_count", m.reply_stats.send_stats[SendStatsType::kBatch].count);
+    append("reply_batch_latency_usec",
+           m.reply_stats.send_stats[SendStatsType::kBatch].total_duration);
   }
 
   if (should_enter("TIERED", true)) {
@@ -1882,7 +1880,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("ERRORSTATS", true)) {
-    for (const auto& k_v : m.conn_stats.err_count_map) {
+    for (const auto& k_v : m.reply_stats.err_count) {
       append(k_v.first, k_v.second);
     }
   }

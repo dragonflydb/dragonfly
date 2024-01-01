@@ -201,9 +201,12 @@ EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
+  static_assert(sizeof(Stats) == 32);
+
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
   defrag_task_invocation_total += o.defrag_task_invocation_total;
+  poll_execution_total += o.poll_execution_total;
 
   return *this;
 }
@@ -441,9 +444,10 @@ void EngineShard::DestroyThreadLocal() {
 // Only runs in its own thread.
 void EngineShard::PollExecution(const char* context, Transaction* trans) {
   DVLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
-           << txq_.size() << " " << continuation_trans_;
+           << txq_.size() << " " << (continuation_trans_ ? continuation_trans_->DebugId() : "");
 
   ShardId sid = shard_id();
+  stats_.poll_execution_total++;
 
   uint16_t trans_mask = trans ? trans->GetLocalMask(sid) : 0;
   if (trans_mask & Transaction::AWAKED_Q) {
@@ -457,23 +461,27 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
   }
 
+  string dbg_id;
+
   if (continuation_trans_) {
     if (trans == continuation_trans_)
       trans = nullptr;
 
     if (continuation_trans_->IsArmedInShard(sid)) {
+      if (VLOG_IS_ON(1)) {
+        dbg_id = continuation_trans_->DebugId();
+      }
       bool to_keep = continuation_trans_->RunInShard(this, false);
-      DVLOG(1) << "RunContTrans: " << (continuation_trans_ ? continuation_trans_->DebugId() : "")
-               << " keep: " << to_keep;
+      DVLOG(1) << "RunContTrans: " << dbg_id << " keep: " << to_keep;
       if (!to_keep) {
+        // if this holds, we can remove this check altogether.
+        DCHECK(continuation_trans_ == nullptr);
         continuation_trans_ = nullptr;
       }
     }
   }
 
   Transaction* head = nullptr;
-  string dbg_id;
-
   if (continuation_trans_ == nullptr) {
     while (!txq_.Empty()) {
       // we must check every iteration so that if the current transaction awakens
@@ -701,25 +709,27 @@ void EngineShard::TEST_EnableHeartbeat() {
 auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
   const TxQueue* queue = txq();
 
+  ShardId sid = shard_id();
   TxQueueInfo info;
+
   if (queue->Empty())
     return info;
 
   auto cur = queue->Head();
   info.tx_total = queue->size();
   unsigned max_db_id = 0;
-  ShardId sid = shard_id();
 
   do {
     auto value = queue->At(cur);
     Transaction* trx = std::get<Transaction*>(value);
-
     // find maximum index of databases used by transactions
     if (trx->GetDbIndex() > max_db_id) {
       max_db_id = trx->GetDbIndex();
     }
 
-    if (trx->IsArmedInShard(sid)) {
+    bool is_armed = trx->IsArmedInShard(sid);
+    DVLOG(1) << "Inspecting " << trx->DebugId() << " is_armed " << is_armed;
+    if (is_armed) {
       info.tx_armed++;
 
       if (trx->IsGlobal() || (trx->IsMulti() && trx->GetMultiMode() == Transaction::GLOBAL)) {

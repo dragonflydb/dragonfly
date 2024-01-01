@@ -1,4 +1,4 @@
-add_library(dfly_facade dragonfly_listener.cc dragonfly_connection.cc facade.cc
+add_library(dfly_facade conn_context.cc dragonfly_listener.cc dragonfly_connection.cc facade.cc
             memcache_parser.cc redis_parser.cc reply_builder.cc op_status.cc
             reply_capture.cc resp_expr.cc cmd_arg_parser.cc tls_error.cc)
 
