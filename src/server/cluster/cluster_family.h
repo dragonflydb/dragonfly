@@ -58,7 +58,7 @@ class ClusterFamily {
 
   // DFLYMIGRATE CONF initiate first step in slots migration procedure
   // MigrationConf process this request and saving slots range and
-  // target node port in migration_infos_.
+  // target node port in outgoing_migration_infos_.
   // return sync_id and shard number to the target node
   void MigrationConf(CmdArgList args, ConnectionContext* cntx);
 
@@ -112,13 +112,13 @@ class ClusterFamily {
 
   mutable Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
-  std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
+  std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   uint32_t next_sync_id_ = 1;
-  // holds all outcoming slots migrations that are currently in progress
+  // holds all outgoing slots migrations that are currently in progress
   using MigrationInfoMap = absl::btree_map<uint32_t, std::shared_ptr<MigrationInfo>>;
-  MigrationInfoMap migration_infos_;
+  MigrationInfoMap outgoing_migration_infos_;
 
  private:
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;

@@ -641,7 +641,7 @@ static std::string_view state_to_str(ClusterSlotMigration::State state) {
     case ClusterSlotMigration::C_STABLE_SYNC:
       return "STABLE_SYNC"sv;
   }
-  assert(false);
+  DCHECK(false) << "Unknown State value " << state;
   return "UNDEFINED_STATE"sv;
 }
 
@@ -656,17 +656,18 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
 
     lock_guard lk(migration_mu_);
     // find incoming slot migration
-    for (const auto& m : migrations_jobs_) {
+    for (const auto& m : incoming_migrations_jobs_) {
       const auto& info = m->GetInfo();
       if (info.host == host_ip && info.port == port)
         return rb->SendSimpleString(state_to_str(info.state));
     }
-    // find outcoming slot migration
-    for (const auto& m : migration_infos_) {
-      if (m.second->host_ip == host_ip && m.second->port == port)
-        return rb->SendSimpleString(state_to_str(m.second->state));
+    // find outgoing slot migration
+    for (const auto& [_, info] : outgoing_migration_infos_) {
+      if (info->host_ip == host_ip && info->port == port)
+        return rb->SendSimpleString(state_to_str(info->state));
     }
-  } else if (auto arr_size = migrations_jobs_.size() + migration_infos_.size(); arr_size != 0) {
+  } else if (auto arr_size = incoming_migrations_jobs_.size() + outgoing_migration_infos_.size();
+             arr_size != 0) {
     rb->StartArray(arr_size);
     const auto& send_answer = [rb](std::string_view direction, std::string_view host, uint16_t port,
                                    auto state) {
@@ -674,12 +675,12 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
       rb->SendSimpleString(str);
     };
     lock_guard lk(migration_mu_);
-    for (const auto& m : migrations_jobs_) {
+    for (const auto& m : incoming_migrations_jobs_) {
       const auto& info = m->GetInfo();
       send_answer("in", info.host, info.port, info.state);
     }
-    for (const auto& m : migration_infos_) {
-      send_answer("out", m.second->host_ip, m.second->port, m.second->state);
+    for (const auto& [_, info] : outgoing_migration_infos_) {
+      send_answer("out", info->host_ip, info->port, info->state);
     }
     return;
   }
@@ -704,12 +705,12 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
 ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
                                                   std::vector<ClusterConfig::SlotRange> slots) {
   lock_guard lk(migration_mu_);
-  for (const auto& mj : migrations_jobs_) {
+  for (const auto& mj : incoming_migrations_jobs_) {
     if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
       return nullptr;
     }
   }
-  return migrations_jobs_
+  return incoming_migrations_jobs_
       .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port, std::move(slots)))
       .get();
 }
@@ -760,7 +761,7 @@ uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t
   auto sync_id = next_sync_id_++;
   auto info = make_shared<MigrationInfo>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(),
                                          sync_id, port, std::move(slots));
-  auto [it, inserted] = migration_infos_.emplace(sync_id, info);
+  auto [it, inserted] = outgoing_migration_infos_.emplace(sync_id, info);
   CHECK(inserted);
   return sync_id;
 }
@@ -816,8 +817,8 @@ void ClusterFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
 
 shared_ptr<ClusterFamily::MigrationInfo> ClusterFamily::GetMigrationInfo(uint32_t sync_id) {
   unique_lock lk(migration_mu_);
-  auto sync_it = migration_infos_.find(sync_id);
-  return sync_it != migration_infos_.end() ? sync_it->second : nullptr;
+  auto sync_it = outgoing_migration_infos_.find(sync_id);
+  return sync_it != outgoing_migration_infos_.end() ? sync_it->second : nullptr;
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);
