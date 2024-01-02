@@ -47,11 +47,12 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
 }
 
 SlotStats& SlotStats::operator+=(const SlotStats& o) {
-  static_assert(sizeof(SlotStats) == 24);
+  static_assert(sizeof(SlotStats) == 32);
 
   ADD(key_count);
   ADD(total_reads);
   ADD(total_writes);
+  ADD(memory_bytes);
   return *this;
 }
 

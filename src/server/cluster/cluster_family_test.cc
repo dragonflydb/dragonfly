@@ -470,32 +470,36 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
   const SlotId slot = ClusterConfig::KeySlot(kKey);
   EXPECT_NE(slot, 0) << "We need to choose another key";
 
-  EXPECT_EQ(Run({"SET", kKey, "value"}), "OK");
+  const string value(1'000, '#');  // Long string - to use heap
+  EXPECT_EQ(Run({"SET", kKey, value}), "OK");
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
-              RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
-                                        "total_writes", IntArg(0))),
-                  RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads",
-                                        IntArg(0), "total_writes", IntArg(1))))));
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                "total_writes", IntArg(0), "memory_bytes", IntArg(0))),
+          RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(0),
+                                "total_writes", IntArg(1), "memory_bytes", Not(IntArg(0)))))));
 
-  EXPECT_EQ(Run({"GET", kKey}), "value");
+  EXPECT_EQ(Run({"GET", kKey}), value);
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
-              RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
-                                        "total_writes", IntArg(0))),
-                  RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads",
-                                        IntArg(1), "total_writes", IntArg(1))))));
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                "total_writes", IntArg(0), "memory_bytes", IntArg(0))),
+          RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(1),
+                                "total_writes", IntArg(1), "memory_bytes", Not(IntArg(0)))))));
 
   EXPECT_EQ(Run({"SET", kKey, "value2"}), "OK");
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
-              RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
-                                        "total_writes", IntArg(0))),
-                  RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads",
-                                        IntArg(1), "total_writes", IntArg(2))))));
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                "total_writes", IntArg(0), "memory_bytes", IntArg(0))),
+          RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads", IntArg(1),
+                                "total_writes", IntArg(2), "memory_bytes", IntArg(0))))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
@@ -524,12 +528,12 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
 
   for (int i = 0; i <= 1'000; ++i) {
     EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespArray(ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _)));
+                RespArray(ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _)));
   }
 
   for (int i = 1'001; i <= 16'383; ++i) {
     EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _)));
+                RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _)));
   }
 }
 
@@ -557,12 +561,13 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 
   Run({"debug", "populate", "100000"});
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
-              RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads",
-                                        IntArg(0), "total_writes", Not(IntArg(0)))),
-                  RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads",
-                                        IntArg(0), "total_writes", Not(IntArg(0)))))));
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
+          RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
 
   config = absl::Substitute(config_template, "abc");
   EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
@@ -571,10 +576,11 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 
   EXPECT_THAT(
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
-      RespArray(ElementsAre(RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0), "total_reads",
-                                                  IntArg(0), "total_writes", Not(IntArg(0)))),
-                            RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads",
-                                                  IntArg(0), "total_writes", Not(IntArg(0)))))));
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
+          RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
 }
 
 // Test issue #1302
@@ -602,12 +608,13 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
 
   Run({"debug", "populate", "100000"});
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
-              RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads",
-                                        IntArg(0), "total_writes", Not(IntArg(0)))),
-                  RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads",
-                                        IntArg(0), "total_writes", Not(IntArg(0)))))));
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+      RespArray(ElementsAre(
+          RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))),
+          RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
+                                "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
 
   config = absl::Substitute(config_template, "abc");
   // After running the new config we start a fiber that removes all slots from current instance
@@ -657,8 +664,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
 
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
               RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _)),
-                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(2), _, _, _, _)))));
+                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _, _, _)),
+                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(2), _, _, _, _, _, _)))));
   EXPECT_THAT(Run({"dbsize"}), IntArg(3));
 
   // Move ownership over 8000 to other master
@@ -670,8 +677,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
 
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
               RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _)),
-                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(0), _, _, _, _)))));
+                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _, _, _)),
+                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(0), _, _, _, _, _, _)))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
@@ -728,28 +735,31 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
   EXPECT_EQ(Run({"debug", "populate", "100", "key", "4", "slots", "0", "1"}), "OK");
 
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
-              RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", Not(IntArg(0)),
-                                                          "total_reads", _, "total_writes", _)),
-                                    RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)),
-                                                          "total_reads", _, "total_writes", _)))));
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(0), "key_count", Not(IntArg(0)), "total_reads", _,
+                                        "total_writes", _, "memory_bytes", _)),
+                  RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads", _,
+                                        "total_writes", _, "memory_bytes", _)))));
 
   ExpectConditionWithinTimeout([&]() {
     return RunPrivileged({"dflycluster", "flushslots", "0"}) == "OK";
   });
 
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
-              RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0),
-                                                          "total_reads", _, "total_writes", _)),
-                                    RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)),
-                                                          "total_reads", _, "total_writes", _)))));
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", _,
+                                        "total_writes", _, "memory_bytes", _)),
+                  RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads", _,
+                                        "total_writes", _, "memory_bytes", _)))));
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", "0", "1"}), "OK");
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
-              RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0),
-                                                          "total_reads", _, "total_writes", _)),
-                                    RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0),
-                                                          "total_reads", _, "total_writes", _)))));
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
+      RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads",
+                                                  _, "total_writes", _, "memory_bytes", _)),
+                            RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0), "total_reads",
+                                                  _, "total_writes", _, "memory_bytes", _)))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
