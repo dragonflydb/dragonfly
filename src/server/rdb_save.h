@@ -66,7 +66,8 @@ enum class SaveMode {
   RDB,                        // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };
+enum class CompressionMode { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
+CompressionMode GetDefaultCompressionMode();
 
 class RdbSaver {
  public:
