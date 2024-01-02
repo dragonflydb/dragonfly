@@ -24,6 +24,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "strings/human_readable.h"
 
 ABSL_FLAG(bool, lock_on_hashtags, false,
           "When true, locks are done in the {hashtag} level instead of key level. "
@@ -371,6 +372,21 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
 
   Cancellation::Cancel();
   return err_;
+}
+
+bool AbslParseFlag(std::string_view in, dfly::MemoryBytesFlag* flag, std::string* err) {
+  int64_t val;
+  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
+    flag->value = val;
+    return true;
+  }
+
+  *err = "Use human-readable format, eg.: 500MB, 1G, 1TB";
+  return false;
+}
+
+std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag) {
+  return strings::HumanReadableNumBytes(flag.value);
 }
 
 }  // namespace dfly
