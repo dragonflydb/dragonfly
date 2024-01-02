@@ -137,6 +137,9 @@ class RdbSerializer {
 
   ~RdbSerializer();
 
+  // Dumps `obj` in DUMP command format. Uses default compression mode.
+  static std::string DumpObject(const CompactObj& obj);
+
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
 
