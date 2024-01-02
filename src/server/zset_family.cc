@@ -2861,7 +2861,7 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
   // filter potential result list
   double xy[2];
   double distance;
-  int limit = geo_ops.any ? geo_ops.count : 0;
+  unsigned long limit = geo_ops.any ? geo_ops.count : 0;
   for (auto& result_array : result_arrays) {
     for (auto& arr : *result_array) {
       for (auto& p : arr) {
