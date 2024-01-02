@@ -38,7 +38,7 @@ ABSL_FLAG(uint32_t, tcp_keepalive, 300,
           "the duration until an inactive connection is terminated is twice the specified time");
 ABSL_FLAG(uint32_t, tcp_user_timeout, 0,
           "the maximum period in milliseconds that transimitted data may stay unacknowledged "
-          "before TCP aborts the connection. 0 means no timeout");
+          "before TCP aborts the connection. 0 means OS default timeout");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 
