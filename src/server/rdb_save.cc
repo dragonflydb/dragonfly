@@ -281,8 +281,11 @@ io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
   return io::Bytes(compr_buf_.data(), frame_size);
 }
 
+SerializerBase::SerializerBase(CompressionMode compression_mode)
+    : compression_mode_(compression_mode), mem_buf_{4_KB} {
+}
 RdbSerializer::RdbSerializer(CompressionMode compression_mode)
-    : mem_buf_{4_KB}, tmp_buf_(nullptr), compression_mode_(compression_mode) {
+    : SerializerBase(compression_mode), tmp_buf_(nullptr) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -764,11 +767,11 @@ error_code RdbSerializer::SendFullSyncCut() {
   return WriteRaw(buf);
 }
 
-size_t RdbSerializer::GetTotalBufferCapacity() const {
+size_t SerializerBase::GetTotalBufferCapacity() const {
   return mem_buf_.Capacity();
 }
 
-error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
+error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
   mem_buf_.Reserve(mem_buf_.InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf_.AppendBuffer();
   memcpy(dest.data(), buf.data(), buf.size());
@@ -776,7 +779,7 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-error_code RdbSerializer::FlushToSink(io::Sink* s) {
+error_code SerializerBase::FlushToSink(io::Sink* s) {
   auto bytes = PrepareFlush();
   if (bytes.empty())
     return error_code{};
@@ -786,12 +789,19 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
   // interrupt point.
   RETURN_ON_ERR(s->Write(bytes));
   mem_buf_.ConsumeInput(bytes.size());
-  // After every flush we should write the DB index again because the blobs in the channel are
-  // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
-  // snapshot)
-  last_entry_db_index_ = kInvalidDbId;
 
   return error_code{};
+}
+
+error_code RdbSerializer::FlushToSink(io::Sink* s) {
+  error_code res = SerializerBase::FlushToSink(s);
+  if (res) {
+    // After every flush we should write the DB index again because the blobs in the channel are
+    // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
+    // snapshot)
+    last_entry_db_index_ = kInvalidDbId;
+  }
+  return res;
 }
 
 namespace {
@@ -851,11 +861,11 @@ std::string RdbSerializer::DumpObject(const CompactObj& obj) {
   return dump_payload;
 }
 
-size_t RdbSerializer::SerializedLen() const {
+size_t SerializerBase::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-io::Bytes RdbSerializer::PrepareFlush() {
+io::Bytes SerializerBase::PrepareFlush() {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
     return mem_buf_.InputBuffer();
@@ -1461,7 +1471,7 @@ size_t RdbSaver::GetTotalBuffersSize() const {
   return impl_->GetTotalBuffersSize();
 }
 
-void RdbSerializer::AllocateCompressorOnce() {
+void SerializerBase::AllocateCompressorOnce() {
   if (compressor_impl_) {
     return;
   }
@@ -1474,7 +1484,7 @@ void RdbSerializer::AllocateCompressorOnce() {
   }
 }
 
-void RdbSerializer::CompressBlob() {
+void SerializerBase::CompressBlob() {
   if (!compression_stats_) {
     compression_stats_.emplace(CompressionStats{});
   }
@@ -1520,6 +1530,39 @@ void RdbSerializer::CompressBlob() {
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
   ++compression_stats_->compressed_blobs;
+}
+
+RestoreSerializer::RestoreSerializer(CompressionMode compression_mode)
+    : SerializerBase(compression_mode) {
+}
+
+error_code RestoreSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
+                                        uint64_t expire_ms, DbIndex dbid) {
+  absl::InlinedVector<string_view, 4> args;
+
+  string key_buffer;
+  string_view key = pk.GetSlice(&key_buffer);
+  args.push_back(key);
+
+  string expire_str = absl::StrCat(expire_ms);
+  args.push_back(expire_str);
+
+  string value = RdbSerializer::DumpObject(pv);
+  args.push_back(value);
+
+  args.push_back("ABSTTL");  // Means expire string is since epoch
+
+  journal::Entry entry(0,                     // txid
+                       journal::Op::COMMAND,  // single command
+                       dbid,                  //
+                       1,                     // shard count
+                       make_pair("RESTORE", ArgSlice{args}));
+
+  io::StringSink sink;
+  JournalWriter writer{&sink};
+  writer.Write(entry);
+
+  return WriteRaw(io::Buffer(sink.str()));
 }
 
 }  // namespace dfly
