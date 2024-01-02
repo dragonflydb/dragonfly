@@ -1838,31 +1838,31 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     replica.stop()
 
 
+# note: please be careful if you want to change any of the parameters used in this test.
+# changing parameters without extensive testing may easily lead to weak testing case assertion
+# which means eviction may not get triggered.
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_eviction_propagation(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=1, cache_mode="true", maxmemory="290mb")
+    master = df_local_factory.create(
+        proactor_threads=1, cache_mode="true", maxmemory="267mb", enable_heartbeat_eviction="false"
+    )
     replica = df_local_factory.create(proactor_threads=1)
     df_local_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
 
-    seeder = df_seeder_factory.create(port=master.port, val_size=1000, stop_on_failure=False)
-
     await c_master.execute_command("DEBUG POPULATE 6200000")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica, timeout=3000)
 
-    # Check data after full sync
-    await check_all_replicas_finished([c_replica], c_master)
-    await check_data(seeder, [replica], [c_replica])
-
-    # Stream more data in stable state
-    await seeder.run(target_ops=10000000, target_deviation=0.0001)
+    # Fill more data in stable state
+    seeder = df_seeder_factory.create(port=master.port, val_size=1000, stop_on_failure=False)
+    await seeder.run(target_ops=50000)
 
     info = await c_master.info("stats")
-    assert info["evicted_keys"] > 0, "Weak testcase. No eviction was triggered"
+    assert info["evicted_keys"] > 0, "Weak testcase: no policy based eviction was triggered"
 
     while True:
         info = await c_master.info("stats")
@@ -1878,4 +1878,35 @@ async def test_eviction_propagation(df_local_factory, df_seeder_factory):
     # Check data after stable state stream
     await check_all_replicas_finished([c_replica], c_master)
     await check_data(seeder, [replica], [c_replica])
+
+    # now enable heart beat eviction
+    info = await c_master.info("stats")
+    evict_after_first_test = info["evicted_keys"]
+    print("Turning on heart beat eviction and test again...")
+    await c_master.execute_command("CONFIG SET enable_heartbeat_eviction true")
+    await c_master.execute_command("CONFIG SET max_eviction_per_heartbeat 1000")
+    await c_master.execute_command("CONFIG SET max_segment_to_consider 8")
+
+    # wait for the heart beat eviction to kick in
+    time.sleep(2)
+
+    info = await c_master.info("stats")
+    assert (
+        info["evicted_keys"] > evict_after_first_test
+    ), "Weak testcase: no heart beat eviction was triggered"
+
+    while True:
+        info = await c_master.info("stats")
+        evicted_1 = info["evicted_keys"]
+        time.sleep(2)
+        info = await c_master.info("stats")
+        evicted_2 = info["evicted_keys"]
+        if evicted_2 == evicted_1:
+            break
+        else:
+            print("waiting for eviction to finish...", end="\r", flush=True)
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await check_data(seeder, [replica], [c_replica])
+
     await disconnect_clients(c_master, *[c_replica])
