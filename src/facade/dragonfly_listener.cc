@@ -36,6 +36,9 @@ ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
 ABSL_FLAG(uint32_t, tcp_keepalive, 300,
           "the period in seconds of inactivity after which keep-alives are triggerred,"
           "the duration until an inactive connection is terminated is twice the specified time");
+ABSL_FLAG(uint32_t, tcp_user_timeout, 0,
+          "the maximum period in milliseconds that transimitted data may stay unacknowledged "
+          "before TCP aborts the connection. 0 means no timeout");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 
@@ -193,11 +196,12 @@ error_code Listener::ConfigureServerSocket(int fd) {
   bool success = ConfigureKeepAlive(fd);
 
 #ifdef __linux__
-  int user_timeout = 2000;
+  int user_timeout = absl::GetFlag(FLAGS_tcp_user_timeout);
   if (setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(int)) < 0) {
     LOG(WARNING) << "Could not set user timeout on socket " << SafeErrorMessage(errno);
   }
 #endif
+
   if (!success) {
 #ifndef __APPLE__
     int myerr = errno;
