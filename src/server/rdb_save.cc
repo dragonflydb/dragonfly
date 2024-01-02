@@ -14,6 +14,7 @@
 #include <queue>
 
 extern "C" {
+#include "redis/crc64.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/rdb.h"
@@ -791,6 +792,63 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
   last_entry_db_index_ = kInvalidDbId;
 
   return error_code{};
+}
+
+namespace {
+using VersionBuffer = std::array<char, sizeof(uint16_t)>;
+using CrcBuffer = std::array<char, sizeof(uint64_t)>;
+
+VersionBuffer MakeRdbVersion() {
+  VersionBuffer buf;
+  buf[0] = RDB_SER_VERSION & 0xff;
+  buf[1] = (RDB_SER_VERSION >> 8) & 0xff;
+  return buf;
+}
+
+CrcBuffer MakeCheckSum(std::string_view dump_res) {
+  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+  CrcBuffer buf;
+  absl::little_endian::Store64(buf.data(), chksum);
+  return buf;
+}
+
+void AppendFooter(std::string* dump_res) {
+  /* Write the footer, this is how it looks like:
+   * ----------------+---------------------+---------------+
+   * ... RDB payload | 2 bytes RDB version | 8 bytes CRC64 |
+   * ----------------+---------------------+---------------+
+   * RDB version and CRC are both in little endian.
+   */
+  const auto ver = MakeRdbVersion();
+  dump_res->append(ver.data(), ver.size());
+  const auto crc = MakeCheckSum(*dump_res);
+  dump_res->append(crc.data(), crc.size());
+}
+}  // namespace
+
+std::string RdbSerializer::DumpObject(const CompactObj& obj) {
+  io::StringSink sink;
+  CompressionMode compression_mode = GetDefaultCompressionMode();
+  if (compression_mode != CompressionMode::NONE) {
+    compression_mode = CompressionMode::SINGLE_ENTRY;
+  }
+  RdbSerializer serializer(compression_mode);
+
+  // According to Redis code we need to
+  // 1. Save the value itself - without the key
+  // 2. Save footer: this include the RDB version and the CRC value for the message
+  auto type = RdbObjectType(obj);
+  DVLOG(1) << "We are going to dump object type: " << type;
+  std::error_code ec = serializer.WriteOpcode(type);
+  CHECK(!ec);
+  ec = serializer.SaveValue(obj);
+  CHECK(!ec);  // make sure that fully was successful
+  ec = serializer.FlushToSink(&sink);
+  CHECK(!ec);  // make sure that fully was successful
+  std::string dump_payload(sink.str());
+  AppendFooter(&dump_payload);  // version and crc
+  CHECK_GT(dump_payload.size(), 10u);
+  return dump_payload;
 }
 
 size_t RdbSerializer::SerializedLen() const {

@@ -38,36 +38,7 @@ using namespace facade;
 
 namespace {
 
-using VersionBuffer = std::array<char, sizeof(uint16_t)>;
-using CrcBuffer = std::array<char, sizeof(uint64_t)>;
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
-
-VersionBuffer MakeRdbVersion() {
-  VersionBuffer buf;
-  buf[0] = RDB_SER_VERSION & 0xff;
-  buf[1] = (RDB_SER_VERSION >> 8) & 0xff;
-  return buf;
-}
-
-CrcBuffer MakeCheckSum(std::string_view dump_res) {
-  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
-  CrcBuffer buf;
-  absl::little_endian::Store64(buf.data(), chksum);
-  return buf;
-}
-
-void AppendFooter(std::string* dump_res) {
-  /* Write the footer, this is how it looks like:
-   * ----------------+---------------------+---------------+
-   * ... RDB payload | 2 bytes RDB version | 8 bytes CRC64 |
-   * ----------------+---------------------+---------------+
-   * RDB version and CRC are both in little endian.
-   */
-  const auto ver = MakeRdbVersion();
-  dump_res->append(ver.data(), ver.size());
-  const auto crc = MakeCheckSum(*dump_res);
-  dump_res->append(crc.data(), crc.size());
-}
 
 bool VerifyFooter(std::string_view msg, int* rdb_version) {
   if (msg.size() <= DUMP_FOOTER_SIZE) {
@@ -448,28 +419,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
 
   if (IsValid(it)) {
     DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
-    io::StringSink sink;
-    CompressionMode compression_mode = GetDefaultCompressionMode();
-    if (compression_mode != CompressionMode::NONE) {
-      compression_mode = CompressionMode::SINGLE_ENTRY;
-    }
-    RdbSerializer serializer(compression_mode);
-
-    // According to Redis code we need to
-    // 1. Save the value itself - without the key
-    // 2. Save footer: this include the RDB version and the CRC value for the message
-    auto type = RdbObjectType(it->second);
-    DVLOG(1) << "We are going to dump object type: " << type;
-    std::error_code ec = serializer.WriteOpcode(type);
-    CHECK(!ec);
-    ec = serializer.SaveValue(it->second);
-    CHECK(!ec);  // make sure that fully was successful
-    ec = serializer.FlushToSink(&sink);
-    CHECK(!ec);  // make sure that fully was successful
-    std::string dump_payload(sink.str());
-    AppendFooter(&dump_payload);  // version and crc
-    CHECK_GT(dump_payload.size(), 10u);
-    return dump_payload;
+    return RdbSerializer::DumpObject(it->second);
   }
   // fallback
   DVLOG(1) << "Dump: '" << key << "' Not found";
