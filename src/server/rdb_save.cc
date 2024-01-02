@@ -1263,15 +1263,7 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
     case SaveMode::SINGLE_SHARD:
     case SaveMode::SINGLE_SHARD_WITH_SUMMARY:
       producer_count = 1;
-      if (compression_mode == CompressionMode::MULTI_ENTRY_LZ4) {
-        compression_mode_ = CompressionMode::MULTI_ENTRY_LZ4;
-      } else if (compression_mode == CompressionMode::MULTI_ENTRY_ZSTD) {
-        compression_mode_ = CompressionMode::MULTI_ENTRY_ZSTD;
-      } else if (compression_mode == CompressionMode::SINGLE_ENTRY) {
-        compression_mode_ = CompressionMode::SINGLE_ENTRY;
-      } else {
-        compression_mode_ = CompressionMode::NONE;
-      }
+      compression_mode_ = compression_mode;
       break;
     case SaveMode::RDB:
       producer_count = shard_set->size();

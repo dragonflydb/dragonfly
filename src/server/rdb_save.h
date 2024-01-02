@@ -77,9 +77,6 @@ class RdbSaver {
     const StringVec search_indices;  // ft.create commands to re-create search indices
   };
 
-  // Dumps `obj` in DUMP command format. Uses default compression mode.
-  static std::string DumpObject(const CompactObj& obj);
-
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
   // to snapshot all the datastore shards.
   // single_shard - false, means we capture all the data using a single RdbSaver instance
