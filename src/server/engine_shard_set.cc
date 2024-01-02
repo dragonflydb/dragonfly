@@ -62,6 +62,8 @@ ABSL_FLAG(string, shard_round_robin_prefix, "",
           "distributed across shards based on their value but instead via round-robin. Use "
           "cautiously! This can efficiently support up to a few hundreds of hash-tags.");
 
+ABSL_FLAG(bool, enable_round_robin_sharding, false, "");
+
 namespace dfly {
 
 using namespace util;
@@ -868,6 +870,8 @@ ShardId Shard(string_view v, ShardId shard_num) {
       has_hashtags = true;
       v = v_hash_tag;
     }
+  } else if (absl::GetFlag(FLAGS_enable_round_robin_sharding)) {
+    has_hashtags = true;
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
