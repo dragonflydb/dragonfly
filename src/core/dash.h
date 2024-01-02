@@ -213,12 +213,12 @@ class DashTable : public detail::DashTableBase {
   }
 
   size_t bucket_count() const {
-    return unique_segments_ * SegmentType::capacity();
+    return unique_segments_ * SegmentType::kNumBuckets;
   }
 
   // Overall capacity of the table (including stash buckets).
   size_t capacity() const {
-    return bucket_count();
+    return unique_segments_ * SegmentType::capacity();
   }
 
   double load_factor() const {
@@ -721,7 +721,7 @@ void DashTable<_Key, _Value, Policy>::Erase(iterator it) {
 
 template <typename _Key, typename _Value, typename Policy>
 void DashTable<_Key, _Value, Policy>::Reserve(size_t size) {
-  if (size <= bucket_count())
+  if (size <= capacity())
     return;
 
   size_t sg_floor = (size - 1) / SegmentType::capacity();

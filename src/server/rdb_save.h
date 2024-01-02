@@ -66,7 +66,8 @@ enum class SaveMode {
   RDB,                        // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };
+enum class CompressionMode { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
+CompressionMode GetDefaultCompressionMode();
 
 class RdbSaver {
  public:
@@ -135,6 +136,9 @@ class RdbSerializer {
   explicit RdbSerializer(CompressionMode compression_mode);
 
   ~RdbSerializer();
+
+  // Dumps `obj` in DUMP command format. Uses default compression mode.
+  static std::string DumpObject(const CompactObj& obj);
 
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;

@@ -58,7 +58,7 @@ class ClusterFamily {
 
   // DFLYMIGRATE CONF initiate first step in slots migration procedure
   // MigrationConf process this request and saving slots range and
-  // target node port in migration_infos_.
+  // target node port in outgoing_migration_infos_.
   // return sync_id and shard number to the target node
   void MigrationConf(CmdArgList args, ConnectionContext* cntx);
 
@@ -93,25 +93,32 @@ class ClusterFamily {
     MigrationInfo() = default;
     MigrationInfo(std::uint32_t flows_num, std::string ip, uint32_t sync_id, uint16_t port,
                   std::vector<ClusterConfig::SlotRange> slots)
-        : host_ip(ip), flows(flows_num), slots(slots), sync_id(sync_id), port(port) {
+        : host_ip(ip),
+          flows(flows_num),
+          slots(slots),
+          sync_id(sync_id),
+          port(port),
+          state(ClusterSlotMigration::State::C_CONNECTING) {
     }
     std::string host_ip;
     std::vector<FlowInfo> flows;
     std::vector<ClusterConfig::SlotRange> slots;
     uint32_t sync_id;
     uint16_t port;
+    ClusterSlotMigration::State state = ClusterSlotMigration::State::C_NO_STATE;
   };
 
   std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);
 
   mutable Mutex migration_mu_;  // guard migrations operations
-  // holds all slots migrations that are currently in progress.
-  std::vector<std::unique_ptr<ClusterSlotMigration>> migrations_jobs_
+  // holds all incoming slots migrations that are currently in progress.
+  std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   uint32_t next_sync_id_ = 1;
+  // holds all outgoing slots migrations that are currently in progress
   using MigrationInfoMap = absl::btree_map<uint32_t, std::shared_ptr<MigrationInfo>>;
-  MigrationInfoMap migration_infos_;
+  MigrationInfoMap outgoing_migration_infos_;
 
  private:
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
