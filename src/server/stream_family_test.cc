@@ -342,26 +342,18 @@ TEST_F(StreamFamilyTest, XReadGroupBlock) {
   ThisFiber::SleepFor(50us);
   pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "bar", "1-*", "k5", "v5"}); });
   // The second one should be unblocked
+  ThisFiber::SleepFor(50us);
 
   fb0.Join();
   fb1.Join();
-  // temporary incorrect results
-  if (resp0.GetVec()[1].GetVec().size() == 0) {
-    EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(0)));
-    EXPECT_THAT(resp1.GetVec(), ElementsAre("foo", ArrLen(1)));
-  } else {
-    EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(1)));
-    EXPECT_THAT(resp1.GetVec(), ElementsAre("foo", ArrLen(0)));
-  }
 
-  // correct results
-  // if (resp0.GetVec()[0].GetString() == "foo") {
-  //   EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(1)));
-  //   EXPECT_THAT(resp1.GetVec(), ElementsAre("bar", ArrLen(1)));
-  // } else {
-  //   EXPECT_THAT(resp1.GetVec(), ElementsAre("foo", ArrLen(1)));
-  //   EXPECT_THAT(resp0.GetVec(), ElementsAre("bar", ArrLen(1)));
-  // }
+  if (resp0.GetVec()[0].GetString() == "foo") {
+    EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(1)));
+    EXPECT_THAT(resp1.GetVec(), ElementsAre("bar", ArrLen(1)));
+  } else {
+    EXPECT_THAT(resp1.GetVec(), ElementsAre("foo", ArrLen(1)));
+    EXPECT_THAT(resp0.GetVec(), ElementsAre("bar", ArrLen(1)));
+  }
 }
 
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {

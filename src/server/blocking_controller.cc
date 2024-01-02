@@ -4,6 +4,8 @@
 
 #include "server/blocking_controller.h"
 
+#include <absl/container/inlined_vector.h>
+
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 extern "C" {
@@ -20,12 +22,13 @@ using namespace std;
 
 struct WatchItem {
   Transaction* trans;
+  KeyReadyChecker key_ready_checker;
 
   Transaction* get() const {
     return trans;
   }
 
-  WatchItem(Transaction* t) : trans(t) {
+  WatchItem(Transaction* t, KeyReadyChecker krc) : trans(t), key_ready_checker(std::move(krc)) {
   }
 };
 
@@ -212,15 +215,7 @@ void BlockingController::NotifyPending() {
     for (auto key : wt.awakened_keys) {
       string_view sv_key = static_cast<string_view>(key);
       DVLOG(1) << "Processing awakened key " << sv_key;
-
-      // Double verify we still got the item.
-      auto [it, exp_it] = owner_->db_slice().FindReadOnly(context, sv_key);
-      // Only LIST, ZSET and STREAM are allowed to block.
-      if (!IsValid(it) || !(it->second.ObjType() == OBJ_LIST || it->second.ObjType() == OBJ_ZSET ||
-                            it->second.ObjType() == OBJ_STREAM))
-        continue;
-
-      NotifyWatchQueue(sv_key, &wt.queue_map);
+      NotifyWatchQueue(sv_key, &wt.queue_map, context);
     }
     wt.awakened_keys.clear();
 
@@ -231,7 +226,7 @@ void BlockingController::NotifyPending() {
   awakened_indices_.clear();
 }
 
-void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
+void BlockingController::AddWatched(ArgSlice keys, KeyReadyChecker krc, Transaction* trans) {
   auto [dbit, added] = watched_dbs_.emplace(trans->GetDbIndex(), nullptr);
   if (added) {
     dbit->second.reset(new DbWatchTable);
@@ -254,7 +249,7 @@ void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
         continue;
     }
     DVLOG(2) << "Emplace " << trans->DebugId() << " to watch " << key;
-    res->second->items.emplace_back(trans);
+    res->second->items.emplace_back(trans, krc);
   }
 }
 
@@ -275,33 +270,40 @@ void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
 }
 
 // Marks the queue as active and notifies the first transaction in the queue.
-void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm) {
+void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm,
+                                          const DbContext& context) {
   auto w_it = wqm->find(key);
   CHECK(w_it != wqm->end());
   DVLOG(1) << "Notify WQ: [" << owner_->shard_id() << "] " << key;
   WatchQueue* wq = w_it->second.get();
-
   DCHECK_EQ(wq->state, WatchQueue::SUSPENDED);
-  wq->state = WatchQueue::ACTIVE;
 
   auto& queue = wq->items;
   ShardId sid = owner_->shard_id();
 
-  do {
-    WatchItem& wi = queue.front();
+  // In the most cases we shouldn't have skipped elements at all
+  absl::InlinedVector<dfly::WatchItem, 4> skipped;
+  while (!queue.empty()) {
+    auto& wi = queue.front();
     Transaction* head = wi.get();
-    DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key;
-
-    if (head->NotifySuspended(owner_->committed_txid(), sid, key)) {
-      // We deliberately keep the notified transaction in the queue to know which queue
-      // must handled when this transaction finished.
-      wq->notify_txid = owner_->committed_txid();
-      awakened_transactions_.insert(head);
-      break;
+    // We check may the transaction be notified otherwise move it to the end of the queue
+    if (wi.key_ready_checker(owner_, context, head, key)) {
+      DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key;
+      if (head->NotifySuspended(owner_->committed_txid(), sid, key)) {
+        wq->state = WatchQueue::ACTIVE;
+        // We deliberately keep the notified transaction in the queue to know which queue
+        // must handled when this transaction finished.
+        wq->notify_txid = owner_->committed_txid();
+        awakened_transactions_.insert(head);
+        break;
+      }
+    } else {
+      skipped.push_back(std::move(wi));
     }
 
     queue.pop_front();
-  } while (!queue.empty());
+  }
+  std::move(skipped.begin(), skipped.end(), std::back_inserter(queue));
 
   if (wq->items.empty()) {
     wqm->erase(w_it);

@@ -2817,7 +2817,28 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
   auto tp = (opts.timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts.timeout)
                            : Transaction::time_point::max();
 
-  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
+  const auto key_checker = [&opts](EngineShard* owner, const DbContext& context, Transaction* tx,
+                                   std::string_view key) -> bool {
+    auto res_it = owner->db_slice().FindReadOnly(context, key, OBJ_STREAM);
+    if (!res_it.ok())
+      return false;
+
+    auto sitem = opts.stream_ids.at(key);
+    if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
+      return true;
+
+    const CompactObj& cobj = (*res_it)->second;
+    stream* s = GetReadOnlyStream(cobj);
+    streamID last_id = s->last_id;
+    if (s->length) {
+      streamLastValidID(s, &last_id);
+    }
+
+    return streamCompareID(&last_id, &sitem.group->last_id) > 0;
+  };
+
+  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb), key_checker);
+      status != OpStatus::OK)
     return rb->SendNullArray();
 
   // Resolve the entry in the woken key. Note this must not use OpRead since

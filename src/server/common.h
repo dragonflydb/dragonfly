@@ -359,6 +359,10 @@ inline uint32_t MemberTimeSeconds(uint64_t now_ms) {
   return (now_ms / 1000) - kMemberExpiryBase;
 }
 
+// Checks whether the touched key is valid for a blocking transaction watching it
+using KeyReadyChecker =
+    std::function<bool(EngineShard*, const DbContext& context, Transaction* tx, std::string_view)>;
+
 struct MemoryBytesFlag {
   uint64_t value = 0;
 };

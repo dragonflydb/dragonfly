@@ -881,8 +881,12 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
 
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
+  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
+                              std::string_view key) -> bool {
+    return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
+  };
   // Block
-  if (auto status = t->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker); status != OpStatus::OK)
     return status;
 
   t->Execute(cb_move, true);
@@ -906,7 +910,12 @@ OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
   // This allows us to run Transaction::Execute on watched transactions in both shards.
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
-  if (auto status = t->WaitOnWatch(tp, std::move(wcb)); status != OpStatus::OK)
+  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
+                              std::string_view key) -> bool {
+    return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
+  };
+
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker); status != OpStatus::OK)
     return status;
 
   return MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, true);
