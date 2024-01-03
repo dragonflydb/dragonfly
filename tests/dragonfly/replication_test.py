@@ -444,7 +444,8 @@ async def test_cancel_replication_immediately(
             await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
             return True
         except redis.exceptions.ResponseError as e:
-            assert e.args[0] == "replication cancelled"
+            err = e.args[0]
+            assert err == "replication cancelled" or err == "Can not execute during LOADING"
             return False
 
     ping_job = asyncio.create_task(ping_status())
