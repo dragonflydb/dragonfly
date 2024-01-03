@@ -29,8 +29,7 @@ template <typename T, typename Hash> class Lru {
   };
 
  public:
-  explicit Lru(uint32_t capacity, PMR_NS::memory_resource* mr)
-      : table_(mr), node_arr_(mr), head_(0) {
+  explicit Lru(uint32_t capacity, PMR_NS::memory_resource* mr) : table_(mr), node_arr_(mr) {
     CHECK_GT(capacity, 1u);
     node_arr_.reserve(capacity);
   }
@@ -52,14 +51,16 @@ template <typename T, typename Hash> class Lru {
   absl::node_hash_map<T, uint32_t, Hash, std::equal_to<>, AllocatorType>
       table_;  // map from item to index in node arr
   std::vector<Node, PMR_NS::polymorphic_allocator<Node>> node_arr_;
-  uint32_t head_;
+  uint32_t head_ = 0;
 };
 
+// Get prev item. In cat item is head return tail.
 template <typename T, typename Hash> std::optional<T> Lru<T, Hash>::GetPrev(const T& data) const {
   auto it = table_.find(data);
   if (it == table_.end()) {
     return std::nullopt;
   }
+  DCHECK_GT(node_arr_.size(), it->second);
   const auto& node = node_arr_[it->second];
 
   DCHECK_EQ(node.data_ptr, &it->first);
