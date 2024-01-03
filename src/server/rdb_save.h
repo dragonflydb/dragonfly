@@ -136,8 +136,8 @@ class SerializerBase {
   explicit SerializerBase(CompressionMode compression_mode);
   virtual ~SerializerBase() = default;
 
-  // Dumps `obj` in DUMP command format. Uses default compression mode.
-  static std::string DumpObject(const CompactObj& obj);
+  // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
+  static void DumpObject(const CompactObj& obj, io::StringSink* out);
 
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
@@ -244,6 +244,12 @@ class RestoreSerializer : public SerializerBase {
 
   std::error_code SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
                             DbIndex dbid);
+
+ private:
+  // All members are used for saving allocations.
+  std::string key_buffer_;
+  io::StringSink value_dump_sink_;
+  io::StringSink sink_;
 };
 
 }  // namespace dfly

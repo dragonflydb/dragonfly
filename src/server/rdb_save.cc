@@ -822,7 +822,11 @@ CrcBuffer MakeCheckSum(std::string_view dump_res) {
   return buf;
 }
 
-void AppendFooter(std::string* dump_res) {
+void AppendFooter(io::StringSink* dump_res) {
+  auto to_bytes = [](auto buf) {
+    return io::Bytes(reinterpret_cast<uint8_t*>(&buf[0]), buf.size());
+  };
+
   /* Write the footer, this is how it looks like:
    * ----------------+---------------------+---------------+
    * ... RDB payload | 2 bytes RDB version | 8 bytes CRC64 |
@@ -830,14 +834,13 @@ void AppendFooter(std::string* dump_res) {
    * RDB version and CRC are both in little endian.
    */
   const auto ver = MakeRdbVersion();
-  dump_res->append(ver.data(), ver.size());
-  const auto crc = MakeCheckSum(*dump_res);
-  dump_res->append(crc.data(), crc.size());
+  dump_res->Write(to_bytes(ver));
+  const auto crc = MakeCheckSum(dump_res->str());
+  dump_res->Write(to_bytes(crc));
 }
 }  // namespace
 
-std::string RdbSerializer::DumpObject(const CompactObj& obj) {
-  io::StringSink sink;
+void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   CompressionMode compression_mode = GetDefaultCompressionMode();
   if (compression_mode != CompressionMode::NONE) {
     compression_mode = CompressionMode::SINGLE_ENTRY;
@@ -853,12 +856,10 @@ std::string RdbSerializer::DumpObject(const CompactObj& obj) {
   CHECK(!ec);
   ec = serializer.SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer.FlushToSink(&sink);
-  CHECK(!ec);  // make sure that fully was successful
-  std::string dump_payload(sink.str());
-  AppendFooter(&dump_payload);  // version and crc
-  CHECK_GT(dump_payload.size(), 10u);
-  return dump_payload;
+  ec = serializer.FlushToSink(out);
+  CHECK(!ec);         // make sure that fully was successful
+  AppendFooter(out);  // version and crc
+  CHECK_GT(out->str().size(), 10u);
 }
 
 size_t SerializerBase::SerializedLen() const {
@@ -1540,15 +1541,16 @@ error_code RestoreSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv
                                         uint64_t expire_ms, DbIndex dbid) {
   absl::InlinedVector<string_view, 4> args;
 
-  string key_buffer;
-  string_view key = pk.GetSlice(&key_buffer);
+  key_buffer_.clear();
+  string_view key = pk.GetSlice(&key_buffer_);
   args.push_back(key);
 
   string expire_str = absl::StrCat(expire_ms);
   args.push_back(expire_str);
 
-  string value = RdbSerializer::DumpObject(pv);
-  args.push_back(value);
+  value_dump_sink_.Clear();
+  DumpObject(pv, &value_dump_sink_);
+  args.push_back(value_dump_sink_.str());
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
 
@@ -1558,11 +1560,11 @@ error_code RestoreSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv
                        1,                     // shard count
                        make_pair("RESTORE", ArgSlice{args}));
 
-  io::StringSink sink;
-  JournalWriter writer{&sink};
+  sink_.Clear();
+  JournalWriter writer{&sink_};
   writer.Write(entry);
 
-  return WriteRaw(io::Buffer(sink.str()));
+  return WriteRaw(io::Buffer(sink_.str()));
 }
 
 }  // namespace dfly
