@@ -794,14 +794,14 @@ error_code SerializerBase::FlushToSink(io::Sink* s) {
 }
 
 error_code RdbSerializer::FlushToSink(io::Sink* s) {
-  error_code res = SerializerBase::FlushToSink(s);
-  if (res) {
-    // After every flush we should write the DB index again because the blobs in the channel are
-    // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
-    // snapshot)
-    last_entry_db_index_ = kInvalidDbId;
-  }
-  return res;
+  RETURN_ON_ERR(SerializerBase::FlushToSink(s));
+
+  // After every flush we should write the DB index again because the blobs in the channel are
+  // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
+  // snapshot)
+  last_entry_db_index_ = kInvalidDbId;
+
+  return {};
 }
 
 namespace {
