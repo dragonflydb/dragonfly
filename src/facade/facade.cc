@@ -40,6 +40,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
+  static_assert(sizeof(ReplyStats) == 80u);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 

@@ -71,6 +71,8 @@ struct ReplyStats {
     int64_t total_duration = 0;
 
     SendStats& operator+=(const SendStats& other) {
+      static_assert(sizeof(SendStats) == 16u);
+
       count += other.count;
       total_duration += other.total_duration;
       return *this;
