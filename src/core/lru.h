@@ -23,21 +23,20 @@ template <typename T> class Lru {
   };
 
  public:
-  explicit Lru(size_t capacity) : head_(0), grow_size_(capacity) {
+  explicit Lru(uint32_t capacity) : head_(0) {
     CHECK_GT(capacity, 1u);
-    node_arr_.resize(capacity);
-  }
-  ~Lru() {
+    node_arr_.reserve(capacity);
   }
 
   std::optional<T> GetPrev(const T& data) const;
-  std::optional<T> GetLast() const;
+  std::optional<T> GetTail() const;
+  std::optional<T> GetHead() const;
   enum class Position {
     kHead,
     kTail,
   };
   void Put(const T& data, Position position = Position::kHead);
-  void Remove(const T& data);
+  bool Remove(const T& data);
 
   size_t Size() const {
     return table_.size();
@@ -49,7 +48,6 @@ template <typename T> class Lru {
   absl::node_hash_map<T, uint32_t> table_;  // map from item to index in node arr
   std::vector<Node> node_arr_;
   uint32_t head_;
-  size_t grow_size_;
 };
 
 template <typename T> std::optional<T> Lru<T>::GetPrev(const T& data) const {
@@ -65,7 +63,7 @@ template <typename T> std::optional<T> Lru<T>::GetPrev(const T& data) const {
   return *node_prev.data_ptr;
 }
 
-template <typename T> std::optional<T> Lru<T>::GetLast() const {
+template <typename T> std::optional<T> Lru<T>::GetTail() const {
   if (table_.size() == 0) {
     return std::nullopt;
   }
@@ -73,15 +71,19 @@ template <typename T> std::optional<T> Lru<T>::GetLast() const {
   return *node_arr_[tail].data_ptr;
 }
 
+template <typename T> std::optional<T> Lru<T>::GetHead() const {
+  if (table_.size() == 0) {
+    return std::nullopt;
+  }
+  return *node_arr_[head_].data_ptr;
+}
+
 template <typename T> void Lru<T>::Put(const T& data, Position position) {
   auto [it, inserted] = table_.emplace(data, table_.size());
   if (inserted) {
-    if (it->second < node_arr_.size()) {
-      node_arr_.resize(node_arr_.size() + grow_size_);
-    }
     unsigned tail = node_arr_[head_].prev;  // 0 if we had 1 or 0 elements.
 
-    auto& node = node_arr_[it->second];
+    Node node;
     // add new item between head and tail.
     node.prev = tail;
     node.next = head_;
@@ -89,6 +91,7 @@ template <typename T> void Lru<T>::Put(const T& data, Position position) {
     node_arr_[head_].prev = it->second;
 
     node.data_ptr = &(it->first);
+    node_arr_.push_back(node);
 
     if (position == Position::kHead) {
       head_ = it->second;
@@ -98,10 +101,10 @@ template <typename T> void Lru<T>::Put(const T& data, Position position) {
   }
 }
 
-template <typename T> void Lru<T>::Remove(const T& data) {
+template <typename T> bool Lru<T>::Remove(const T& data) {
   auto it = table_.find(data);
   if (it == table_.end()) {
-    return;
+    return false;
   }
   uint32_t remove_index = it->second;
   auto& node = node_arr_[remove_index];
@@ -114,10 +117,11 @@ template <typename T> void Lru<T>::Remove(const T& data) {
   if (remove_index == head_) {
     head_ = node.next;
   }
-  table_.erase(data);
+  table_.erase(it);
 
   if (table_.size() == remove_index) {
-    return;  // if the removed item was the last in the node array nothing else to do.
+    node_arr_.pop_back();
+    return true;  // if the removed item was the last in the node array nothing else to do.
   }
 
   // move last item from node array to the removed index
@@ -133,10 +137,12 @@ template <typename T> void Lru<T>::Remove(const T& data) {
 
   // move the data from the node to the removed node.
   node = node_to_move;
+  node_arr_.pop_back();
 
   if (head_ == move_index) {
     head_ = remove_index;
   }
+  return true;
 }
 
 template <typename T> void Lru<T>::MoveToPosition(uint32_t index, Position position) {
@@ -148,7 +154,7 @@ template <typename T> void Lru<T>::MoveToPosition(uint32_t index, Position posit
   }
 
   auto& node = node_arr_[index];
-  DCHECK(node.prev != node.next);
+  CHECK_NE(node.prev, node.next);
 
   if (position == Position::kHead && index == tail) {
     head_ = index;  // just shift the cycle.
