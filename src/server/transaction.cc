@@ -1203,13 +1203,14 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
   return reverse_index_[sd.arg_start + arg_index];
 }
 
-OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider) {
+OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider,
+                                  KeyReadyChecker krc) {
   DVLOG(2) << "WaitOnWatch " << DebugId();
   using namespace chrono;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto keys = wkeys_provider(t, shard);
-    return t->WatchInShard(keys, shard);
+    return t->WatchInShard(keys, shard, krc);
   };
 
   Execute(std::move(cb), true);
@@ -1257,14 +1258,14 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
 }
 
 // Runs only in the shard thread.
-OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
+OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc) {
   ShardId idx = SidToId(shard->shard_id());
 
   auto& sd = shard_data_[idx];
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
 
   auto* bc = shard->EnsureBlockingController();
-  bc->AddWatched(keys, this);
+  bc->AddWatched(keys, std::move(krc), this);
 
   sd.local_mask |= SUSPENDED_Q;
   sd.local_mask &= ~OUT_OF_ORDER;

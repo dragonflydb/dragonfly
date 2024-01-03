@@ -298,7 +298,8 @@ void TieredStorage::InflightWriteRequest::Undo(PerDb::BinRecord* bin_record, DbS
   }
 }
 
-TieredStorage::TieredStorage(DbSlice* db_slice) : db_slice_(*db_slice) {
+TieredStorage::TieredStorage(DbSlice* db_slice, size_t max_file_size)
+    : db_slice_(*db_slice), max_file_size_(max_file_size) {
 }
 
 TieredStorage::~TieredStorage() {
@@ -312,8 +313,10 @@ error_code TieredStorage::Open(const string& base) {
 
   error_code ec = io_mgr_.Open(path);
   if (!ec) {
-    if (io_mgr_.Span()) {  // Add initial storage.
-      alloc_.AddStorage(0, io_mgr_.Span());
+    size_t initial_size = io_mgr_.Span();
+    if (initial_size) {  // Add initial storage.
+      allocated_size_ += initial_size;
+      alloc_.AddStorage(0, initial_size);
     }
   }
   return ec;
@@ -611,7 +614,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
 }
 
 void TieredStorage::InitiateGrow(size_t grow_size) {
-  if (io_mgr_.grow_pending())
+  if (io_mgr_.grow_pending() || allocated_size_ + grow_size > max_file_size_)
     return;
   DCHECK_GT(grow_size, 0u);
 
@@ -620,6 +623,7 @@ void TieredStorage::InitiateGrow(size_t grow_size) {
   auto cb = [start, grow_size, this](int io_res) {
     if (io_res == 0) {
       alloc_.AddStorage(start, grow_size);
+      allocated_size_ += grow_size;
     } else {
       LOG_FIRST_N(ERROR, 10) << "Error enlarging storage " << io_res;
     }

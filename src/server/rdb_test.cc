@@ -20,6 +20,7 @@ extern "C" {
 #include "io/file.h"
 #include "server/engine_shard_set.h"
 #include "server/rdb_load.h"
+#include "server/rdb_save.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -31,7 +32,7 @@ using absl::StrCat;
 
 ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
-ABSL_DECLARE_FLAG(int, compression_mode);
+ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
 
 namespace dfly {
 
@@ -158,8 +159,9 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
   auto resp = Run({"keys", "key:[5-9][0-9][0-9][0-9][0-9]*"});
   EXPECT_EQ(resp.GetVec().size(), 0);
 
-  for (int i = 0; i <= 3; ++i) {
-    SetFlag(&FLAGS_compression_mode, i);
+  for (auto mode : {CompressionMode::NONE, CompressionMode::SINGLE_ENTRY,
+                    CompressionMode::MULTI_ENTRY_ZSTD, CompressionMode::MULTI_ENTRY_LZ4}) {
+    SetFlag(&FLAGS_compression_mode, mode);
     RespExpr resp = Run({"save", "df"});
     ASSERT_EQ(resp, "OK");
 
@@ -171,7 +173,7 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
 }
 
 TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
-  SetFlag(&FLAGS_compression_mode, 2);
+  SetFlag(&FLAGS_compression_mode, CompressionMode::MULTI_ENTRY_ZSTD);
   for (int i = 0; i < 1000; ++i) {
     Run({"set", StrCat(i), "1"});
   }
