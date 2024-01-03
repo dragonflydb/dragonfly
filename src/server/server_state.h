@@ -130,7 +130,7 @@ class ServerState {  // public struct - to allow initialization.
   }
 
   static facade::ConnectionStats* tl_connection_stats() {
-    return &state_->connection_stats;
+    return &facade::tl_facade_stats->conn_stats;
   }
 
   ServerState();
@@ -180,7 +180,7 @@ class ServerState {  // public struct - to allow initialization.
   }
 
   void RecordCmd() {
-    ++connection_stats.command_cnt;
+    ++tl_connection_stats()->command_cnt;
     qps_.Inc();
   }
 
@@ -235,8 +235,6 @@ class ServerState {  // public struct - to allow initialization.
   bool is_master = true;
   std::string remote_client_id_;  // for cluster support
   uint32_t log_slower_than_usec = UINT32_MAX;
-
-  facade::ConnectionStats connection_stats;
 
   acl::UserRegistry* user_registry;
 

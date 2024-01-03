@@ -95,7 +95,7 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
   f();
   const size_t capacity = io_buf.Capacity();
   if (stats != nullptr && prev_capacity != capacity) {
-    VLOG(1) << "Grown io_buf to " << capacity;
+    VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
 }
@@ -149,7 +149,7 @@ string_view Connection::PubMessage::Message() const {
 
 struct Connection::DispatchOperations {
   DispatchOperations(SinkReplyBuilder* b, Connection* me)
-      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
+      : stats{&tl_facade_stats->conn_stats}, builder{b}, self(me) {
   }
 
   void operator()(const PubMessage& msg);
@@ -294,7 +294,7 @@ void Connection::DispatchOperations::operator()(const MigrationRequestMessage& m
 }
 
 void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
-  VLOG(1) << "Decremented checkpoint at " << self->DebugInfo();
+  VLOG(2) << "Decremented checkpoint at " << self->DebugInfo();
 
   msg.bc.Dec();
 }
@@ -595,7 +595,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 }
 
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
-  stats_ = service_->GetThreadLocalConnectionStats();
+  stats_ = &tl_facade_stats->conn_stats;
 
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
@@ -638,9 +638,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   evc_.notify();
   phase_ = SHUTTING_DOWN;
 
-  VLOG(1) << "Before dispatch_fb.join()";
+  VLOG(2) << "Before dispatch_fb.join()";
   dispatch_fb_.JoinIfNeeded();
-  VLOG(1) << "After dispatch_fb.join()";
+  VLOG(2) << "After dispatch_fb.join()";
 
   phase_ = PRECLOSE;
 
@@ -823,12 +823,13 @@ void Connection::OnBreakCb(int32_t mask) {
   if (mask <= 0)
     return;  // we cancelled the poller, which means we do not need to break from anything.
 
-  VLOG(1) << "Got event " << mask;
-
   if (!cc_) {
     LOG(ERROR) << "Unexpected event " << mask;
     return;
   }
+
+  VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
+          << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
 
   cc_->conn_closing = true;
   break_cb_engaged_ = false;  // do not attempt to cancel it.
@@ -865,7 +866,7 @@ void Connection::HandleMigrateRequest() {
 
       queue_backpressure_ = &tl_queue_backpressure_;
 
-      stats_ = service_->GetThreadLocalConnectionStats();
+      stats_ = &tl_facade_stats->conn_stats;
       ++stats_->num_conns;
       stats_->read_buf_capacity += io_buf_.Capacity();
       if (cc_->replica_conn) {
@@ -1258,7 +1259,7 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, boo
   if (cc_->blocked && ignore_blocked)
     return;
 
-  VLOG(1) << "Sent checkpoint to " << DebugInfo();
+  VLOG(2) << "Sent checkpoint to " << DebugInfo();
 
   bc.Add(1);
   SendAsync({CheckpointMessage{bc}});
