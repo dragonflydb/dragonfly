@@ -68,12 +68,6 @@ class ClusterFamily {
   // source for migration
   void Flow(CmdArgList args, ConnectionContext* cntx);
 
-  // DFLYMIGRATE SYNC is the third step that trigger data transferring
-  // for all flows simultaneously
-  // This method can be removed in the future if we decide to tranfser
-  // data without any synchronization in FLOW step
-  void Sync(CmdArgList args, ConnectionContext* cntx);
-
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);

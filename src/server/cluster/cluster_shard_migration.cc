@@ -30,12 +30,14 @@ ClusterShardMigration::~ClusterShardMigration() {
 std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
   RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
 
+  leftover_buf_.emplace(128);
+  ResetParser(/*server_mode=*/false);
+
   std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", sync_id_, " ", source_shard_id_);
   VLOG(1) << "cmd: " << cmd;
 
-  ResetParser(/*server_mode=*/false);
-  leftover_buf_.emplace(128);
   RETURN_ON_ERR(SendCommand(cmd));
+
   auto read_resp = ReadRespReply(&*leftover_buf_);
   if (!read_resp.has_value()) {
     return read_resp.error();
@@ -55,15 +57,16 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
-  uint8_t ok_buf[2];
-  ps.ReadAtLeast(io::MutableBytes{ok_buf, 2}, 2);
+  uint8_t ok_buf[4];
+  ps.ReadAtLeast(io::MutableBytes{ok_buf, 4}, 4);
 
-  if (string_view(reinterpret_cast<char*>(ok_buf), 2) != "OK") {
+  if (string_view(reinterpret_cast<char*>(ok_buf), 4) != "SYNC") {
+    VLOG(1) << "FullSyncShardFb incorrect data transfer";
     cntx->ReportError(std::make_error_code(errc::protocol_error),
                       "Incorrect FullSync data, only for tets");
   }
 
-  VLOG(1) << "FullSyncShardFb finished after reading 2 bytes";
+  VLOG(1) << "FullSyncShardFb finished after reading 4 bytes";
 }
 
 void ClusterShardMigration::Cancel() {
