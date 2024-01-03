@@ -22,16 +22,29 @@ class LruTest : public ::testing::Test {
 
 TEST_F(LruTest, PutAndGet) {
   cache_.Put("a");
+  ASSERT_EQ("a", cache_.GetHead());
+  ASSERT_EQ("a", cache_.GetPrev("a"));
   ASSERT_EQ("a", cache_.GetTail());
   cache_.Put("a");
+  ASSERT_EQ("a", cache_.GetHead());
+  ASSERT_EQ("a", cache_.GetTail());
   cache_.Put("b");
+  ASSERT_EQ("b", cache_.GetHead());
+  ASSERT_EQ("a", cache_.GetTail());
   cache_.Put("c");
+  ASSERT_EQ("c", cache_.GetHead());
+  ASSERT_EQ("a", cache_.GetTail());
   cache_.Put("d");
+  ASSERT_EQ("d", cache_.GetHead());
   ASSERT_EQ("a", cache_.GetTail());
   cache_.Put("a");
+  ASSERT_EQ("a", cache_.GetHead());
   ASSERT_EQ("b", cache_.GetTail());
   cache_.Put("e");
+  ASSERT_EQ("e", cache_.GetHead());
+  ASSERT_EQ("b", cache_.GetTail());
   cache_.Put("f");
+  ASSERT_EQ("f", cache_.GetHead());
   ASSERT_EQ("b", cache_.GetTail());
 }
 

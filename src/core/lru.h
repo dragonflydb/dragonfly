@@ -81,7 +81,10 @@ template <typename T> std::optional<T> Lru<T>::GetHead() const {
 template <typename T> void Lru<T>::Put(const T& data, Position position) {
   auto [it, inserted] = table_.emplace(data, table_.size());
   if (inserted) {
-    unsigned tail = node_arr_[head_].prev;  // 0 if we had 1 or 0 elements.
+    unsigned tail = 0;
+    if (node_arr_.size() > 0) {
+      tail = node_arr_[head_].prev;
+    }
 
     Node node;
     // add new item between head and tail.
