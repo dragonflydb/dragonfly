@@ -39,6 +39,21 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   return *this;
 }
 
+ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
+  ADD(io_write_cnt);
+  ADD(io_write_bytes);
+
+  for (const auto& k_v : o.err_count) {
+    err_count[k_v.first] += k_v.second;
+  }
+
+  for (unsigned i = 0; i < kNumTypes; ++i) {
+    send_stats[i] += o.send_stats[i];
+  }
+
+  return *this;
+}
+
 #undef ADD
 
 string WrongNumArgsError(string_view cmd) {
@@ -112,6 +127,8 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
 uint32_t CommandId::OptCount(uint32_t mask) {
   return absl::popcount(mask);
 }
+
+__thread FacadeStats* tl_facade_stats = nullptr;
 
 }  // namespace facade
 

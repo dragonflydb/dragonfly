@@ -59,6 +59,44 @@ struct ConnectionStats {
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
 
+struct ReplyStats {
+  enum SendStatsType {
+    kRegular,   // Send() operations that are written to sockets
+    kBatch,     // Send() operations that are internally batched to a buffer
+    kNumTypes,  // Number of types, do not use directly
+  };
+
+  struct SendStats {
+    int64_t count = 0;
+    int64_t total_duration = 0;
+
+    SendStats& operator+=(const SendStats& other) {
+      count += other.count;
+      total_duration += other.total_duration;
+      return *this;
+    }
+  };
+
+  SendStats send_stats[SendStatsType::kNumTypes];
+
+  size_t io_write_cnt = 0;
+  size_t io_write_bytes = 0;
+  absl::flat_hash_map<std::string, uint64_t> err_count;
+
+  ReplyStats& operator+=(const ReplyStats& other);
+};
+
+struct FacadeStats {
+  ConnectionStats conn_stats;
+  ReplyStats reply_stats;
+
+  FacadeStats& operator+=(const FacadeStats& other) {
+    conn_stats += other.conn_stats;
+    reply_stats += other.reply_stats;
+    return *this;
+  }
+};
+
 struct ErrorReply {
   explicit ErrorReply(std::string&& msg, std::string_view kind = {})
       : message{std::move(msg)}, kind{kind} {
@@ -97,6 +135,8 @@ constexpr inline unsigned long long operator""_MB(unsigned long long x) {
 constexpr inline unsigned long long operator""_KB(unsigned long long x) {
   return 1024L * x;
 }
+
+extern __thread FacadeStats* tl_facade_stats;
 
 }  // namespace facade
 

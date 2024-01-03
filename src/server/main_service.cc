@@ -791,6 +791,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.Await([&](uint32_t index, ProactorBase* pb) {
+    tl_facade_stats = new FacadeStats;
     ServerState::Init(index, shard_num, &user_registry_);
   });
 
@@ -1459,10 +1460,6 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
   });
 
   return res;
-}
-
-facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
-  return ServerState::tl_connection_stats();
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {

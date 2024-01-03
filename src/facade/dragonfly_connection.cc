@@ -149,7 +149,7 @@ string_view Connection::PubMessage::Message() const {
 
 struct Connection::DispatchOperations {
   DispatchOperations(SinkReplyBuilder* b, Connection* me)
-      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
+      : stats{&tl_facade_stats->conn_stats}, builder{b}, self(me) {
   }
 
   void operator()(const PubMessage& msg);
@@ -595,7 +595,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 }
 
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
-  stats_ = service_->GetThreadLocalConnectionStats();
+  stats_ = &tl_facade_stats->conn_stats;
 
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
@@ -866,7 +866,7 @@ void Connection::HandleMigrateRequest() {
 
       queue_backpressure_ = &tl_queue_backpressure_;
 
-      stats_ = service_->GetThreadLocalConnectionStats();
+      stats_ = &tl_facade_stats->conn_stats;
       ++stats_->num_conns;
       stats_->read_buf_capacity += io_buf_.Capacity();
       if (cc_->replica_conn) {
