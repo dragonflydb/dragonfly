@@ -73,13 +73,10 @@ struct Metrics {
   std::vector<DbStats> db_stats;   // dbsize stats
   EngineShard::Stats shard_stats;  // per-shard stats
 
-  facade::ConnectionStats conn_stats;  // client stats and buffer sizes
-  TieredStats tiered_stats;            // stats for tiered storage
+  facade::FacadeStats facade_stats;  // client stats and buffer sizes
+  TieredStats tiered_stats;          // stats for tiered storage
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
-
-  facade::SinkReplyBuilder::ReplyStats reply_stats;  // Stats for Send*() ops
-
   PeakStats peak_stats;
 
   size_t uptime = 0;
