@@ -282,10 +282,10 @@ io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
 }
 
 SerializerBase::SerializerBase(CompressionMode compression_mode)
-    : compression_mode_(compression_mode), mem_buf_{4_KB} {
+    : compression_mode_(compression_mode), mem_buf_{4_KB}, tmp_buf_(nullptr) {
 }
-RdbSerializer::RdbSerializer(CompressionMode compression_mode)
-    : SerializerBase(compression_mode), tmp_buf_(nullptr) {
+
+RdbSerializer::RdbSerializer(CompressionMode compression_mode) : SerializerBase(compression_mode) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -755,7 +755,7 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
   return WriteRaw(buf);
 }
 
-error_code RdbSerializer::SendFullSyncCut() {
+error_code SerializerBase::SendFullSyncCut() {
   VLOG(2) << "SendFullSyncCut";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
@@ -879,7 +879,7 @@ io::Bytes SerializerBase::PrepareFlush() {
   return mem_buf_.InputBuffer();
 }
 
-error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
+error_code SerializerBase::WriteJournalEntry(std::string_view serialized_entry) {
   VLOG(2) << "WriteJournalEntry";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(1));
@@ -887,7 +887,7 @@ error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveString(string_view val) {
+error_code SerializerBase::SaveString(string_view val) {
   /* Try integer encoding */
   if (val.size() <= 11) {
     uint8_t buf[16];
@@ -927,13 +927,13 @@ error_code RdbSerializer::SaveString(string_view val) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveLen(size_t len) {
+error_code SerializerBase::SaveLen(size_t len) {
   uint8_t buf[16];
   unsigned enclen = WritePackedUInt(len, buf);
   return WriteRaw(Bytes{buf, enclen});
 }
 
-error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
+error_code SerializerBase::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
   /* Data compressed! Let's save it on disk */
   uint8_t opcode = (RDB_ENCVAL << 6) | RDB_ENC_LZF;
   RETURN_ON_ERR(WriteOpcode(opcode));
