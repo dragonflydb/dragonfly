@@ -823,8 +823,8 @@ CrcBuffer MakeCheckSum(std::string_view dump_res) {
 }
 
 void AppendFooter(io::StringSink* dump_res) {
-  auto to_bytes = [](auto buf) {
-    return io::Bytes(reinterpret_cast<uint8_t*>(&buf[0]), buf.size());
+  auto to_bytes = [](const auto& buf) {
+    return io::Bytes(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
   };
 
   /* Write the footer, this is how it looks like:
