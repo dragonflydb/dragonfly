@@ -36,8 +36,6 @@ class ServiceInterface {
 
   virtual ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) = 0;
 
-  virtual ConnectionStats* GetThreadLocalConnectionStats() = 0;
-
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   }
 

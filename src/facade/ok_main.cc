@@ -19,8 +19,6 @@ namespace facade {
 
 namespace {
 
-thread_local ConnectionStats tl_stats;
-
 class OkService : public ServiceInterface {
  public:
   void DispatchCommand(CmdArgList args, ConnectionContext* cntx) final {
@@ -41,14 +39,11 @@ class OkService : public ServiceInterface {
   ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) final {
     return new ConnectionContext{peer, owner};
   }
-
-  ConnectionStats* GetThreadLocalConnectionStats() final {
-    return &tl_stats;
-  }
 };
 
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   OkService service;
+  pool->Await([](auto*) { tl_facade_stats = new FacadeStats; });
 
   acceptor->AddListener(GetFlag(FLAGS_port), new Listener{Protocol::REDIS, &service});
 

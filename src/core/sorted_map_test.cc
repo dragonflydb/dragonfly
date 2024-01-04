@@ -246,4 +246,23 @@ TEST_F(SortedMapTest, DeleteRange) {
   EXPECT_EQ(96, sm_.DeleteRangeByLex(lex_range));
 }
 
+// not a real test, just to see how much memory is used by zskiplist.
+TEST_F(SortedMapTest, MemoryUsage) {
+  zskiplist* zsl = zslCreate();
+  std::vector<sds> sds_vec;
+  for (size_t i = 0; i < 10'000; ++i) {
+    sds_vec.push_back(sdsnew("f"));
+  }
+  size_t sz_before = zmalloc_used_memory_tl;
+  LOG(INFO) << "zskiplist before: " << sz_before << " bytes";
+
+  for (size_t i = 0; i < sds_vec.size(); ++i) {
+    zslInsert(zsl, i, sds_vec[i]);
+  }
+  size_t delta = zmalloc_used_memory_tl - sz_before;
+  LOG(INFO) << "zskiplist took: " << delta << " bytes for " << zsl->length << " elements, or "
+            << double(delta) / zsl->length << " per element";
+  zslFree(zsl);
+}
+
 }  // namespace dfly
