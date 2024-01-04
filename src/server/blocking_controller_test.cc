@@ -21,12 +21,18 @@ using namespace std;
 using namespace std::chrono;
 using namespace testing;
 
+constexpr size_t kNumThreads = 3;
+
 class BlockingControllerTest : public Test {
  protected:
   BlockingControllerTest() : cid_("blpop", 0, -3, 1, -2, acl::NONE) {
   }
   void SetUp() override;
   void TearDown() override;
+  static void SetUpTestSuite() {
+    ServerState::Init(kNumThreads, kNumThreads, nullptr);
+    facade::tl_facade_stats = new facade::FacadeStats;
+  }
 
   std::unique_ptr<ProactorPool> pp_;
   boost::intrusive_ptr<Transaction> trans_;
@@ -35,14 +41,15 @@ class BlockingControllerTest : public Test {
   CmdArgVec arg_vec_;
 };
 
-constexpr size_t kNumThreads = 3;
-
 void BlockingControllerTest::SetUp() {
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
-  pp_->Await(
-      [](unsigned index, ProactorBase* p) { ServerState::Init(index, kNumThreads, nullptr); });
-  ServerState::Init(kNumThreads, kNumThreads, nullptr);
+  pp_->Await([](unsigned index, ProactorBase* p) {
+    ServerState::Init(index, kNumThreads, nullptr);
+    if (facade::tl_facade_stats == nullptr) {
+      facade::tl_facade_stats = new facade::FacadeStats;
+    }
+  });
 
   shard_set = new EngineShardSet(pp_.get());
   shard_set->Init(kNumThreads, false);

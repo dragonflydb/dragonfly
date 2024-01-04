@@ -40,24 +40,7 @@ const char* NullString(bool resp3) {
   return resp3 ? "_\r\n" : "$-1\r\n";
 }
 
-static thread_local SinkReplyBuilder::ReplyStats tl_stats;
-
 }  // namespace
-
-SinkReplyBuilder::ReplyStats& SinkReplyBuilder::ReplyStats::operator+=(const ReplyStats& o) {
-  io_write_cnt += o.io_write_cnt;
-  io_write_bytes += o.io_write_bytes;
-
-  for (const auto& k_v : o.err_count) {
-    err_count[k_v.first] += k_v.second;
-  }
-
-  for (unsigned i = 0; i < kNumTypes; ++i) {
-    send_stats[i] += o.send_stats[i];
-  }
-
-  return *this;
-}
 
 SinkReplyBuilder::MGetResponse::~MGetResponse() {
   while (storage_list) {
@@ -80,22 +63,18 @@ void SinkReplyBuilder::CloseConnection() {
     ec_ = std::make_error_code(std::errc::connection_aborted);
 }
 
-const SinkReplyBuilder::ReplyStats& SinkReplyBuilder::GetThreadLocalStats() {
-  return tl_stats;
-}
-
 void SinkReplyBuilder::ResetThreadLocalStats() {
-  tl_stats = {};
+  tl_facade_stats->reply_stats = {};
 }
 
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   int64_t before = absl::GetCurrentTimeNanos();
-  SendStatsType stats_type = SendStatsType::kRegular;
+  ReplyStats::SendStatsType stats_type = ReplyStats::SendStatsType::kRegular;
 
   auto cleanup = absl::MakeCleanup([&]() {
     int64_t after = absl::GetCurrentTimeNanos();
-    tl_stats.send_stats[stats_type].count++;
-    tl_stats.send_stats[stats_type].total_duration += (after - before) / 1'000;
+    tl_facade_stats->reply_stats.send_stats[stats_type].count++;
+    tl_facade_stats->reply_stats.send_stats[stats_type].total_duration += (after - before) / 1'000;
   });
 
   has_replied_ = true;
@@ -109,7 +88,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
 
   // Allow batching with up to kMaxBatchSize of data.
   if ((should_batch_ || should_aggregate_) && (batch_.size() + bsize < kMaxBatchSize)) {
-    stats_type = SendStatsType::kBatch;
+    stats_type = ReplyStats::SendStatsType::kBatch;
 
     batch_.reserve(batch_.size() + bsize);
     for (unsigned i = 0; i < len; ++i) {
@@ -123,8 +102,8 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
 
   error_code ec;
   send_active_ = true;
-  tl_stats.io_write_cnt++;
-  tl_stats.io_write_bytes += bsize;
+  tl_facade_stats->reply_stats.io_write_cnt++;
+  tl_facade_stats->reply_stats.io_write_bytes += bsize;
   DVLOG(2) << "Writing " << bsize << " bytes of len " << len;
 
   if (batch_.empty()) {
@@ -132,7 +111,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   } else {
     DVLOG(3) << "Sending batch to stream :" << absl::CHexEscape(batch_);
 
-    tl_stats.io_write_bytes += batch_.size();
+    tl_facade_stats->reply_stats.io_write_bytes += batch_.size();
 
     iovec tmp[len + 1];
     tmp[0].iov_base = batch_.data();
@@ -324,7 +303,7 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
       err_type = kSyntaxErrType;
   }
 
-  tl_stats.err_count[err_type]++;
+  tl_facade_stats->reply_stats.err_count[err_type]++;
 
   if (str[0] == '-') {
     iovec v[] = {IoVec(str), IoVec(kCRLF)};

@@ -141,34 +141,10 @@ class SinkReplyBuilder {
 
   virtual size_t UsedMemory() const;
 
-  enum SendStatsType {
-    kRegular,   // Send() operations that are written to sockets
-    kBatch,     // Send() operations that are internally batched to a buffer
-    kNumTypes,  // Number of types, do not use directly
-  };
+  static const ReplyStats& GetThreadLocalStats() {
+    return tl_facade_stats->reply_stats;
+  }
 
-  struct SendStats {
-    int64_t count = 0;
-    int64_t total_duration = 0;
-
-    SendStats& operator+=(const SendStats& other) {
-      count += other.count;
-      total_duration += other.total_duration;
-      return *this;
-    }
-  };
-
-  struct ReplyStats {
-    SendStats send_stats[SendStatsType::kNumTypes];
-
-    size_t io_write_cnt = 0;
-    size_t io_write_bytes = 0;
-    absl::flat_hash_map<std::string, uint64_t> err_count;
-
-    ReplyStats& operator+=(const ReplyStats& other);
-  };
-
-  static const ReplyStats& GetThreadLocalStats();
   static void ResetThreadLocalStats();
 
  protected:

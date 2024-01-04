@@ -106,6 +106,10 @@ class RedisReplyBuilderTest : public testing::Test {
     SinkReplyBuilder::ResetThreadLocalStats();
   }
 
+  static void SetUpTestSuite() {
+    tl_facade_stats = new FacadeStats;
+  }
+
  protected:
   std::vector<std::string_view> RawTokenizedMessage() const {
     CHECK(!str().empty());
@@ -133,11 +137,11 @@ class RedisReplyBuilderTest : public testing::Test {
   }
 
   static bool NoErrors() {
-    return SinkReplyBuilder::GetThreadLocalStats().err_count.empty();
+    return tl_facade_stats->reply_stats.err_count.empty();
   }
 
-  static const SinkReplyBuilder::ReplyStats& GetReplyStats() {
-    return SinkReplyBuilder::GetThreadLocalStats();
+  static const ReplyStats& GetReplyStats() {
+    return tl_facade_stats->reply_stats;
   }
 
   // Breaks the string we have in sink into tokens.
