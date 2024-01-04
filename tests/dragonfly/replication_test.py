@@ -1842,7 +1842,7 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
 # changing parameters without extensive testing may easily lead to weak testing case assertion
 # which means eviction may not get triggered.
 @pytest.mark.asyncio
-async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_factory):
+async def test_policy_based_eviction_propagation(df_local_factory):
     master = df_local_factory.create(
         proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
     )
