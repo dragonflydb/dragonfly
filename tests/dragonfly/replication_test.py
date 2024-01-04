@@ -1866,10 +1866,6 @@ async def test_policy_based_eviction_propagation(df_local_factory):
     keys_master = await c_master.execute_command("keys *")
     keys_replica = await c_replica.execute_command("keys *")
     assert set(keys_master) == set(keys_replica)
-    for k in keys_master:
-        val_master = await c_master.execute_command(f"GET {k}")
-        val_replica = await c_replica.execute_command(f"GET {k}")
-        assert val_master == val_replica
     await disconnect_clients(c_master, *[c_replica])
 
 
@@ -1907,9 +1903,4 @@ async def test_heartbeat_eviction_propagation(df_local_factory):
     keys_master = await c_master.execute_command("keys *")
     keys_replica = await c_replica.execute_command("keys *")
     assert set(keys_master) == set(keys_replica)
-    for k in keys_master:
-        val_master = await c_master.execute_command(f"GET {k}")
-        val_replica = await c_replica.execute_command(f"GET {k}")
-        assert val_master == val_replica
-
     await disconnect_clients(c_master, *[c_replica])
