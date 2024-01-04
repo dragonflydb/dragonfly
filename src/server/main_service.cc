@@ -1228,7 +1228,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   // not just the blocking ones
   const auto* conn = cntx->conn();
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr && etl.GetSlowLog().IsEnabled() &&
-      invoke_time_usec > etl.log_slower_than_usec) {
+      invoke_time_usec >= etl.log_slower_than_usec) {
     vector<string> aux_params;
     CmdArgVec aux_slices;
 
