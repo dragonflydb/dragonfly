@@ -155,9 +155,7 @@ class SerializerBase {
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
   std::error_code SendFullSyncCut();
 
-  std::error_code WriteOpcode(uint8_t opcode) {
-    return WriteRaw(::io::Bytes{&opcode, 1});
-  }
+  std::error_code WriteOpcode(uint8_t opcode);
 
   std::error_code SaveLen(size_t len);
   std::error_code SaveString(std::string_view val);

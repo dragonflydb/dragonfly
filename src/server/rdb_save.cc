@@ -767,6 +767,10 @@ error_code SerializerBase::SendFullSyncCut() {
   return WriteRaw(buf);
 }
 
+std::error_code SerializerBase::WriteOpcode(uint8_t opcode) {
+  return WriteRaw(::io::Bytes{&opcode, 1});
+}
+
 size_t SerializerBase::GetTotalBufferCapacity() const {
   return mem_buf_.Capacity();
 }
