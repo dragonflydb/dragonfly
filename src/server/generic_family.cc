@@ -419,7 +419,9 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
 
   if (IsValid(it)) {
     DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
-    return RdbSerializer::DumpObject(it->second);
+    io::StringSink sink;
+    SerializerBase::DumpObject(it->second, &sink);
+    return sink.str();  // TODO: Add rvalue overload to str()
   }
   // fallback
   DVLOG(1) << "Dump: '" << key << "' Not found";
