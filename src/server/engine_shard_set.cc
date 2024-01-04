@@ -134,10 +134,6 @@ class RoundRobinSharder {
   }
 
   static optional<ShardId> TryGetShardId(string_view key, XXH64_hash_t key_hash) {
-    if (!IsEnabled()) {
-      return nullopt;
-    }
-
     DCHECK(!round_robin_shards_tl_cache_.empty());
 
     if (!absl::StartsWith(key, round_robin_prefix_)) {
@@ -862,19 +858,16 @@ void EngineShardSet::TEST_EnableCacheMode() {
 }
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  bool has_hashtags = false;
-
   if (ClusterConfig::IsEnabledOrEmulated()) {
     string_view v_hash_tag = ClusterConfig::KeyTag(v);
     if (v_hash_tag.size() != v.size()) {
-      has_hashtags = true;
       v = v_hash_tag;
     }
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
 
-  if (has_hashtags || RoundRobinSharder::IsEnabled()) {
+  if (RoundRobinSharder::IsEnabled()) {
     auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
     if (round_robin.has_value()) {
       return *round_robin;
