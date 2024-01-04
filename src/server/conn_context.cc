@@ -95,7 +95,7 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
   if (tx) {  // If we have a carrier transaction, this context is used for squashing
     DCHECK(owner);
     conn_state.db_index = owner->conn_state.db_index;
-    conn_state.squashing_info = {owner};
+    conn_state.squashing_info = {owner, owner->transaction};
   }
   auto* prev_reply_builder = Inject(crb);
   CHECK_EQ(prev_reply_builder, nullptr);
@@ -236,7 +236,7 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
-  return dfly::HeapSize(keys) + async_cmds_heap_mem;
+  return async_cmds_heap_mem;
 }
 
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {

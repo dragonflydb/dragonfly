@@ -122,6 +122,8 @@ TEST_F(MultiTest, MultiGlobalCommands) {
 
   RespExpr resp = Run({"exec"});
   ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_FALSE(service_->IsLocked(0, "key"));
+  ASSERT_FALSE(service_->IsLocked(2, "key"));
 
   ASSERT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
 
@@ -537,9 +539,9 @@ TEST_F(MultiTest, Watch) {
   ASSERT_THAT(Run({"exec"}), kExecSuccess);
 }
 
-TEST_F(MultiTest, MultiOOO) {
-  GTEST_SKIP() << "Command squashing breaks stats";
-
+// If all commands fit into a single batch, it can be run as a single hop, without separate hops for
+// locking and unlocking
+TEST_F(MultiTest, MultiSingleHop) {
   auto fb0 = pp_->at(0)->LaunchFiber([&] {
     for (unsigned i = 0; i < 100; i++) {
       Run({"multi"});
@@ -548,23 +550,18 @@ TEST_F(MultiTest, MultiOOO) {
     }
   });
 
-  pp_->at(1)->Await([&] {
-    for (unsigned i = 0; i < 100; ++i) {
-      Run({"multi"});
-      Run({"rpush", "b", "bar"});
-      Run({"exec"});
-    }
-  });
-
   fb0.Join();
   auto metrics = GetMetrics();
 
-  // OOO works in LOCK_AHEAD mode.
   int mode = absl::GetFlag(FLAGS_multi_exec_mode);
-  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
-    EXPECT_EQ(200, metrics.shard_stats.tx_ooo_total);
-  else
+  const auto& tx_stats = metrics.coordinator_stats.tx_type_cnt;
+
+  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC) {
+    // Check multi runs as quick or even inlined
+    EXPECT_EQ(100, tx_stats[ServerState::QUICK] + tx_stats[ServerState::INLINE]);
+  } else {
     EXPECT_EQ(0, metrics.shard_stats.tx_ooo_total);
+  }
 }
 
 // Lua scripts lock their keys ahead and thus can run out of order.

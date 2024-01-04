@@ -101,8 +101,6 @@ struct ConnectionState {
   struct ScriptInfo {
     size_t UsedMemory() const;
 
-    absl::flat_hash_set<std::string_view> keys;  // declared keys
-
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
@@ -135,10 +133,11 @@ struct ConnectionState {
   };
 
   struct SquashingInfo {
-    // Pointer to the original underlying context of the base command.
-    // Only const access it possible for reading from multiple threads,
-    // each squashing thread has its own proxy context that contains this info.
+    // Underlying context of the base command, should be used for state checks.
+    // Note: some squashing mechanisms re-use the context (single shard eval).
     const ConnectionContext* owner = nullptr;
+    // Underlying base transaction of squashing mechanism.
+    const Transaction* transaction = nullptr;
   };
 
   enum MCGetMask {

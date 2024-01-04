@@ -1,6 +1,7 @@
 #include "server/multi_command_squasher.h"
 
 #include <absl/container/inlined_vector.h>
+#include <absl/functional/bind_front.h>
 
 #include "facade/dragonfly_connection.h"
 #include "server/cluster/unique_slot_checker.h"
@@ -68,6 +69,40 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
   return sinfo;
 }
 
+// Atomic transactions (that have all keys locked) perform hops and run squashed commands via
+// stubs, non-atomic ones just run the commands in parallel (hopefully running many hops inline).
+void MultiCommandSquasher::PerformHop() {
+  auto* tx = cntx_->transaction;
+
+  if (!IsAtomic()) {  // Simple fanout for non-atomic.
+    return shard_set->RunBlockingInParallel(
+        [this, tx](auto* es) { SquashedHopCb(tx, es); },
+        [this](auto sid) { return !sharded_[sid].cmds.empty(); });
+  }
+
+  cntx_->cid = base_cid_;
+  auto run_cb = absl::bind_front(&MultiCommandSquasher::SquashedHopCb, this);
+
+  // If we're not scheduled (and thus the multi interface isn't yet enabled) and all commands fit
+  // into a single batch, run a single hop
+  if (!tx->IsScheduled() && cmds_.empty()) {
+    // Single hop concludes immediately, so give it shard write info
+    tx->ReportWritesSquashedMulti([this](ShardId sid) { return sharded_[sid].had_writes; });
+    tx->MultiBecomeSquasher();
+    tx->ScheduleSingleHop(run_cb);
+    return;
+  }
+
+  if (!tx->IsScheduled()) {
+    DCHECK_EQ(tx->GetMultiMode(), Transaction::LOCK_AHEAD);
+    tx->Schedule();  // Missed the optimization above, so schedule and enable "multi interface"
+  }
+
+  auto check_cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
+  tx->PrepareSquashedMultiHop(base_cid_, check_cb);
+  tx->ScheduleSingleHop(run_cb);
+}
+
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
   DCHECK(cmd->Cid());
 
@@ -107,7 +142,9 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   auto& sinfo = PrepareShardInfo(last_sid, slot_checker.GetUniqueSlotId());
 
+  DCHECK_EQ(cmd->Cid()->opt_mask() & CO::NO_KEY_TRANSACTIONAL, 0u);  // TODO: handle their writes
   sinfo.had_writes |= cmd->Cid()->IsWriteOnly();
+
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
 
@@ -133,6 +170,13 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   }
 
   auto* tx = cntx_->transaction;
+
+  // Scheduling is delayed by default to allow optimization from PerformHop()
+  if (IsAtomic() && !tx->IsScheduled()) {
+    DCHECK_EQ(tx->GetCId(), base_cid_);
+    tx->Schedule();
+  }
+
   tx->MultiSwitchCmd(cmd->Cid());
   cntx_->cid = cmd->Cid();
 
@@ -143,7 +187,7 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   return true;
 }
 
-OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
+OpStatus MultiCommandSquasher::SquashedHopCb(const Transaction* parent_tx, EngineShard* es) {
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.cmds.empty());
 
@@ -154,6 +198,9 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
   }
   absl::InlinedVector<MutableSlice, 4> arg_vec;
+
+  if (IsAtomic())  // transfer time and txid
+    local_tx->MultiUpdateWithParent(parent_tx);
 
   for (auto* cmd : sinfo.cmds) {
     arg_vec.resize(cmd->NumArgs());
@@ -188,7 +235,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   // remove our local pointer from it.
   local_cntx.Inject(nullptr);
 
-  reverse(sinfo.replies.begin(), sinfo.replies.end());
+  std::reverse(sinfo.replies.begin(), sinfo.replies.end());
   return OpStatus::OK;
 }
 
@@ -201,22 +248,11 @@ bool MultiCommandSquasher::ExecuteSquashed() {
   for (auto& sd : sharded_)
     sd.replies.reserve(sd.cmds.size());
 
-  Transaction* tx = cntx_->transaction;
   ServerState::tlocal()->stats.multi_squash_executions++;
   ProactorBase* proactor = ProactorBase::me();
   uint64_t start = proactor->GetMonotonicTimeNs();
 
-  // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
-  // stubs, non-atomic ones just run the commands in parallel.
-  if (IsAtomic()) {
-    cntx_->cid = base_cid_;
-    auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
-    tx->PrepareSquashedMultiHop(base_cid_, cb);
-    tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
-  } else {
-    shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
-                                     [this](auto sid) { return !sharded_[sid].cmds.empty(); });
-  }
+  PerformHop();
 
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
@@ -249,8 +285,9 @@ void MultiCommandSquasher::Run() {
   DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
-  for (auto& cmd : cmds_) {
-    auto res = TrySquash(&cmd);
+  while (!cmds_.empty()) {
+    StoredCmd* cmd = &cmds_.front();
+    auto res = TrySquash(cmd);
 
     if (res == SquashResult::ERROR)
       break;
@@ -261,9 +298,11 @@ void MultiCommandSquasher::Run() {
     }
 
     if (res == SquashResult::NOT_SQUASHED) {
-      if (!ExecuteStandalone(&cmd))
+      if (!ExecuteStandalone(cmd))
         break;
     }
+
+    cmds_.remove_prefix(1);
   }
 
   ExecuteSquashed();  // Flush leftover
@@ -284,8 +323,8 @@ void MultiCommandSquasher::Run() {
     }
   }
 
-  VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
-          << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
+  VLOG(1) << "Squashed " << num_squashed_ << " commands, max fanout: " << num_shards_
+          << ", atomic: " << atomic_;
 }
 
 bool MultiCommandSquasher::IsAtomic() const {

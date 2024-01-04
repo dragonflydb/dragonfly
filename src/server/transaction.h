@@ -233,6 +233,7 @@ class Transaction {
   void StartMultiGlobal(DbIndex dbid);
 
   // Start multi in LOCK_AHEAD mode with given keys.
+  // Scheduling can be optionally disabled to allow more fine-grained control.
   void StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys, bool skip_scheduling = false);
 
   // Start multi in NON_ATOMIC mode.
@@ -337,6 +338,9 @@ class Transaction {
   // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
   // to it must not block.
   void PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args);
+
+  // Mark as squasher. Transaction must be already properly initialized.
+  void MultiBecomeSquasher();
 
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
   // journal command, multiple journal entries may be necessary. In this case, call with set
