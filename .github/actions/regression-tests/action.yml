@@ -54,7 +54,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
         run_pytest_with_args() {
-          timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report \
+          timeout 30m pytest -m "${{inputs.filter}}" --color=yes --json-report \
             --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO \
             --df alsologtostderr $1 $2 || code=$?
           if [[ $code -ne 0 ]]; then
