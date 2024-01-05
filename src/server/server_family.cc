@@ -565,6 +565,7 @@ void ServerFamily::Shutdown() {
     }
 
     dfly_cmd_->Shutdown();
+    DebugCmd::Shutdown();
   });
 }
 

@@ -308,8 +308,19 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "EXEC") {
     return Exec();
   }
+
+  if (subcmd == "TRAFFIC") {
+    return LogTraffic(args.subspan(1));
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cntx_->SendError(reply, kSyntaxErrType);
+}
+
+void DebugCmd::Shutdown() {
+  // disable traffic logging
+  shard_set->pool()->AwaitFiberOnAll(
+      [](auto*) { facade::Connection::ToggleTrafficLogging(false); });
 }
 
 void DebugCmd::Reload(CmdArgList args) {
@@ -588,6 +599,13 @@ void DebugCmd::Exec() {
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   rb->SendVerbatimString(res);
+}
+
+void DebugCmd::LogTraffic(CmdArgList args) {
+  bool enable = (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) == "ON"s);
+  shard_set->pool()->AwaitFiberOnAll(
+      [enable](auto*) { facade::Connection::ToggleTrafficLogging(enable); });
+  cntx_->SendOk();
 }
 
 void DebugCmd::Inspect(string_view key) {

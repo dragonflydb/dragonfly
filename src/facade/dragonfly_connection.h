@@ -276,6 +276,8 @@ class Connection : public util::Connection {
 
   bool IsTrackingOn() const;
 
+  static void ToggleTrafficLogging(bool on);
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;

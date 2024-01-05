@@ -13,8 +13,10 @@
 
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
+#include "base/io_buf.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
+#include "core/uring.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
@@ -98,6 +100,66 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
     VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
+}
+
+struct TrafficLogger {
+  base::IoBuf buf;
+  std::unique_ptr<util::fb2::LinuxFile> file;
+};
+
+thread_local std::optional<TrafficLogger> open_tl_logger{};
+
+void OpenLogger() {
+  if (open_tl_logger.has_value())
+    return;
+
+  string path = "./trlog-" + to_string(ProactorBase::me()->GetPoolIndex());
+  auto file = util::fb2::OpenLinux(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0666);
+  if (!file)
+    return;
+
+  open_tl_logger = TrafficLogger{base::IoBuf{}, std::move(file.value())};
+}
+
+void StopLogger() {
+  if (!open_tl_logger.has_value())
+    return;
+
+  open_tl_logger->file->Close();
+  open_tl_logger.reset();
+}
+
+void Log(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
+  if (!open_tl_logger)
+    return;
+
+  auto& buf = open_tl_logger->buf;
+
+  uint8_t int_buf[8];
+  auto write_u32 = [&buf, &int_buf](uint32_t i) {
+    absl::big_endian::Store32(int_buf, i);
+    buf.WriteAndCommit(int_buf, sizeof(i));
+  };
+
+  write_u32(id);
+
+  absl::big_endian::Store64(int_buf, absl::GetCurrentTimeNanos());
+  buf.WriteAndCommit(int_buf, 8);
+
+  write_u32(has_more ? 1 : 0);
+  write_u32(uint32_t(resp.size()));
+  for (auto part : resp) {
+    if (string_view part_sv = part.GetString(); part_sv.size() < 256) {
+      write_u32(uint32_t(part_sv.size()));
+      buf.WriteAndCommit(part_sv.data(), part_sv.size());
+    } else {
+      write_u32(uint32_t(0));
+      write_u32(uint32_t(part_sv.size()));
+    }
+  }
+
+  open_tl_logger->file->Write(buf.InputBuffer(), 0, 0);
+  buf.Clear();
 }
 
 constexpr size_t kMinReadSize = 256;
@@ -690,6 +752,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 
 void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   bool can_dispatch_sync = (consumed >= io_buf_.InputLen());
+
+  Log(id_, can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
 
   // Avoid sync dispatch if an async dispatch is already in progress, or else they'll interleave.
   if (cc_->async_dispatch)
@@ -1395,6 +1459,13 @@ void Connection::SetClientTrackingSwitch(bool is_on) {
 
 bool Connection::IsTrackingOn() const {
   return tracking_enabled_;
+}
+
+void Connection::ToggleTrafficLogging(bool on) {
+  if (on)
+    OpenLogger();
+  else
+    StopLogger();
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
