@@ -8,6 +8,7 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <fstream>
 #include <numeric>
 #include <variant>
 
@@ -104,7 +105,8 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
 
 struct TrafficLogger {
   base::IoBuf buf;
-  std::unique_ptr<util::fb2::LinuxFile> file;
+  // std::unique_ptr<util::fb2::LinuxFile> file;
+  std::ofstream file;
 };
 
 thread_local std::optional<TrafficLogger> open_tl_logger{};
@@ -114,18 +116,24 @@ void OpenLogger() {
     return;
 
   string path = "./trlog-" + to_string(ProactorBase::me()->GetPoolIndex());
-  auto file = util::fb2::OpenLinux(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0666);
-  if (!file)
+  // auto file = util::fb2::OpenLinux(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_APPEND,
+  // 0666); if (!file)
+  //   return;
+
+  std::ofstream file(path, std::ofstream::out | std::ofstream::binary | std::ofstream::trunc);
+  if (file.bad())
     return;
 
-  open_tl_logger = TrafficLogger{base::IoBuf{}, std::move(file.value())};
+  open_tl_logger = TrafficLogger{base::IoBuf{}, std::move(file)};
 }
 
 void StopLogger() {
   if (!open_tl_logger.has_value())
     return;
 
-  open_tl_logger->file->Close();
+  open_tl_logger->file.flush();
+  open_tl_logger->file.close();
+  // open_tl_logger->file->Close();
   open_tl_logger.reset();
 }
 
@@ -137,19 +145,19 @@ void Log(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
 
   uint8_t int_buf[8];
   auto write_u32 = [&buf, &int_buf](uint32_t i) {
-    absl::big_endian::Store32(int_buf, i);
+    absl::little_endian::Store32(int_buf, i);
     buf.WriteAndCommit(int_buf, sizeof(i));
   };
 
   write_u32(id);
 
-  absl::big_endian::Store64(int_buf, absl::GetCurrentTimeNanos());
+  absl::little_endian::Store64(int_buf, absl::GetCurrentTimeNanos());
   buf.WriteAndCommit(int_buf, 8);
 
   write_u32(has_more ? 1 : 0);
   write_u32(uint32_t(resp.size()));
   for (auto part : resp) {
-    if (string_view part_sv = part.GetString(); part_sv.size() < 256) {
+    if (string_view part_sv = part.GetView(); part_sv.size() < 256) {
       write_u32(uint32_t(part_sv.size()));
       buf.WriteAndCommit(part_sv.data(), part_sv.size());
     } else {
@@ -158,7 +166,8 @@ void Log(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
     }
   }
 
-  open_tl_logger->file->Write(buf.InputBuffer(), 0, 0);
+  open_tl_logger->file.write(facade::ToSV(buf.InputBuffer()).data(), buf.InputLen());
+  // open_tl_logger->file->Write(buf.InputBuffer(), 0, 0);
   buf.Clear();
 }
 

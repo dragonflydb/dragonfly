@@ -35,9 +35,13 @@ class RespExpr {
     return Buffer{reinterpret_cast<uint8_t*>(s->data()), s->size()};
   }
 
-  std::string_view GetString() const {
+  std::string_view GetView() const {
     Buffer buffer = GetBuf();
     return {reinterpret_cast<const char*>(buffer.data()), buffer.size()};
+  }
+
+  std::string GetString() const {
+    return string(GetView());
   }
 
   Buffer GetBuf() const {
