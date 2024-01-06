@@ -762,7 +762,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   bool can_dispatch_sync = (consumed >= io_buf_.InputLen());
 
-  Log(id_, can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
+  Log(id_, !can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
 
   // Avoid sync dispatch if an async dispatch is already in progress, or else they'll interleave.
   if (cc_->async_dispatch)
