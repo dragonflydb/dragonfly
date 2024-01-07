@@ -127,7 +127,7 @@ struct TieredStorage::PerDb {
 
   struct BinRecord {
     // Those that wait to be serialized. Must be less than NumEntriesInSmallBin for each bin.
-    absl::flat_hash_set<CompactObjectView, PrimeHasher> pending_entries;
+    absl::flat_hash_set<CompactObjectView> pending_entries;
 
     // Entries that were scheduled to write but have not completed yet.
     InflightMap enqueued_entries;

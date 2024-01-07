@@ -166,7 +166,7 @@ class PrimeEvictionPolicy {
 
 class PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items)
+  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& bumped_items)
       : bumped_items_(bumped_items) {
   }
   // returns true if key can be made less important for eviction (opposite of bump up)
@@ -175,7 +175,7 @@ class PrimeBumpPolicy {
   }
 
  private:
-  const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items_;
+  const absl::flat_hash_set<CompactObjectView>& bumped_items_;
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {

@@ -17,7 +17,7 @@ enum class Position {
   kTail,
 };
 
-template <typename T, typename Hash> class Lru {
+template <typename T> class Lru {
   struct Node {
     const T* data_ptr;
 
@@ -34,6 +34,7 @@ template <typename T, typename Hash> class Lru {
     node_arr_.reserve(capacity);
   }
 
+  // Get prev item. In case item is head return tail.
   std::optional<T> GetPrev(const T& data) const;
   std::optional<T> GetTail() const;
   std::optional<T> GetHead() const;
@@ -42,20 +43,20 @@ template <typename T, typename Hash> class Lru {
   bool Remove(const T& data);
 
   size_t Size() const {
+    DCHECK_EQ(table_.size(), node_arr_.size());
     return table_.size();
   }
 
  private:
   void MoveToPosition(uint32_t index, Position position);
   using AllocatorType = PMR_NS::polymorphic_allocator<std::pair<T, uint32_t>>;
-  absl::node_hash_map<T, uint32_t, Hash, std::equal_to<>, AllocatorType>
+  absl::node_hash_map<T, uint32_t, absl::Hash<T>, std::equal_to<>, AllocatorType>
       table_;  // map from item to index in node arr
   std::vector<Node, PMR_NS::polymorphic_allocator<Node>> node_arr_;
   uint32_t head_ = 0;
 };
 
-// Get prev item. In cat item is head return tail.
-template <typename T, typename Hash> std::optional<T> Lru<T, Hash>::GetPrev(const T& data) const {
+template <typename T> std::optional<T> Lru<T>::GetPrev(const T& data) const {
   auto it = table_.find(data);
   if (it == table_.end()) {
     return std::nullopt;
@@ -69,7 +70,7 @@ template <typename T, typename Hash> std::optional<T> Lru<T, Hash>::GetPrev(cons
   return *node_prev.data_ptr;
 }
 
-template <typename T, typename Hash> std::optional<T> Lru<T, Hash>::GetTail() const {
+template <typename T> std::optional<T> Lru<T>::GetTail() const {
   if (table_.size() == 0) {
     return std::nullopt;
   }
@@ -77,14 +78,15 @@ template <typename T, typename Hash> std::optional<T> Lru<T, Hash>::GetTail() co
   return *node_arr_[tail].data_ptr;
 }
 
-template <typename T, typename Hash> std::optional<T> Lru<T, Hash>::GetHead() const {
+template <typename T> std::optional<T> Lru<T>::GetHead() const {
   if (table_.size() == 0) {
     return std::nullopt;
   }
   return *node_arr_[head_].data_ptr;
 }
 
-template <typename T, typename Hash> void Lru<T, Hash>::Put(const T& data, Position position) {
+template <typename T> void Lru<T>::Put(const T& data, Position position) {
+  DCHECK_EQ(table_.size(), node_arr_.size());
   auto [it, inserted] = table_.emplace(data, table_.size());
   if (inserted) {
     unsigned tail = 0;
@@ -110,7 +112,7 @@ template <typename T, typename Hash> void Lru<T, Hash>::Put(const T& data, Posit
   }
 }
 
-template <typename T, typename Hash> bool Lru<T, Hash>::Remove(const T& data) {
+template <typename T> bool Lru<T>::Remove(const T& data) {
   auto it = table_.find(data);
   if (it == table_.end()) {
     return false;
@@ -130,6 +132,7 @@ template <typename T, typename Hash> bool Lru<T, Hash>::Remove(const T& data) {
 
   if (table_.size() == remove_index) {
     node_arr_.pop_back();
+    DCHECK_EQ(table_.size(), node_arr_.size());
     return true;  // if the removed item was the last in the node array nothing else to do.
   }
 
@@ -151,11 +154,11 @@ template <typename T, typename Hash> bool Lru<T, Hash>::Remove(const T& data) {
   if (head_ == move_index) {
     head_ = remove_index;
   }
+  DCHECK_EQ(table_.size(), node_arr_.size());
   return true;
 }
 
-template <typename T, typename Hash>
-void Lru<T, Hash>::MoveToPosition(uint32_t index, Position position) {
+template <typename T> void Lru<T>::MoveToPosition(uint32_t index, Position position) {
   DCHECK_LT(index, node_arr_.size());
   uint32_t tail = node_arr_[head_].prev;
   uint32_t curr_node_index = position == Position::kHead ? head_ : tail;

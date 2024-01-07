@@ -20,7 +20,7 @@ class StringLruTest : public ::testing::Test {
 
   const size_t kSize = 4;
   MiMemoryResource mr_;
-  Lru<std::string, std::hash<std::string>> cache_;
+  Lru<std::string> cache_;
 };
 
 TEST_F(StringLruTest, PutAndGet) {
@@ -152,15 +152,9 @@ class COVLruTest : public ::testing::Test {
   COVLruTest() : mr_(mi_heap_get_backing()), cache_(kSize, &mr_) {
   }
 
-  struct Hasher {
-    size_t operator()(const CompactObj& o) const {
-      return o.HashCode();
-    }
-  };
-
   const size_t kSize = 100;
   MiMemoryResource mr_;
-  Lru<CompactObjectView, Hasher> cache_;
+  Lru<CompactObjectView> cache_;
 };
 
 TEST_F(COVLruTest, MemoryUsagePrint) {
