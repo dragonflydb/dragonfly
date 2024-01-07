@@ -924,6 +924,13 @@ TEST_F(MultiTest, EvalExpiration) {
   EXPECT_LE(CheckedInt({"pttl", "x"}), 5000);
 }
 
+TEST_F(MultiTest, MemoryInScript) {
+  EXPECT_EQ(Run({"set", "x", "y"}), "OK");
+
+  auto resp = Run({"eval", "return redis.call('MEMORY', 'USAGE', KEYS[1])", "1", "x"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
 TEST_F(MultiTest, NoKeyTransactional) {
   Run({"multi"});
   Run({"ft._list"});
