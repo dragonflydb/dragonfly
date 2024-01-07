@@ -149,6 +149,20 @@ class SerializerBase {
 
   std::error_code WriteRaw(const ::io::Bytes& buf);
 
+  // Write journal entry as an embedded journal blob.
+  std::error_code WriteJournalEntry(std::string_view entry);
+
+  // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
+  std::error_code SendFullSyncCut();
+
+  std::error_code WriteOpcode(uint8_t opcode);
+
+  std::error_code SaveLen(size_t len);
+  std::error_code SaveString(std::string_view val);
+  std::error_code SaveString(const uint8_t* buf, size_t len) {
+    return SaveString(io::View(io::Bytes{buf, len}));
+  }
+
  protected:
   // Prepare internal buffer for flush. Compress it.
   io::Bytes PrepareFlush();
@@ -156,6 +170,8 @@ class SerializerBase {
   // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
   void AllocateCompressorOnce();
+
+  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
 
   CompressionMode compression_mode_;
   base::IoBuf mem_buf_;
@@ -170,6 +186,8 @@ class SerializerBase {
     uint32_t compressed_blobs = 0;
   };
   std::optional<CompressionStats> compression_stats_;
+  base::PODArray<uint8_t> tmp_buf_;
+  std::unique_ptr<LZF_HSLOT[]> lzf_;
 };
 
 class RdbSerializer : public SerializerBase {
@@ -190,32 +208,15 @@ class RdbSerializer : public SerializerBase {
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
                                 DbIndex dbid);
 
-  std::error_code SaveLen(size_t len);
-  std::error_code SaveString(std::string_view val);
-  std::error_code SaveString(const uint8_t* buf, size_t len) {
-    return SaveString(io::View(io::Bytes{buf, len}));
-  }
-
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
   // this by finding the key. This function is used
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
 
-  std::error_code WriteOpcode(uint8_t opcode) {
-    return WriteRaw(::io::Bytes{&opcode, 1});
-  }
-
-  // Write journal entry as an embedded journal blob.
-  std::error_code WriteJournalEntry(std::string_view entry);
-
   std::error_code SendJournalOffset(uint64_t journal_offset);
 
-  // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
-  std::error_code SendFullSyncCut();
-
  private:
-  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
   std::error_code SaveObject(const PrimeValue& pv);
   std::error_code SaveListObject(const robj* obj);
   std::error_code SaveSetObject(const PrimeValue& pv);
@@ -231,10 +232,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamConsumers(streamCG* cg);
 
   std::string tmp_str_;
-  base::PODArray<uint8_t> tmp_buf_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
-
-  std::unique_ptr<LZF_HSLOT[]> lzf_;
 };
 
 // Serializes CompactObj as RESTORE commands.
