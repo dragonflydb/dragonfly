@@ -1838,23 +1838,38 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     replica.stop()
 
 
+from random import choice
+
+
+def random_str(len):
+    return "".join(
+        choice(string.ascii_letters + string.digits + string.punctuation) for i in range(len)
+    )
+
+
 # note: please be careful if you want to change any of the parameters used in this test.
 # changing parameters without extensive testing may easily lead to weak testing case assertion
 # which means eviction may not get triggered.
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_policy_based_eviction_propagation(df_local_factory):
     master = df_local_factory.create(
-        proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
+        proactor_threads=1,
+        cache_mode="true",
+        maxmemory="256mb",
+        enable_heartbeat_eviction="false",
+        keys_output_limit="3800000",
     )
-    replica = df_local_factory.create(proactor_threads=1)
+    replica = df_local_factory.create(proactor_threads=1, keys_output_limit="3800000")
     df_local_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
 
+    # await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
+
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
-
     pipe = c_master.pipeline(transaction=False)
     batch_fill_data(client=pipe, gen=gen_test_data(3700000))
     await pipe.execute()
