@@ -1463,7 +1463,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {
-  return registry_.Find(cmd);
+  return registry_.Find(registry_.RenamedOrOriginal(cmd));
 }
 
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
