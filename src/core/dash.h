@@ -213,7 +213,7 @@ class DashTable : public detail::DashTableBase {
   }
 
   size_t bucket_count() const {
-    return unique_segments_ * SegmentType::kNumBuckets;
+    return unique_segments_ * SegmentType::kRegularBucketCnt;
   }
 
   // Overall capacity of the table (including stash buckets).
@@ -920,8 +920,8 @@ template <typename Cb>
 void DashTable<_Key, _Value, Policy>::TraverseBucket(const_iterator it, Cb&& cb) {
   SegmentType& s = *segment_[it.seg_id_];
   const auto& b = s.GetBucket(it.bucket_id_);
-  b.ForEachSlot([&](uint8_t slot, bool probe) {
-    cb(iterator{this, it.seg_id_, it.bucket_id_, slot});
+  b.ForEachSlot([it, cb = std::move(cb), table = this](auto* bucket, uint8_t slot, bool probe) {
+    cb(iterator{table, it.seg_id_, it.bucket_id_, slot});
   });
 }
 
