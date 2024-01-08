@@ -37,10 +37,14 @@ initialization errors.
 
 ## Step 2
 
-Connect with a redis client
+Make sure you have Redis installed on your system before this step. [Here you can learn](https://redis.io/docs/install/) how to install it locally on your system.
 
+Connect with a redis client with command: 
 ```bash
 redis-cli
+```
+After connecting to the `redis-cli`, you have to run the following commands:
+```bash
 127.0.0.1:6379> set hello world
 OK
 127.0.0.1:6379> keys *
