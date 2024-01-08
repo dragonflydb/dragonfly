@@ -712,7 +712,8 @@ ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t 
     }
   }
   return incoming_migrations_jobs_
-      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port, std::move(slots)))
+      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port,
+                                                      &server_family_->service(), std::move(slots)))
       .get();
 }
 

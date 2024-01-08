@@ -8,6 +8,8 @@
 
 namespace dfly {
 
+class Service;
+
 // The main entity on the target side that manage slots migration process
 // Creates initial connection between the target and source node,
 // manage migration process state and data
@@ -21,7 +23,7 @@ class ClusterSlotMigration : ProtocolClient {
     State state;
   };
 
-  ClusterSlotMigration(std::string host_ip, uint16_t port,
+  ClusterSlotMigration(std::string host_ip, uint16_t port, Service* se,
                        std::vector<ClusterConfig::SlotRange> slots);
   ~ClusterSlotMigration();
 
@@ -37,12 +39,14 @@ class ClusterSlotMigration : ProtocolClient {
   std::error_code InitiateSlotsMigration();
 
  private:
+  Service& service_;
   Mutex flows_op_mu_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   std::vector<ClusterConfig::SlotRange> slots_;
   uint32_t source_shards_num_ = 0;
   uint32_t sync_id_ = 0;
   State state_ = C_NO_STATE;
+  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   Fiber sync_fb_;
 };

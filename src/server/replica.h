@@ -30,22 +30,7 @@ class JournalExecutor;
 struct JournalReader;
 class DflyShardReplica;
 
-// Coordinator for multi shard execution.
-struct MultiShardExecution {
-  Mutex map_mu;
-
-  struct TxExecutionSync {
-    Barrier barrier;
-    std::atomic_uint32_t counter;
-    BlockingCounter block;
-
-    explicit TxExecutionSync(uint32_t counter)
-        : barrier(counter), counter(counter), block(counter) {
-    }
-  };
-
-  std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
-};
+struct MultiShardExecution;
 
 // The attributes of the master we are connecting to.
 struct MasterContext {

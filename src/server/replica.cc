@@ -26,6 +26,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
+#include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
@@ -903,29 +904,16 @@ void DflyShardReplica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Conte
 
   bool was_insert = false;
   if (tx_data.IsGlobalCmd()) {
-    was_insert = InsertTxToSharedMap(tx_data);
+    was_insert = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
   }
 
   ExecuteTx(std::move(tx_data), was_insert, cntx);
 }
 
-bool DflyShardReplica::InsertTxToSharedMap(const TransactionData& tx_data) {
-  std::unique_lock lk(multi_shard_exe_->map_mu);
-  auto [it, was_insert] =
-      multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
-  lk.unlock();
-
-  VLOG(2) << "txid: " << tx_data.txid << " unique_shard_cnt_: " << tx_data.shard_cnt
-          << " was_insert: " << was_insert;
-  it->second.block.Dec();
-
-  return was_insert;
-}
-
 void DflyShardReplica::InsertTxDataToShardResource(TransactionData&& tx_data) {
   bool was_insert = false;
   if (tx_data.shard_cnt > 1) {
-    was_insert = InsertTxToSharedMap(tx_data);
+    was_insert = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
   }
 
   VLOG(2) << "txid: " << tx_data.txid << " pushed to queue";

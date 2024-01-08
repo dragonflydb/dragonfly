@@ -1,6 +1,7 @@
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+
 #include "server/cluster/cluster_slot_migration.h"
 
 #include <absl/cleanup/cleanup.h>
@@ -9,6 +10,7 @@
 #include "base/logging.h"
 #include "server/cluster/cluster_shard_migration.h"
 #include "server/error.h"
+#include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 
 ABSL_FLAG(int, source_connect_timeout_ms, 20000,
@@ -35,9 +37,9 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
-ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port,
+ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(move(host_ip), port), slots_(std::move(slots)) {
+    : ProtocolClient(move(host_ip), port), service_(*se), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -114,9 +116,11 @@ void ClusterSlotMigration::MainMigrationFb() {
 }
 
 std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
+  multi_shard_exe_ = std::make_shared<MultiShardExecution>();
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_));
+    shard_flows_[i].reset(
+        new ClusterShardMigration(server(), i, sync_id_, &service_, multi_shard_exe_));
   }
 
   // Switch to new error handler that closes flow sockets.
