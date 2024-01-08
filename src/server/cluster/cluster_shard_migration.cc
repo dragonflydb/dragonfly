@@ -62,71 +62,6 @@ std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
   return {};
 }
 
-bool ClusterShardMigration::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
-  ++journal_rec_count;
-
-  switch (entry.opcode) {
-    case journal::Op::PING:
-      is_ping = true;
-      return true;
-    case journal::Op::EXPIRED:
-    case journal::Op::COMMAND:
-      commands.push_back(std::move(entry.cmd));
-      [[fallthrough]];
-    case journal::Op::EXEC:
-      shard_cnt = entry.shard_cnt;
-      dbid = entry.dbid;
-      txid = entry.txid;
-      return true;
-    case journal::Op::MULTI_COMMAND:
-      commands.push_back(std::move(entry.cmd));
-      dbid = entry.dbid;
-      return false;
-    default:
-      DCHECK(false) << "Unsupported opcode";
-  }
-  return false;
-}
-
-ClusterShardMigration::TransactionData ClusterShardMigration::TransactionData::FromSingle(
-    journal::ParsedEntry&& entry) {
-  TransactionData data;
-  bool res = data.AddEntry(std::move(entry));
-  DCHECK(res);
-  return data;
-}
-
-auto ClusterShardMigration::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
-    -> optional<TransactionData> {
-  io::Result<journal::ParsedEntry> res;
-  while (true) {
-    if (res = reader->ReadEntry(); !res) {
-      cntx->ReportError(res.error());
-      return std::nullopt;
-    }
-
-    // Check if journal command can be executed right away.
-    // Expiration checks lock on master, so it never conflicts with running multi transactions.
-    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
-        res->opcode == journal::Op::PING)
-      return TransactionData::FromSingle(std::move(res.value()));
-
-    // Otherwise, continue building multi command.
-    DCHECK(res->opcode == journal::Op::MULTI_COMMAND || res->opcode == journal::Op::EXEC);
-    DCHECK(res->txid > 0);
-
-    auto txid = res->txid;
-    auto& txdata = current_[txid];
-    if (txdata.AddEntry(std::move(res.value()))) {
-      auto out = std::move(txdata);
-      current_.erase(txid);
-      return out;
-    }
-  }
-
-  return std::nullopt;
-}
-
 void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
@@ -146,10 +81,7 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   TransactionReader tx_reader{};
 
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() {
-      static constexpr size_t kYieldAfterItemsInQueue = 50;
-      return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
-    });
+    waker_.await([&]() { return cntx->IsCancelled(); });
     if (cntx->IsCancelled())
       break;
 
@@ -170,45 +102,14 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   }
 }
 
-bool ClusterShardMigration::TransactionData::IsGlobalCmd() const {
-  if (commands.size() > 1) {
-    return false;
-  }
-
-  auto& command = commands.front();
-  if (command.cmd_args.empty()) {
-    return false;
-  }
-
-  auto& args = command.cmd_args;
-  if (absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHDB"sv) ||
-      absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHALL"sv) ||
-      (absl::EqualsIgnoreCase(ToSV(args[0]), "DFLYCLUSTER"sv) &&
-       absl::EqualsIgnoreCase(ToSV(args[1]), "FLUSHSLOTS"sv))) {
-    return true;
-  }
-
-  return false;
-}
-
 void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
 
-  bool was_insert = false;
-  if (tx_data.IsGlobalCmd()) {
-    was_insert = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
-  }
+  bool inserted_by_me = tx_data.IsGlobalCmd() &&
+                        multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
 
-  ExecuteTx(std::move(tx_data), was_insert, cntx);
-}
-
-void ClusterShardMigration::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
-                                      Context* cntx) {
-  if (cntx->IsCancelled()) {
-    return;
-  }
   if (tx_data.shard_cnt <= 1 || !tx_data.IsGlobalCmd()) {
     VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));

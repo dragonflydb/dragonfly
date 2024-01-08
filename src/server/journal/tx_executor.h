@@ -6,10 +6,11 @@
 #include <unordered_map>
 
 #include "server/common.h"
+#include "server/journal/types.h"
 
 namespace dfly {
 
-class Service;
+class JournalReader;
 
 // Coordinator for multi shard execution.
 class MultiShardExecution {
@@ -32,6 +33,36 @@ class MultiShardExecution {
  private:
   Mutex map_mu;
   std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
+};
+
+// This class holds the commands of transaction in single shard.
+// Once all commands were received, the transaction can be executed.
+struct TransactionData {
+  // Update the data from ParsedEntry and return true if all shard transaction commands were
+  // received.
+  bool AddEntry(journal::ParsedEntry&& entry);
+
+  bool IsGlobalCmd() const;
+
+  static TransactionData FromSingle(journal::ParsedEntry&& entry);
+
+  TxId txid{0};
+  DbIndex dbid{0};
+  uint32_t shard_cnt{0};
+  absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
+  uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
+  bool is_ping = false;           // For Op::PING entries.
+};
+
+// Utility for reading TransactionData from a journal reader.
+// The journal stream can contain interleaved data for multiple multi transactions,
+// expiries and out of order executed transactions that need to be grouped on the replica side.
+struct TransactionReader {
+  std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
+
+ private:
+  // Stores ongoing multi transaction data.
+  absl::flat_hash_map<TxId, TransactionData> current_;
 };
 
 }  // namespace dfly
