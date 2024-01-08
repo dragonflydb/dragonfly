@@ -105,43 +105,44 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
 
 struct TrafficLogger {
   base::IoBuf buf;
-  // std::unique_ptr<util::fb2::LinuxFile> file;
+  // std::unique_ptr<io::WriteFile> file;
   std::ofstream file;
 };
 
-thread_local std::optional<TrafficLogger> open_tl_logger{};
+thread_local std::optional<TrafficLogger> tl_traffic_logger{};  // nullopt while disabled
 
-void OpenLogger() {
-  if (open_tl_logger.has_value())
+void OpenTrafficLogger() {
+  if (tl_traffic_logger.has_value())
     return;
 
-  string path = "./trlog-" + to_string(ProactorBase::me()->GetPoolIndex());
-  // auto file = util::fb2::OpenLinux(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_APPEND,
-  // 0666); if (!file)
+  string path = "./traffic-log-" + to_string(ProactorBase::me()->GetPoolIndex());
+  // auto file = util::fb2::OpenWrite(path, {});
+  // if (!file)
   //   return;
 
   std::ofstream file(path, std::ofstream::out | std::ofstream::binary | std::ofstream::trunc);
   if (file.bad())
     return;
 
-  open_tl_logger = TrafficLogger{base::IoBuf{}, std::move(file)};
+  tl_traffic_logger = TrafficLogger{base::IoBuf{}, std::move(file)};
+  // tl_traffic_logger = TrafficLogger{base::IoBuf{}, std::unique_ptr<io::WriteFile>{file.value()}};
 }
 
-void StopLogger() {
-  if (!open_tl_logger.has_value())
+void StopTrafficLogger() {
+  if (!tl_traffic_logger.has_value())
     return;
 
-  open_tl_logger->file.flush();
-  open_tl_logger->file.close();
-  // open_tl_logger->file->Close();
-  open_tl_logger.reset();
+  tl_traffic_logger->file.flush();
+  tl_traffic_logger->file.close();
+  // tl_traffic_logger->file->Close();
+  tl_traffic_logger.reset();
 }
 
-void Log(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
-  if (!open_tl_logger)
+void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
+  if (!tl_traffic_logger)
     return;
 
-  auto& buf = open_tl_logger->buf;
+  auto& buf = tl_traffic_logger->buf;
 
   uint8_t int_buf[8];
   auto write_u32 = [&buf, &int_buf](uint32_t i) {
@@ -157,6 +158,7 @@ void Log(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
   write_u32(has_more ? 1 : 0);
   write_u32(uint32_t(resp.size()));
   for (auto part : resp) {
+    // TODO: don't truncate scripts
     if (string_view part_sv = part.GetView(); part_sv.size() < 256) {
       write_u32(uint32_t(part_sv.size()));
       buf.WriteAndCommit(part_sv.data(), part_sv.size());
@@ -166,8 +168,8 @@ void Log(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
     }
   }
 
-  open_tl_logger->file.write(facade::ToSV(buf.InputBuffer()).data(), buf.InputLen());
-  // open_tl_logger->file->Write(buf.InputBuffer(), 0, 0);
+  tl_traffic_logger->file.write(facade::ToSV(buf.InputBuffer()).data(), buf.InputLen());
+  // tl_traffic_logger->file->Write(buf.InputBuffer());
   buf.Clear();
 }
 
@@ -762,7 +764,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   bool can_dispatch_sync = (consumed >= io_buf_.InputLen());
 
-  Log(id_, !can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
+  // Log command as soon as we receive it
+  LogTraffic(id_, !can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
 
   // Avoid sync dispatch if an async dispatch is already in progress, or else they'll interleave.
   if (cc_->async_dispatch)
@@ -1472,9 +1475,9 @@ bool Connection::IsTrackingOn() const {
 
 void Connection::ToggleTrafficLogging(bool on) {
   if (on)
-    OpenLogger();
+    OpenTrafficLogger();
   else
-    StopLogger();
+    StopTrafficLogger();
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
