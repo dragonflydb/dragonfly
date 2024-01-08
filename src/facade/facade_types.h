@@ -37,8 +37,6 @@ struct CmdArgListFormatter {
 };
 
 struct ConnectionStats {
-  absl::flat_hash_map<std::string, uint64_t> err_count_map;
-
   size_t read_buf_capacity = 0;                // total capacity of input buffers
   size_t dispatch_queue_entries = 0;           // total number of dispatch queue entries
   size_t dispatch_queue_bytes = 0;             // total size of all dispatch queue entries
@@ -48,8 +46,6 @@ struct ConnectionStats {
 
   size_t io_read_cnt = 0;
   size_t io_read_bytes = 0;
-  size_t io_write_cnt = 0;
-  size_t io_write_bytes = 0;
 
   uint64_t command_cnt = 0;
   uint64_t pipelined_cmd_cnt = 0;
@@ -61,6 +57,46 @@ struct ConnectionStats {
   uint32_t num_blocked_clients = 0;
 
   ConnectionStats& operator+=(const ConnectionStats& o);
+};
+
+struct ReplyStats {
+  enum SendStatsType {
+    kRegular,   // Send() operations that are written to sockets
+    kBatch,     // Send() operations that are internally batched to a buffer
+    kNumTypes,  // Number of types, do not use directly
+  };
+
+  struct SendStats {
+    int64_t count = 0;
+    int64_t total_duration = 0;
+
+    SendStats& operator+=(const SendStats& other) {
+      static_assert(sizeof(SendStats) == 16u);
+
+      count += other.count;
+      total_duration += other.total_duration;
+      return *this;
+    }
+  };
+
+  SendStats send_stats[SendStatsType::kNumTypes];
+
+  size_t io_write_cnt = 0;
+  size_t io_write_bytes = 0;
+  absl::flat_hash_map<std::string, uint64_t> err_count;
+
+  ReplyStats& operator+=(const ReplyStats& other);
+};
+
+struct FacadeStats {
+  ConnectionStats conn_stats;
+  ReplyStats reply_stats;
+
+  FacadeStats& operator+=(const FacadeStats& other) {
+    conn_stats += other.conn_stats;
+    reply_stats += other.reply_stats;
+    return *this;
+  }
 };
 
 struct ErrorReply {
@@ -101,6 +137,8 @@ constexpr inline unsigned long long operator""_MB(unsigned long long x) {
 constexpr inline unsigned long long operator""_KB(unsigned long long x) {
   return 1024L * x;
 }
+
+extern __thread FacadeStats* tl_facade_stats;
 
 }  // namespace facade
 

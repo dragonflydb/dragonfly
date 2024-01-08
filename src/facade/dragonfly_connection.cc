@@ -82,16 +82,6 @@ void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
   }
 }
 
-void FetchBuilderStats(ConnectionStats* stats, SinkReplyBuilder* builder) {
-  stats->io_write_cnt += builder->io_write_cnt();
-  stats->io_write_bytes += builder->io_write_bytes();
-
-  for (const auto& k_v : builder->err_count()) {
-    stats->err_count_map[k_v.first] += k_v.second;
-  }
-  builder->reset_io_stats();
-}
-
 // TODO: to implement correct matcher according to HTTP spec
 // https://www.w3.org/Protocols/rfc2616/rfc2616-sec5.html
 // One place to find a good implementation would be https://github.com/h2o/picohttpparser
@@ -105,7 +95,7 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
   f();
   const size_t capacity = io_buf.Capacity();
   if (stats != nullptr && prev_capacity != capacity) {
-    VLOG(1) << "Grown io_buf to " << capacity;
+    VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
   }
 }
@@ -113,6 +103,9 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
 constexpr size_t kMinReadSize = 256;
 
 thread_local uint32_t free_req_release_weight = 0;
+
+const char* kPhaseName[Connection::NUM_PHASES] = {"SETUP", "READ", "PROCESS", "SHUTTING_DOWN",
+                                                  "PRECLOSE"};
 
 }  // namespace
 
@@ -156,7 +149,7 @@ string_view Connection::PubMessage::Message() const {
 
 struct Connection::DispatchOperations {
   DispatchOperations(SinkReplyBuilder* b, Connection* me)
-      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
+      : stats{&tl_facade_stats->conn_stats}, builder{b}, self(me) {
   }
 
   void operator()(const PubMessage& msg);
@@ -301,7 +294,7 @@ void Connection::DispatchOperations::operator()(const MigrationRequestMessage& m
 }
 
 void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
-  VLOG(1) << "Decremented checkpoint at " << self->DebugInfo();
+  VLOG(2) << "Decremented checkpoint at " << self->DebugInfo();
 
   msg.bc.Dec();
 }
@@ -513,13 +506,15 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
-  absl::StrAppend(&after, " phase=", PHASE_NAMES[phase_]);
+  string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get());
+    if (cc_->reply_builder()->IsSendActive())
+      phase_name = "send";
     absl::StrAppend(&after, " ", cc_info);
   }
-
+  absl::StrAppend(&after, " phase=", phase_name);
   return {std::move(before), std::move(after)};
 }
 
@@ -600,7 +595,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 }
 
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
-  stats_ = service_->GetThreadLocalConnectionStats();
+  stats_ = &tl_facade_stats->conn_stats;
 
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
@@ -643,9 +638,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   evc_.notify();
   phase_ = SHUTTING_DOWN;
 
-  VLOG(1) << "Before dispatch_fb.join()";
+  VLOG(2) << "Before dispatch_fb.join()";
   dispatch_fb_.JoinIfNeeded();
-  VLOG(1) << "After dispatch_fb.join()";
+  VLOG(2) << "After dispatch_fb.join()";
 
   phase_ = PRECLOSE;
 
@@ -684,14 +679,12 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
         }
       }
     }
-
-    FetchBuilderStats(stats_, orig_builder);
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     string conn_info = service_->GetContextInfo(cc_.get());
-    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName() << ": " << ec
-                 << " " << ec.message();
+    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName()
+                 << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message();
   }
 }
 
@@ -830,12 +823,13 @@ void Connection::OnBreakCb(int32_t mask) {
   if (mask <= 0)
     return;  // we cancelled the poller, which means we do not need to break from anything.
 
-  VLOG(1) << "Got event " << mask;
-
   if (!cc_) {
     LOG(ERROR) << "Unexpected event " << mask;
     return;
   }
+
+  VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
+          << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
 
   cc_->conn_closing = true;
   break_cb_engaged_ = false;  // do not attempt to cancel it.
@@ -872,7 +866,7 @@ void Connection::HandleMigrateRequest() {
 
       queue_backpressure_ = &tl_queue_backpressure_;
 
-      stats_ = service_->GetThreadLocalConnectionStats();
+      stats_ = &tl_facade_stats->conn_stats;
       ++stats_->num_conns;
       stats_->read_buf_capacity += io_buf_.Capacity();
       if (cc_->replica_conn) {
@@ -899,8 +893,6 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   size_t max_iobfuf_len = absl::GetFlag(FLAGS_max_client_iobuf_len);
 
   do {
-    FetchBuilderStats(stats_, orig_builder);
-
     HandleMigrateRequest();
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
@@ -974,8 +966,6 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
     }
     ec = orig_builder->GetError();
   } while (peer->IsOpen() && !ec);
-
-  FetchBuilderStats(stats_, orig_builder);
 
   if (ec)
     return ec;
@@ -1269,7 +1259,7 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, boo
   if (cc_->blocked && ignore_blocked)
     return;
 
-  VLOG(1) << "Sent checkpoint to " << DebugInfo();
+  VLOG(2) << "Sent checkpoint to " << DebugInfo();
 
   bc.Add(1);
   SendAsync({CheckpointMessage{bc}});

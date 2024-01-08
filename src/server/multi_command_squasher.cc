@@ -239,6 +239,9 @@ bool MultiCommandSquasher::ExecuteSquashed() {
 }
 
 void MultiCommandSquasher::Run() {
+  DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
+           << cntx_->transaction->DebugId();
+
   for (auto& cmd : cmds_) {
     auto res = TrySquash(&cmd);
 

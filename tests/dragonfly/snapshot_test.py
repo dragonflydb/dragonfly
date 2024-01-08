@@ -196,6 +196,35 @@ class TestSetsnapshot_cron(SnapshotTestBase):
         assert super().get_main_file("test-set-snapshot_cron-summary.dfs")
 
 
+@dfly_args(
+    {**BASIC_ARGS, "dbfilename": "test-save-rename-command", "rename_command": "save=save-foo"}
+)
+class TestSnapshotShutdownWithRenameSave(SnapshotTestBase):
+    """Test set snapshot_cron flag"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        super().setup(tmp_dir)
+
+    @pytest.mark.asyncio
+    async def test_snapshot(self, df_server, df_seeder_factory):
+        """Checks that on shutdown we save snapshot"""
+        seeder = df_seeder_factory.create(port=df_server.port)
+        await seeder.run(target_deviation=0.1)
+
+        start_capture = await seeder.capture()
+        a_client = aioredis.Redis(port=df_server.port)
+
+        df_server.stop()
+        df_server.start()
+
+        a_client = aioredis.Redis(port=df_server.port)
+        await wait_available_async(a_client)
+        await a_client.connection_pool.disconnect()
+
+        assert await seeder.compare(start_capture, port=df_server.port)
+
+
 @dfly_args({**BASIC_ARGS})
 class TestOnlyOneSaveAtATime(SnapshotTestBase):
     """Dragonfly does not allow simultaneous save operations, send 2 save operations and make sure one is rejected"""

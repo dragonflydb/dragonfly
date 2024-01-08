@@ -449,3 +449,12 @@ class CompactObjectView {
 };
 
 }  // namespace dfly
+
+namespace std {
+template <> struct hash<dfly::CompactObjectView> {
+  std::size_t operator()(const dfly::CompactObjectView& obj) const {
+    return obj.Hash();
+  }
+};
+
+}  // namespace std

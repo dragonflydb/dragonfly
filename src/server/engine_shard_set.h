@@ -40,7 +40,7 @@ class EngineShard {
     uint64_t defrag_attempt_total = 0;
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
-
+    uint64_t poll_execution_total = 0;
     Stats& operator+=(const Stats&);
   };
 
@@ -49,7 +49,7 @@ class EngineShard {
 
   // Sets up a new EngineShard in the thread.
   // If update_db_time is true, initializes periodic time update for its db_slice.
-  static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+  static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time, size_t max_file_size);
 
   static void DestroyThreadLocal();
 
@@ -332,7 +332,7 @@ class EngineShardSet {
   void TEST_EnableCacheMode();
 
  private:
-  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time, size_t max_file_size);
 
   util::ProactorPool* pp_;
   std::vector<FiberQueue*> shard_queue_;

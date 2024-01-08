@@ -67,7 +67,7 @@ class SinkReplyBuilder {
   SinkReplyBuilder(const SinkReplyBuilder&) = delete;
   void operator=(const SinkReplyBuilder&) = delete;
 
-  SinkReplyBuilder(::io::Sink* sink);
+  explicit SinkReplyBuilder(::io::Sink* sink);
 
   virtual ~SinkReplyBuilder() {
   }
@@ -110,22 +110,8 @@ class SinkReplyBuilder {
     return ec_;
   }
 
-  size_t io_write_cnt() const {
-    return io_write_cnt_;
-  }
-
-  size_t io_write_bytes() const {
-    return io_write_bytes_;
-  }
-
-  void reset_io_stats() {
-    io_write_cnt_ = 0;
-    io_write_bytes_ = 0;
-    err_count_.clear();
-  }
-
-  const absl::flat_hash_map<std::string, uint64_t>& err_count() const {
-    return err_count_;
+  bool IsSendActive() const {
+    return send_active_;
   }
 
   struct ReplyAggregator {
@@ -155,26 +141,11 @@ class SinkReplyBuilder {
 
   virtual size_t UsedMemory() const;
 
-  enum SendStatsType {
-    kRegular,   // Send() operations that are written to sockets
-    kBatch,     // Send() operations that are internally batched to a buffer
-    kNumTypes,  // Number of types, do not use directly
-  };
+  static const ReplyStats& GetThreadLocalStats() {
+    return tl_facade_stats->reply_stats;
+  }
 
-  struct SendStats {
-    int64_t count = 0;
-    int64_t total_duration = 0;
-
-    SendStats& operator+=(const SendStats& other) {
-      count += other.count;
-      total_duration += other.total_duration;
-      return *this;
-    }
-  };
-
-  using StatsType = std::array<SendStats, SendStatsType::kNumTypes>;
-
-  static StatsType GetThreadLocalStats();
+  static void ResetThreadLocalStats();
 
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
@@ -189,15 +160,12 @@ class SinkReplyBuilder {
   ::io::Sink* sink_;
   std::error_code ec_;
 
-  size_t io_write_cnt_ = 0;
-  size_t io_write_bytes_ = 0;
-  absl::flat_hash_map<std::string, uint64_t> err_count_;
-
   bool should_batch_ : 1;
 
   // Similarly to batch mode but is controlled by at operation level.
   bool should_aggregate_ : 1;
   bool has_replied_ : 1;
+  bool send_active_ : 1;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

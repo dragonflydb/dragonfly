@@ -14,6 +14,7 @@
 #include <queue>
 
 extern "C" {
+#include "redis/crc64.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/rdb.h"
@@ -39,7 +40,7 @@ extern "C" {
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 
-ABSL_FLAG(int, compression_mode, 3,
+ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_ENTRY_LZ4,
           "set 0 for no compression,"
           "set 1 for single entry lzf compression,"
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
@@ -108,6 +109,47 @@ constexpr size_t kBufLen = 64_KB;
 constexpr size_t kAmask = 4_KB - 1;
 
 }  // namespace
+
+bool AbslParseFlag(std::string_view in, dfly::CompressionMode* flag, std::string* err) {
+  if (in == "0" || in == "NONE") {
+    *flag = dfly::CompressionMode::NONE;
+    return true;
+  }
+  if (in == "1" || in == "SINGLE_ENTRY") {
+    *flag = dfly::CompressionMode::SINGLE_ENTRY;
+    return true;
+  }
+  if (in == "2" || in == "MULTI_ENTRY_ZSTD") {
+    *flag = dfly::CompressionMode::MULTI_ENTRY_ZSTD;
+    return true;
+  }
+  if (in == "3" || in == "MULTI_ENTRY_LZ4") {
+    *flag = dfly::CompressionMode::MULTI_ENTRY_LZ4;
+    return true;
+  }
+
+  *err = absl::StrCat("Unknown value ", in, " for compression_mode flag");
+  return false;
+}
+
+std::string AbslUnparseFlag(dfly::CompressionMode flag) {
+  switch (flag) {
+    case dfly::CompressionMode::NONE:
+      return "NONE";
+    case dfly::CompressionMode::SINGLE_ENTRY:
+      return "SINGLE_ENTRY";
+    case dfly::CompressionMode::MULTI_ENTRY_ZSTD:
+      return "MULTI_ENTRY_ZSTD";
+    case dfly::CompressionMode::MULTI_ENTRY_LZ4:
+      return "MULTI_ENTRY_LZ4";
+  }
+  DCHECK(false) << "Unknown compression_mode flag value " << int(flag);
+  return "NONE";
+}
+
+dfly::CompressionMode GetDefaultCompressionMode() {
+  return absl::GetFlag(FLAGS_compression_mode);
+}
 
 uint8_t RdbObjectType(const PrimeValue& pv) {
   unsigned type = pv.ObjType();
@@ -239,8 +281,11 @@ io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
   return io::Bytes(compr_buf_.data(), frame_size);
 }
 
-RdbSerializer::RdbSerializer(CompressionMode compression_mode)
-    : mem_buf_{4_KB}, tmp_buf_(nullptr), compression_mode_(compression_mode) {
+SerializerBase::SerializerBase(CompressionMode compression_mode)
+    : compression_mode_(compression_mode), mem_buf_{4_KB}, tmp_buf_(nullptr) {
+}
+
+RdbSerializer::RdbSerializer(CompressionMode compression_mode) : SerializerBase(compression_mode) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -710,7 +755,7 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
   return WriteRaw(buf);
 }
 
-error_code RdbSerializer::SendFullSyncCut() {
+error_code SerializerBase::SendFullSyncCut() {
   VLOG(2) << "SendFullSyncCut";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
@@ -722,11 +767,15 @@ error_code RdbSerializer::SendFullSyncCut() {
   return WriteRaw(buf);
 }
 
-size_t RdbSerializer::GetTotalBufferCapacity() const {
+std::error_code SerializerBase::WriteOpcode(uint8_t opcode) {
+  return WriteRaw(::io::Bytes{&opcode, 1});
+}
+
+size_t SerializerBase::GetTotalBufferCapacity() const {
   return mem_buf_.Capacity();
 }
 
-error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
+error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
   mem_buf_.Reserve(mem_buf_.InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf_.AppendBuffer();
   memcpy(dest.data(), buf.data(), buf.size());
@@ -734,7 +783,7 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-error_code RdbSerializer::FlushToSink(io::Sink* s) {
+error_code SerializerBase::FlushToSink(io::Sink* s) {
   auto bytes = PrepareFlush();
   if (bytes.empty())
     return error_code{};
@@ -744,32 +793,97 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
   // interrupt point.
   RETURN_ON_ERR(s->Write(bytes));
   mem_buf_.ConsumeInput(bytes.size());
+
+  return error_code{};
+}
+
+error_code RdbSerializer::FlushToSink(io::Sink* s) {
+  RETURN_ON_ERR(SerializerBase::FlushToSink(s));
+
   // After every flush we should write the DB index again because the blobs in the channel are
   // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
   // snapshot)
   last_entry_db_index_ = kInvalidDbId;
 
-  return error_code{};
+  return {};
 }
 
-size_t RdbSerializer::SerializedLen() const {
+namespace {
+using VersionBuffer = std::array<char, sizeof(uint16_t)>;
+using CrcBuffer = std::array<char, sizeof(uint64_t)>;
+
+VersionBuffer MakeRdbVersion() {
+  VersionBuffer buf;
+  buf[0] = RDB_SER_VERSION & 0xff;
+  buf[1] = (RDB_SER_VERSION >> 8) & 0xff;
+  return buf;
+}
+
+CrcBuffer MakeCheckSum(std::string_view dump_res) {
+  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+  CrcBuffer buf;
+  absl::little_endian::Store64(buf.data(), chksum);
+  return buf;
+}
+
+void AppendFooter(io::StringSink* dump_res) {
+  auto to_bytes = [](const auto& buf) {
+    return io::Bytes(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
+  };
+
+  /* Write the footer, this is how it looks like:
+   * ----------------+---------------------+---------------+
+   * ... RDB payload | 2 bytes RDB version | 8 bytes CRC64 |
+   * ----------------+---------------------+---------------+
+   * RDB version and CRC are both in little endian.
+   */
+  const auto ver = MakeRdbVersion();
+  dump_res->Write(to_bytes(ver));
+  const auto crc = MakeCheckSum(dump_res->str());
+  dump_res->Write(to_bytes(crc));
+}
+}  // namespace
+
+void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
+  CompressionMode compression_mode = GetDefaultCompressionMode();
+  if (compression_mode != CompressionMode::NONE) {
+    compression_mode = CompressionMode::SINGLE_ENTRY;
+  }
+  RdbSerializer serializer(compression_mode);
+
+  // According to Redis code we need to
+  // 1. Save the value itself - without the key
+  // 2. Save footer: this include the RDB version and the CRC value for the message
+  auto type = RdbObjectType(obj);
+  DVLOG(1) << "We are going to dump object type: " << type;
+  std::error_code ec = serializer.WriteOpcode(type);
+  CHECK(!ec);
+  ec = serializer.SaveValue(obj);
+  CHECK(!ec);  // make sure that fully was successful
+  ec = serializer.FlushToSink(out);
+  CHECK(!ec);         // make sure that fully was successful
+  AppendFooter(out);  // version and crc
+  CHECK_GT(out->str().size(), 10u);
+}
+
+size_t SerializerBase::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-io::Bytes RdbSerializer::PrepareFlush() {
+io::Bytes SerializerBase::PrepareFlush() {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
     return mem_buf_.InputBuffer();
 
-  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
-      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
+  if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD ||
+      compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
     CompressBlob();
   }
 
   return mem_buf_.InputBuffer();
 }
 
-error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
+error_code SerializerBase::WriteJournalEntry(std::string_view serialized_entry) {
   VLOG(2) << "WriteJournalEntry";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(1));
@@ -777,7 +891,7 @@ error_code RdbSerializer::WriteJournalEntry(std::string_view serialized_entry) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveString(string_view val) {
+error_code SerializerBase::SaveString(string_view val) {
   /* Try integer encoding */
   if (val.size() <= 11) {
     uint8_t buf[16];
@@ -817,13 +931,13 @@ error_code RdbSerializer::SaveString(string_view val) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveLen(size_t len) {
+error_code SerializerBase::SaveLen(size_t len) {
   uint8_t buf[16];
   unsigned enclen = WritePackedUInt(len, buf);
   return WriteRaw(Bytes{buf, enclen});
 }
 
-error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
+error_code SerializerBase::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_len) {
   /* Data compressed! Let's save it on disk */
   uint8_t opcode = (RDB_ENCVAL << 6) | RDB_ENC_LZF;
   RETURN_ON_ERR(WriteOpcode(opcode));
@@ -1208,12 +1322,12 @@ unique_ptr<SliceSnapshot>& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
 
 RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
   CHECK_NOTNULL(sink);
-  int compression_mode = absl::GetFlag(FLAGS_compression_mode);
+  CompressionMode compression_mode = GetDefaultCompressionMode();
   int producer_count = 0;
   switch (save_mode) {
     case SaveMode::SUMMARY:
       producer_count = 0;
-      if (compression_mode >= 1) {
+      if (compression_mode >= CompressionMode::SINGLE_ENTRY) {
         compression_mode_ = CompressionMode::SINGLE_ENTRY;
       } else {
         compression_mode_ = CompressionMode::NONE;
@@ -1222,19 +1336,11 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
     case SaveMode::SINGLE_SHARD:
     case SaveMode::SINGLE_SHARD_WITH_SUMMARY:
       producer_count = 1;
-      if (compression_mode == 3) {
-        compression_mode_ = CompressionMode::MULTY_ENTRY_LZ4;
-      } else if (compression_mode == 2) {
-        compression_mode_ = CompressionMode::MULTY_ENTRY_ZSTD;
-      } else if (compression_mode == 1) {
-        compression_mode_ = CompressionMode::SINGLE_ENTRY;
-      } else {
-        compression_mode_ = CompressionMode::NONE;
-      }
+      compression_mode_ = compression_mode;
       break;
     case SaveMode::RDB:
       producer_count = shard_set->size();
-      if (compression_mode >= 1) {
+      if (compression_mode >= CompressionMode::SINGLE_ENTRY) {
         compression_mode_ = CompressionMode::SINGLE_ENTRY;
       } else {
         compression_mode_ = CompressionMode::NONE;
@@ -1370,20 +1476,20 @@ size_t RdbSaver::GetTotalBuffersSize() const {
   return impl_->GetTotalBuffersSize();
 }
 
-void RdbSerializer::AllocateCompressorOnce() {
+void SerializerBase::AllocateCompressorOnce() {
   if (compressor_impl_) {
     return;
   }
-  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD) {
+  if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD) {
     compressor_impl_.reset(new ZstdCompressor());
-  } else if (compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
+  } else if (compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
     compressor_impl_.reset(new Lz4Compressor());
   } else {
     CHECK(false) << "Compressor allocation should not be done";
   }
 }
 
-void RdbSerializer::CompressBlob() {
+void SerializerBase::CompressBlob() {
   if (!compression_stats_) {
     compression_stats_.emplace(CompressionStats{});
   }
@@ -1413,7 +1519,7 @@ void RdbSerializer::CompressBlob() {
 
   // First write opcode for compressed string
   auto dest = mem_buf_.AppendBuffer();
-  uint8_t opcode = compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD
+  uint8_t opcode = compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD
                        ? RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START
                        : RDB_OPCODE_COMPRESSED_LZ4_BLOB_START;
   dest[0] = opcode;
@@ -1429,6 +1535,40 @@ void RdbSerializer::CompressBlob() {
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
   ++compression_stats_->compressed_blobs;
+}
+
+RestoreSerializer::RestoreSerializer(CompressionMode compression_mode)
+    : SerializerBase(compression_mode) {
+}
+
+error_code RestoreSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
+                                        uint64_t expire_ms, DbIndex dbid) {
+  absl::InlinedVector<string_view, 4> args;
+
+  key_buffer_.clear();
+  string_view key = pk.GetSlice(&key_buffer_);
+  args.push_back(key);
+
+  string expire_str = absl::StrCat(expire_ms);
+  args.push_back(expire_str);
+
+  value_dump_sink_.Clear();
+  DumpObject(pv, &value_dump_sink_);
+  args.push_back(value_dump_sink_.str());
+
+  args.push_back("ABSTTL");  // Means expire string is since epoch
+
+  journal::Entry entry(0,                     // txid
+                       journal::Op::COMMAND,  // single command
+                       dbid,                  //
+                       1,                     // shard count
+                       make_pair("RESTORE", ArgSlice{args}));
+
+  sink_.Clear();
+  JournalWriter writer{&sink_};
+  writer.Write(entry);
+
+  return WriteRaw(io::Buffer(sink_.str()));
 }
 
 }  // namespace dfly

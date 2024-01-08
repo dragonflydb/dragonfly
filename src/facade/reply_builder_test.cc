@@ -13,7 +13,6 @@
 #include "facade/facade_test.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
-
 // This will test the reply_builder RESP (Redis).
 
 using namespace testing;
@@ -104,6 +103,11 @@ class RedisReplyBuilderTest : public testing::Test {
   void SetUp() {
     sink_.Clear();
     builder_.reset(new RedisReplyBuilder(&sink_));
+    SinkReplyBuilder::ResetThreadLocalStats();
+  }
+
+  static void SetUpTestSuite() {
+    tl_facade_stats = new FacadeStats;
   }
 
  protected:
@@ -124,6 +128,20 @@ class RedisReplyBuilderTest : public testing::Test {
 
   std::size_t SinkSize() const {
     return str().size();
+  }
+
+  unsigned GetError(string_view err) const {
+    const auto& map = SinkReplyBuilder::GetThreadLocalStats().err_count;
+    auto it = map.find(err);
+    return it == map.end() ? 0 : it->second;
+  }
+
+  static bool NoErrors() {
+    return tl_facade_stats->reply_stats.err_count.empty();
+  }
+
+  static const ReplyStats& GetReplyStats() {
+    return tl_facade_stats->reply_stats;
   }
 
   // Breaks the string we have in sink into tokens.
@@ -228,7 +246,7 @@ TEST_F(RedisReplyBuilderTest, SimpleError) {
   // ASSERT_EQ(sink_.str().at(0), kErrorStartChar);
   ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
   ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
-  ASSERT_EQ(builder_->err_count().at(error), 1);
+  ASSERT_EQ(GetError(error), 1);
   ASSERT_EQ(str(), BuildExpectedErrorString(error))
       << " error different from expected - '" << str() << "'";
   auto parsing = Parse();
@@ -242,7 +260,7 @@ TEST_F(RedisReplyBuilderTest, SimpleError) {
   ASSERT_EQ(str(), kOKMessage);
 
   ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
-  ASSERT_EQ(builder_->err_count().at(error), 1);
+  ASSERT_EQ(GetError(error), 1);
 
   parsing = Parse();
   ASSERT_TRUE(parsing.Verify(SinkSize()));
@@ -263,8 +281,7 @@ TEST_F(RedisReplyBuilderTest, ErrorBuiltInMessage) {
     builder_->SendError(err);
     ASSERT_TRUE(absl::StartsWith(str(), kErrorStart)) << " invalid start char for " << err;
     ASSERT_TRUE(absl::EndsWith(str(), kCRLF)) << " failed to find correct termination at " << err;
-    ASSERT_EQ(builder_->err_count().at(error_type), 1)
-        << " number of error count is invalid for " << err;
+    ASSERT_EQ(GetError(error_type), 1) << " number of error count is invalid for " << err;
     ASSERT_EQ(str(), BuildExpectedErrorString(error_name))
         << " error different from expected - '" << str() << "'";
 
@@ -280,7 +297,7 @@ TEST_F(RedisReplyBuilderTest, ErrorReplyBuiltInMessage) {
   builder_->SendError(err);
   ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
   ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
-  ASSERT_EQ(builder_->err_count().at(kIndexOutOfRange), 1);
+  ASSERT_EQ(GetError(kIndexOutOfRange), 1);
   ASSERT_EQ(str(), BuildExpectedErrorString(kIndexOutOfRange));
 
   auto parsing_output = Parse();
@@ -292,7 +309,7 @@ TEST_F(RedisReplyBuilderTest, ErrorReplyBuiltInMessage) {
   builder_->SendError(err);
   ASSERT_TRUE(absl::StartsWith(str(), kErrorStart));
   ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
-  ASSERT_EQ(builder_->err_count().at("e2"), 1);
+  ASSERT_EQ(GetError("e2"), 1);
   ASSERT_EQ(str(), BuildExpectedErrorString("e1"));
 
   parsing_output = Parse();
@@ -314,7 +331,7 @@ TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
     builder_->SendError(err);
     ASSERT_TRUE(absl::StartsWith(str(), kErrorStart)) << " invalid start char for " << err;
     ASSERT_TRUE(absl::EndsWith(str(), kCRLF));
-    auto current_error_count = builder_->err_count().at(error_type);
+    auto current_error_count = GetError(error_type);
     error_count++;
     ASSERT_EQ(current_error_count, error_count) << " number of error count is invalid for " << err;
     auto parsing_output = Parse();
@@ -374,7 +391,7 @@ TEST_F(RedisReplyBuilderTest, StrArray) {
   for (auto s : string_vector) {
     builder_->SendSimpleString(s);
     expected_size += s.size() + kCRLF.size() + 1;
-    ASSERT_TRUE(builder_->err_count().empty());
+    ASSERT_TRUE(NoErrors());
   }
   ASSERT_EQ(SinkSize(), expected_size);
   // ASSERT_EQ(kArrayStart, str().at(0));
@@ -401,7 +418,7 @@ TEST_F(RedisReplyBuilderTest, SendSimpleStrArr) {
       "+++", "---", "$$$", "~~~~", "@@@", "^^^", "1234", "foo"};
   const std::size_t kArrayLen = sizeof(kArrayMessage) / sizeof(kArrayMessage[0]);
   builder_->SendSimpleStrArr(kArrayMessage);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   // Tokenize the message and verify content
   std::vector<std::string_view> message_tokens = TokenizeMessage();
   ASSERT_THAT(message_tokens, ElementsAre(absl::StrCat(kArrayStartString, kArrayLen),
@@ -426,7 +443,7 @@ TEST_F(RedisReplyBuilderTest, SendStringViewArr) {
       // random values
       "(((", "}}}", "&&&&", "####", "___", "+++", "0.1234", "bar"};
   builder_->SendStringArr(kArrayMessage);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   // verify content
   std::vector<std::string_view> message_tokens = TokenizeMessage();
   // the form of this is *<array size>\r\n$<string1 size>\r\n<string1>..$<stringN
@@ -457,7 +474,7 @@ TEST_F(RedisReplyBuilderTest, SendBulkStringArr) {
       // Test this one with large values
       std::string(1024, '.'), std::string(2048, ','), std::string(4096, ' ')};
   builder_->SendStringArr(kArrayMessage);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   std::vector<std::string_view> message_tokens = TokenizeMessage();
   // the form of this is *<array size>\r\n$<string1 size>\r\n<string1>..$<stringN
   // size>\r\n<stringN>\r\n
@@ -479,7 +496,7 @@ TEST_F(RedisReplyBuilderTest, SendBulkStringArr) {
 TEST_F(RedisReplyBuilderTest, NullBulkString) {
   // null bulk string == "$-1\r\n" i.e. '$' + -1 + \r + \n
   builder_->SendNull();
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), kNullBulkString);
   auto parsing_output = Parse();
   ASSERT_TRUE(parsing_output.Verify(SinkSize()));
@@ -491,7 +508,7 @@ TEST_F(RedisReplyBuilderTest, EmptyBulkString) {
   // empty bulk string is in the form of "$0\r\n\r\n", i.e. length 0 after $ follow by \r\n*2
   const std::string_view kEmptyBulkString = "$0\r\n\r\n";
   builder_->SendBulkString(std::string_view{});
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), kEmptyBulkString);
   auto parsing_output = Parse();
   ASSERT_TRUE(parsing_output.Verify(SinkSize()));
@@ -505,7 +522,7 @@ TEST_F(RedisReplyBuilderTest, NoAsciiBulkString) {
   std::size_t data_size = sizeof(random_bytes) / sizeof(random_bytes[0]);
   std::string_view none_ascii_payload{random_bytes, data_size};
   builder_->SendBulkString(none_ascii_payload);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   const std::string expected_payload =
       absl::StrCat(kBulkStringStart, data_size, kCRLF, none_ascii_payload, kCRLF);
   ASSERT_EQ(str(), expected_payload);
@@ -522,7 +539,7 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithCRLF) {
   // Verify bulk string that contains the \r\n as payload
   std::string_view crlf_chars{"\r\n"};
   builder_->SendBulkString(crlf_chars);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   // the expected message in this case is $2\r\n\r\n\r\n
   std::string expected_message =
       absl::StrCat(kBulkStringStart, crlf_chars.size(), kCRLF, crlf_chars, kCRLF);
@@ -538,7 +555,7 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithStartBulkString) {
   std::string expected_message =
       absl::StrCat(kBulkStringStart, message.size(), kCRLF, message, kCRLF);
   builder_->SendBulkString(message);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), expected_message);
 
   auto parsing_output = Parse();
@@ -562,7 +579,7 @@ TEST_F(RedisReplyBuilderTest, BulkStringWithErrorString) {
   std::string expected_message =
       absl::StrCat(kBulkStringStart, message.size(), kCRLF, message, kCRLF);
   builder_->SendBulkString(message);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), expected_message);
   auto parsing_output = Parse();
   ASSERT_TRUE(parsing_output.IsString());
@@ -594,7 +611,7 @@ TEST_F(RedisReplyBuilderTest, Double) {
   const std::string expected_payload =
       absl::StrCat(kBulkStringStart, kPayloadStr.size(), kCRLF, kPayloadStr, kCRLF);
   builder_->SendDouble(double_value);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   std::vector<std::string_view> message_tokens = TokenizeMessage();
   ASSERT_EQ(str(), expected_payload);
   ASSERT_THAT(message_tokens,
@@ -638,7 +655,7 @@ TEST_F(RedisReplyBuilderTest, MixedTypeArray) {
   builder_->SendDouble(double_value);
   const std::string_view output_msg = str();
   ASSERT_FALSE(output_msg.empty());
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   std::vector<std::string_view> message_tokens = TokenizeMessage();
   ASSERT_THAT(
       message_tokens,
@@ -673,8 +690,8 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
   for (const auto& val : kInputArray) {
     builder_->SendBulkString(val);
     ASSERT_EQ(SinkSize(), 0) << " sink is not empty at iteration number " << count;
-    ASSERT_EQ(builder_->io_write_bytes(), 0);
-    ASSERT_EQ(builder_->io_write_cnt(), 0);
+    ASSERT_EQ(GetReplyStats().io_write_bytes, 0);
+    ASSERT_EQ(GetReplyStats().io_write_cnt, 0);
     total_bytes += val.size();
     ++count;
   }
@@ -682,11 +699,11 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
   // write something
   builder_->SetBatchMode(false);
   builder_->SendBulkString(std::string_view{});
-  ASSERT_EQ(builder_->io_write_cnt(), 1);
+  ASSERT_EQ(GetReplyStats().io_write_cnt, 1);
   // We expecting to have more than the total bytes we count,
   // since we are not counting the \r\n and the type char as well
   // as length entries
-  ASSERT_GT(builder_->io_write_bytes(), total_bytes);
+  ASSERT_GT(GetReplyStats().io_write_bytes, total_bytes);
   std::vector<std::string_view> array_members = TokenizeMessage();
   ASSERT_THAT(array_members,
               ElementsAre(absl::StrCat(kArrayStartString, kInputArray.size()),
@@ -702,14 +719,14 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
 TEST_F(RedisReplyBuilderTest, Resp3Double) {
   builder_->SetResp3(true);
   builder_->SendDouble(5.5);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(str(), ",5.5\r\n");
 }
 
 TEST_F(RedisReplyBuilderTest, Resp3NullString) {
   builder_->SetResp3(true);
   builder_->SendNull();
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "_\r\n");
 }
 
@@ -718,13 +735,13 @@ TEST_F(RedisReplyBuilderTest, SendStringArrayAsMap) {
 
   builder_->SetResp3(false);
   builder_->SendStringArr(map_array, builder_->MAP);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*4\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
       << "SendStringArrayAsMap Resp2 Failed.";
 
   builder_->SetResp3(true);
   builder_->SendStringArr(map_array, builder_->MAP);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "%2\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
       << "SendStringArrayAsMap Resp3 Failed.";
 }
@@ -734,13 +751,13 @@ TEST_F(RedisReplyBuilderTest, SendStringArrayAsSet) {
 
   builder_->SetResp3(false);
   builder_->SendStringArr(set_array, builder_->SET);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "SendStringArrayAsSet Resp2 Failed.";
 
   builder_->SetResp3(true);
   builder_->SendStringArr(set_array, builder_->SET);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "~3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "SendStringArrayAsSet Resp3 Failed.";
 }
@@ -751,26 +768,26 @@ TEST_F(RedisReplyBuilderTest, SendScoredArray) {
 
   builder_->SetResp3(false);
   builder_->SendScoredArray(scored_array, false);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "Resp2 WITHOUT scores failed.";
 
   builder_->SetResp3(true);
   builder_->SendScoredArray(scored_array, false);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "Resp3 WITHOUT scores failed.";
 
   builder_->SetResp3(false);
   builder_->SendScoredArray(scored_array, true);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(),
             "*6\r\n$2\r\ne1\r\n$3\r\n1.1\r\n$2\r\ne2\r\n$3\r\n2.2\r\n$2\r\ne3\r\n$3\r\n3.3\r\n")
       << "Resp3 WITHSCORES failed.";
 
   builder_->SetResp3(true);
   builder_->SendScoredArray(scored_array, true);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(),
             "*3\r\n*2\r\n$2\r\ne1\r\n,1.1\r\n*2\r\n$2\r\ne2\r\n,2.2\r\n*2\r\n$2\r\ne3\r\n,3.3\r\n")
       << "Resp3 WITHSCORES failed.";
@@ -781,14 +798,14 @@ TEST_F(RedisReplyBuilderTest, SendMGetResponse) {
 
   builder_->SetResp3(false);
   builder_->SendMGetResponse(std::move(resp));
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv1\r\n$-1\r\n$2\r\nv3\r\n")
       << "Resp2 SendMGetResponse failed.";
 
   resp = MakeMGetResponse({"v1", nullopt, "v3"});
   builder_->SetResp3(true);
   builder_->SendMGetResponse(std::move(resp));
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv1\r\n_\r\n$2\r\nv3\r\n")
       << "Resp3 SendMGetResponse failed.";
 }
@@ -919,17 +936,17 @@ TEST_F(RedisReplyBuilderTest, VerbatimString) {
 
   builder_->SetResp3(true);
   builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::TXT);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "=20\r\ntxt:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
 
   builder_->SetResp3(true);
   builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::MARKDOWN);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "=20\r\nmkd:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
 
   builder_->SetResp3(false);
   builder_->SendVerbatimString(str);
-  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "$16\r\nA simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
 }
 

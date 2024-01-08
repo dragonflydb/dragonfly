@@ -186,7 +186,7 @@ class Transaction {
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
-  facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeysProvider cb);
+  facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeysProvider cb, KeyReadyChecker krc);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue.
@@ -261,7 +261,7 @@ class Transaction {
     return txid_;
   }
 
-  IntentLock::Mode Mode() const;  // Based on command mask
+  IntentLock::Mode LockMode() const;  // Based on command mask
 
   std::string_view Name() const;  // Based on command name
 
@@ -387,6 +387,7 @@ class Transaction {
     // executing multi-command. For every write to a shard journal, the corresponding index in the
     // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
+    unsigned cmd_seq_num = 0;  // used for debugging purposes.
   };
 
   enum CoordinatorState : uint8_t {
@@ -455,7 +456,7 @@ class Transaction {
   void ExecuteAsync();
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
+  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc);
 
   // Expire blocking transaction, unlock keys and unregister it from the blocking controller
   void ExpireBlocking(WaitKeysProvider wcb);

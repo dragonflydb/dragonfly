@@ -32,10 +32,15 @@ ABSL_FLAG(bool, conn_use_incoming_cpu, false,
 ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
 ABSL_FLAG(string, tls_ca_cert_file, "", "ca signed certificate to validate tls connections");
-ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
+ABSL_FLAG(string, tls_ca_cert_dir, "",
+          "ca signed certificates directory. Use c_rehash before, read description in "
+          "https://www.openssl.org/docs/man3.0/man1/c_rehash.html");
 ABSL_FLAG(uint32_t, tcp_keepalive, 300,
           "the period in seconds of inactivity after which keep-alives are triggerred,"
           "the duration until an inactive connection is terminated is twice the specified time");
+ABSL_FLAG(uint32_t, tcp_user_timeout, 0,
+          "the maximum period in milliseconds that transimitted data may stay unacknowledged "
+          "before TCP aborts the connection. 0 means OS default timeout");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 
@@ -191,6 +196,13 @@ error_code Listener::ConfigureServerSocket(int fd) {
     LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
   bool success = ConfigureKeepAlive(fd);
+
+#ifdef __linux__
+  int user_timeout = absl::GetFlag(FLAGS_tcp_user_timeout);
+  if (setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout, sizeof(int)) < 0) {
+    LOG(WARNING) << "Could not set user timeout on socket " << SafeErrorMessage(errno);
+  }
+#endif
 
   if (!success) {
 #ifndef __APPLE__

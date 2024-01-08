@@ -10,6 +10,9 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/zmalloc.h"
 }
+#include <sys/statvfs.h>
+
+#include <filesystem>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -19,6 +22,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "strings/human_readable.h"
 #include "util/varz.h"
 
 using namespace std;
@@ -28,6 +32,11 @@ ABSL_FLAG(string, spill_file_prefix, "",
           "The string denotes the path and prefix of the files "
           " associated with tiered storage. E.g,"
           "spill_file_prefix=/path/to/file-prefix");
+
+ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
+          "Limit on maximum file size that is used by the database for tiered storage. "
+          "0 - means the program will automatically determine its maximum file size. "
+          "default: 0");
 
 ABSL_FLAG(uint32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
@@ -49,14 +58,16 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "this, memory in this page will defragmented");
 
 ABSL_FLAG(string, shard_round_robin_prefix, "",
-          "When non-empty, keys with hash-tags, whose hash-tag starts with this prefix are not "
-          "distributed across shards based on their value but instead via round-robin. Use "
-          "cautiously! This can efficiently support up to a few hundreds of hash-tags.");
+          "When non-empty, keys which start with this prefix are not distributed across shards "
+          "based on their value but instead via round-robin. Use cautiously! This can efficiently "
+          "support up to a few hundreds of prefixes. Note: prefix is looked inside hash tags when "
+          "cluster mode is enabled.");
 
 namespace dfly {
 
 using namespace util;
 using absl::GetFlag;
+using strings::HumanReadableNumBytes;
 
 namespace {
 
@@ -123,10 +134,6 @@ class RoundRobinSharder {
   }
 
   static optional<ShardId> TryGetShardId(string_view key, XXH64_hash_t key_hash) {
-    if (!IsEnabled()) {
-      return nullopt;
-    }
-
     DCHECK(!round_robin_shards_tl_cache_.empty());
 
     if (!absl::StartsWith(key, round_robin_prefix_)) {
@@ -201,9 +208,12 @@ EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
+  static_assert(sizeof(Stats) == 32);
+
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
   defrag_task_invocation_total += o.defrag_task_invocation_total;
+  poll_execution_total += o.poll_execution_total;
 
   return *this;
 }
@@ -387,7 +397,7 @@ void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
   });
 }
 
-void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
+void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t max_file_size) {
   CHECK(shard_ == nullptr) << pb->GetPoolIndex();
 
   mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
@@ -404,7 +414,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
       exit(1);
     }
 
-    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
+    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_, max_file_size));
     error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
   }
@@ -441,9 +451,10 @@ void EngineShard::DestroyThreadLocal() {
 // Only runs in its own thread.
 void EngineShard::PollExecution(const char* context, Transaction* trans) {
   DVLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
-           << txq_.size() << " " << continuation_trans_;
+           << txq_.size() << " " << (continuation_trans_ ? continuation_trans_->DebugId() : "");
 
   ShardId sid = shard_id();
+  stats_.poll_execution_total++;
 
   uint16_t trans_mask = trans ? trans->GetLocalMask(sid) : 0;
   if (trans_mask & Transaction::AWAKED_Q) {
@@ -457,23 +468,27 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
   }
 
+  string dbg_id;
+
   if (continuation_trans_) {
     if (trans == continuation_trans_)
       trans = nullptr;
 
     if (continuation_trans_->IsArmedInShard(sid)) {
+      if (VLOG_IS_ON(1)) {
+        dbg_id = continuation_trans_->DebugId();
+      }
       bool to_keep = continuation_trans_->RunInShard(this, false);
-      DVLOG(1) << "RunContTrans: " << (continuation_trans_ ? continuation_trans_->DebugId() : "")
-               << " keep: " << to_keep;
+      DVLOG(1) << "RunContTrans: " << dbg_id << " keep: " << to_keep;
       if (!to_keep) {
+        // if this holds, we can remove this check altogether.
+        DCHECK(continuation_trans_ == nullptr);
         continuation_trans_ = nullptr;
       }
     }
   }
 
   Transaction* head = nullptr;
-  string dbg_id;
-
   if (continuation_trans_ == nullptr) {
     while (!txq_.Empty()) {
       // we must check every iteration so that if the current transaction awakens
@@ -701,25 +716,27 @@ void EngineShard::TEST_EnableHeartbeat() {
 auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
   const TxQueue* queue = txq();
 
+  ShardId sid = shard_id();
   TxQueueInfo info;
+
   if (queue->Empty())
     return info;
 
   auto cur = queue->Head();
   info.tx_total = queue->size();
   unsigned max_db_id = 0;
-  ShardId sid = shard_id();
 
   do {
     auto value = queue->At(cur);
     Transaction* trx = std::get<Transaction*>(value);
-
     // find maximum index of databases used by transactions
     if (trx->GetDbIndex() > max_db_id) {
       max_db_id = trx->GetDbIndex();
     }
 
-    if (trx->IsArmedInShard(sid)) {
+    bool is_armed = trx->IsArmedInShard(sid);
+    DVLOG(1) << "Inspecting " << trx->DebugId() << " is_armed " << is_armed;
+    if (is_armed) {
       info.tx_armed++;
 
       if (trx->IsGlobal() || (trx->IsMulti() && trx->GetMultiMode() == Transaction::GLOBAL)) {
@@ -768,14 +785,52 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
 
  */
 
+uint64_t GetFsLimit() {
+  std::filesystem::path file_path(GetFlag(FLAGS_spill_file_prefix));
+  std::string dir_name_str = file_path.parent_path().string();
+
+  struct statvfs stat;
+  if (statvfs(dir_name_str.c_str(), &stat) == 0) {
+    uint64_t limit = stat.f_frsize * stat.f_blocks;
+    return limit;
+  }
+  LOG(WARNING) << "Error getting filesystem information";
+  return 0;
+}
+
 void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   CHECK_EQ(0u, size());
   cached_stats.resize(sz);
   shard_queue_.resize(sz);
 
+  string file_prefix = GetFlag(FLAGS_spill_file_prefix);
+  size_t max_shard_file_size = 0;
+  if (!file_prefix.empty()) {
+    size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;
+    size_t max_file_size_limit = GetFsLimit();
+    if (max_file_size == 0) {
+      LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
+      max_file_size = (max_file_size_limit * 0.8);
+    } else {
+      if (max_file_size_limit < max_file_size) {
+        LOG(WARNING) << "Got max file size " << HumanReadableNumBytes(max_file_size)
+                     << ", however only " << HumanReadableNumBytes(max_file_size_limit)
+                     << " disk space was found.";
+      }
+    }
+    max_shard_file_size = max_file_size / shard_queue_.size();
+    if (max_shard_file_size < 256_MB) {
+      LOG(ERROR) << "Max tiering file size is too small. Setting: "
+                 << HumanReadableNumBytes(max_file_size) << " Required at least "
+                 << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
+      exit(1);
+    }
+    LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
+  }
+
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
-      InitThreadLocal(pb, update_db_time);
+      InitThreadLocal(pb, update_db_time, max_shard_file_size);
     }
   });
 }
@@ -784,8 +839,8 @@ void EngineShardSet::Shutdown() {
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
-void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
-  EngineShard::InitThreadLocal(pb, update_db_time);
+void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t max_file_size) {
+  EngineShard::InitThreadLocal(pb, update_db_time, max_file_size);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();
 }
@@ -803,18 +858,16 @@ void EngineShardSet::TEST_EnableCacheMode() {
 }
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  bool has_hashtags = false;
   if (ClusterConfig::IsEnabledOrEmulated()) {
     string_view v_hash_tag = ClusterConfig::KeyTag(v);
     if (v_hash_tag.size() != v.size()) {
-      has_hashtags = true;
       v = v_hash_tag;
     }
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
 
-  if (has_hashtags) {
+  if (RoundRobinSharder::IsEnabled()) {
     auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
     if (round_robin.has_value()) {
       return *round_robin;
