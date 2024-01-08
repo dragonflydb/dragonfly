@@ -132,6 +132,8 @@ std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
       flow->Cancel();
+
+    multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 

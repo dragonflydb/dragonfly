@@ -599,14 +599,7 @@ error_code Replica::ConsumeDflyStream() {
       flow->Cancel();
     }
 
-    // Iterate over map and cancel all blocking entities
-    {
-      lock_guard lk{multi_shard_exe_->map_mu};
-      for (auto& tx_data : multi_shard_exe_->tx_sync_execution) {
-        tx_data.second.barrier.Cancel();
-        tx_data.second.block.Cancel();
-      }
-    }
+    multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
@@ -945,12 +938,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
     return;
   }
 
-  VLOG(2) << "Execute txid: " << tx_data.txid;
-  std::unique_lock lk(multi_shard_exe_->map_mu);
-  auto it = multi_shard_exe_->tx_sync_execution.find(tx_data.txid);
-  DCHECK(it != multi_shard_exe_->tx_sync_execution.end());
-  auto& multi_shard_data = it->second;
-  lk.unlock();
+  auto& multi_shard_data = multi_shard_exe_->Find(tx_data.txid);
 
   VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
   // Wait until shards flows got transaction data and inserted to map.
@@ -992,8 +980,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
   auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
   VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
   if (val == 1) {
-    std::lock_guard lg{multi_shard_exe_->map_mu};
-    multi_shard_exe_->tx_sync_execution.erase(tx_data.txid);
+    multi_shard_exe_->Erase(tx_data.txid);
   }
 }
 

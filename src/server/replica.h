@@ -30,7 +30,7 @@ class JournalExecutor;
 struct JournalReader;
 class DflyShardReplica;
 
-struct MultiShardExecution;
+class MultiShardExecution;
 
 // The attributes of the master we are connecting to.
 struct MasterContext {

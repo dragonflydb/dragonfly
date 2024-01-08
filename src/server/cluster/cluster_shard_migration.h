@@ -11,7 +11,7 @@ namespace dfly {
 
 class Service;
 
-struct MultiShardExecution;
+class MultiShardExecution;
 
 // ClusterShardMigration manage data receiving in slots migration process.
 // It is created per shard on the target node to initiate FLOW step.

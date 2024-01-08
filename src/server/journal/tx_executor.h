@@ -12,11 +12,8 @@ namespace dfly {
 class Service;
 
 // Coordinator for multi shard execution.
-struct MultiShardExecution {
-  bool InsertTxToSharedMap(TxId txid, uint32_t shard_cnt);
-
-  Mutex map_mu;
-
+class MultiShardExecution {
+ public:
   struct TxExecutionSync {
     Barrier barrier;
     std::atomic_uint32_t counter;
@@ -27,6 +24,13 @@ struct MultiShardExecution {
     }
   };
 
+  bool InsertTxToSharedMap(TxId txid, uint32_t shard_cnt);
+  TxExecutionSync& Find(TxId txid);
+  void Erase(TxId txid);
+  void CancelAllBlockingEntities();
+
+ private:
+  Mutex map_mu;
   std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
 };
 
