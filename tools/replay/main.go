@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/binary"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"sync"
@@ -28,76 +25,10 @@ type RecordHeader struct {
 
 type Record struct {
 	RecordHeader
-	values []interface{}
+	values []interface{} // instead of []string to unwrap into variadic
 }
 
-var kBigEmptyBytes = make([]byte, 100_000)
-
-func parseStrings(file io.Reader) (out []interface{}, err error) {
-	var num, strLen uint32
-	err = binary.Read(file, binary.LittleEndian, &num)
-	if err != nil {
-		return nil, err
-	}
-
-	out = make([]interface{}, num)
-	for i := uint32(0); i < num; i++ {
-		err = binary.Read(file, binary.LittleEndian, &strLen)
-		if err != nil {
-			return nil, err
-		}
-
-		if strLen == 0 {
-			err = binary.Read(file, binary.LittleEndian, &strLen)
-			if err != nil {
-				return nil, err
-			}
-			out[i] = kBigEmptyBytes[:strLen]
-			continue
-		}
-
-		buf := make([]byte, strLen)
-		_, err := io.ReadFull(file, buf)
-		if err != nil {
-			return nil, err
-		}
-
-		out[i] = string(buf)
-	}
-	return
-}
-
-func parseRecords(filename string, cb func(Record) bool) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	reader := bufio.NewReader(file)
-	for {
-		var rec Record
-		err := binary.Read(reader, binary.LittleEndian, &rec.RecordHeader)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
-		}
-
-		rec.values, err = parseStrings(reader)
-		if err != nil {
-			return err
-		}
-
-		if !cb(rec) {
-			return nil
-		}
-	}
-
-	return nil
-}
-
+// Determine earliest time
 func DetermineBaseTime(files []string) time.Time {
 	var minTime uint64 = math.MaxUint64
 	for _, file := range files {
@@ -111,25 +42,24 @@ func DetermineBaseTime(files []string) time.Time {
 	return time.Unix(0, int64(minTime))
 }
 
-func ApproxLatency() time.Duration {
-	redis := redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1})
-
-	var total time.Duration
-	for i := 0; i < 10; i += 1 {
-		before := time.Now()
-		redis.Ping(context.Background()).Result()
-		took := time.Since(before)
-		total += took
-	}
-	return total / time.Duration(10)
-}
-
-type Client struct {
+// Handles a single connection/client
+type ClientWorker struct {
 	redis    *redis.Client
 	incoming chan Record
 }
 
-func (c Client) Run(worker *Worker) {
+// Handles a single file and distributes messages to clients
+type FileWorker struct {
+	clientGroup sync.WaitGroup
+	timeOffset  time.Duration
+	// stats for output, updated by clients, read by rendering goroutine
+	processed atomic.Uint64
+	delayed   atomic.Uint64
+	parsed    atomic.Uint64
+	clients   atomic.Uint64
+}
+
+func (c ClientWorker) Run(worker *FileWorker) {
 	for msg := range c.incoming {
 		lag := time.Until(worker.HappensAt(time.Unix(0, int64(msg.Time))))
 		if lag < 0 {
@@ -143,8 +73,8 @@ func (c Client) Run(worker *Worker) {
 	worker.clientGroup.Done()
 }
 
-func NewClient(w *Worker) *Client {
-	client := &Client{
+func NewClient(w *FileWorker) *ClientWorker {
+	client := &ClientWorker{
 		redis:    redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true}),
 		incoming: make(chan Record, *fClientBuffer),
 	}
@@ -154,18 +84,8 @@ func NewClient(w *Worker) *Client {
 	return client
 }
 
-type Worker struct {
-	clientGroup   sync.WaitGroup
-	timeOffset    time.Duration
-	approxLatency time.Duration
-	processed     atomic.Uint64
-	delayed       atomic.Uint64
-	parsed        atomic.Uint64
-	clients       atomic.Uint64
-}
-
-func (w *Worker) Run(file string, wg *sync.WaitGroup) {
-	clients := make(map[uint32]*Client, 0)
+func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
+	clients := make(map[uint32]*ClientWorker, 0)
 	parseRecords(file, func(r Record) bool {
 		client, ok := clients[r.Client]
 		if !ok {
@@ -185,11 +105,11 @@ func (w *Worker) Run(file string, wg *sync.WaitGroup) {
 	wg.Done()
 }
 
-func (w *Worker) HappensAt(recordTime time.Time) time.Time {
-	return recordTime.Add(w.timeOffset).Add(-w.approxLatency)
+func (w *FileWorker) HappensAt(recordTime time.Time) time.Time {
+	return recordTime.Add(w.timeOffset)
 }
 
-func RenderTable(area *pterm.AreaPrinter, files []string, workers []Worker) {
+func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
 	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients"}}
 	for i := range workers {
 		tableData = append(tableData, []string{
@@ -200,7 +120,6 @@ func RenderTable(area *pterm.AreaPrinter, files []string, workers []Worker) {
 			fmt.Sprint(workers[i].clients.Load()),
 		})
 	}
-
 	content, _ := pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(tableData).Srender()
 	area.Update(content)
 }
@@ -210,18 +129,13 @@ func main() {
 	files := os.Args[1:]
 
 	timeOffset := time.Now().Add(500 * time.Millisecond).Sub(DetermineBaseTime(files))
-	approxyLatency := ApproxLatency()
-
 	fmt.Println("Offset -> ", timeOffset)
-	fmt.Println("Approx latency -> ", approxyLatency)
 
+	// Start a worker for every file. They take care of spawning client workers.
 	var wg sync.WaitGroup
-	workers := make([]Worker, len(files))
+	workers := make([]FileWorker, len(files))
 	for i := range workers {
-		workers[i] = Worker{
-			timeOffset:    timeOffset,
-			approxLatency: approxyLatency,
-		}
+		workers[i] = FileWorker{timeOffset: timeOffset}
 		wg.Add(1)
 		go workers[i].Run(files[i], &wg)
 	}
@@ -232,6 +146,7 @@ func main() {
 		wgDone <- true
 	}()
 
+	// Render table while running
 	area, _ := pterm.DefaultArea.WithCenter().Start()
 	for running := true; running; {
 		select {
@@ -242,5 +157,5 @@ func main() {
 		}
 	}
 
-	RenderTable(area, files, workers)
+	RenderTable(area, files, workers) // to show last stats
 }
