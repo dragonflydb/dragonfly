@@ -8,8 +8,8 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
-#include <fstream>
 #include <numeric>
+#include <shared_mutex>
 #include <variant>
 
 #include "absl/strings/str_cat.h"
@@ -104,45 +104,47 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
 }
 
 struct TrafficLogger {
-  base::IoBuf buf;
-  // std::unique_ptr<io::WriteFile> file;
-  std::ofstream file;
+  fb2::SharedMutex mutex;
+  std::unique_ptr<io::WriteFile> file;
+  std::vector<base::IoBuf> buffer_pool;
 };
 
-thread_local std::optional<TrafficLogger> tl_traffic_logger{};  // nullopt while disabled
+thread_local TrafficLogger tl_traffic_logger{};  // nullopt while disabled
 
 void OpenTrafficLogger() {
-  if (tl_traffic_logger.has_value())
+  std::unique_lock lk{tl_traffic_logger.mutex};
+  if (tl_traffic_logger.file)
     return;
 
+  // Open file with append mode, without it concurrent fiber writes seem to conflict
   string path = "./traffic-log-" + to_string(ProactorBase::me()->GetPoolIndex());
-  // auto file = util::fb2::OpenWrite(path, {});
-  // if (!file)
-  //   return;
-
-  std::ofstream file(path, std::ofstream::out | std::ofstream::binary | std::ofstream::trunc);
-  if (file.bad())
+  auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ true});
+  if (!file)
     return;
 
-  tl_traffic_logger = TrafficLogger{base::IoBuf{}, std::move(file)};
-  // tl_traffic_logger = TrafficLogger{base::IoBuf{}, std::unique_ptr<io::WriteFile>{file.value()}};
+  tl_traffic_logger.file = std::unique_ptr<io::WriteFile>{file.value()};
 }
 
 void StopTrafficLogger() {
-  if (!tl_traffic_logger.has_value())
-    return;
-
-  tl_traffic_logger->file.flush();
-  tl_traffic_logger->file.close();
-  // tl_traffic_logger->file->Close();
-  tl_traffic_logger.reset();
+  std::unique_lock lk{tl_traffic_logger.mutex};
+  if (tl_traffic_logger.file) {
+    tl_traffic_logger.file->Close();
+    tl_traffic_logger.file.reset();
+  }
 }
 
 void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
-  if (!tl_traffic_logger)
+  if (!tl_traffic_logger.file)  // fast check without locking
     return;
 
-  auto& buf = tl_traffic_logger->buf;
+  std::shared_lock lk{tl_traffic_logger.mutex};
+  if (!tl_traffic_logger.file)
+    return;
+
+  auto& buffers = tl_traffic_logger.buffer_pool;
+  base::IoBuf buf = buffers.empty() ? base::IoBuf{} : std::move(buffers.back());
+  if (!buffers.empty())
+    buffers.pop_back();
 
   uint8_t int_buf[8];
   auto write_u32 = [&buf, &int_buf](uint32_t i) {
@@ -168,9 +170,10 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
     }
   }
 
-  tl_traffic_logger->file.write(facade::ToSV(buf.InputBuffer()).data(), buf.InputLen());
-  // tl_traffic_logger->file->Write(buf.InputBuffer());
+  tl_traffic_logger.file->Write(buf.InputBuffer());
+
   buf.Clear();
+  buffers.push_back(std::move(buf));
 }
 
 constexpr size_t kMinReadSize = 256;
