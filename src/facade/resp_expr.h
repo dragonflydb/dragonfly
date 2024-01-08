@@ -41,7 +41,7 @@ class RespExpr {
   }
 
   std::string GetString() const {
-    return string(GetView());
+    return std::string(GetView());
   }
 
   Buffer GetBuf() const {
