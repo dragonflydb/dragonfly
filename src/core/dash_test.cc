@@ -163,7 +163,7 @@ set<Segment::Key_t> DashTest::FillSegment(unsigned bid) {
   std::equal_to<Segment::Key_t> eq;
   for (Segment::Key_t key = 0; key < 1000000u; ++key) {
     uint64_t hash = dt_.DoHash(key);
-    unsigned bi = (hash >> 8) % Segment::kNumBuckets;
+    unsigned bi = (hash >> 8) % Segment::kRegularBucketCnt;
     if (bi != bid)
       continue;
     uint8_t fp = hash & 0xFF;
@@ -219,7 +219,7 @@ TEST_F(DashTest, Basic) {
 
   auto hfun = &UInt64Policy::HashFn;
 
-  auto cursor = segment_.TraverseLogicalBucket((hash >> 8) % Segment::kNumBuckets, hfun, cb);
+  auto cursor = segment_.TraverseLogicalBucket((hash >> 8) % Segment::kRegularBucketCnt, hfun, cb);
   ASSERT_EQ(1, has_called);
   ASSERT_EQ(0, segment_.TraverseLogicalBucket(cursor, hfun, cb));
   ASSERT_EQ(1, has_called);
@@ -237,7 +237,7 @@ TEST_F(DashTest, Segment) {
   set<Segment::Key_t> keys = FillSegment(0);
 
   EXPECT_TRUE(segment_.GetBucket(0).IsFull() && segment_.GetBucket(1).IsFull());
-  for (size_t i = 2; i < Segment::kNumBuckets; ++i) {
+  for (size_t i = 2; i < Segment::kRegularBucketCnt; ++i) {
     EXPECT_EQ(0, segment_.GetBucket(i).Size());
   }
   EXPECT_EQ(4 * Segment::kNumSlots, keys.size());
@@ -254,10 +254,10 @@ TEST_F(DashTest, Segment) {
   segment_.TraverseAll(cb);
   ASSERT_EQ(keys.size(), has_called);
 
-  ASSERT_TRUE(segment_.GetBucket(Segment::kNumBuckets).IsFull());
+  ASSERT_TRUE(segment_.GetBucket(Segment::kRegularBucketCnt).IsFull());
   std::array<uint64_t, Segment::kNumSlots * 2> arr;
   uint64_t* next = arr.begin();
-  for (unsigned i = Segment::kNumBuckets; i < Segment::kNumBuckets + 2; ++i) {
+  for (unsigned i = Segment::kRegularBucketCnt; i < Segment::kRegularBucketCnt + 2; ++i) {
     const auto* k = &segment_.Key(i, 0);
     next = std::copy(k, k + Segment::kNumSlots, next);
   }
@@ -311,9 +311,10 @@ TEST_F(DashTest, SegmentFull) {
 }
 
 TEST_F(DashTest, Split) {
+  // fills segment with maximum keys that must reside in bucket id 0.
   set<Segment::Key_t> keys = FillSegment(0);
   Segment::Value_t val;
-  Segment s2{2};
+  Segment s2{2};  // segment with local depth 2.
 
   segment_.Split(&UInt64Policy::HashFn, &s2);
   unsigned sum[2] = {0};
@@ -335,8 +336,8 @@ TEST_F(DashTest, Split) {
 
 TEST_F(DashTest, BumpUp) {
   set<Segment::Key_t> keys = FillSegment(0);
-  constexpr unsigned kFirstStashId = Segment::kNumBuckets;
-  constexpr unsigned kSecondStashId = Segment::kNumBuckets + 1;
+  constexpr unsigned kFirstStashId = Segment::kRegularBucketCnt;
+  constexpr unsigned kSecondStashId = Segment::kRegularBucketCnt + 1;
   constexpr unsigned kNumSlots = Segment::kNumSlots;
 
   EXPECT_TRUE(segment_.GetBucket(0).IsFull());
@@ -391,7 +392,7 @@ TEST_F(DashTest, BumpPolicy) {
   };
 
   set<Segment::Key_t> keys = FillSegment(0);
-  constexpr unsigned kFirstStashId = Segment::kNumBuckets;
+  constexpr unsigned kFirstStashId = Segment::kRegularBucketCnt;
 
   EXPECT_TRUE(segment_.GetBucket(0).IsFull());
   EXPECT_TRUE(segment_.GetBucket(1).IsFull());
@@ -886,14 +887,14 @@ struct SimpleEvictPolicy {
   // returns number of items evicted from the table.
   // 0 means - nothing has been evicted.
   unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
-    constexpr unsigned kNumBuckets = U64Dash::HotspotBuckets::kNumBuckets;
+    constexpr unsigned kRegularBucketCnt = U64Dash::HotspotBuckets::kNumBuckets;
 
-    uint32_t bid = hotb.key_hash % kNumBuckets;
+    uint32_t bid = hotb.key_hash % kRegularBucketCnt;
 
     unsigned slot_index = (hotb.key_hash >> 32) % U64Dash::kBucketWidth;
 
-    for (unsigned i = 0; i < kNumBuckets; ++i) {
-      auto it = hotb.at((bid + i) % kNumBuckets);
+    for (unsigned i = 0; i < kRegularBucketCnt; ++i) {
+      auto it = hotb.at((bid + i) % kRegularBucketCnt);
       it += slot_index;
 
       if (it.is_done())
