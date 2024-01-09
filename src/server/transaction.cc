@@ -451,7 +451,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
-  bool is_concluding = coordinator_state_ & COORD_EXEC_CONCLUDING;
+  bool is_concluding = coordinator_state_ & COORD_CONCLUDING;
 
   IntentLock::Mode mode = LockMode();
 
@@ -492,7 +492,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   /*************************************************************************/
 
   // Log to jounrnal only once the command finished running
-  if (is_concluding || multi_->concluding)
+  if (is_concluding || (multi_ && multi_->concluding))
     LogAutoJournalOnShard(shard);
 
   shard->db_slice().OnCbFinish();
@@ -668,20 +668,19 @@ void Transaction::ScheduleInternal() {
 // transactions like set/mset/mget etc. Does not apply for more complicated cases like RENAME or
 // BLPOP where a data must be read from multiple shards before performing another hop.
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
-  DCHECK(!cb_ptr_);
-
   if (multi_ && multi_->role == SQUASHED_STUB) {
     return RunSquashedMultiCb(cb);
   }
 
-  cb_ptr_ = &cb;
-
+  DCHECK(!cb_ptr_);
   DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
+
+  cb_ptr_ = &cb;
 
   if (IsAtomicMulti()) {
     multi_->concluding = true;
   } else {
-    coordinator_state_ |= COORD_EXEC;  // Single hop means we conclude.
+    coordinator_state_ |= COORD_CONCLUDING;  // Single hop means we conclude.
   }
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
@@ -729,9 +728,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     } else {
       shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
     }
-  } else {
-    // This transaction either spans multiple shards and/or is multi.
-
+  } else {                 // This transaction either spans multiple shards and/or is multi.
     if (!IsAtomicMulti())  // Multi schedule in advance.
       ScheduleInternal();
 
@@ -824,13 +821,12 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   DCHECK(!cb_ptr_);
 
   cb_ptr_ = &cb;
-  coordinator_state_ |= COORD_EXEC;
 
   if (IsAtomicMulti()) {
     multi_->concluding = conclude;
   } else {
-    coordinator_state_ = conclude ? (coordinator_state_ | COORD_EXEC_CONCLUDING)
-                                  : (coordinator_state_ & ~COORD_EXEC_CONCLUDING);
+    coordinator_state_ = conclude ? (coordinator_state_ | COORD_CONCLUDING)
+                                  : (coordinator_state_ & ~COORD_CONCLUDING);
   }
 
   ExecuteAsync();
