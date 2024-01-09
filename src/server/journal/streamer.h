@@ -65,6 +65,7 @@ class RestoreStreamer : public JournalStreamer {
 
   void WriteBucket(PrimeTable::bucket_iterator it);
   void WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms);
+  void WriteCommand(journal::Entry::Payload cmd_payload);
 
   DbSlice* db_slice_;
   uint64_t snapshot_version_ = 0;

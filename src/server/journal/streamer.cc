@@ -78,6 +78,8 @@ void RestoreStreamer::Start(io::Sink* dest) {
         last_yield = 0;
       }
     } while (cursor);
+
+    WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT"}));
   });
 }
 
@@ -155,11 +157,16 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pv, uint64_t
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
 
+  WriteCommand(make_pair("RESTORE", ArgSlice{args}));
+}
+
+void RestoreStreamer::WriteCommand(journal::Entry::Payload cmd_payload) {
   journal::Entry entry(0,                     // txid
                        journal::Op::COMMAND,  // single command
                        0,                     // db index
                        1,                     // shard count
-                       ClusterConfig::KeySlot(key), make_pair("RESTORE", ArgSlice{args}));
+                       0,                     // slot-id, but it is ignored at this level
+                       cmd_payload);
 
   JournalWriter writer{this};
   writer.Write(entry);
