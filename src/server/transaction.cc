@@ -925,6 +925,8 @@ void Transaction::ExecuteAsync() {
 }
 
 void Transaction::Conclude() {
+  if (!IsScheduled())
+    return;
   auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
   Execute(std::move(cb), true);
 }

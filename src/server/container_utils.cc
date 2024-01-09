@@ -274,8 +274,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     result = FindFirstNonEmpty(trans, req_obj_type);
   }
 
-  DCHECK(trans->IsScheduled());  // we continue with blocking and waking up eventually
-
   // If a non-empty key exists, execute the callback immediately
   if (result.ok()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -286,7 +284,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
       return OpStatus::OK;
     };
     trans->Execute(std::move(cb), true);
-
     return result_key;
   }
 
@@ -302,6 +299,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::TIMED_OUT;
   }
 
+  DCHECK(trans->IsScheduled());  // we still hold the keys
   VLOG(1) << "Blocking " << trans->DebugId();
 
   // If timeout (limit_ms) is zero, block indefinitely

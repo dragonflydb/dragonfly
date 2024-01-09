@@ -195,7 +195,7 @@ class Transaction {
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
 
-  // Conclude transaction
+  // Conclude transaction. Ignores if not schedules
   void Conclude();
 
   // Called by engine shard to execute a transaction hop.
