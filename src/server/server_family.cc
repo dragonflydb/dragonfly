@@ -276,7 +276,7 @@ template <typename T> void UpdateMax(T* maxv, T current) {
 
 void SetMasterFlagOnAllThreads(bool is_master) {
   auto cb = [is_master](auto* pb) { ServerState::tlocal()->is_master = is_master; };
-  shard_set->pool()->DispatchBrief(cb);
+  shard_set->pool()->Await(cb);
 }
 
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {

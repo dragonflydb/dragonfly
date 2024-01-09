@@ -445,7 +445,7 @@ async def test_cancel_replication_immediately(
             return True
         except redis.exceptions.ResponseError as e:
             err = e.args[0]
-            assert err == "replication cancelled" or err == "Can not execute during LOADING"
+            assert err == "replication cancelled"
             return False
 
     ping_job = asyncio.create_task(ping_status())
