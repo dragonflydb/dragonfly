@@ -82,13 +82,6 @@ std::string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]);
 // Find value by key and return stringview to it, otherwise nullopt.
 std::optional<std::string_view> LpFind(uint8_t* lp, std::string_view key, uint8_t int_buf[]);
 
-struct ShardFFResult {
-  PrimeKey key;
-  ShardId sid = kInvalidSid;
-};
-
-OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_type);
-
 using BlockingResultCb =
     std::function<void(Transaction*, EngineShard*, std::string_view /* key */)>;
 

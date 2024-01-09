@@ -83,7 +83,6 @@ using facade::OpStatus;
 // })
 //
 // ```
-
 class Transaction {
   friend class BlockingController;
 
@@ -104,9 +103,32 @@ class Transaction {
   }
 
  public:
+  // Result returned by callbacks. Most should use the implcit conversion from OpStatus.
+  struct RunnableResult {
+    using Flags = uint16_t;
+    enum Flag : Flags {
+      // Can be issued by a **single** shard callback to avoid concluding, i.e. perform one more hop
+      // even if not requested ahead. Used for blocking command fallback.
+      AVOID_CONCLUDING = 1,
+    };
+
+    RunnableResult(OpStatus status = OpStatus::OK, Flags flags = 0) : status(status), flags(flags) {
+    }
+
+    operator OpStatus() const {
+      return status;
+    }
+
+    OpStatus status;
+    uint16_t flags;
+  };
+
+  static_assert(sizeof(RunnableResult) == 4);
+
   using time_point = ::std::chrono::steady_clock::time_point;
   // Runnable that is run on shards during hop executions (often named callback).
-  using RunnableType = absl::FunctionRef<OpStatus(Transaction* t, EngineShard*)>;
+  // Callacks should return `OpStatus` which is implicitly converitble to `RunnableResult`!
+  using RunnableType = absl::FunctionRef<RunnableResult(Transaction* t, EngineShard*)>;
   // Provides keys to block on for specific shard.
   using WaitKeysProvider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
 
@@ -276,6 +298,10 @@ class Transaction {
     return bool(multi_);
   }
 
+  bool IsScheduled() const {
+    return coordinator_state_ & COORD_SCHED;
+  }
+
   MultiMode GetMultiMode() const {
     return multi_->mode;
   }
@@ -392,7 +418,6 @@ class Transaction {
 
   enum CoordinatorState : uint8_t {
     COORD_SCHED = 1,
-    COORD_EXEC = 2,
 
     COORD_EXEC_CONCLUDING = 1 << 2,  // Whether its the last hop of a transaction
     COORD_BLOCKED = 1 << 3,
@@ -451,7 +476,7 @@ class Transaction {
   std::pair<bool, bool> ScheduleInShard(EngineShard* shard);
 
   // Optimized version of RunInShard for single shard uncontended cases.
-  void RunQuickie(EngineShard* shard);
+  RunnableResult RunQuickie(EngineShard* shard);
 
   void ExecuteAsync();
 
