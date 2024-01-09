@@ -60,9 +60,30 @@ void RestoreStreamer::Start(io::Sink* dest) {
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   JournalStreamer::Start(dest);
+
+  DCHECK(!snapshot_fb_.IsJoinable());
+  snapshot_fb_ = fb2::Fiber("slot-snapshot", [this] {
+    PrimeTable::Cursor cursor;
+    uint64_t last_yield = 0;
+    PrimeTable* pt = &db_slice_->databases()[0]->prime;
+
+    do {
+      if (fiber_cancellation_.IsCancelled())
+        return;
+
+      cursor = pt->Traverse(cursor, absl::bind_front(&RestoreStreamer::WriteBucket, this));
+
+      if (last_yield >= 100) {
+        ThisFiber::Yield();
+        last_yield = 0;
+      }
+    } while (cursor);
+  });
 }
 
 void RestoreStreamer::Cancel() {
+  fiber_cancellation_.Cancel();
+  snapshot_fb_.JoinIfNeeded();
   db_slice_->UnregisterOnChange(snapshot_version_);
   JournalStreamer::Cancel();
 }
@@ -79,50 +100,48 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.contains(slot_id);
 }
 
-void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  DCHECK_EQ(db_index, 0) << "Cluster mode should only support db0";
+void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+  DCHECK_LT(it.GetVersion(), snapshot_version_);
+  it.SetVersion(snapshot_version_);
 
-  auto iterate_bucket = [this](DbIndex db_index, PrimeTable::bucket_iterator it) {
-    DCHECK_LT(it.GetVersion(), snapshot_version_);
-    it.SetVersion(snapshot_version_);
+  while (!it.is_done()) {
+    const auto& pv = it->second;
 
-    while (!it.is_done()) {
-      const auto& pv = it->second;
+    string key_buffer;
+    string_view key = it->first.GetSlice(&key_buffer);
 
-      string key_buffer;
-      string_view key = it->first.GetSlice(&key_buffer);
-
-      uint64_t expire = 0;
-      if (pv.HasExpire()) {
-        auto eit = db_slice_->databases()[db_index]->expire.Find(it->first);
-        expire = db_slice_->ExpireTime(eit);
-      }
-
-      WriteEntry(db_index, key, pv, expire);
-
-      ++it;
+    uint64_t expire = 0;
+    if (pv.HasExpire()) {
+      auto eit = db_slice_->databases()[0]->expire.Find(it->first);
+      expire = db_slice_->ExpireTime(eit);
     }
-  };
 
-  FiberAtomicGuard fg;
-  PrimeTable* table = db_slice_->GetTables(db_index).first;
+    WriteEntry(key, pv, expire);
 
-  if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    if (bit->GetVersion() < snapshot_version_) {
-      iterate_bucket(db_index, *bit);
-    }
-  } else {
-    string_view key = get<string_view>(req.change);
-    table->CVCUponInsert(snapshot_version_, key,
-                         [this, db_index, iterate_bucket](PrimeTable::bucket_iterator it) {
-                           DCHECK_LT(it.GetVersion(), snapshot_version_);
-                           iterate_bucket(db_index, it);
-                         });
+    ++it;
   }
 }
 
-void RestoreStreamer::WriteEntry(DbIndex db_index, string_view key, const PrimeValue& pv,
-                                 uint64_t expire_ms) {
+void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
+
+  FiberAtomicGuard fg;
+  PrimeTable* table = db_slice_->GetTables(0).first;
+
+  if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (bit->GetVersion() < snapshot_version_) {
+      WriteBucket(*bit);
+    }
+  } else {
+    string_view key = get<string_view>(req.change);
+    table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
+      DCHECK_LT(it.GetVersion(), snapshot_version_);
+      WriteBucket(it);
+    });
+  }
+}
+
+void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
   absl::InlinedVector<string_view, 4> args;
 
   args.push_back(key);
@@ -138,7 +157,7 @@ void RestoreStreamer::WriteEntry(DbIndex db_index, string_view key, const PrimeV
 
   journal::Entry entry(0,                     // txid
                        journal::Op::COMMAND,  // single command
-                       db_index,              //
+                       0,                     // db index
                        1,                     // shard count
                        ClusterConfig::KeySlot(key), make_pair("RESTORE", ArgSlice{args}));
 

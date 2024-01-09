@@ -63,11 +63,14 @@ class RestoreStreamer : public JournalStreamer {
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(SlotId slot_id) const;
 
-  void WriteEntry(DbIndex db_index, string_view key, const PrimeValue& pv, uint64_t expire_ms);
+  void WriteBucket(PrimeTable::bucket_iterator it);
+  void WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms);
 
   DbSlice* db_slice_;
   uint64_t snapshot_version_ = 0;
   SlotSet my_slots_;
+  Fiber snapshot_fb_;
+  Cancellation fiber_cancellation_;
 };
 
 }  // namespace dfly
