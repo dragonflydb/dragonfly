@@ -96,29 +96,34 @@ void Transaction::InitGlobal() {
 
 void Transaction::BuildShardIndex(const KeyIndex& key_index, bool rev_mapping,
                                   std::vector<PerShardCache>* out) {
+  auto args = full_args_;
+
   auto& shard_index = *out;
 
-  auto add = [this, rev_mapping, &shard_index](string_view key, uint32_t i) {
-    unique_slot_checker_.Add(key);
-
-    uint32_t sid = Shard(key, shard_data_.size());
-    shard_index[sid].args.push_back(key);
+  auto add = [this, rev_mapping, &shard_index](uint32_t sid, uint32_t i) {
+    string_view val = ArgS(full_args_, i);
+    shard_index[sid].args.push_back(val);
     if (rev_mapping)
       shard_index[sid].original_index.push_back(i);
   };
 
   if (key_index.bonus) {
     DCHECK(key_index.step == 1);
-    add(ArgS(full_args_, *key_index.bonus), *key_index.bonus);
+    string_view key = ArgS(args, *key_index.bonus);
+    unique_slot_checker_.Add(key);
+    uint32_t sid = Shard(key, shard_data_.size());
+    add(sid, *key_index.bonus);
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(full_args_, i);
-    add(key, i);
+    string_view key = ArgS(args, i);
+    unique_slot_checker_.Add(key);
+    uint32_t sid = Shard(key, shard_data_.size());
+    add(sid, i);
 
     DCHECK_LE(key_index.step, 2u);
     if (key_index.step == 2) {  // Handle value associated with preceding key.
-      add(key, ++i);
+      add(sid, ++i);
     }
   }
 }
