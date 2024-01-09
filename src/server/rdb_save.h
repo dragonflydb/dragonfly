@@ -196,9 +196,6 @@ class RdbSerializer : public SerializerBase {
 
   ~RdbSerializer();
 
-  // Dumps `obj` in DUMP command format. Uses default compression mode.
-  static std::string DumpObject(const CompactObj& obj);
-
   std::error_code FlushToSink(io::Sink* s) override;
   std::error_code SelectDb(uint32_t dbid);
 
