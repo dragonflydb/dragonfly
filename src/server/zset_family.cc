@@ -2892,7 +2892,7 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
     }
     return OpStatus::OK;
   };
-  cntx->transaction->Execute(std::move(cb), false);
+  cntx->transaction->Execute(std::move(cb), geo_ops.store == GeoStoreType::kNoStore);
 
   // filter potential result list
   double xy[2];
@@ -2908,13 +2908,6 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
         }
       }
     }
-  }
-
-  // if no matching results, the user gets an empty reply.
-  if (ga.empty()) {
-    rb->SendNull();
-    cntx->transaction->Conclude();
-    return;
   }
 
   // sort and trim by count
@@ -2976,11 +2969,10 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
       }
       return OpStatus::OK;
     };
-    cntx->transaction->Execute(std::move(store_cb), false);
+    cntx->transaction->Execute(std::move(store_cb), true);
 
     rb->SendLong(smvec.size());
   }
-  cntx->transaction->Conclude();
 }
 }  // namespace
 

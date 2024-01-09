@@ -894,6 +894,10 @@ TEST_F(ZSetFamilyTest, GeoSearch) {
               "KM", "WITHCOORD", "WITHDIST"});
   EXPECT_THAT(resp.GetVec().empty(), true);
 
+  resp = Run({"GEOSEARCH", "Europe", "FROMLONLAT", "130.4050", "52.5200", "BYBOX", "10", "10", "KM",
+              "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
   resp = Run({"GEOSEARCH", "Europe", "FROMLONLAT", "13.4050", "52.5200", "BYBOX", "1000", "1000",
               "KM", "WITHCOORD", "WITHDIST"});
   EXPECT_THAT(
