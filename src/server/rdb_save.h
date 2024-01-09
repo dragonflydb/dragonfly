@@ -235,19 +235,4 @@ class RdbSerializer : public SerializerBase {
   DbIndex last_entry_db_index_ = kInvalidDbId;
 };
 
-// Serializes CompactObj as RESTORE commands.
-class RestoreSerializer : public SerializerBase {
- public:
-  explicit RestoreSerializer(CompressionMode compression_mode);
-
-  std::error_code SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
-                            DbIndex dbid);
-
- private:
-  // All members are used for saving allocations.
-  std::string key_buffer_;
-  io::StringSink value_dump_sink_;
-  io::StringSink sink_;
-};
-
 }  // namespace dfly

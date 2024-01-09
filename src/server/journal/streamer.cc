@@ -4,6 +4,10 @@
 
 #include "server/journal/streamer.h"
 
+#include <absl/functional/bind_front.h>
+
+#include "base/logging.h"
+
 namespace dfly {
 using namespace util;
 
@@ -11,10 +15,15 @@ void JournalStreamer::Start(io::Sink* dest) {
   using namespace journal;
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
   journal_cb_id_ = journal_->RegisterOnChange([this](const JournalItem& item, bool allow_await) {
+    if (!ShouldWrite(item)) {
+      return;
+    }
+
     if (item.opcode == Op::NOOP) {
       // No record to write, just await if data was written so consumer will read the data.
       return AwaitIfWritten();
     }
+
     Write(io::Buffer(item.data));
     NotifyWritten(allow_await);
   });
@@ -38,6 +47,103 @@ void JournalStreamer::WriterFb(io::Sink* dest) {
   if (auto ec = ConsumeIntoSink(dest); ec) {
     cntx_->ReportError(ec);
   }
+}
+
+RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal,
+                                 Context* cntx)
+    : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
+  DCHECK(slice != nullptr);
+}
+
+void RestoreStreamer::Start(io::Sink* dest) {
+  auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
+  snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
+
+  JournalStreamer::Start(dest);
+}
+
+void RestoreStreamer::Cancel() {
+  db_slice_->UnregisterOnChange(snapshot_version_);
+  JournalStreamer::Cancel();
+}
+
+bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
+  if (!item.slot.has_value()) {
+    return false;
+  }
+
+  return ShouldWrite(*item.slot);
+}
+
+bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
+  return my_slots_.contains(slot_id);
+}
+
+void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  DCHECK_EQ(db_index, 0) << "Cluster mode should only support db0";
+
+  auto iterate_bucket = [this](DbIndex db_index, PrimeTable::bucket_iterator it) {
+    DCHECK_LT(it.GetVersion(), snapshot_version_);
+    it.SetVersion(snapshot_version_);
+
+    while (!it.is_done()) {
+      const auto& pv = it->second;
+
+      string key_buffer;
+      string_view key = it->first.GetSlice(&key_buffer);
+
+      uint64_t expire = 0;
+      if (pv.HasExpire()) {
+        auto eit = db_slice_->databases()[db_index]->expire.Find(it->first);
+        expire = db_slice_->ExpireTime(eit);
+      }
+
+      WriteEntry(db_index, key, pv, expire);
+
+      ++it;
+    }
+  };
+
+  FiberAtomicGuard fg;
+  PrimeTable* table = db_slice_->GetTables(db_index).first;
+
+  if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (bit->GetVersion() < snapshot_version_) {
+      iterate_bucket(db_index, *bit);
+    }
+  } else {
+    string_view key = get<string_view>(req.change);
+    table->CVCUponInsert(snapshot_version_, key,
+                         [this, db_index, iterate_bucket](PrimeTable::bucket_iterator it) {
+                           DCHECK_LT(it.GetVersion(), snapshot_version_);
+                           iterate_bucket(db_index, it);
+                         });
+  }
+}
+
+void RestoreStreamer::WriteEntry(DbIndex db_index, string_view key, const PrimeValue& pv,
+                                 uint64_t expire_ms) {
+  absl::InlinedVector<string_view, 4> args;
+
+  args.push_back(key);
+
+  string expire_str = absl::StrCat(expire_ms);
+  args.push_back(expire_str);
+
+  io::StringSink value_dump_sink;
+  SerializerBase::DumpObject(pv, &value_dump_sink);
+  args.push_back(value_dump_sink.str());
+
+  args.push_back("ABSTTL");  // Means expire string is since epoch
+
+  journal::Entry entry(0,                     // txid
+                       journal::Op::COMMAND,  // single command
+                       db_index,              //
+                       1,                     // shard count
+                       ClusterConfig::KeySlot(key), make_pair("RESTORE", ArgSlice{args}));
+
+  JournalWriter writer{this};
+  writer.Write(entry);
 }
 
 }  // namespace dfly

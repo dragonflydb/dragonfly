@@ -151,6 +151,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     item->lsn = -1;
     item->opcode = entry.opcode;
     item->data = "";
+    item->slot = entry.slot;
   } else {
     FiberAtomicGuard fg;
     // GetTail gives a pointer to a new tail entry in the buffer, possibly overriding the last entry
@@ -158,6 +159,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     item = ring_buffer_->GetTail(true);
     item->opcode = entry.opcode;
     item->lsn = lsn_++;
+    item->slot = entry.slot;
 
     io::BufSink buf_sink{&ring_serialize_buf_};
     JournalWriter writer{&buf_sink};

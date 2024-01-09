@@ -478,9 +478,10 @@ void WriteFlushSlotsToJournal(const SlotSet& slots) {
     }
 
     // Send journal entry
+    // TODO: Break slot migration upon FLUSHSLOTS
     journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
-                         /* shard_cnt= */ shard_set->size(), make_pair("DFLYCLUSTER", args_view),
-                         false);
+                         /* shard_cnt= */ shard_set->size(), nullopt,
+                         make_pair("DFLYCLUSTER", args_view), false);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }

@@ -34,6 +34,7 @@ extern "C" {
 #include "server/acl/validator.h"
 #include "server/bitops_family.h"
 #include "server/cluster/cluster_family.h"
+#include "server/cluster/unique_slot_checker.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
@@ -1807,8 +1808,11 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   sinfo->keys.reserve(eval_args.keys.size());
 
   optional<ShardId> sid;
+
+  UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
+    slot_checker.Add(key);
     sinfo->keys.insert(KeyLockArgs::GetLockKey(key));
 
     ShardId cur_sid = Shard(key, shard_count());
@@ -1845,7 +1849,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
     tx->PrepareMultiForScheduleSingleHop(*sid, tx->GetDbIndex(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
-      boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx, *sid};
+      boost::intrusive_ptr<Transaction> stub_tx =
+          new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
       cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);
