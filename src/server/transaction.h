@@ -382,6 +382,9 @@ class Transaction {
     std::optional<IntentLock::Mode> lock_mode;
     absl::flat_hash_set<std::string> locks;
 
+    // Set if the multi command is concluding to avoid ambiguity with COORD_EXEC_CONCLUDING
+    bool concluding = false;
+
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
     // executing multi-command. For every write to a shard journal, the corresponding index in the
