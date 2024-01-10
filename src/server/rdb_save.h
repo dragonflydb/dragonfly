@@ -131,7 +131,66 @@ class RdbSaver {
 
 class CompressorImpl;
 
-class RdbSerializer {
+class SerializerBase {
+ public:
+  explicit SerializerBase(CompressionMode compression_mode);
+  virtual ~SerializerBase() = default;
+
+  // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
+  static void DumpObject(const CompactObj& obj, io::StringSink* out);
+
+  // Internal buffer size. Might shrink after flush due to compression.
+  size_t SerializedLen() const;
+
+  // Flush internal buffer to sink.
+  virtual std::error_code FlushToSink(io::Sink* s);
+
+  size_t GetTotalBufferCapacity() const;
+
+  std::error_code WriteRaw(const ::io::Bytes& buf);
+
+  // Write journal entry as an embedded journal blob.
+  std::error_code WriteJournalEntry(std::string_view entry);
+
+  // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
+  std::error_code SendFullSyncCut();
+
+  std::error_code WriteOpcode(uint8_t opcode);
+
+  std::error_code SaveLen(size_t len);
+  std::error_code SaveString(std::string_view val);
+  std::error_code SaveString(const uint8_t* buf, size_t len) {
+    return SaveString(io::View(io::Bytes{buf, len}));
+  }
+
+ protected:
+  // Prepare internal buffer for flush. Compress it.
+  io::Bytes PrepareFlush();
+
+  // If membuf data is compressable use compression impl to compress the data and write it to membuf
+  void CompressBlob();
+  void AllocateCompressorOnce();
+
+  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
+
+  CompressionMode compression_mode_;
+  base::IoBuf mem_buf_;
+  std::unique_ptr<CompressorImpl> compressor_impl_;
+
+  static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr double kMinCompressionReductionPrecentage = 0.95;
+  struct CompressionStats {
+    uint32_t compression_no_effective = 0;
+    uint32_t small_str_count = 0;
+    uint32_t compression_failed = 0;
+    uint32_t compressed_blobs = 0;
+  };
+  std::optional<CompressionStats> compression_stats_;
+  base::PODArray<uint8_t> tmp_buf_;
+  std::unique_ptr<LZF_HSLOT[]> lzf_;
+};
+
+class RdbSerializer : public SerializerBase {
  public:
   explicit RdbSerializer(CompressionMode compression_mode);
 
@@ -140,12 +199,7 @@ class RdbSerializer {
   // Dumps `obj` in DUMP command format. Uses default compression mode.
   static std::string DumpObject(const CompactObj& obj);
 
-  // Internal buffer size. Might shrink after flush due to compression.
-  size_t SerializedLen() const;
-
-  // Flush internal buffer to sink.
-  std::error_code FlushToSink(io::Sink* s);
-
+  std::error_code FlushToSink(io::Sink* s) override;
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
@@ -154,38 +208,15 @@ class RdbSerializer {
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
                                 DbIndex dbid);
 
-  std::error_code SaveLen(size_t len);
-  std::error_code SaveString(std::string_view val);
-  std::error_code SaveString(const uint8_t* buf, size_t len) {
-    return SaveString(io::View(io::Bytes{buf, len}));
-  }
-
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
   // this by finding the key. This function is used
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
 
-  std::error_code WriteRaw(const ::io::Bytes& buf);
-  std::error_code WriteOpcode(uint8_t opcode) {
-    return WriteRaw(::io::Bytes{&opcode, 1});
-  }
-
-  // Write journal entry as an embedded journal blob.
-  std::error_code WriteJournalEntry(std::string_view entry);
-
   std::error_code SendJournalOffset(uint64_t journal_offset);
 
-  // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
-  std::error_code SendFullSyncCut();
-
-  size_t GetTotalBufferCapacity() const;
-
  private:
-  // Prepare internal buffer for flush. Compress it.
-  io::Bytes PrepareFlush();
-
-  std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
   std::error_code SaveObject(const PrimeValue& pv);
   std::error_code SaveListObject(const robj* obj);
   std::error_code SaveSetObject(const PrimeValue& pv);
@@ -199,29 +230,24 @@ class RdbSerializer {
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
-  // If membuf data is compressable use compression impl to compress the data and write it to membuf
-  void CompressBlob();
-  void AllocateCompressorOnce();
 
-  base::IoBuf mem_buf_;
   std::string tmp_str_;
-  base::PODArray<uint8_t> tmp_buf_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
+};
 
-  std::unique_ptr<LZF_HSLOT[]> lzf_;
+// Serializes CompactObj as RESTORE commands.
+class RestoreSerializer : public SerializerBase {
+ public:
+  explicit RestoreSerializer(CompressionMode compression_mode);
 
-  CompressionMode compression_mode_;
-  std::unique_ptr<CompressorImpl> compressor_impl_;
+  std::error_code SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
+                            DbIndex dbid);
 
-  static constexpr size_t kMinStrSizeToCompress = 256;
-  static constexpr double kMinCompressionReductionPrecentage = 0.95;
-  struct CompressionStats {
-    uint32_t compression_no_effective = 0;
-    uint32_t small_str_count = 0;
-    uint32_t compression_failed = 0;
-    uint32_t compressed_blobs = 0;
-  };
-  std::optional<CompressionStats> compression_stats_;
+ private:
+  // All members are used for saving allocations.
+  std::string key_buffer_;
+  io::StringSink value_dump_sink_;
+  io::StringSink sink_;
 };
 
 }  // namespace dfly

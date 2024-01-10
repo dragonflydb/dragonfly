@@ -154,15 +154,6 @@ std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
                       "incorrect shards num, only for tests");
   }
 
-  RETURN_ON_ERR(cntx_.GetError());
-
-  string request = absl::StrCat("DFLYMIGRATE SYNC ", sync_id_);
-
-  VLOG(1) << "Sending: " << request;
-  RETURN_ON_ERR(SendCommandAndReadResponse(request));
-
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
-
   return cntx_.GetError();
 }
 

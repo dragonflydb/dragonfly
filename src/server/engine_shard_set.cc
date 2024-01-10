@@ -58,9 +58,10 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "this, memory in this page will defragmented");
 
 ABSL_FLAG(string, shard_round_robin_prefix, "",
-          "When non-empty, keys with hash-tags, whose hash-tag starts with this prefix are not "
-          "distributed across shards based on their value but instead via round-robin. Use "
-          "cautiously! This can efficiently support up to a few hundreds of hash-tags.");
+          "When non-empty, keys which start with this prefix are not distributed across shards "
+          "based on their value but instead via round-robin. Use cautiously! This can efficiently "
+          "support up to a few hundreds of prefixes. Note: prefix is looked inside hash tags when "
+          "cluster mode is enabled.");
 
 namespace dfly {
 
@@ -133,10 +134,6 @@ class RoundRobinSharder {
   }
 
   static optional<ShardId> TryGetShardId(string_view key, XXH64_hash_t key_hash) {
-    if (!IsEnabled()) {
-      return nullopt;
-    }
-
     DCHECK(!round_robin_shards_tl_cache_.empty());
 
     if (!absl::StartsWith(key, round_robin_prefix_)) {
@@ -861,18 +858,16 @@ void EngineShardSet::TEST_EnableCacheMode() {
 }
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  bool has_hashtags = false;
   if (ClusterConfig::IsEnabledOrEmulated()) {
     string_view v_hash_tag = ClusterConfig::KeyTag(v);
     if (v_hash_tag.size() != v.size()) {
-      has_hashtags = true;
       v = v_hash_tag;
     }
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
 
-  if (has_hashtags) {
+  if (RoundRobinSharder::IsEnabled()) {
     auto round_robin = RoundRobinSharder::TryGetShardId(v, hash);
     if (round_robin.has_value()) {
       return *round_robin;

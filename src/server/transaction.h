@@ -408,6 +408,9 @@ class Transaction {
     std::optional<IntentLock::Mode> lock_mode;
     absl::flat_hash_set<std::string> locks;
 
+    // Set if the multi command is concluding to avoid ambiguity with COORD_CONCLUDING
+    bool concluding = false;
+
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
     // executing multi-command. For every write to a shard journal, the corresponding index in the
@@ -419,10 +422,10 @@ class Transaction {
   enum CoordinatorState : uint8_t {
     COORD_SCHED = 1,
 
-    COORD_EXEC_CONCLUDING = 1 << 2,  // Whether its the last hop of a transaction
-    COORD_BLOCKED = 1 << 3,
-    COORD_CANCELLED = 1 << 4,
-    COORD_OOO = 1 << 5,
+    COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
+    COORD_BLOCKED = 1 << 2,
+    COORD_CANCELLED = 1 << 3,
+    COORD_OOO = 1 << 4,
   };
 
   struct PerShardCache {

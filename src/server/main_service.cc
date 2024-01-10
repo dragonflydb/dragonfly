@@ -1228,7 +1228,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   // not just the blocking ones
   const auto* conn = cntx->conn();
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr && etl.GetSlowLog().IsEnabled() &&
-      invoke_time_usec > etl.log_slower_than_usec) {
+      invoke_time_usec >= etl.log_slower_than_usec) {
     vector<string> aux_params;
     CmdArgVec aux_slices;
 
@@ -1463,7 +1463,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 }
 
 const CommandId* Service::FindCmd(std::string_view cmd) const {
-  return registry_.Find(cmd);
+  return registry_.Find(registry_.RenamedOrOriginal(cmd));
 }
 
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
