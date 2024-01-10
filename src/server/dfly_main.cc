@@ -475,22 +475,23 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     if (auto cpu = ReadFileToString(StrCat(path, "/cpu.max")); cpu.has_value()) {
       vector<string_view> res = absl::StrSplit(*cpu, ' ');
 
-      CHECK_EQ(res.size(), 2u);
+      // Some linux distributions do not have anything there.
+      if (res.size() == 2u) {
+        if (res[0] == "max")
+          *output = 0u;
+        else {
+          CHECK(absl::SimpleAtod(res[0], &count))
+              << "Failed in parsing cgroupv2 cpu count, path = " << path << " (read: " << *cpu
+              << ")";
+          CHECK(absl::SimpleAtod(res[1], &timeshare))
+              << "Failed in parsing cgroupv2 cpu timeshare, path = " << path << " (read: " << *cpu
+              << ")";
 
-      if (res[0] == "max")
-        *output = 0u;
-      else {
-        CHECK(absl::SimpleAtod(res[0], &count))
-            << "Failed in parsing cgroupv2 cpu count, path = " << path << " (read: " << *cpu << ")";
-        CHECK(absl::SimpleAtod(res[1], &timeshare))
-            << "Failed in parsing cgroupv2 cpu timeshare, path = " << path << " (read: " << *cpu
-            << ")";
+          *output = static_cast<size_t>(ceil(count / timeshare));
+        }
 
-        *output = static_cast<size_t>(ceil(count / timeshare));
+        read_something = true;
       }
-
-      read_something = true;
-
     } else if (auto quota = ReadFileToString(StrCat(path, "/cpu.cfs_quota_us"));
                quota.has_value()) {
       auto period = ReadFileToString(StrCat(path, "/cpu.cfs_period_us"));

@@ -452,7 +452,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
                &status](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
-      shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
+      shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
       while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
         if (absl::Now() - start > timeout_dur) {
           LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: "
