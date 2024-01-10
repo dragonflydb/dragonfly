@@ -104,76 +104,127 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
 }
 
 struct TrafficLogger {
+  // protects agains closing the file while writing or data races when opening the file.
+  // We use shared mutex to allow concurrent writes, i.e multiple fibers can write to the file
+  // without contending with each other.
   fb2::SharedMutex mutex;
-  std::unique_ptr<io::WriteFile> file;
-  std::vector<base::IoBuf> buffer_pool;
+  unique_ptr<io::WriteFile> log_file;
+
+  void Reset();
+
+  // Returns true if Write succeeded, false if it failed and the recording should be aborted.
+  bool Write(string_view blob, shared_lock<fb2::SharedMutex>* lk);
+  bool Write(iovec* blobs, size_t len, shared_lock<fb2::SharedMutex>* lk);
 };
 
-thread_local TrafficLogger tl_traffic_logger{};  // nullopt while disabled
-
-void OpenTrafficLogger() {
-  std::unique_lock lk{tl_traffic_logger.mutex};
-  if (tl_traffic_logger.file)
-    return;
-
-  // Open file with append mode, without it concurrent fiber writes seem to conflict
-  string path = "./traffic-log-" + to_string(ProactorBase::me()->GetPoolIndex());
-  auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ true});
-  if (!file)
-    return;
-
-  tl_traffic_logger.file = std::unique_ptr<io::WriteFile>{file.value()};
-}
-
-void StopTrafficLogger() {
-  std::unique_lock lk{tl_traffic_logger.mutex};
-  if (tl_traffic_logger.file) {
-    tl_traffic_logger.file->Close();
-    tl_traffic_logger.file.reset();
+void TrafficLogger::Reset() {
+  std::unique_lock lk{mutex};
+  if (log_file) {
+    log_file->Close();
+    log_file.reset();
   }
 }
 
+// Returns true if Write succeeded, false if it failed and the recording should be aborted.
+bool TrafficLogger::Write(string_view blob, shared_lock<fb2::SharedMutex>* lk) {
+  auto ec = log_file->Write(io::Buffer(blob));
+  if (ec) {
+    LOG(ERROR) << "Error writing to traffic log: " << ec;
+    lk->unlock();
+    Reset();
+    return false;
+  }
+  return true;
+}
+
+bool TrafficLogger::Write(iovec* blobs, size_t len, shared_lock<fb2::SharedMutex>* lk) {
+  auto ec = log_file->Write(blobs, len);
+  if (ec) {
+    LOG(ERROR) << "Error writing to traffic log: " << ec;
+    lk->unlock();
+    Reset();
+    return false;
+  }
+  return true;
+}
+
+thread_local TrafficLogger tl_traffic_logger{};  // nullopt while disabled
+
+void OpenTrafficLogger(string_view base_path) {
+  unique_lock lk{tl_traffic_logger.mutex};
+  if (tl_traffic_logger.log_file)
+    return;
+
+  // Open file with append mode, without it concurrent fiber writes seem to conflict
+  string path = absl::StrCat(
+      base_path, "-", absl::Dec(ProactorBase::me()->GetPoolIndex(), absl::kZeroPad3), ".bin");
+  auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ true});
+  if (!file) {
+    LOG(ERROR) << "Error opening a file " << path << " for traffic logging: " << file.error();
+    return;
+  }
+  tl_traffic_logger.log_file = unique_ptr<io::WriteFile>{file.value()};
+}
+
 void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
-  if (!tl_traffic_logger.file)  // fast check without locking
+  if (!tl_traffic_logger.log_file)  // fast check without locking
     return;
 
-  std::shared_lock lk{tl_traffic_logger.mutex};
-  if (!tl_traffic_logger.file)
-    return;
+  char stack_buf[1024];
+  char* next = stack_buf;
 
-  auto& buffers = tl_traffic_logger.buffer_pool;
-  base::IoBuf buf = buffers.empty() ? base::IoBuf{} : std::move(buffers.back());
-  if (!buffers.empty())
-    buffers.pop_back();
-
-  uint8_t int_buf[8];
-  auto write_u32 = [&buf, &int_buf](uint32_t i) {
-    absl::little_endian::Store32(int_buf, i);
-    buf.WriteAndCommit(int_buf, sizeof(i));
+  // We write id, timestamp, has_more, num_parts, part_len, part_len, part_len, ...
+  // And then all the part blobs concatenated together.
+  auto write_u32 = [&next](uint32_t i) {
+    absl::little_endian::Store32(next, i);
+    next += 4;
   };
 
   write_u32(id);
 
-  absl::little_endian::Store64(int_buf, absl::GetCurrentTimeNanos());
-  buf.WriteAndCommit(int_buf, 8);
+  absl::little_endian::Store64(next, absl::GetCurrentTimeNanos());
+  next += 8;
 
   write_u32(has_more ? 1 : 0);
   write_u32(uint32_t(resp.size()));
+
+  // Grab the lock and check if the file is still open.
+  shared_lock lk{tl_traffic_logger.mutex};
+  if (!tl_traffic_logger.log_file)
+    return;
+
+  // Proceed with writing the blob lengths.
   for (auto part : resp) {
-    // TODO: don't truncate scripts
-    if (string_view part_sv = part.GetView(); part_sv.size() < 256) {
-      write_u32(uint32_t(part_sv.size()));
-      buf.WriteAndCommit(part_sv.data(), part_sv.size());
-    } else {
-      write_u32(uint32_t(0));
-      write_u32(uint32_t(part_sv.size()));
+    if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
+      if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)}, &lk)) {
+        return;
+      }
+      next = stack_buf;
+    }
+    write_u32(part.GetView().size());
+  }
+
+  // Write the data itself.
+  std::array<iovec, 16> blobs;
+  unsigned index = 0;
+  if (next != stack_buf) {
+    blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
+  }
+
+  for (auto part : resp) {
+    blobs[index++] = iovec{.iov_base = const_cast<char*>(part.GetView().data()),
+                           .iov_len = part.GetView().size()};
+    if (index >= blobs.size()) {
+      if (!tl_traffic_logger.Write(blobs.data(), blobs.size(), &lk)) {
+        return;
+      }
+      index = 0;
     }
   }
 
-  tl_traffic_logger.file->Write(buf.InputBuffer());
-
-  buf.Clear();
-  buffers.push_back(std::move(buf));
+  if (index) {
+    tl_traffic_logger.Write(blobs.data(), index, &lk);
+  }
 }
 
 constexpr size_t kMinReadSize = 256;
@@ -1476,11 +1527,12 @@ bool Connection::IsTrackingOn() const {
   return tracking_enabled_;
 }
 
-void Connection::ToggleTrafficLogging(bool on) {
-  if (on)
-    OpenTrafficLogger();
-  else
-    StopTrafficLogger();
+void Connection::StartTrafficLogging(string_view path) {
+  OpenTrafficLogger(path);
+}
+
+void Connection::StopTrafficLogging() {
+  tl_traffic_logger.Reset();
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {

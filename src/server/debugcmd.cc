@@ -255,6 +255,9 @@ void DebugCmd::Run(CmdArgList args) {
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
         "TX",
         "    Performs transaction analysis per shard.",
+        "TRAFFIC <path> | [STOP]"
+        "    Starts traffic logging to the specified path. If path is not specified,"
+        "    traffic logging is stopped.",
         "HELP",
         "    Prints this help.",
     };
@@ -319,8 +322,7 @@ void DebugCmd::Run(CmdArgList args) {
 
 void DebugCmd::Shutdown() {
   // disable traffic logging
-  shard_set->pool()->AwaitFiberOnAll(
-      [](auto*) { facade::Connection::ToggleTrafficLogging(false); });
+  shard_set->pool()->AwaitFiberOnAll([](auto*) { facade::Connection::StopTrafficLogging(); });
 }
 
 void DebugCmd::Reload(CmdArgList args) {
@@ -602,9 +604,16 @@ void DebugCmd::Exec() {
 }
 
 void DebugCmd::LogTraffic(CmdArgList args) {
-  bool enable = (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) == "ON"s);
-  shard_set->pool()->AwaitFiberOnAll(
-      [enable](auto*) { facade::Connection::ToggleTrafficLogging(enable); });
+  optional<string> path;
+  if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
+    path = ArgS(args, 0);
+  }
+  shard_set->pool()->AwaitFiberOnAll([path](auto*) {
+    if (path)
+      facade::Connection::StartTrafficLogging(*path);
+    else
+      facade::Connection::StopTrafficLogging();
+  });
   cntx_->SendOk();
 }
 
