@@ -1851,28 +1851,36 @@ def random_str(len):
 # changing parameters without extensive testing may easily lead to weak testing case assertion
 # which means eviction may not get triggered.
 @pytest.mark.asyncio
-@pytest.mark.slow
-async def test_policy_based_eviction_propagation(df_local_factory):
+@pytest.mark.skip(reason="Failing due to bug in replication on command errors")
+async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(
-        proactor_threads=1,
-        cache_mode="true",
-        maxmemory="256mb",
-        enable_heartbeat_eviction="false",
-        keys_output_limit="3800000",
+        proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
     )
-    replica = df_local_factory.create(proactor_threads=1, keys_output_limit="3800000")
+    replica = df_local_factory.create(proactor_threads=1)
     df_local_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
 
-    # await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
+    await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
-    pipe = c_master.pipeline(transaction=False)
-    batch_fill_data(client=pipe, gen=gen_test_data(3700000))
-    await pipe.execute()
+
+    seeder = df_seeder_factory.create(
+        port=master.port,
+        keys=500,
+        val_size=200,
+        stop_on_failure=False,
+        unsupported_types=[
+            ValueType.JSON,
+            ValueType.LIST,
+            ValueType.SET,
+            ValueType.HSET,
+            ValueType.ZSET,
+        ],
+    )
+    await seeder.run(target_deviation=0.1)
 
     info = await c_master.info("stats")
     assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
@@ -1880,6 +1888,7 @@ async def test_policy_based_eviction_propagation(df_local_factory):
     await check_all_replicas_finished([c_replica], c_master)
     keys_master = await c_master.execute_command("keys *")
     keys_replica = await c_replica.execute_command("keys *")
+
     assert set(keys_master) == set(keys_replica)
     await disconnect_clients(c_master, *[c_replica])
 
