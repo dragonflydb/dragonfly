@@ -1838,15 +1838,6 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     replica.stop()
 
 
-from random import choice
-
-
-def random_str(len):
-    return "".join(
-        choice(string.ascii_letters + string.digits + string.punctuation) for i in range(len)
-    )
-
-
 # note: please be careful if you want to change any of the parameters used in this test.
 # changing parameters without extensive testing may easily lead to weak testing case assertion
 # which means eviction may not get triggered.
