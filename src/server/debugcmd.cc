@@ -255,6 +255,9 @@ void DebugCmd::Run(CmdArgList args) {
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
         "TX",
         "    Performs transaction analysis per shard.",
+        "TRAFFIC <path> | [STOP]"
+        "    Starts traffic logging to the specified path. If path is not specified,"
+        "    traffic logging is stopped.",
         "HELP",
         "    Prints this help.",
     };
@@ -308,8 +311,18 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "EXEC") {
     return Exec();
   }
+
+  if (subcmd == "TRAFFIC") {
+    return LogTraffic(args.subspan(1));
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cntx_->SendError(reply, kSyntaxErrType);
+}
+
+void DebugCmd::Shutdown() {
+  // disable traffic logging
+  shard_set->pool()->AwaitFiberOnAll([](auto*) { facade::Connection::StopTrafficLogging(); });
 }
 
 void DebugCmd::Reload(CmdArgList args) {
@@ -588,6 +601,24 @@ void DebugCmd::Exec() {
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   rb->SendVerbatimString(res);
+}
+
+void DebugCmd::LogTraffic(CmdArgList args) {
+  optional<string> path;
+  if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
+    path = ArgS(args, 0);
+    LOG(INFO) << "Logging to traffic to " << *path << "*.bin";
+  } else {
+    LOG(INFO) << "Traffic logging stopped";
+  }
+
+  shard_set->pool()->AwaitFiberOnAll([path](auto*) {
+    if (path)
+      facade::Connection::StartTrafficLogging(*path);
+    else
+      facade::Connection::StopTrafficLogging();
+  });
+  cntx_->SendOk();
 }
 
 void DebugCmd::Inspect(string_view key) {

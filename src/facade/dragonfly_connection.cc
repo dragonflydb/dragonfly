@@ -13,8 +13,10 @@
 
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
+#include "base/io_buf.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
+#include "core/uring.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
@@ -97,6 +99,129 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
   if (stats != nullptr && prev_capacity != capacity) {
     VLOG(2) << "Grown io_buf to " << capacity;
     stats->read_buf_capacity += capacity - prev_capacity;
+  }
+}
+
+struct TrafficLogger {
+  // protects agains closing the file while writing or data races when opening the file.
+  // Also, makes sure that LogTraffic are executed atomically.
+  fb2::Mutex mutex;
+  unique_ptr<io::WriteFile> log_file;
+
+  void ResetLocked();
+  // Returns true if Write succeeded, false if it failed and the recording should be aborted.
+  bool Write(string_view blob);
+  bool Write(iovec* blobs, size_t len);
+};
+
+void TrafficLogger::ResetLocked() {
+  if (log_file) {
+    log_file->Close();
+    log_file.reset();
+  }
+}
+
+// Returns true if Write succeeded, false if it failed and the recording should be aborted.
+bool TrafficLogger::Write(string_view blob) {
+  auto ec = log_file->Write(io::Buffer(blob));
+  if (ec) {
+    LOG(ERROR) << "Error writing to traffic log: " << ec;
+    ResetLocked();
+    return false;
+  }
+  return true;
+}
+
+bool TrafficLogger::Write(iovec* blobs, size_t len) {
+  auto ec = log_file->Write(blobs, len);
+  if (ec) {
+    LOG(ERROR) << "Error writing to traffic log: " << ec;
+    ResetLocked();
+    return false;
+  }
+  return true;
+}
+
+thread_local TrafficLogger tl_traffic_logger{};  // nullopt while disabled
+
+void OpenTrafficLogger(string_view base_path) {
+  unique_lock lk{tl_traffic_logger.mutex};
+  if (tl_traffic_logger.log_file)
+    return;
+
+  // Open file with append mode, without it concurrent fiber writes seem to conflict
+  string path = absl::StrCat(
+      base_path, "-", absl::Dec(ProactorBase::me()->GetPoolIndex(), absl::kZeroPad3), ".bin");
+  auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ false});
+  if (!file) {
+    LOG(ERROR) << "Error opening a file " << path << " for traffic logging: " << file.error();
+    return;
+  }
+  tl_traffic_logger.log_file = unique_ptr<io::WriteFile>{file.value()};
+}
+
+void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
+  string_view cmd = resp.front().GetView();
+  if (absl::EqualsIgnoreCase(cmd, "debug"sv))
+    return;
+
+  DVLOG(2) << "Recording " << cmd;
+
+  char stack_buf[1024];
+  char* next = stack_buf;
+
+  // We write id, timestamp, has_more, num_parts, part_len, part_len, part_len, ...
+  // And then all the part blobs concatenated together.
+  auto write_u32 = [&next](uint32_t i) {
+    absl::little_endian::Store32(next, i);
+    next += 4;
+  };
+
+  write_u32(id);
+
+  absl::little_endian::Store64(next, absl::GetCurrentTimeNanos());
+  next += 8;
+
+  write_u32(has_more ? 1 : 0);
+  write_u32(uint32_t(resp.size()));
+
+  // Grab the lock and check if the file is still open.
+  lock_guard lk{tl_traffic_logger.mutex};
+
+  if (!tl_traffic_logger.log_file)
+    return;
+
+  // Proceed with writing the blob lengths.
+  for (auto part : resp) {
+    if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
+      if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
+        return;
+      }
+      next = stack_buf;
+    }
+    write_u32(part.GetView().size());
+  }
+
+  // Write the data itself.
+  std::array<iovec, 16> blobs;
+  unsigned index = 0;
+  if (next != stack_buf) {
+    blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
+  }
+
+  for (auto part : resp) {
+    blobs[index++] = iovec{.iov_base = const_cast<char*>(part.GetView().data()),
+                           .iov_len = part.GetView().size()};
+    if (index >= blobs.size()) {
+      if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
+        return;
+      }
+      index = 0;
+    }
+  }
+
+  if (index) {
+    tl_traffic_logger.Write(blobs.data(), index);
   }
 }
 
@@ -690,6 +815,11 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 
 void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   bool can_dispatch_sync = (consumed >= io_buf_.InputLen());
+
+  if (tl_traffic_logger.log_file) {
+    // Log command as soon as we receive it
+    LogTraffic(id_, !can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
+  }
 
   // Avoid sync dispatch if an async dispatch is already in progress, or else they'll interleave.
   if (cc_->async_dispatch)
@@ -1395,6 +1525,15 @@ void Connection::SetClientTrackingSwitch(bool is_on) {
 
 bool Connection::IsTrackingOn() const {
   return tracking_enabled_;
+}
+
+void Connection::StartTrafficLogging(string_view path) {
+  OpenTrafficLogger(path);
+}
+
+void Connection::StopTrafficLogging() {
+  lock_guard lk(tl_traffic_logger.mutex);
+  tl_traffic_logger.ResetLocked();
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
