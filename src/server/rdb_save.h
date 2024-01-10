@@ -196,9 +196,6 @@ class RdbSerializer : public SerializerBase {
 
   ~RdbSerializer();
 
-  // Dumps `obj` in DUMP command format. Uses default compression mode.
-  static std::string DumpObject(const CompactObj& obj);
-
   std::error_code FlushToSink(io::Sink* s) override;
   std::error_code SelectDb(uint32_t dbid);
 
@@ -233,21 +230,6 @@ class RdbSerializer : public SerializerBase {
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
-};
-
-// Serializes CompactObj as RESTORE commands.
-class RestoreSerializer : public SerializerBase {
- public:
-  explicit RestoreSerializer(CompressionMode compression_mode);
-
-  std::error_code SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
-                            DbIndex dbid);
-
- private:
-  // All members are used for saving allocations.
-  std::string key_buffer_;
-  io::StringSink value_dump_sink_;
-  io::StringSink sink_;
 };
 
 }  // namespace dfly

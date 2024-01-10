@@ -1537,38 +1537,4 @@ void SerializerBase::CompressBlob() {
   ++compression_stats_->compressed_blobs;
 }
 
-RestoreSerializer::RestoreSerializer(CompressionMode compression_mode)
-    : SerializerBase(compression_mode) {
-}
-
-error_code RestoreSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
-                                        uint64_t expire_ms, DbIndex dbid) {
-  absl::InlinedVector<string_view, 4> args;
-
-  key_buffer_.clear();
-  string_view key = pk.GetSlice(&key_buffer_);
-  args.push_back(key);
-
-  string expire_str = absl::StrCat(expire_ms);
-  args.push_back(expire_str);
-
-  value_dump_sink_.Clear();
-  DumpObject(pv, &value_dump_sink_);
-  args.push_back(value_dump_sink_.str());
-
-  args.push_back("ABSTTL");  // Means expire string is since epoch
-
-  journal::Entry entry(0,                     // txid
-                       journal::Op::COMMAND,  // single command
-                       dbid,                  //
-                       1,                     // shard count
-                       make_pair("RESTORE", ArgSlice{args}));
-
-  sink_.Clear();
-  JournalWriter writer{&sink_};
-  writer.Write(entry);
-
-  return WriteRaw(io::Buffer(sink_.str()));
-}
-
 }  // namespace dfly

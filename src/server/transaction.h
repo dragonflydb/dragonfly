@@ -16,6 +16,7 @@
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
+#include "server/cluster/unique_slot_checker.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
@@ -146,7 +147,7 @@ class Transaction {
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
-  explicit Transaction(const Transaction* parent, ShardId shard_id);
+  explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -574,6 +575,7 @@ class Transaction {
   // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};          // Number of unique shards active
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
+  UniqueSlotChecker unique_slot_checker_;
 
   EventCount blocking_ec_;  // Used to wake blocking transactions.
   EventCount run_ec_;       // Used to wait for shard callbacks

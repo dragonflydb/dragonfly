@@ -55,7 +55,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
@@ -69,6 +69,10 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id)
   multi_->role = SQUASHED_STUB;
 
   time_now_ms_ = parent->time_now_ms_;
+
+  if (slot_id.has_value()) {
+    unique_slot_checker_.Add(*slot_id);
+  }
 }
 
 Transaction::~Transaction() {
@@ -105,12 +109,16 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, bool rev_mapping,
 
   if (key_index.bonus) {
     DCHECK(key_index.step == 1);
-    uint32_t sid = Shard(ArgS(args, *key_index.bonus), shard_data_.size());
+    string_view key = ArgS(args, *key_index.bonus);
+    unique_slot_checker_.Add(key);
+    uint32_t sid = Shard(key, shard_data_.size());
     add(sid, *key_index.bonus);
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    uint32_t sid = Shard(ArgS(args, i), shard_data_.size());
+    string_view key = ArgS(args, i);
+    unique_slot_checker_.Add(key);
+    uint32_t sid = Shard(key, shard_data_.size());
     add(sid, i);
 
     DCHECK_LE(key_index.step, 2u);
@@ -1307,7 +1315,8 @@ void Transaction::UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* s
   auto journal = shard->journal();
 
   if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()]) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {}, true);
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt,
+                         unique_slot_checker_.GetUniqueSlotId(), {}, true);
   }
 
   if (multi_->mode == GLOBAL) {
@@ -1464,7 +1473,8 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
   bool is_multi = multi_commands || IsAtomicMulti();
 
   auto opcode = is_multi ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
-  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), allow_await);
+  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, unique_slot_checker_.GetUniqueSlotId(),
+                       std::move(payload), allow_await);
 }
 
 void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const {
@@ -1473,7 +1483,8 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   }
   auto journal = shard->journal();
   CHECK(journal);
-  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {}, false);
+  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt,
+                       unique_slot_checker_.GetUniqueSlotId(), {}, false);
 }
 
 void Transaction::RunOnceAsCommand(const CommandId* cid, RunnableType cb) {
