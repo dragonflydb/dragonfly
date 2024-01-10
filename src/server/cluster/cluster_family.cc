@@ -697,8 +697,6 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
     MigrationConf(args, cntx);
   } else if (sub_cmd == "FLOW") {
     Flow(args, cntx);
-  } else if (sub_cmd == "SYNC") {
-    Sync(args, cntx);
   } else {
     cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -789,32 +787,13 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
 
-  cntx->SendOk();
-}
-
-void ClusterFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser{args};
-  auto sync_id = parser.Next<uint32_t>();
-  if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-
-  VLOG(1) << "Got DFLYMIGRATE SYNC " << sync_id;
-
-  auto info = GetMigrationInfo(sync_id);
-  if (!info)
-    cntx->SendError(kIdNotFound);
-
   info->state = ClusterSlotMigration::State::C_FULL_SYNC;
 
-  auto cb = [info](EngineShard* shard) {
-    info->flows[shard->shard_id()].conn->socket()->Write(io::Buffer("OK"));
-  };
-  shard_set->RunBlockingInParallel(std::move(cb));
+  cntx->SendOk();
+
+  info->flows[shard_id].conn->socket()->Write(io::Buffer("SYNC"));
 
   LOG(INFO) << "Started migation with target node " << info->host_ip << ":" << info->port;
-
-  return rb->SendOk();
 }
 
 shared_ptr<ClusterFamily::MigrationInfo> ClusterFamily::GetMigrationInfo(uint32_t sync_id) {

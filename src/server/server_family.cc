@@ -276,7 +276,7 @@ template <typename T> void UpdateMax(T* maxv, T current) {
 
 void SetMasterFlagOnAllThreads(bool is_master) {
   auto cb = [is_master](auto* pb) { ServerState::tlocal()->is_master = is_master; };
-  shard_set->pool()->DispatchBrief(cb);
+  shard_set->pool()->Await(cb);
 }
 
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
@@ -2439,7 +2439,7 @@ constexpr uint32_t kDfly = ADMIN;
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
-  constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
+  constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST;
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)

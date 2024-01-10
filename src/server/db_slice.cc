@@ -179,7 +179,7 @@ class PrimeEvictionPolicy {
 
 class PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items)
+  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& bumped_items)
       : bumped_items_(bumped_items) {
   }
   // returns true if key can be made less important for eviction (opposite of bump up)
@@ -188,7 +188,7 @@ class PrimeBumpPolicy {
   }
 
  private:
-  const absl::flat_hash_set<CompactObjectView, PrimeHasher>& bumped_items_;
+  const absl::flat_hash_set<CompactObjectView>& bumped_items_;
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
@@ -1327,8 +1327,8 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
   PrimeTable::Segment_t* segment = table->prime.GetSegment(it.segment_id());
   DCHECK(segment);
 
-  constexpr unsigned kNumStashBuckets =
-      PrimeTable::Segment_t::kTotalBuckets - PrimeTable::Segment_t::kNumBuckets;
+  constexpr unsigned kNumStashBuckets = PrimeTable::Segment_t::kStashBucketCnt;
+  constexpr unsigned kNumRegularBuckets = PrimeTable::Segment_t::kRegularBucketCnt;
 
   PrimeTable::bucket_iterator it2(it);
   unsigned evicted = 0;
@@ -1343,7 +1343,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
   };
 
   for (unsigned i = 0; !evict_succeeded && i < kNumStashBuckets; ++i) {
-    unsigned stash_bid = i + PrimeTable::Segment_t::kNumBuckets;
+    unsigned stash_bid = i + kNumRegularBuckets;
     const auto& bucket = segment->GetBucket(stash_bid);
     if (bucket.IsEmpty())
       continue;
@@ -1374,8 +1374,8 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
   // Try normal buckets now. We iterate from largest slot to smallest across the whole segment.
   for (int slot_id = PrimeTable::Segment_t::kNumSlots - 1; !evict_succeeded && slot_id >= 0;
        --slot_id) {
-    for (unsigned i = 0; i < PrimeTable::Segment_t::kNumBuckets; ++i) {
-      unsigned bid = (it.bucket_id() + i) % PrimeTable::Segment_t::kNumBuckets;
+    for (unsigned i = 0; i < kNumRegularBuckets; ++i) {
+      unsigned bid = (it.bucket_id() + i) % kNumRegularBuckets;
       const auto& bucket = segment->GetBucket(bid);
       if (!bucket.IsBusy(slot_id))
         continue;
