@@ -17,11 +17,16 @@ func parseStrings(file io.Reader) (out []interface{}, err error) {
 	}
 
 	out = make([]interface{}, num)
-	for i := uint32(0); i < num; i++ {
+	for i := range out {
 		err = binary.Read(file, binary.LittleEndian, &strLen)
 		if err != nil {
 			return nil, err
 		}
+		out[i] = strLen
+	}
+
+	for i := range out {
+		strLen = out[i].(uint32)
 
 		if strLen == 0 {
 			err = binary.Read(file, binary.LittleEndian, &strLen)
