@@ -636,7 +636,7 @@ TEST_F(GenericFamilyTest, Info) {
   InitWithDbFilename();  // Needed for `save`
 
   auto get_rdb_changes_since_last_save = [](const string& str) -> size_t {
-    const string matcher = "rdb_changes_since_last_save:";
+    const string matcher = "rdb_changes_since_last_success_save:";
     const auto pos = str.find(matcher) + matcher.size();
     const auto sub = str.substr(pos, 1);
     return atoi(sub.c_str());

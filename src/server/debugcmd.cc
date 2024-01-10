@@ -337,7 +337,7 @@ void DebugCmd::Reload(CmdArgList args) {
     }
   }
 
-  string last_save_file = sf_.GetLastSaveInfo()->file_name;
+  string last_save_file = sf_.GetLastSaveInfo().file_name;
   Load(last_save_file);
 }
 
