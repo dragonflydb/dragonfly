@@ -265,7 +265,7 @@ void SaveStagesController::SaveRdb() {
 }
 
 void SaveStagesController::UpdateSaveInfo() {
-  double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time_)) / 1000;
+  auto seconds = (absl::Now() - start_time_) / absl::Seconds(1);
   if (shared_err_) {
     lock_guard lk{*save_mu_};
     last_save_info_->last_error = *shared_err_;
@@ -290,7 +290,7 @@ void SaveStagesController::UpdateSaveInfo() {
   }
   last_save_info_->save_time = absl::ToUnixSeconds(start_time_);
   last_save_info_->file_name = resulting_path.generic_string();
-  last_save_info_->success_duration_sec = uint32_t(seconds);
+  last_save_info_->success_duration_sec = seconds;
 }
 
 GenericError SaveStagesController::InitResources() {

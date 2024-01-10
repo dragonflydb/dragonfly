@@ -284,7 +284,7 @@ class ServerFamily {
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  LastSaveInfo last_save_info_;  // protected by save_mu_;
+  LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
   std::atomic_bool is_saving_{false};
   // this field duplicate SaveStagesController::start_save_time_
   // TODO make SaveStagesController as member of this class

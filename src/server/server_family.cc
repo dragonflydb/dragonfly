@@ -1780,9 +1780,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
     append("loading", is_loading);
-    append("saving", IsSaving());
+
     auto curent_durration_sec =
         start_save_time_ ? (absl::Now() - *start_save_time_) / absl::Seconds(1) : 0;
+    append("saving", curent_durration_sec != 0);
     append("current_save_duration_sec", curent_durration_sec);
 
     for (const auto& k_v : save_info.freq_map) {
