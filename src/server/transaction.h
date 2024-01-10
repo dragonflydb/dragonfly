@@ -105,14 +105,14 @@ class Transaction {
  public:
   // Result returned by callbacks. Most should use the implcit conversion from OpStatus.
   struct RunnableResult {
-    using Flags = uint16_t;
-    enum Flag : Flags {
+    enum Flag : uint16_t {
       // Can be issued by a **single** shard callback to avoid concluding, i.e. perform one more hop
       // even if not requested ahead. Used for blocking command fallback.
       AVOID_CONCLUDING = 1,
     };
 
-    RunnableResult(OpStatus status = OpStatus::OK, Flags flags = 0) : status(status), flags(flags) {
+    RunnableResult(OpStatus status = OpStatus::OK, uint16_t flags = 0)
+        : status(status), flags(flags) {
     }
 
     operator OpStatus() const {
@@ -195,7 +195,7 @@ class Transaction {
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
 
-  // Conclude transaction. Ignores if not schedules
+  // Conclude transaction. Ignored if not scheduled
   void Conclude();
 
   // Called by engine shard to execute a transaction hop.

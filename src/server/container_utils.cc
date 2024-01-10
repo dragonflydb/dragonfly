@@ -262,6 +262,9 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
                                               bool* block_flag) {
   string result_key;
 
+  // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
+  // If we don't find any anything, we abort concluding and keep scheduled.
+  // Slow path: schedule, find results from shards, execute action if found.
   OpResult<ShardFFResult> result;
   if (trans->GetUniqueShardCnt() == 1) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
@@ -299,7 +302,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::TIMED_OUT;
   }
 
-  DCHECK(trans->IsScheduled());  // we still hold the keys
+  DCHECK(trans->IsScheduled());  // single shard optimization didn't forget to schedule
   VLOG(1) << "Blocking " << trans->DebugId();
 
   // If timeout (limit_ms) is zero, block indefinitely
