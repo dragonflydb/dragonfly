@@ -55,7 +55,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
@@ -69,6 +69,10 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id)
   multi_->role = SQUASHED_STUB;
 
   time_now_ms_ = parent->time_now_ms_;
+
+  if (slot_id.has_value()) {
+    unique_slot_checker_.Add(*slot_id);
+  }
 }
 
 Transaction::~Transaction() {
@@ -105,12 +109,16 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, bool rev_mapping,
 
   if (key_index.bonus) {
     DCHECK(key_index.step == 1);
-    uint32_t sid = Shard(ArgS(args, *key_index.bonus), shard_data_.size());
+    string_view key = ArgS(args, *key_index.bonus);
+    unique_slot_checker_.Add(key);
+    uint32_t sid = Shard(key, shard_data_.size());
     add(sid, *key_index.bonus);
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    uint32_t sid = Shard(ArgS(args, i), shard_data_.size());
+    string_view key = ArgS(args, i);
+    unique_slot_checker_.Add(key);
+    uint32_t sid = Shard(key, shard_data_.size());
     add(sid, i);
 
     DCHECK_LE(key_index.step, 2u);
@@ -451,9 +459,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
-
-  bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
-  bool tx_stop_runnig = is_concluding && !IsAtomicMulti();
+  bool is_concluding = coordinator_state_ & COORD_CONCLUDING;
 
   IntentLock::Mode mode = LockMode();
 
@@ -493,7 +499,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   /*************************************************************************/
 
-  if (is_concluding)  // Check last hop
+  // Log to jounrnal only once the command finished running
+  if (is_concluding || (multi_ && multi_->concluding))
     LogAutoJournalOnShard(shard);
 
   shard->db_slice().OnCbFinish();
@@ -503,11 +510,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
   // and successive hops are run by continuation_trans_ in engine shard.
   // Otherwise we can remove ourselves only when we're concluding (so no more hops will follow).
-  // In case of multi transaction is_concluding represents only if the current running op is
-  // concluding, therefore we remove from txq in unlock multi function which is when the transaction
-  // is concluding.
-  bool remove_txq = tx_stop_runnig || !txq_ooo;
-  if (remove_txq && sd.pq_pos != TxQueue::kEnd) {
+  if ((is_concluding || !txq_ooo) && sd.pq_pos != TxQueue::kEnd) {
     VLOG(2) << "Remove from txq " << this->DebugId();
     shard->txq()->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
@@ -515,7 +518,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // If it's a final hop we should release the locks.
-  if (tx_stop_runnig) {
+  if (is_concluding) {
     bool became_suspended = sd.local_mask & SUSPENDED_Q;
     KeyLockArgs largs;
 
@@ -560,7 +563,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   CHECK_GE(DecreaseRunCnt(), 1u);
   // From this point on we can not access 'this'.
 
-  return !tx_stop_runnig;
+  return !is_concluding;
 }
 
 void Transaction::ScheduleInternal() {
@@ -673,22 +676,26 @@ void Transaction::ScheduleInternal() {
 // transactions like set/mset/mget etc. Does not apply for more complicated cases like RENAME or
 // BLPOP where a data must be read from multiple shards before performing another hop.
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
-  DCHECK(!cb_ptr_);
-
   if (multi_ && multi_->role == SQUASHED_STUB) {
     return RunSquashedMultiCb(cb);
   }
 
+  DCHECK(!cb_ptr_);
+  DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
+
   cb_ptr_ = &cb;
 
-  DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
-  coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
-
-  bool was_ooo = false;
+  if (IsAtomicMulti()) {
+    multi_->concluding = true;
+  } else {
+    coordinator_state_ |= COORD_CONCLUDING;  // Single hop means we conclude.
+  }
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
   bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
+
+  bool was_ooo = false;
   bool run_inline = false;
   ServerState* ss = nullptr;
 
@@ -729,9 +736,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     } else {
       shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
     }
-  } else {
-    // This transaction either spans multiple shards and/or is multi.
-
+  } else {                 // This transaction either spans multiple shards and/or is multi.
     if (!IsAtomicMulti())  // Multi schedule in advance.
       ScheduleInternal();
 
@@ -824,12 +829,12 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   DCHECK(!cb_ptr_);
 
   cb_ptr_ = &cb;
-  coordinator_state_ |= COORD_EXEC;
 
-  if (conclude) {
-    coordinator_state_ |= COORD_EXEC_CONCLUDING;
+  if (IsAtomicMulti()) {
+    multi_->concluding = conclude;
   } else {
-    coordinator_state_ &= ~COORD_EXEC_CONCLUDING;
+    coordinator_state_ = conclude ? (coordinator_state_ | COORD_CONCLUDING)
+                                  : (coordinator_state_ & ~COORD_CONCLUDING);
   }
 
   ExecuteAsync();
@@ -1310,7 +1315,8 @@ void Transaction::UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* s
   auto journal = shard->journal();
 
   if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()]) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {}, true);
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt,
+                         unique_slot_checker_.GetUniqueSlotId(), {}, true);
   }
 
   if (multi_->mode == GLOBAL) {
@@ -1467,7 +1473,8 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
   bool is_multi = multi_commands || IsAtomicMulti();
 
   auto opcode = is_multi ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
-  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), allow_await);
+  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, unique_slot_checker_.GetUniqueSlotId(),
+                       std::move(payload), allow_await);
 }
 
 void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const {
@@ -1476,7 +1483,8 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   }
   auto journal = shard->journal();
   CHECK(journal);
-  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {}, false);
+  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt,
+                       unique_slot_checker_.GetUniqueSlotId(), {}, false);
 }
 
 void Transaction::RunOnceAsCommand(const CommandId* cid, RunnableType cb) {

@@ -276,6 +276,14 @@ class Connection : public util::Connection {
 
   bool IsTrackingOn() const;
 
+  // Starts traffic logging in the calling thread. Must be a proactor thread.
+  // Each thread creates its own log file combining requests from all the connections in
+  // that thread. A noop if the thread is already logging.
+  static void StartTrafficLogging(std::string_view base_path);
+
+  // Stops traffic logging in this thread. A noop if the thread is not logging.
+  static void StopTrafficLogging();
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;

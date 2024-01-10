@@ -50,7 +50,7 @@ class MultiCommandSquasher {
                        bool verify_commands, bool error_abort);
 
   // Lazy initialize shard info.
-  ShardExecInfo& PrepareShardInfo(ShardId sid);
+  ShardExecInfo& PrepareShardInfo(ShardId sid, std::optional<SlotId> slot_id);
 
   // Retrun squash flags
   SquashResult TrySquash(StoredCmd* cmd);

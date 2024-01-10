@@ -3,6 +3,7 @@
 #include <absl/container/inlined_vector.h>
 
 #include "facade/dragonfly_connection.h"
+#include "server/cluster/unique_slot_checker.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -46,14 +47,15 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
   atomic_ = mode != Transaction::NON_ATOMIC;
 }
 
-MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
+MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
+    ShardId sid, optional<SlotId> slot_id) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
-      sinfo.local_tx = new Transaction{cntx_->transaction, sid};
+      sinfo.local_tx = new Transaction{cntx_->transaction, sid, slot_id};
     } else {
       // Non-atomic squashing does not use the transactional framework for fan out, so local
       // transactions have to be fully standalone, check locks and release them immediately.
@@ -82,11 +84,17 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   // Check if all commands belong to one shard
   bool found_more = false;
+  UniqueSlotChecker slot_checker;
   ShardId last_sid = kInvalidSid;
-  IterateKeys(args, *keys, [&last_sid, &found_more](MutableSlice key) {
+  IterateKeys(args, *keys, [&last_sid, &found_more, &slot_checker](MutableSlice key) {
     if (found_more)
       return;
-    ShardId sid = Shard(facade::ToSV(key), shard_set->size());
+
+    string_view key_sv = facade::ToSV(key);
+
+    slot_checker.Add(key_sv);
+
+    ShardId sid = Shard(key_sv, shard_set->size());
     if (last_sid == kInvalidSid || last_sid == sid) {
       last_sid = sid;
       return;
@@ -97,7 +105,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   if (found_more || last_sid == kInvalidSid)
     return SquashResult::NOT_SQUASHED;
 
-  auto& sinfo = PrepareShardInfo(last_sid);
+  auto& sinfo = PrepareShardInfo(last_sid, slot_checker.GetUniqueSlotId());
 
   sinfo.had_writes |= cmd->Cid()->IsWriteOnly();
   sinfo.cmds.push_back(cmd);
