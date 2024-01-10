@@ -492,9 +492,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   if (result.flags & RunnableResult::AVOID_CONCLUDING) {
     CHECK_EQ(unique_shard_cnt_, 1u);  // multi shard must know it ahead, so why do those tricks?
-    DCHECK(is_concluding);
+    DCHECK(is_concluding || multi_->concluding);
     is_concluding = false;
-    tx_stop_runnig = false;  // TODO: will be removed by preceding PR
   }
 
   // Log to jounrnal only once the command finished running
