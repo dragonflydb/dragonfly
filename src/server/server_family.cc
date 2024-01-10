@@ -371,6 +371,140 @@ void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Serv
   }
 }
 
+void ClientSetName(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 1) {
+    cntx->conn()->SetName(string{ArgS(args, 0)});
+    return cntx->SendOk();
+  } else {
+    return cntx->SendError(facade::kSyntaxErr);
+  }
+}
+
+void ClientGetName(CmdArgList args, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return cntx->SendError(facade::kSyntaxErr);
+  }
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (auto name = cntx->conn()->GetName(); !name.empty()) {
+    return rb->SendBulkString(name);
+  } else {
+    return rb->SendNull();
+  }
+}
+
+void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, ConnectionContext* cntx) {
+  if (!args.empty()) {
+    return cntx->SendError(facade::kSyntaxErr);
+  }
+
+  vector<string> client_info;
+  absl::base_internal::SpinLock mu;
+
+  // we can not preempt the connection traversal, so we need to use a spinlock.
+  // alternatively we could lock when mutating the connection list, but it seems not important.
+  auto cb = [&](unsigned thread_index, util::Connection* conn) {
+    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+    string info = dcon->GetClientInfo(thread_index);
+    absl::base_internal::SpinLockHolder l(&mu);
+    client_info.push_back(std::move(info));
+  };
+
+  for (auto* listener : listeners) {
+    listener->TraverseConnections(cb);
+  }
+
+  string result = absl::StrJoin(client_info, "\n");
+  result.append("\n");
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  return rb->SendVerbatimString(result);
+}
+
+void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
+                    ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+
+  auto timeout = parser.Next<uint64_t>();
+  enum ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
+  }
+
+  // Set global pause state and track commands that are running when the pause state is flipped.
+  // Exlude already paused commands from the busy count.
+  DispatchTracker tracker{listeners, cntx->conn(), true /* ignore paused commands */};
+  shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
+    // Commands don't suspend before checking the pause state, so
+    // it's impossible to deadlock on waiting for a command that will be paused.
+    tracker.TrackOnThread();
+    ServerState::tlocal()->SetPauseState(pause_state, true);
+  });
+
+  // TODO handle blocking commands
+  // Wait for all busy commands to finish running before replying to guarantee
+  // that no more (write) operations will occur.
+  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  if (!tracker.Wait(kDispatchTimeout)) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
+    shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
+      ServerState::tlocal()->SetPauseState(pause_state, false);
+    });
+    return cntx->SendError("Failed to pause all running clients");
+  }
+
+  // We should not expire/evict keys while clients are puased.
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+
+  fb2::Fiber("client_pause", [timeout, pause_state]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
+    // ensure this fiber will not left hanging .
+    auto step = 10ms;
+    auto timeout_ms = timeout * 1ms;
+    int64_t steps = timeout_ms.count() / step.count();
+    ServerState& etl = *ServerState::tlocal();
+    do {
+      ThisFiber::SleepFor(step);
+    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
+
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      });
+      shard_set->RunBriefInParallel(
+          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    }
+  }).Detach();
+
+  cntx->SendOk();
+}
+
+void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 1)
+    return cntx->SendError(kSyntaxErr);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (!rb->IsResp3())
+    return cntx->SendError(
+        "Client tracking is currently not supported for RESP2. Please use RESP3.");
+
+  ToUpper(&args[0]);
+  string_view state = ArgS(args, 0);
+  bool is_on;
+  if (state == "ON") {
+    is_on = true;
+  } else if (state == "OFF") {
+    is_on = false;
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  cntx->conn()->SetClientTrackingSwitch(is_on);
+  return cntx->SendOk();
+}
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -1243,9 +1377,9 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "GETNAME") {
     return ClientGetName(sub_args, cntx);
   } else if (sub_cmd == "LIST") {
-    return ClientList(sub_args, cntx);
+    return ClientList(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPause(sub_args, cntx);
+    return ClientPauseCmd(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, cntx);
   }
@@ -1256,139 +1390,6 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
   return cntx->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
-}
-
-void ServerFamily::ClientSetName(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() == 1) {
-    cntx->conn()->SetName(string{ArgS(args, 0)});
-    return cntx->SendOk();
-  } else {
-    return cntx->SendError(facade::kSyntaxErr);
-  }
-}
-
-void ServerFamily::ClientGetName(CmdArgList args, ConnectionContext* cntx) {
-  if (!args.empty()) {
-    return cntx->SendError(facade::kSyntaxErr);
-  }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (auto name = cntx->conn()->GetName(); !name.empty()) {
-    return rb->SendBulkString(name);
-  } else {
-    return rb->SendNull();
-  }
-}
-
-void ServerFamily::ClientList(CmdArgList args, ConnectionContext* cntx) {
-  if (!args.empty()) {
-    return cntx->SendError(facade::kSyntaxErr);
-  }
-
-  vector<string> client_info;
-  absl::base_internal::SpinLock mu;
-
-  // we can not preempt the connection traversal, so we need to use a spinlock.
-  // alternatively we could lock when mutating the connection list, but it seems not important.
-  auto cb = [&](unsigned thread_index, util::Connection* conn) {
-    facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-    string info = dcon->GetClientInfo(thread_index);
-    absl::base_internal::SpinLockHolder l(&mu);
-    client_info.push_back(std::move(info));
-  };
-
-  for (auto* listener : listeners_) {
-    listener->TraverseConnections(cb);
-  }
-
-  string result = absl::StrJoin(client_info, "\n");
-  result.append("\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  return rb->SendVerbatimString(result);
-}
-
-void ServerFamily::ClientPause(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser(args);
-
-  auto timeout = parser.Next<uint64_t>();
-  enum ClientPause pause_state = ClientPause::ALL;
-  if (parser.HasNext()) {
-    pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
-  }
-  if (auto err = parser.Error(); err) {
-    return cntx->SendError(err->MakeReply());
-  }
-
-  // Set global pause state and track commands that are running when the pause state is flipped.
-  // Exlude already paused commands from the busy count.
-  DispatchTracker tracker{GetListeners(), cntx->conn(), true /* ignore paused commands */};
-  service_.proactor_pool().Await([&tracker, pause_state](util::ProactorBase* pb) {
-    // Commands don't suspend before checking the pause state, so
-    // it's impossible to deadlock on waiting for a command that will be paused.
-    tracker.TrackOnThread();
-    ServerState::tlocal()->SetPauseState(pause_state, true);
-  });
-
-  // TODO handle blocking commands
-  // Wait for all busy commands to finish running before replying to guarantee
-  // that no more (write) operations will occur.
-  const absl::Duration kDispatchTimeout = absl::Seconds(1);
-  if (!tracker.Wait(kDispatchTimeout)) {
-    LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
-    service_.proactor_pool().Await([pause_state](util::ProactorBase* pb) {
-      ServerState::tlocal()->SetPauseState(pause_state, false);
-    });
-    return cntx->SendError("Failed to pause all running clients");
-  }
-
-  // We should not expire/evict keys while clients are puased.
-  shard_set->RunBriefInParallel(
-      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
-
-  fb2::Fiber("client_pause", [this, timeout, pause_state]() mutable {
-    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
-    // ensure this fiber will not left hanging .
-    auto step = 10ms;
-    auto timeout_ms = timeout * 1ms;
-    int64_t steps = timeout_ms.count() / step.count();
-    ServerState& etl = *ServerState::tlocal();
-    do {
-      ThisFiber::SleepFor(step);
-    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
-
-    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-      service_.proactor_pool().AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-        ServerState::tlocal()->SetPauseState(pause_state, false);
-      });
-      shard_set->RunBriefInParallel(
-          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
-    }
-  }).Detach();
-
-  cntx->SendOk();
-}
-
-void ServerFamily::ClientTracking(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() != 1)
-    return cntx->SendError(kSyntaxErr);
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (!rb->IsResp3())
-    return cntx->SendError(
-        "Client tracking is currently not supported for RESP2. Please use RESP3.");
-
-  ToUpper(&args[0]);
-  string_view state = ArgS(args, 0);
-  bool is_on;
-  if (state == "ON") {
-    is_on = true;
-  } else if (state == "OFF") {
-    is_on = false;
-  } else {
-    return cntx->SendError(kSyntaxErr);
-  }
-
-  cntx->conn()->SetClientTrackingSwitch(is_on);
-  return cntx->SendOk();
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -2268,14 +2269,6 @@ void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
   script_mgr_->Run(std::move(args), cntx);
 }
 
-void ServerFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
-  SyncGeneric("", 0, cntx);
-}
-
-void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
-  SyncGeneric("?", 0, cntx);  // full sync, ignore the request.
-}
-
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   time_t save_time;
   {
@@ -2320,20 +2313,6 @@ void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cntx->SendOk();
-}
-
-void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
-                               ConnectionContext* cntx) {
-  if (cntx->async_dispatch) {
-    // SYNC is a special command that should not be sent in batch with other commands.
-    // It should be the last command since afterwards the server just dumps the replication data.
-    cntx->SendError("Can not sync in pipeline mode");
-    return;
-  }
-
-  cntx->replica_conn = true;
-  ServerState::tl_connection_stats()->num_replicas += 1;
-  // TBD.
 }
 
 void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
