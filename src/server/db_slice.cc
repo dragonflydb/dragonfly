@@ -259,7 +259,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       ArgSlice delete_args{key};
-      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1,
+      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, ClusterConfig::KeySlot(key),
                            make_pair("DEL", delete_args), false);
     }
 
