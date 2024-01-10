@@ -607,7 +607,11 @@ void DebugCmd::LogTraffic(CmdArgList args) {
   optional<string> path;
   if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
     path = ArgS(args, 0);
+    LOG(INFO) << "Logging to traffic to " << *path << "*.bin";
+  } else {
+    LOG(INFO) << "Traffic logging stopped";
   }
+
   shard_set->pool()->AwaitFiberOnAll([path](auto*) {
     if (path)
       facade::Connection::StartTrafficLogging(*path);

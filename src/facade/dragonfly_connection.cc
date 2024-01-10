@@ -9,7 +9,6 @@
 #include <mimalloc.h>
 
 #include <numeric>
-#include <shared_mutex>
 #include <variant>
 
 #include "absl/strings/str_cat.h"
@@ -105,20 +104,17 @@ void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
 
 struct TrafficLogger {
   // protects agains closing the file while writing or data races when opening the file.
-  // We use shared mutex to allow concurrent writes, i.e multiple fibers can write to the file
-  // without contending with each other.
-  fb2::SharedMutex mutex;
+  // Also, makes sure that LogTraffic are executed atomically.
+  fb2::Mutex mutex;
   unique_ptr<io::WriteFile> log_file;
 
-  void Reset();
-
+  void ResetLocked();
   // Returns true if Write succeeded, false if it failed and the recording should be aborted.
-  bool Write(string_view blob, shared_lock<fb2::SharedMutex>* lk);
-  bool Write(iovec* blobs, size_t len, shared_lock<fb2::SharedMutex>* lk);
+  bool Write(string_view blob);
+  bool Write(iovec* blobs, size_t len);
 };
 
-void TrafficLogger::Reset() {
-  std::unique_lock lk{mutex};
+void TrafficLogger::ResetLocked() {
   if (log_file) {
     log_file->Close();
     log_file.reset();
@@ -126,23 +122,21 @@ void TrafficLogger::Reset() {
 }
 
 // Returns true if Write succeeded, false if it failed and the recording should be aborted.
-bool TrafficLogger::Write(string_view blob, shared_lock<fb2::SharedMutex>* lk) {
+bool TrafficLogger::Write(string_view blob) {
   auto ec = log_file->Write(io::Buffer(blob));
   if (ec) {
     LOG(ERROR) << "Error writing to traffic log: " << ec;
-    lk->unlock();
-    Reset();
+    ResetLocked();
     return false;
   }
   return true;
 }
 
-bool TrafficLogger::Write(iovec* blobs, size_t len, shared_lock<fb2::SharedMutex>* lk) {
+bool TrafficLogger::Write(iovec* blobs, size_t len) {
   auto ec = log_file->Write(blobs, len);
   if (ec) {
     LOG(ERROR) << "Error writing to traffic log: " << ec;
-    lk->unlock();
-    Reset();
+    ResetLocked();
     return false;
   }
   return true;
@@ -158,7 +152,7 @@ void OpenTrafficLogger(string_view base_path) {
   // Open file with append mode, without it concurrent fiber writes seem to conflict
   string path = absl::StrCat(
       base_path, "-", absl::Dec(ProactorBase::me()->GetPoolIndex(), absl::kZeroPad3), ".bin");
-  auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ true});
+  auto file = util::fb2::OpenWrite(path, io::WriteFile::Options{/*.append = */ false});
   if (!file) {
     LOG(ERROR) << "Error opening a file " << path << " for traffic logging: " << file.error();
     return;
@@ -167,8 +161,11 @@ void OpenTrafficLogger(string_view base_path) {
 }
 
 void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
-  if (!tl_traffic_logger.log_file)  // fast check without locking
+  string_view cmd = resp.front().GetView();
+  if (absl::EqualsIgnoreCase(cmd, "debug"sv))
     return;
+
+  DVLOG(2) << "Recording " << cmd;
 
   char stack_buf[1024];
   char* next = stack_buf;
@@ -189,14 +186,15 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
   write_u32(uint32_t(resp.size()));
 
   // Grab the lock and check if the file is still open.
-  shared_lock lk{tl_traffic_logger.mutex};
+  lock_guard lk{tl_traffic_logger.mutex};
+
   if (!tl_traffic_logger.log_file)
     return;
 
   // Proceed with writing the blob lengths.
   for (auto part : resp) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
-      if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)}, &lk)) {
+      if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
         return;
       }
       next = stack_buf;
@@ -215,7 +213,7 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
     blobs[index++] = iovec{.iov_base = const_cast<char*>(part.GetView().data()),
                            .iov_len = part.GetView().size()};
     if (index >= blobs.size()) {
-      if (!tl_traffic_logger.Write(blobs.data(), blobs.size(), &lk)) {
+      if (!tl_traffic_logger.Write(blobs.data(), blobs.size())) {
         return;
       }
       index = 0;
@@ -223,7 +221,7 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
   }
 
   if (index) {
-    tl_traffic_logger.Write(blobs.data(), index, &lk);
+    tl_traffic_logger.Write(blobs.data(), index);
   }
 }
 
@@ -818,8 +816,10 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   bool can_dispatch_sync = (consumed >= io_buf_.InputLen());
 
-  // Log command as soon as we receive it
-  LogTraffic(id_, !can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
+  if (tl_traffic_logger.log_file) {
+    // Log command as soon as we receive it
+    LogTraffic(id_, !can_dispatch_sync, absl::MakeSpan(tmp_parse_args_));
+  }
 
   // Avoid sync dispatch if an async dispatch is already in progress, or else they'll interleave.
   if (cc_->async_dispatch)
@@ -1532,7 +1532,8 @@ void Connection::StartTrafficLogging(string_view path) {
 }
 
 void Connection::StopTrafficLogging() {
-  tl_traffic_logger.Reset();
+  lock_guard lk(tl_traffic_logger.mutex);
+  tl_traffic_logger.ResetLocked();
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
