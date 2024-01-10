@@ -1,8 +1,5 @@
 BUILD_ARCH := $(shell uname -m)
 RELEASE_NAME := "dragonfly-${BUILD_ARCH}"
-
-HELIO_RELEASE := $(if $(HELIO_RELEASE),y,)
-
 HELIO_RELEASE_FLAGS = -DHELIO_RELEASE_FLAGS="-g"
 HELIO_USE_STATIC_LIBS = ON
 HELIO_OPENSSL_USE_STATIC_LIBS = ON
@@ -20,11 +17,9 @@ endif
 
 # For release builds we link statically libstdc++ and libgcc. Currently,
 # all the release builds are performed by gcc.
-ifeq ($(HELIO_RELEASE),y)
-	LINKER_FLAGS += -static-libstdc++ -static-libgcc
-endif
+LINKER_FLAGS += -static-libstdc++ -static-libgcc
 
-HELIO_FLAGS = $(if $(HELIO_RELEASE),-release $(HELIO_RELEASE_FLAGS),) \
+HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
 			  -DCMAKE_EXE_LINKER_FLAGS="$(LINKER_FLAGS)" \
               -DBoost_USE_STATIC_LIBS=$(HELIO_USE_STATIC_LIBS) \
               -DOPENSSL_USE_STATIC_LIBS=$(HELIO_OPENSSL_USE_STATIC_LIBS) \
@@ -34,18 +29,14 @@ HELIO_FLAGS = $(if $(HELIO_RELEASE),-release $(HELIO_RELEASE_FLAGS),) \
 .PHONY: default
 
 configure:
-	./helio/blaze.sh $(HELIO_FLAGS)
+	cmake -L -B build-release -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS)
 
 build:
-	cd build-opt; \
-	ninja dragonfly && ldd dragonfly
-
-build-debug:
-	cd build-dbg; \
+	cd build-release; \
 	ninja dragonfly && ldd dragonfly
 
 package:
-	cd build-opt; \
+	cd build-release; \
 	objcopy \
 		--remove-section=".debug_*" \
 		--remove-section="!.debug_line" \
@@ -55,7 +46,5 @@ package:
 	tar cvfz $(RELEASE_NAME).tar.gz $(RELEASE_NAME) ../LICENSE.md
 
 release: configure build
-
-release-debug: configure build-debug
 
 default: release
