@@ -30,6 +30,10 @@ class ClusterSlotMigration : ProtocolClient {
   // Initiate connection with source node and create migration fiber
   std::error_code Start(ConnectionContext* cntx);
   Info GetInfo() const;
+  uint32_t getSyncId() const {
+    return sync_id_;
+  }
+  bool trySetStableSync(uint32_t flow);
 
  private:
   // Send DFLYMIGRATE CONF to the source and get info about migration process

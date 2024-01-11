@@ -24,6 +24,13 @@ class ClusterShardMigration : public ProtocolClient {
   std::error_code StartSyncFlow(Context* cntx);
   void Cancel();
 
+  void setStableSync() {
+    is_stable_sync = true;
+  }
+  bool isStableSync() {
+    return is_stable_sync;
+  }
+
  private:
   void FullSyncShardFb(Context* cntx);
   void JoinFlow();
@@ -35,6 +42,7 @@ class ClusterShardMigration : public ProtocolClient {
   uint32_t source_shard_id_;
   uint32_t sync_id_;
   Service& service_;
+  bool is_stable_sync = false;
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<JournalExecutor> executor_;
   EventCount waker_;

@@ -103,6 +103,19 @@ ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   return {ctx.host, ctx.port, state_};
 }
 
+bool ClusterSlotMigration::trySetStableSync(uint32_t flow) {
+  DCHECK(shard_flows_.size() > flow);
+  shard_flows_[flow]->setStableSync();
+  auto res = std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                         [](const auto& el) { return el->isStableSync(); });
+  if (res) {
+    // TODO make this when we set new config
+    state_ = ClusterSlotMigration::C_STABLE_SYNC;
+    cntx_.Cancel();
+  }
+  return res;
+}
+
 void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "Main migration fiber started";
 

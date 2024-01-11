@@ -68,6 +68,8 @@ class ClusterFamily {
   // source for migration
   void Flow(CmdArgList args, ConnectionContext* cntx);
 
+  void FullSyncCut(CmdArgList args, ConnectionContext* cntx);
+
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
