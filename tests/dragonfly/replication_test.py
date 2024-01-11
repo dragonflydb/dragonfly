@@ -1836,3 +1836,86 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     await c_replica.close()
     master.stop()
     replica.stop()
+
+
+# note: please be careful if you want to change any of the parameters used in this test.
+# changing parameters without extensive testing may easily lead to weak testing case assertion
+# which means eviction may not get triggered.
+@pytest.mark.asyncio
+@pytest.mark.skip(reason="Failing due to bug in replication on command errors")
+async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(
+        proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
+    )
+    replica = df_local_factory.create(proactor_threads=1)
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    seeder = df_seeder_factory.create(
+        port=master.port,
+        keys=500,
+        val_size=200,
+        stop_on_failure=False,
+        unsupported_types=[
+            ValueType.JSON,
+            ValueType.LIST,
+            ValueType.SET,
+            ValueType.HSET,
+            ValueType.ZSET,
+        ],
+    )
+    await seeder.run(target_deviation=0.1)
+
+    info = await c_master.info("stats")
+    assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
+
+    await check_all_replicas_finished([c_replica], c_master)
+    keys_master = await c_master.execute_command("keys *")
+    keys_replica = await c_replica.execute_command("keys *")
+
+    assert set(keys_master) == set(keys_replica)
+    await disconnect_clients(c_master, *[c_replica])
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_eviction_propagation(df_local_factory):
+    master = df_local_factory.create(
+        proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
+    )
+    replica = df_local_factory.create(proactor_threads=1)
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # fill the master to use about 233mb > 256mb * 0.9, which will trigger heartbeat eviction.
+    await c_master.execute_command("DEBUG POPULATE 233 size 1048576")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # now enable heart beat eviction
+    await c_master.execute_command("CONFIG SET enable_heartbeat_eviction true")
+
+    while True:
+        info = await c_master.info("stats")
+        evicted_1 = info["evicted_keys"]
+        time.sleep(2)
+        info = await c_master.info("stats")
+        evicted_2 = info["evicted_keys"]
+        if evicted_2 == evicted_1:
+            break
+        else:
+            print("waiting for eviction to finish...", end="\r", flush=True)
+
+    await check_all_replicas_finished([c_replica], c_master)
+    keys_master = await c_master.execute_command("keys *")
+    keys_replica = await c_replica.execute_command("keys *")
+    assert set(keys_master) == set(keys_replica)
+    await disconnect_clients(c_master, *[c_replica])
