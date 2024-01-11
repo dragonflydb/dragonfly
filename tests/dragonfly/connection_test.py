@@ -1,6 +1,7 @@
 import random
 import pytest
 import asyncio
+import logging
 import time
 from redis import asyncio as aioredis
 from redis.exceptions import ConnectionError as redis_conn_error
@@ -700,3 +701,31 @@ async def test_nested_client_pause(async_client: aioredis.Redis):
     await asyncio.sleep(0.0)
     assert p3.done()
     await p3
+
+
+RD_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+
+
+@dfly_args({"proactor_threads": "4"})
+async def test_pipelined_migration(async_client: aioredis.Redis):
+    sha = await async_client.script_load(RD_SCRIPT)
+    for iters in range(0, 3):
+        resp = await async_client.execute_command("dfly", "thread", "0")
+        assert resp == "OK"
+        await async_client.select(0)
+        await async_client.set("key1", "val")
+        pipe = async_client.pipeline(transaction=False)
+        pipe.select(0)
+        pipe.evalsha(sha, 1, "key1", "val")
+        pipe.select(1)
+        key = "foo"
+        pipe.zcount(key, 0, 0)
+        pipe.zrangebyscore(key, 0, 0)
+        res = await pipe.execute()
+        logging.info(f"results {res}")

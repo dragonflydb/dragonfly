@@ -1581,7 +1581,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
   DCHECK(cntx->transaction);
-  DVLOG(1) << "CallFromScript " << ArgS(ca.args, 0);
+  DVLOG(2) << "CallFromScript " << ArgS(ca.args, 0);
 
   InterpreterReplier replier(ca.translator);
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
@@ -1860,7 +1860,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     if (*sid != ServerState::tlocal()->thread_index()) {
-      VLOG(1) << "Migrating connection " << cntx->conn() << " from "
+      VLOG(1) << "Migrating connection " << cntx->conn()->GetClientId() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
       cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
     }
