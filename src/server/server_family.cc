@@ -12,6 +12,7 @@
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
 #include <sys/resource.h>
+#include <sys/utsname.h>
 
 #include <algorithm>
 #include <chrono>
@@ -505,6 +506,9 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendOk();
 }
 
+// Initalized once in ServerFamily ctor.
+static string os_string;
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -561,6 +565,17 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
+
+  static std::once_flag once_init;
+
+  std::call_once(once_init, [] {
+    utsname os_name;
+
+    // Call uname() only once since it can be expensive. Cache the final result in a static string.
+    uname(&os_name);
+    os_string = StrCat(os_name.sysname, " ", os_name.release, " ", os_name.machine);
+    LOG(INFO) << "Host OS: " << os_string << " with " << shard_set->pool()->size() << " threads";
+  });
 
   SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
   config_registry.RegisterMutable("maxclients", [this](const absl::CommandLineFlag& flag) {
@@ -1633,6 +1648,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("dragonfly_version", GetVersion());
     append("redis_mode", "standalone");
     append("arch_bits", 64);
+    append("os", os_string);
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
     append("thread_count", service_.proactor_pool().size());
