@@ -49,9 +49,13 @@ void JournalStreamer::WriterFb(io::Sink* dest) {
   }
 }
 
-RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal,
-                                 Context* cntx)
-    : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
+RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id, uint32_t flow_id,
+                                 journal::Journal* journal, Context* cntx)
+    : JournalStreamer(journal, cntx),
+      db_slice_(slice),
+      my_slots_(std::move(slots)),
+      sync_id_(sync_id),
+      flow_id_(flow_id) {
   DCHECK(slice != nullptr);
 }
 
@@ -79,7 +83,8 @@ void RestoreStreamer::Start(io::Sink* dest) {
       }
     } while (cursor);
 
-    WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT"}));
+    WriteCommand(make_pair(
+        "DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_), absl::StrCat(flow_id_)}));
   });
 }
 
