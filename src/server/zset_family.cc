@@ -50,6 +50,9 @@ static const char kStoreTypeErr[] =
 static const char kScoreNaN[] = "resulting score is not a number (NaN)";
 static const char kFloatRangeErr[] = "min or max is not a float";
 static const char kLexRangeErr[] = "min or max not valid string range item";
+static const char kStoreCompatErr[] =
+    "STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options";
+static const char kMemberNotFound[] = "could not decode requested zset member";
 constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 
 using MScoreResponse = std::vector<std::optional<double>>;
@@ -81,6 +84,7 @@ struct GeoSearchOpts {
   bool withcoord = 0;
   bool withhash = 0;
   GeoStoreType store = GeoStoreType::kNoStore;
+  string_view store_key;
 };
 
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
@@ -1609,6 +1613,12 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, ArgSlice member
   return deleted;
 }
 
+OpResult<void> OpKeyExisted(const OpArgs& op_args, string_view key) {
+  OpResult<PrimeConstIterator> res_it =
+      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  return res_it.status();
+}
+
 OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view member) {
   OpResult<PrimeConstIterator> res_it =
       op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
@@ -1621,8 +1631,9 @@ OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view mem
 
   const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
   auto res = GetZsetScore(robj_wrapper, tmp_str);
-  if (!res)
-    return OpStatus::KEY_NOTFOUND;
+  if (!res) {
+    return OpStatus::MEMBER_NOTFOUND;
+  }
   return *res;
 }
 
@@ -2742,12 +2753,9 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
 }
 
 namespace {
-// Search all eight neighbors + self geohash box
-bool MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHashRadius& n,
-                           const GeoShape& shape_ref, GeoArray* ga, unsigned long limit) {
+std::vector<ZSetFamily::ZRangeSpec> GetGeoRangeSpec(const GeoHashRadius& n) {
   array<GeoHashBits, 9> neighbors;
   unsigned int last_processed = 0;
-  GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
 
   neighbors[0] = n.hash;
   neighbors[1] = n.neighbors.north;
@@ -2789,34 +2797,7 @@ bool MembersOfAllNeighbors(ConnectionContext* cntx, string_view key, const GeoHa
 
     last_processed = i;
   }
-
-  // get all the matching members and add them to the potential result list
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRanges(range_specs, t->GetOpArgs(shard), key);
-  };
-  OpResult<vector<ScoredArray>> result_arrays =
-      cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result_arrays.status() == OpStatus::WRONG_TYPE) {
-    cntx->SendError(kWrongTypeErr);
-    return false;
-  } else if (result_arrays.status() == OpStatus::KEY_NOTFOUND) {
-    cntx->SendError("Member not found");
-    return false;
-  }
-
-  // filter potential result list
-  double xy[2];
-  double distance;
-  for (auto& arr : *result_arrays) {
-    for (auto& p : arr) {
-      if (geoWithinShape(shape, p.second, xy, &distance) == 0) {
-        ga->emplace_back(xy[0], xy[1], distance, p.second, p.first);
-        if (limit > 0 && ga->size() >= limit)
-          break;
-      }
-    }
-  }
-  return true;
+  return range_specs;
 }
 
 void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
@@ -2840,54 +2821,157 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
   }
 }
 
-void GeoSearchGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, string_view key,
-                      const GeoSearchOpts& geo_ops) {
-  // query
+void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, string_view key,
+                           string_view member, const GeoSearchOpts& geo_ops) {
   GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+
+  ShardId from_shard = Shard(key, shard_set->size());
+  cntx->transaction->Schedule();
+  if (!member.empty()) {
+    // get shape.xy from member
+    OpResult<double> member_score;
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == from_shard) {
+        member_score = OpScore(t->GetOpArgs(shard), key, member);
+      }
+      return OpStatus::OK;
+    };
+    cntx->transaction->Execute(std::move(cb), false);
+    auto member_sts = member_score.status();
+    if (member_sts != OpStatus::OK) {
+      cntx->transaction->Conclude();
+      switch (member_sts) {
+        case OpStatus::WRONG_TYPE:
+          return cntx->SendError(kWrongTypeErr);
+        case OpStatus::KEY_NOTFOUND:
+          return rb->StartArray(0);
+        case OpStatus::MEMBER_NOTFOUND:
+          return cntx->SendError(kMemberNotFound);
+        default:
+          return cntx->SendError(member_sts);
+      }
+    }
+    ScoreToLongLat(*member_score, shape->xy);
+  } else {
+    // verify key is valid
+    OpResult<void> result;
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == from_shard) {
+        result = OpKeyExisted(t->GetOpArgs(shard), key);
+      }
+      return OpStatus::OK;
+    };
+    cntx->transaction->Execute(std::move(cb), false);
+    auto result_sts = result.status();
+    if (result_sts != OpStatus::OK) {
+      cntx->transaction->Conclude();
+      switch (result_sts) {
+        case OpStatus::WRONG_TYPE:
+          return cntx->SendError(kWrongTypeErr);
+        case OpStatus::KEY_NOTFOUND:
+          return rb->StartArray(0);
+        default:
+          return cntx->SendError(result_sts);
+      }
+    }
+  }
+  DCHECK(shape->xy[0] >= -180.0 && shape->xy[0] <= 180.0);
+  DCHECK(shape->xy[1] >= -90.0 && shape->xy[1] <= 90.0);
+
+  // query
   GeoHashRadius georadius = geohashCalculateAreasByShapeWGS84(shape);
   GeoArray ga;
-  if (!MembersOfAllNeighbors(cntx, key, georadius, shape_ref, &ga,
-                             geo_ops.any ? geo_ops.count : 0)) {
-    return;
-  }
+  auto range_specs = GetGeoRangeSpec(georadius);
+  // get all the matching members and add them to the potential result list
+  vector<OpResult<vector<ScoredArray>>> result_arrays;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto res_it = OpRanges(range_specs, t->GetOpArgs(shard), key);
+    if (res_it) {
+      result_arrays.emplace_back(res_it);
+    }
+    return OpStatus::OK;
+  };
+  cntx->transaction->Execute(std::move(cb), geo_ops.store == GeoStoreType::kNoStore);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  // if no matching results, the user gets an empty reply.
-  if (ga.empty()) {
-    rb->SendNull();
-    return;
+  // filter potential result list
+  double xy[2];
+  double distance;
+  unsigned long limit = geo_ops.any ? geo_ops.count : 0;
+  for (auto& result_array : result_arrays) {
+    for (auto& arr : *result_array) {
+      for (auto& p : arr) {
+        if (geoWithinShape(shape, p.second, xy, &distance) == 0) {
+          ga.emplace_back(xy[0], xy[1], distance, p.second, p.first);
+          if (limit > 0 && ga.size() >= limit)
+            break;
+        }
+      }
+    }
   }
 
   // sort and trim by count
   SortIfNeeded(&ga, geo_ops.sorting, geo_ops.count);
 
-  // generate reply array withdist, withcoords, withhash
-  int record_size = 1;
-  if (geo_ops.withdist) {
-    record_size++;
-  }
-  if (geo_ops.withhash) {
-    record_size++;
-  }
-  if (geo_ops.withcoord) {
-    record_size++;
-  }
-  rb->StartArray(ga.size());
-  for (const auto& p : ga) {
-    // [member, dist, x, y, hash]
-    rb->StartArray(record_size);
-    rb->SendBulkString(p.member);
+  if (geo_ops.store == GeoStoreType::kNoStore) {
+    // case 1: read mode
+    // case 2: write mode, kNoStore
+    // generate reply array withdist, withcoords, withhash
+    int record_size = 1;
     if (geo_ops.withdist) {
-      rb->SendDouble(p.dist / geo_ops.conversion);
+      record_size++;
     }
     if (geo_ops.withhash) {
-      rb->SendDouble(p.score);
+      record_size++;
     }
     if (geo_ops.withcoord) {
-      rb->StartArray(2);
-      rb->SendDouble(p.longitude);
-      rb->SendDouble(p.latitude);
+      record_size++;
     }
+    rb->StartArray(ga.size());
+    for (const auto& p : ga) {
+      // [member, dist, x, y, hash]
+      rb->StartArray(record_size);
+      rb->SendBulkString(p.member);
+      if (geo_ops.withdist) {
+        rb->SendDouble(p.dist / geo_ops.conversion);
+      }
+      if (geo_ops.withhash) {
+        rb->SendDouble(p.score);
+      }
+      if (geo_ops.withcoord) {
+        rb->StartArray(2);
+        rb->SendDouble(p.longitude);
+        rb->SendDouble(p.latitude);
+      }
+    }
+  } else {
+    // case 3: write mode, !kNoStore
+    DCHECK(geo_ops.store == GeoStoreType::kStoreDist || geo_ops.store == GeoStoreType::kStoreHash);
+    ShardId dest_shard = Shard(geo_ops.store_key, shard_set->size());
+    DVLOG(1) << "store shard:" << dest_shard << ", key " << geo_ops.store_key;
+    AddResult add_result;
+    vector<ScoredMemberView> smvec;
+    for (const auto& p : ga) {
+      if (geo_ops.store == GeoStoreType::kStoreDist) {
+        smvec.emplace_back(p.dist / geo_ops.conversion, p.member);
+      } else {
+        DCHECK(geo_ops.store == GeoStoreType::kStoreHash);
+        smvec.emplace_back(p.score, p.member);
+      }
+    }
+
+    auto store_cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == dest_shard) {
+        ZParams zparams;
+        zparams.override = true;
+        add_result =
+            OpAdd(t->GetOpArgs(shard), zparams, geo_ops.store_key, ScoredMemberSpan{smvec}).value();
+      }
+      return OpStatus::OK;
+    };
+    cntx->transaction->Execute(std::move(store_cb), true);
+
+    rb->SendLong(smvec.size());
   }
 }
 }  // namespace
@@ -2897,6 +2981,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
+  string_view member;
 
   // FROMMEMBER or FROMLONLAT is set
   bool from_set = false;
@@ -2907,25 +2992,11 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
     ToUpper(&args[i]);
 
     string_view cur_arg = ArgS(args, i);
-
     if (cur_arg == "FROMMEMBER") {
       if (from_set) {
         return cntx->SendError(kFromMemberLonglatErr);
       } else if (i + 1 < args.size()) {
-        string_view member;
         member = ArgS(args, i + 1);
-
-        // member to latlong, set shape.xy
-        auto cb = [&](Transaction* t, EngineShard* shard) {
-          return OpScore(t->GetOpArgs(shard), key, member);
-        };
-        OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-        if (result.status() == OpStatus::WRONG_TYPE) {
-          return cntx->SendError(kWrongTypeErr);
-        } else if (!result) {
-          return cntx->SendError("Member not found");
-        }
-        ScoreToLongLat(*result, shape.xy);
         from_set = true;
         i++;
       } else {
@@ -3032,7 +3103,9 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
   if (!by_set) {
     return cntx->SendError(kSyntaxErr);
   }
-  GeoSearchGeneric(cntx, shape, key, geo_ops);
+  // parsing completed
+
+  GeoSearchStoreGeneric(cntx, shape, key, member, geo_ops);
 }
 
 void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
@@ -3042,16 +3115,6 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   // member to latlong, set shape.xy
   string_view member = ArgS(args, 1);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpScore(t->GetOpArgs(shard), key, member);
-  };
-  OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return cntx->SendError(kWrongTypeErr);
-  } else if (!result) {
-    return cntx->SendError("Member not found");
-  }
-  ScoreToLongLat(*result, shape.xy);
 
   if (!ParseDouble(ArgS(args, 2), &shape.t.radius)) {
     return cntx->SendError(kInvalidFloatErr);
@@ -3063,7 +3126,6 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("unsupported unit provided. please use M, KM, FT, MI");
   }
   shape.type = CIRCULAR_TYPE;
-  string_view store_key;
 
   for (size_t i = 4; i < args.size(); ++i) {
     ToUpper(&args[i]);
@@ -3093,17 +3155,28 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
         i++;
       }
     } else if (cur_arg == "WITHCOORD") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withcoord = true;
     } else if (cur_arg == "WITHDIST") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withdist = true;
     } else if (cur_arg == "WITHHASH") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withhash = true;
     } else if (cur_arg == "STORE") {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         return cntx->SendError(kStoreTypeErr);
+      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
+        return cntx->SendError(kStoreCompatErr);
       }
       if (i + 1 < args.size()) {
-        store_key = ArgS(args, i + 1);
+        geo_ops.store_key = ArgS(args, i + 1);
         geo_ops.store = GeoStoreType::kStoreHash;
         i++;
       } else {
@@ -3112,9 +3185,11 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
     } else if (cur_arg == "STOREDIST") {
       if (geo_ops.store != GeoStoreType::kNoStore) {
         return cntx->SendError(kStoreTypeErr);
+      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
+        return cntx->SendError(kStoreCompatErr);
       }
       if (i + 1 < args.size()) {
-        store_key = ArgS(args, i + 1);
+        geo_ops.store_key = ArgS(args, i + 1);
         geo_ops.store = GeoStoreType::kStoreDist;
         i++;
       } else {
@@ -3124,7 +3199,9 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
       return cntx->SendError(kSyntaxErr);
     }
   }
-  GeoSearchGeneric(cntx, shape, key, geo_ops);
+  // parsing completed
+
+  GeoSearchStoreGeneric(cntx, shape, key, member, geo_ops);
 }
 
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
@@ -3166,7 +3243,7 @@ constexpr uint32_t kGeoHash = READ | GEO | SLOW;
 constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
-constexpr uint32_t kGeoRadiusByMember = READ | GEO | SLOW;
+constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
 }  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
@@ -3220,8 +3297,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
       << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
-      << CI{"GEORADIUSBYMEMBER", CO::READONLY, -4, 1, 1, acl::kGeoRadiusByMember}.HFUNC(
-             GeoRadiusByMember);
+      << CI{"GEORADIUSBYMEMBER", CO::WRITE | CO::STORE_LAST_KEY, -4, 1, 1, acl::kGeoRadiusByMember}
+             .HFUNC(GeoRadiusByMember);
 }
 
 }  // namespace dfly
