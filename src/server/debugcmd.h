@@ -39,7 +39,7 @@ class DebugCmd {
   void Replica(CmdArgList args);
   void Load(std::string_view filename);
   void Exec();
-  void Inspect(std::string_view key);
+  void Inspect(std::string_view key, CmdArgList args);
   void Watched();
   void TxAnalysis();
   void ObjHist();
