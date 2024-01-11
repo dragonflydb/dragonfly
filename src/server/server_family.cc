@@ -521,8 +521,7 @@ std::string_view GetOSString() {
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
-  last_save_info_ = make_shared<LastSaveInfo>();
-  last_save_info_->save_time = start_time_;
+  last_save_info_.save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
   journal_.reset(new journal::Journal());
 
@@ -1227,10 +1226,18 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
                           StrCat(GlobalStateName(new_state), " - can not save database")};
     }
   }
+  {
+    std::lock_guard lck(save_mu_);
+    start_save_time_ = absl::Now();
+  }
   SaveStagesController sc{detail::SaveStagesInputs{
       new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
       &save_mu_, &save_bytes_cb_, snapshot_storage_}};
   auto res = sc.Save();
+  {
+    std::lock_guard lck(save_mu_);
+    start_save_time_.reset();
+  }
   if (!ignore_state)
     service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
   return res;
@@ -1251,7 +1258,7 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   return error_code{};
 }
 
-shared_ptr<const LastSaveInfo> ServerFamily::GetLastSaveInfo() const {
+LastSaveInfo ServerFamily::GetLastSaveInfo() const {
   lock_guard lk(save_mu_);
   return last_save_info_;
 }
@@ -1782,22 +1789,30 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("PERSISTENCE", true)) {
-    decltype(last_save_info_) save_info;
-    {
-      lock_guard lk(save_mu_);
-      save_info = last_save_info_;
-    }
-    // when when last save
-    append("last_save", save_info->save_time);
-    append("last_save_duration_sec", save_info->duration_sec);
-    append("last_save_file", save_info->file_name);
+    auto save_info = GetLastSaveInfo();
+
+    // when last success save
+    append("last_success_save", save_info.save_time);
+    append("last_saved_file", save_info.file_name);
+    append("last_success_save_duration_sec", save_info.success_duration_sec);
+
     size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
     append("loading", is_loading);
 
-    for (const auto& k_v : save_info->freq_map) {
+    auto curent_durration_sec =
+        start_save_time_ ? (absl::Now() - *start_save_time_) / absl::Seconds(1) : 0;
+    append("saving", curent_durration_sec != 0);
+    append("current_save_duration_sec", curent_durration_sec);
+
+    for (const auto& k_v : save_info.freq_map) {
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
-    append("rdb_changes_since_last_save", m.events.update);
+    append("rdb_changes_since_last_success_save", m.events.update);
+
+    // when last failed save
+    append("last_failed_save", save_info.last_error_time);
+    append("last_error", save_info.last_error.Format());
+    append("last_failed_save_duration_sec", save_info.failed_duration_sec);
   }
 
   if (should_enter("TRANSACTION", true)) {
@@ -2289,7 +2304,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   time_t save_time;
   {
     lock_guard lk(save_mu_);
-    save_time = last_save_info_->save_time;
+    save_time = last_save_info_.save_time;
   }
   cntx->SendLong(save_time);
 }

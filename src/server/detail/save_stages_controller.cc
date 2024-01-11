@@ -178,8 +178,7 @@ GenericError SaveStagesController::Save() {
 
   FinalizeFileMovement();
 
-  if (!shared_err_)
-    UpdateSaveInfo();
+  UpdateSaveInfo();
 
   return *shared_err_;
 }
@@ -266,26 +265,32 @@ void SaveStagesController::SaveRdb() {
 }
 
 void SaveStagesController::UpdateSaveInfo() {
+  auto seconds = (absl::Now() - start_time_) / absl::Seconds(1);
+  if (shared_err_) {
+    lock_guard lk{*save_mu_};
+    last_save_info_->last_error = *shared_err_;
+    last_save_info_->last_error_time = absl::ToUnixSeconds(start_time_);
+    last_save_info_->failed_duration_sec = seconds;
+    return;
+  }
+
   fs::path resulting_path = full_path_;
   if (use_dfs_format_)
     SetExtension("summary", ".dfs", &resulting_path);
   else
     resulting_path.replace_extension();  // remove .tmp
 
-  double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time_)) / 1000;
   LOG(INFO) << "Saving " << resulting_path << " finished after "
             << strings::HumanReadableElapsedTime(seconds);
 
-  auto save_info = make_shared<LastSaveInfo>();
-  for (const auto& k_v : rdb_name_map_) {
-    save_info->freq_map.emplace_back(k_v);
-  }
-  save_info->save_time = absl::ToUnixSeconds(start_time_);
-  save_info->file_name = resulting_path.generic_string();
-  save_info->duration_sec = uint32_t(seconds);
-
   lock_guard lk{*save_mu_};
-  last_save_info_->swap(save_info);  // swap - to deallocate the old version outstide of the lock.
+  last_save_info_->freq_map.clear();
+  for (const auto& k_v : rdb_name_map_) {
+    last_save_info_->freq_map.emplace_back(k_v);
+  }
+  last_save_info_->save_time = absl::ToUnixSeconds(start_time_);
+  last_save_info_->file_name = resulting_path.generic_string();
+  last_save_info_->success_duration_sec = seconds;
 }
 
 GenericError SaveStagesController::InitResources() {
