@@ -19,15 +19,15 @@ WORKDIR /build
 
 COPY . ./
 
-RUN make HELIO_RELEASE=y release
+RUN make release
 
-RUN build-opt/dragonfly --version
+RUN build-release/dragonfly --version
 
 FROM alpine:3
 
 COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
-COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
+COPY --from=builder /build/build-release/dragonfly /usr/local/bin/
 
 RUN apk --no-cache add libgcc libstdc++  \
      su-exec netcat-openbsd boost-context && ldd /usr/local/bin/dragonfly
