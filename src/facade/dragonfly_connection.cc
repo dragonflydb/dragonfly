@@ -1131,7 +1131,9 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       MessageHandle msg = std::move(dispatch_q_.front());
       dispatch_q_.pop_front();
 
-      // We batch until the last command, if it doesn't reply, we have to flush
+      // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
+      // last command to reply and flush. If it doesn't reply (i.e. is a control message like
+      // migrate), we have to flush manually.
       if (dispatch_q_.empty() && !msg.IsReplying()) {
         builder->FlushBatch();
       }
