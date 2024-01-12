@@ -263,7 +263,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   string result_key;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
-  // If we don't find any anything, we abort concluding and keep scheduled.
+  // If we don't find anything, we abort concluding and keep scheduled.
   // Slow path: schedule, find results from shards, execute action if found.
   OpResult<ShardFFResult> result;
   if (trans->GetUniqueShardCnt() == 1) {

@@ -489,7 +489,12 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   }
 
   /*************************************************************************/
+  // at least the coordinator thread owns the reference.
+  DCHECK_GE(GetUseCount(), 1u);
 
+  shard->db_slice().OnCbFinish();
+
+  // Handle result flags to alter behaviour.
   if (result.flags & RunnableResult::AVOID_CONCLUDING) {
     CHECK_EQ(unique_shard_cnt_, 1u);  // multi shard must know it ahead, so why do those tricks?
     DCHECK(is_concluding || multi_->concluding);
@@ -499,10 +504,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   // Log to jounrnal only once the command finished running
   if (is_concluding || (multi_ && multi_->concluding))
     LogAutoJournalOnShard(shard);
-
-  shard->db_slice().OnCbFinish();
-  // at least the coordinator thread owns the reference.
-  DCHECK_GE(GetUseCount(), 1u);
 
   // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
   // and successive hops are run by continuation_trans_ in engine shard.
@@ -982,8 +983,10 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   } catch (std::exception& e) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
+
   shard->db_slice().OnCbFinish();
-  LogAutoJournalOnShard(shard);
+
+  // Handling the reesult, along with conclusion and journaling, is done by the caller
 
   sd.is_armed.store(false, memory_order_relaxed);
   cb_ptr_ = nullptr;  // We can do it because only a single shard runs the callback.
@@ -1056,6 +1059,8 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
       // If we want to run again, we have to actually acquire keys, but keep ourselves disarmed
       DCHECK_EQ(sd.is_armed, false);
       unlocked_keys = false;
+    } else {
+      LogAutoJournalOnShard(shard);
     }
   }
 
