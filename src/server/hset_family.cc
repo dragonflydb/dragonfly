@@ -168,7 +168,12 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.shard->db_slice();
-  auto add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  DbSlice::AddOrFindResult add_res;
+  try {
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  } catch (const bad_alloc& e) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 

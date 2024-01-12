@@ -258,7 +258,12 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
     string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.shard->db_slice();
-    auto res = db_slice.AddOrFind(t->GetDbContext(), key);
+    DbSlice::AddOrFindResult res;
+    try {
+      res = db_slice.AddOrFind(t->GetDbContext(), key);
+    } catch (const bad_alloc& e) {
+      return OpStatus::OUT_OF_MEMORY;
+    }
     res.it->second.SetString(hll);
     return OpStatus::OK;
   };
