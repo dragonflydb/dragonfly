@@ -22,8 +22,6 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
-#include "server/conn_context.h"
-#include "server/server_state.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
@@ -530,8 +528,6 @@ void Connection::OnPostMigrateThread() {
     if (cc_->replica_conn) {
       ++stats_->num_replicas;
     }
-
-    static_cast<dfly::ConnectionContext*>(cc_.get())->server_state = dfly::ServerState::tlocal();
   };
 
   // We're now running in `dest` thread. We use non-inline lambda to force reading new thread's

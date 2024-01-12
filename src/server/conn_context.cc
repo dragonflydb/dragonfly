@@ -84,7 +84,6 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* own
     skip_acl_validation = owner->IsPrivileged();
   }
   acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
-  server_state = ServerState::tlocal();
 }
 
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
@@ -98,7 +97,6 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
   }
   auto* prev_reply_builder = Inject(crb);
   CHECK_EQ(prev_reply_builder, nullptr);
-  server_state = ServerState::tlocal();
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {

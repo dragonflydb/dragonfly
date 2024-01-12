@@ -202,7 +202,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     sd.replies.reserve(sd.cmds.size());
 
   Transaction* tx = cntx_->transaction;
-  cntx_->SS()->stats.multi_squash_executions++;
+  ServerState::tlocal()->stats.multi_squash_executions++;
   ProactorBase* proactor = ProactorBase::me();
   uint64_t start = proactor->GetMonotonicTimeNs();
 
@@ -235,8 +235,8 @@ bool MultiCommandSquasher::ExecuteSquashed() {
       break;
   }
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
-  cntx_->SS()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
-  cntx_->SS()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
+  ServerState::tlocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
+  ServerState::tlocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
 
   for (auto& sinfo : sharded_)
     sinfo.cmds.clear();

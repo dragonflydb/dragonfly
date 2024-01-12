@@ -1207,7 +1207,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
   // enabled on them - see https://redis.io/commands/monitor/
-  if (!cntx->SS()->Monitors().Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
+  if (!ServerState::tlocal()->Monitors().Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
     DispatchMonitor(cntx, cid, tail_args);
   }
 
@@ -1227,8 +1227,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   // not just the blocking ones
   const auto* conn = cntx->conn();
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
-      cntx->SS()->GetSlowLog().IsEnabled() &&
-      invoke_time_usec >= cntx->SS()->log_slower_than_usec) {
+      ServerState::tlocal()->GetSlowLog().IsEnabled() &&
+      invoke_time_usec >= ServerState::tlocal()->log_slower_than_usec) {
     vector<string> aux_params;
     CmdArgVec aux_slices;
 
@@ -1238,8 +1238,9 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
       aux_slices.emplace_back(aux_params.back());
       tail_args = absl::MakeSpan(aux_slices);
     }
-    cntx->SS()->GetSlowLog().Add(cid->name(), tail_args, conn->GetName(), conn->RemoteEndpointStr(),
-                                 invoke_time_usec, absl::GetCurrentTimeNanos() / 1000);
+    ServerState::tlocal()->GetSlowLog().Add(cid->name(), tail_args, conn->GetName(),
+                                            conn->RemoteEndpointStr(), invoke_time_usec,
+                                            absl::GetCurrentTimeNanos() / 1000);
   }
 
   if (cntx->transaction && !cntx->conn_state.exec_info.IsRunning() &&
@@ -2069,7 +2070,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   if (!exec_info.body.empty()) {
     if (GetFlag(FLAGS_track_exec_frequencies)) {
       string descr = CreateExecDescriptor(exec_info.body, cntx->transaction->GetUniqueShardCnt());
-      cntx->SS()->exec_freq_count[descr]++;
+      ServerState::tlocal()->exec_freq_count[descr]++;
     }
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
