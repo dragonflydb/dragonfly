@@ -22,6 +22,8 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "server/conn_context.h"
+#include "server/server_state.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
@@ -514,6 +516,27 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
     break_cb_engaged_ = true;
   }
+
+  auto update_tl_vars = [this] [[gnu::noinline]] {
+    // The compiler barrier that does not allow reordering memory accesses
+    // to before this function starts. See https://stackoverflow.com/a/75622732
+    asm volatile("");
+
+    queue_backpressure_ = &tl_queue_backpressure_;
+
+    stats_ = &tl_facade_stats->conn_stats;
+    ++stats_->num_conns;
+    stats_->read_buf_capacity += io_buf_.Capacity();
+    if (cc_->replica_conn) {
+      ++stats_->num_replicas;
+    }
+
+    static_cast<dfly::ConnectionContext*>(cc_.get())->server_state = dfly::ServerState::tlocal();
+  };
+
+  // We're now running in `dest` thread. We use non-inline lambda to force reading new thread's
+  // thread local vars.
+  update_tl_vars();
 }
 
 auto Connection::RegisterShutdownHook(ShutdownCb cb) -> ShutdownHandle {
@@ -988,25 +1011,6 @@ void Connection::HandleMigrateRequest() {
     DecreaseStatsOnClose();
 
     this->Migrate(dest);
-
-    auto update_tl_vars = [this] [[gnu::noinline]] {
-      // The compiler barrier that does not allow reordering memory accesses
-      // to before this function starts. See https://stackoverflow.com/a/75622732
-      asm volatile("");
-
-      queue_backpressure_ = &tl_queue_backpressure_;
-
-      stats_ = &tl_facade_stats->conn_stats;
-      ++stats_->num_conns;
-      stats_->read_buf_capacity += io_buf_.Capacity();
-      if (cc_->replica_conn) {
-        ++stats_->num_replicas;
-      }
-    };
-
-    // We're now running in `dest` thread. We use non-inline lambda to force reading new thread's
-    // thread local vars.
-    update_tl_vars();
   }
 
   DCHECK(dispatch_q_.empty());

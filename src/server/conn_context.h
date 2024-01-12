@@ -20,6 +20,7 @@ class EngineShardSet;
 class ConnectionContext;
 class ChannelStore;
 class Interpreter;
+class ServerState;
 struct FlowInfo;
 
 // Stores command id and arguments for delayed invocation.
@@ -209,6 +210,12 @@ class ConnectionContext : public facade::ConnectionContext {
   // Reference to a FlowInfo for this connection if from a master to a replica.
   FlowInfo* replication_flow = nullptr;
 
+  ServerState* SS() const {
+    return server_state;
+  }
+
+  ServerState* server_state = nullptr;
+
  private:
   void EnableMonitoring(bool enable) {
     subscriptions++;  // required to support the monitoring
@@ -217,6 +224,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   void SendSubscriptionChangedResponse(std::string_view action,
                                        std::optional<std::string_view> topic, unsigned count);
+
+  // Pointer to the thread local ServerState instance. Migrations should always update this
 };
 
 }  // namespace dfly
