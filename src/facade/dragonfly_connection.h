@@ -138,9 +138,9 @@ class Connection : public util::Connection {
     // Intrusive messages put themselves at the front of the queue, but only after all other
     // intrusive ones. Used for quick transfer or control / update messages.
     bool IsIntrusive() const;
-
     bool IsPipelineMsg() const;
     bool IsPubMsg() const;
+    bool IsReplying() const;
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
                  MigrationRequestMessage, CheckpointMessage, InvalidationMessage>

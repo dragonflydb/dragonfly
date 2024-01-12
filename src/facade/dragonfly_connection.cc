@@ -248,6 +248,10 @@ bool Connection::MessageHandle::IsPubMsg() const {
   return holds_alternative<PubMessagePtr>(handle);
 }
 
+bool Connection::MessageHandle::IsReplying() const {
+  return IsPipelineMsg() || IsPubMsg() || holds_alternative<MonitorMessage>(handle);
+}
+
 void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
@@ -1126,6 +1130,11 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     } else {
       MessageHandle msg = std::move(dispatch_q_.front());
       dispatch_q_.pop_front();
+
+      // We batch until the last command, if it doesn't reply, we have to flush
+      if (dispatch_q_.empty() && !msg.IsReplying()) {
+        builder->FlushBatch();
+      }
 
       if (ShouldEndDispatchFiber(msg)) {
         RecycleMessage(std::move(msg));
