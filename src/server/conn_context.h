@@ -20,7 +20,6 @@ class EngineShardSet;
 class ConnectionContext;
 class ChannelStore;
 class Interpreter;
-class ServerState;
 struct FlowInfo;
 
 // Stores command id and arguments for delayed invocation.
@@ -218,8 +217,6 @@ class ConnectionContext : public facade::ConnectionContext {
 
   void SendSubscriptionChangedResponse(std::string_view action,
                                        std::optional<std::string_view> topic, unsigned count);
-
-  // Pointer to the thread local ServerState instance. Migrations should always update this
 };
 
 }  // namespace dfly

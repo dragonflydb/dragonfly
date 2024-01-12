@@ -697,7 +697,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
   bool was_ooo = false;
   bool run_inline = false;
-  ServerState* ss = ServerState::tlocal();
+  ServerState* ss = nullptr;
 
   if (schedule_fast) {
     DCHECK_NE(unique_shard_id_, kInvalidSid);
@@ -728,6 +728,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
       }
     };
 
+    ss = ServerState::tlocal();
     if (ss->thread_index() == unique_shard_id_ && ss->AllowInlineScheduling()) {
       DVLOG(2) << "Inline scheduling a transaction";
       schedule_cb();
