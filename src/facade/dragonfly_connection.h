@@ -136,11 +136,12 @@ class Connection : public util::Connection {
     size_t UsedMemory() const;  // How much bytes this handle takes up in total.
 
     // Intrusive messages put themselves at the front of the queue, but only after all other
-    // intrusive ones. Used for quick transfer or control / update messages.
+    // intrusive ones. Used for quick transfer of control / update messages.
     bool IsIntrusive() const;
+
     bool IsPipelineMsg() const;
     bool IsPubMsg() const;
-    bool IsReplying() const;
+    bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
                  MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
