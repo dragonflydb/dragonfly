@@ -81,7 +81,6 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   TransactionReader tx_reader{};
 
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() { return cntx->IsCancelled(); });
     if (cntx->IsCancelled())
       break;
 
@@ -97,8 +96,6 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
       // force_ping_ = true;
       // journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     }
-
-    waker_.notify();
   }
 }
 
@@ -113,7 +110,6 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
   if (tx_data.shard_cnt <= 1 || !tx_data.IsGlobalCmd()) {
     VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
-    // journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
     return;
   }
 

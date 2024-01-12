@@ -19,6 +19,7 @@
 namespace dfly {
 
 using SlotId = uint16_t;
+// TODO consider to use bit set or some more compact way to store SlotId
 using SlotSet = absl::flat_hash_set<SlotId>;
 
 class ClusterConfig {

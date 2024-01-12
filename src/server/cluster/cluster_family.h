@@ -17,7 +17,7 @@ namespace dfly {
 class CommandRegistry;
 class ConnectionContext;
 class ServerFamily;
-class DflyCmd;
+class RestoreStreamer;
 
 class ClusterFamily {
  public:
@@ -81,26 +81,22 @@ class ClusterFamily {
   // FlowInfo is used to store state, connection, and all auxiliary data
   // that is needed for correct slots (per shard) data transfer
   struct FlowInfo {
-    facade::Connection* conn = nullptr;
+    // facade::Connection* conn = nullptr;
+    std::unique_ptr<RestoreStreamer> streamer;
+    ~FlowInfo();
   };
 
   // Whole slots migration process information
   struct MigrationInfo {
     MigrationInfo() = default;
-    MigrationInfo(std::uint32_t flows_num, std::string ip, uint32_t sync_id, uint16_t port,
-                  std::vector<ClusterConfig::SlotRange> slots)
-        : host_ip(ip),
-          flows(flows_num),
-          slots(slots),
-          sync_id(sync_id),
-          port(port),
-          state(ClusterSlotMigration::State::C_CONNECTING) {
-    }
+    ~MigrationInfo();
+    MigrationInfo(std::uint32_t flows_num, std::string ip, uint16_t port,
+                  std::vector<ClusterConfig::SlotRange> slots, Context::ErrHandler err_handler);
     std::string host_ip;
     std::vector<FlowInfo> flows;
     std::vector<ClusterConfig::SlotRange> slots;
-    uint32_t sync_id;
     uint16_t port;
+    Context cntx;
     ClusterSlotMigration::State state = ClusterSlotMigration::State::C_NO_STATE;
   };
 

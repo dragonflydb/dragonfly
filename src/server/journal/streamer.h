@@ -54,10 +54,12 @@ class JournalStreamer : protected BufferedStreamerBase {
 class RestoreStreamer : public JournalStreamer {
  public:
   RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id, uint32_t flow_id,
-                  journal::Journal* journal, Context* cntx);
+                  journal::Journal* journal, Context* cntx, std::function<void()> full_sync_cut_cb);
 
   void Start(io::Sink* dest) override;
   void Cancel() override;
+
+  ~RestoreStreamer();
 
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -75,6 +77,7 @@ class RestoreStreamer : public JournalStreamer {
   uint32_t flow_id_;
   Fiber snapshot_fb_;
   Cancellation fiber_cancellation_;
+  std::function<void()> full_sync_cut_cb;
 };
 
 }  // namespace dfly

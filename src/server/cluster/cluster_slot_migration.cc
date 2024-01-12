@@ -111,7 +111,9 @@ bool ClusterSlotMigration::trySetStableSync(uint32_t flow) {
   if (res) {
     // TODO make this when we set new config
     state_ = ClusterSlotMigration::C_STABLE_SYNC;
-    cntx_.Cancel();
+    for (auto& flow : shard_flows_) {
+      flow->Cancel();
+    }
   }
   return res;
 }

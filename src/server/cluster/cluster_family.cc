@@ -21,6 +21,7 @@
 #include "server/dflycmd.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/journal/streamer.h"
 #include "server/main_service.h"
 #include "server/replica.h"
 #include "server/server_family.h"
@@ -50,6 +51,19 @@ constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only un
 thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
 }  // namespace
+
+ClusterFamily::FlowInfo::~FlowInfo() = default;
+ClusterFamily::MigrationInfo::~MigrationInfo() = default;
+ClusterFamily::MigrationInfo::MigrationInfo(std::uint32_t flows_num, std::string ip, uint16_t port,
+                                            std::vector<ClusterConfig::SlotRange> slots,
+                                            Context::ErrHandler err_handler)
+    : host_ip(ip),
+      flows(flows_num),
+      slots(slots),
+      port(port),
+      cntx(err_handler),
+      state(ClusterSlotMigration::State::C_CONNECTING) {
+}
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
@@ -763,9 +777,15 @@ uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t
                                                std::vector<ClusterConfig::SlotRange> slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
+  auto err_handler = [this, sync_id](const GenericError& err) {
+    LOG(INFO) << "Slot migration error: " << err.Format();
+
+    // Todo add error processing, stop migration process
+    // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
+  };
   auto info = make_shared<MigrationInfo>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(),
-                                         sync_id, port, std::move(slots));
-  auto [it, inserted] = outgoing_migration_infos_.emplace(sync_id, info);
+                                         port, std::move(slots), err_handler);
+  auto [it, inserted] = outgoing_migration_infos_.emplace(sync_id, std::move(info));
   CHECK(inserted);
   return sync_id;
 }
@@ -787,15 +807,31 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   if (!info)
     return cntx->SendError(kIdNotFound);
 
-  info->flows[shard_id].conn = cntx->conn();
+  // info->flows[shard_id].conn = cntx->conn();
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
 
-  info->state = ClusterSlotMigration::State::C_FULL_SYNC;
-
   cntx->SendOk();
 
-  info->flows[shard_id].conn->socket()->Write(io::Buffer("SYNC"));
+  // TODO refactor: maybe we can use vector<slotRange> instead of SlotSet
+  SlotSet sset;
+  for (const auto& slot_range : info->slots) {
+    for (auto i = slot_range.start; i <= slot_range.end; ++i)
+      sset.insert(i);
+  }
+  info->state = ClusterSlotMigration::State::C_FULL_SYNC;
+
+  EngineShard* shard = EngineShard::tlocal();
+  info->flows[shard_id].streamer = std::make_unique<RestoreStreamer>(
+      &shard->db_slice(), std::move(sset), sync_id, shard_id, server_family_->journal(),
+      &info->cntx, [weak_info = weak_ptr(info), shard_id] {
+        if (auto info = weak_info.lock(); info) {
+          VLOG(1) << "Change state to C_STABLE_SYNC for shard_id: " << shard_id;
+          info->state = ClusterSlotMigration::State::C_STABLE_SYNC;
+        }
+      });
+
+  info->flows[shard_id].streamer->Start(cntx->conn()->socket());
 
   LOG(INFO) << "Started migation with target node " << info->host_ip << ":" << info->port;
 }
@@ -808,13 +844,13 @@ void ClusterFamily::FullSyncCut(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(err->MakeReply());
   }
 
+  VLOG(1) << "Full sync cut "
+          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
+
   std::lock_guard lck(migration_mu_);
   auto migration_it =
       std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
                    [sync_id](const auto& el) { return el->getSyncId() == sync_id; });
-
-  VLOG(1) << "Full sync cut "
-          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
 
   if (migration_it == incoming_migrations_jobs_.end())
     return cntx->SendError(kIdNotFound);
@@ -822,6 +858,7 @@ void ClusterFamily::FullSyncCut(CmdArgList args, ConnectionContext* cntx) {
   if ((*migration_it)->trySetStableSync(shard_id)) {
     LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
   }
+  cntx->SendOk();
 }
 
 shared_ptr<ClusterFamily::MigrationInfo> ClusterFamily::GetMigrationInfo(uint32_t sync_id) {
