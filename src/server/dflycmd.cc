@@ -643,15 +643,21 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
 
   for (const auto& [id, info] : replica_infos_) {
     LSN lag = replication_lags[id];
+    SyncState state = SyncState::PREPARATION;
 
-    lock_guard repl_lk{info->mu};
-
-    // If the replica is not in stable sync, its lag is undefined, so we set it as max.
-    if (info->replica_state != SyncState::STABLE_SYNC) {
+    // If the replica state being updated, its lag is undefined,
+    // the same applies of course if its state is not STABLE_SYNC.
+    if (info->mu.try_lock()) {
+      state = info->replica_state;
+      // If the replica is not in stable sync, its lag is undefined, so we set it as max.
+      if (state != SyncState::STABLE_SYNC) {
+        lag = std::numeric_limits<LSN>::max();
+      }
+      info->mu.unlock();
+    } else {
       lag = std::numeric_limits<LSN>::max();
     }
-    vec.push_back(ReplicaRoleInfo{info->address, info->listening_port,
-                                  SyncStateName(info->replica_state), lag});
+    vec.push_back(ReplicaRoleInfo{info->address, info->listening_port, SyncStateName(state), lag});
   }
   return vec;
 }
