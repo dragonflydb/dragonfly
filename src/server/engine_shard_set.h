@@ -250,7 +250,6 @@ class EngineShard {
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
-  std::vector<Counter> ttl_survivor_sum_;  // we need it per db.
 
   static __thread EngineShard* shard_;
 };

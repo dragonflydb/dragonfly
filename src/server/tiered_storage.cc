@@ -15,13 +15,18 @@ extern "C" {
 #include "base/logging.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "util/fibers/fibers.h"
 
 ABSL_FLAG(uint32_t, tiered_storage_max_pending_writes, 32,
           "Maximal number of pending writes per thread");
+ABSL_FLAG(uint32_t, tiered_storage_throttle_us, 1,
+          "Slow down tiered storage writes for at most this usec in case of I/O saturation "
+          "specified by tiered_storage_max_pending_writes. 0 - do not throttle.");
 
 namespace dfly {
 
 using namespace std;
+using namespace util;
 using absl::GetFlag;
 
 constexpr size_t kBlockLen = 4096;
@@ -379,6 +384,9 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   }
   delete req;
   --num_active_requests_;
+  if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+    this->throttle_ec_.notifyAll();
+  }
   VLOG_IF(2, num_active_requests_ == 0) << "Finished active requests";
 }
 
@@ -396,9 +404,17 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   if (db_arr_[db_index] == nullptr) {
     db_arr_[db_index] = new PerDb;
   }
+  unsigned max_pending_writes = GetFlag(FLAGS_tiered_storage_max_pending_writes);
+  unsigned throttle_usec = GetFlag(FLAGS_tiered_storage_throttle_us);
+  if (num_active_requests_ >= max_pending_writes && throttle_usec > 0) {
+    chrono::steady_clock::time_point next =
+        chrono::steady_clock::now() + chrono::microseconds(throttle_usec);
+    stats_.throttled_write_cnt++;
+    throttle_ec_.await_until([&]() { return num_active_requests_ < max_pending_writes; }, next);
+  }
 
   if (blob_len > kMaxSmallBin) {
-    if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+    if (num_active_requests_ < max_pending_writes) {
       WriteSingle(db_index, it, blob_len);
     } else {
       VLOG(2) << "Skip WriteSingle for: " << it->first.ToString();
@@ -426,7 +442,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
     return error_code{};  // gather more.
 
   bool flush_succeeded = false;
-  if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+  if (num_active_requests_ < max_pending_writes) {
     flush_succeeded = FlushPending(db_index, bin_index);
 
     // if we reached high utilization of the file range - try to grow the file.
@@ -524,6 +540,9 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
       mi_free(req->block_ptr);
       delete req;
       --num_active_requests_;
+      if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+        this->throttle_ec_.notifyAll();
+      }
     };
 
     // In case entry was canceled free allocated.

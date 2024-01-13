@@ -123,15 +123,16 @@ void RecordExpiry(DbIndex dbid, std::string_view key);
 void TriggerJournalWriteToSink();
 
 struct TieredStats {
-  size_t tiered_reads = 0;
-  size_t tiered_writes = 0;
+  uint64_t tiered_reads = 0;
+  uint64_t tiered_writes = 0;
 
   size_t storage_capacity = 0;
 
   // how much was reserved by actively stored items.
   size_t storage_reserved = 0;
-  size_t aborted_write_cnt = 0;
-  size_t flush_skip_cnt = 0;
+  uint64_t aborted_write_cnt = 0;
+  uint64_t flush_skip_cnt = 0;
+  uint64_t throttled_write_cnt = 0;
 
   TieredStats& operator+=(const TieredStats&);
 };

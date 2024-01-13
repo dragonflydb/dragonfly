@@ -67,7 +67,7 @@ class TieredStorage {
   std::vector<PerDb*> db_arr_;
 
   absl::flat_hash_map<uint32_t, uint8_t> page_refcnt_;
-
+  util::fb2::EventCount throttle_ec_;
   TieredStats stats_;
   size_t max_file_size_;
   size_t allocated_size_ = 0;
