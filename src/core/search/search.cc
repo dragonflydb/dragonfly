@@ -443,6 +443,12 @@ struct BasicSearch {
 
 }  // namespace
 
+string_view Schema::LookupAlias(string_view alias) const {
+  if (auto it = field_names.find(alias); it != field_names.end())
+    return it->second;
+  return alias;
+}
+
 FieldIndices::FieldIndices(Schema schema, PMR_NS::memory_resource* mr)
     : schema_{std::move(schema)}, all_ids_{}, indices_{} {
   CreateIndices(mr);
@@ -521,20 +527,12 @@ void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
-  // Replace short field name with full identifier
-  if (auto it = schema_.field_names.find(field); it != schema_.field_names.end())
-    field = it->second;
-
-  auto it = indices_.find(field);
+  auto it = indices_.find(schema_.LookupAlias(field));
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
 BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
-  // Replace short field name with full identifier
-  if (auto it = schema_.field_names.find(field); it != schema_.field_names.end())
-    field = it->second;
-
-  auto it = sort_indices_.find(field);
+  auto it = sort_indices_.find(schema_.LookupAlias(field));
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }
 

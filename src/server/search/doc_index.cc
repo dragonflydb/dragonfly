@@ -230,12 +230,16 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 }
 
 vector<vector<pair<string, search::ResultScore>>> ShardDocIndex::SearchForAggregator(
-    const OpArgs& op_args, const SearchParams& params, search::SearchAlgorithm* search_algo) const {
+    const OpArgs& op_args, ArgSlice load_fields, search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.shard->db_slice();
-  auto search_results = search_algo->Search(&indices_, params.limit_offset + params.limit_total);
+  auto search_results = search_algo->Search(&indices_);
 
   if (!search_results.error.empty())
     return {};
+
+  SearchParams::FieldReturnList return_fields;
+  for (string_view load_field : load_fields)
+    return_fields.emplace_back(indices_.GetSchema().LookupAlias(load_field), load_field);
 
   vector<vector<pair<string, search::ResultScore>>> out;
   for (DocId doc : search_results.ids) {
@@ -248,7 +252,7 @@ vector<vector<pair<string, search::ResultScore>>> ShardDocIndex::SearchForAggreg
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
     auto extracted = indices_.ExtractStoredValues(doc);
 
-    auto loaded = accessor->Serialize(base_->schema, *params.return_fields);
+    auto loaded = accessor->Serialize(base_->schema, return_fields);
     for (const auto& [field, value] : loaded) {
       extracted.emplace_back(field, value);
     }

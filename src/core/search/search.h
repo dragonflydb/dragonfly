@@ -51,6 +51,9 @@ struct Schema {
 
   // Mapping for short field names (aliases).
   absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
+
+  // Return identifier for alias if found, otherwise return passed value
+  std::string_view LookupAlias(std::string_view alias) const;
 };
 
 // Collection of indices for all fields in schema

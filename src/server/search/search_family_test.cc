@@ -62,6 +62,14 @@ template <typename... Args> auto AreDocIds(Args... args) {
   return DocIds(sizeof...(args), vector<string>{args...});
 }
 
+template <typename... Args> auto IsArray(Args... args) {
+  return RespArray(ElementsAre(std::forward<Args>(args)...));
+}
+
+template <typename... Args> auto IsUnordArray(Args... args) {
+  return RespArray(UnorderedElementsAre(std::forward<Args>(args)...));
+}
+
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1"}), "OK");
   EXPECT_EQ(Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"}), "OK");
@@ -90,12 +98,10 @@ TEST_F(SearchFamilyTest, InfoIndex) {
   }
 
   auto info = Run({"ft.info", "idx-1"});
-  EXPECT_THAT(
-      info, RespArray(ElementsAre(
-                _, _, _, RespArray(ElementsAre("key_type", "HASH", "prefix", "doc-")), "attributes",
-                RespArray(ElementsAre(RespArray(
-                    ElementsAre("identifier", "name", "attribute", "name", "type", "TEXT")))),
-                "num_docs", IntArg(15))));
+  EXPECT_THAT(info,
+              IsArray(_, _, _, IsArray("key_type", "HASH", "prefix", "doc-"), "attributes",
+                      IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT")),
+                      "num_docs", IntArg(15)));
 }
 
 TEST_F(SearchFamilyTest, Stats) {
@@ -385,7 +391,7 @@ TEST_F(SearchFamilyTest, TestReturn) {
        "NUMERIC",   "vector", "VECTOR", "FLAT",    "2",     "DIM",   "1"});
 
   auto MatchEntry = [](string key, auto... fields) {
-    return RespArray(ElementsAre(IntArg(1), key, RespArray(UnorderedElementsAre(fields...))));
+    return RespArray(ElementsAre(IntArg(1), key, IsUnordArray(fields...)));
   };
 
   // Check all fields are returned
@@ -594,6 +600,33 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1"));
 
   Run({"flushall"});
+}
+
+TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
+  for (size_t i = 0; i < 101; i++) {  // 51 even, 50 odd
+    Run({"hset", absl::StrCat("k", i), "even", (i % 2 == 0) ? "true" : "false", "value",
+         absl::StrCat(i)});
+  }
+  Run({"ft.create", "i1", "schema", "even", "tag", "sortable", "value", "numeric", "sortable"});
+
+  // clang-format off
+  auto resp = Run({"ft.aggregate", "i1", "*",
+                  "GROUPBY", "1", "even",
+                      "REDUCE", "count", "0", "as", "count",
+                      "REDUCE", "count_distinct", "1", "even", "as", "distinct_tags",
+                      "REDUCE", "count_distinct", "1", "value", "as", "distinct_vals",
+                      "REDUCE", "max", "1", "value", "as", "max_val",
+                      "REDUCE", "min", "1", "value", "as", "min_val",
+                  "SORTBY", "1", "count"});
+  // clang-format on
+
+  EXPECT_THAT(resp,
+              IsArray(IsUnordArray(IsArray("even", "false"), IsArray("count", "50"),
+                                   IsArray("distinct_tags", "1"), IsArray("distinct_vals", "50"),
+                                   IsArray("max_val", "99"), IsArray("min_val", "1")),
+                      IsUnordArray(IsArray("even", "true"), IsArray("count", "51"),
+                                   IsArray("distinct_tags", "1"), IsArray("distinct_vals", "51"),
+                                   IsArray("max_val", "100"), IsArray("min_val", "0"))));
 }
 
 }  // namespace dfly

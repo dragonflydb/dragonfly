@@ -27,6 +27,7 @@
 #include "server/search/aggregator.h"
 #include "server/search/doc_index.h"
 #include "server/transaction.h"
+#include "src/core/overloaded.h"
 
 namespace dfly {
 
@@ -153,6 +154,16 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
   return schema;
 }
 
+search::QueryParams ParseQueryParams(CmdArgParser* parser) {
+  search::QueryParams params;
+  size_t num_args = parser->Next<size_t>();
+  while (parser->HasNext() && params.Size() * 2 < num_args) {
+    auto [k, v] = parser->Next<string_view, string_view>();
+    params[k] = v;
+  }
+  return params;
+}
+
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
   SearchParams params;
 
@@ -184,12 +195,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
     if (parser.Check("PARAMS").ExpectTail(1)) {
-      size_t num_args = parser.Next<size_t>();
-      while (parser.HasNext() && params.query_params.Size() * 2 < num_args) {
-        string_view k = parser.Next();
-        string_view v = parser.Next();
-        params.query_params[k] = v;
-      }
+      params.query_params = ParseQueryParams(&parser);
       continue;
     }
 
@@ -201,6 +207,92 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
 
     // Unsupported parameters are ignored for now
     parser.Skip(1);
+  }
+
+  if (auto err = parser.Error(); err) {
+    cntx->SendError(err->MakeReply());
+    return nullopt;
+  }
+
+  return params;
+}
+
+struct AggregateParams {
+  string_view index, query;
+  search::QueryParams params;
+
+  vector<string_view> load_fields;
+  vector<aggregate::PipelineStep> steps;
+};
+
+optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
+                                                       ConnectionContext* cntx) {
+  AggregateParams params;
+  tie(params.index, params.query) = parser.Next<string_view, string_view>();
+
+  while (parser.ToUpper().HasNext()) {
+    // LOAD count field [field ...]
+    if (parser.Check("LOAD").ExpectTail(1)) {
+      params.load_fields.resize(parser.Next<size_t>());
+      for (string_view& field : params.load_fields)
+        field = parser.Next();
+      continue;
+    }
+
+    // GROUPBY nargs property [property ...]
+    if (parser.Check("GROUPBY").ExpectTail(1)) {
+      vector<string_view> fields(parser.Next<size_t>());
+      for (string_view& field : fields)
+        field = parser.Next();
+
+      vector<aggregate::Reducer> reducers;
+      while (parser.ToUpper().Check("REDUCE").ExpectTail(2)) {
+        parser.ToUpper();  // uppercase for func_name
+        auto [func_name, nargs] = parser.Next<string_view, size_t>();
+        auto func = aggregate::FindReducerFunc(func_name);
+
+        if (!parser.HasError() && !func) {
+          cntx->SendError(absl::StrCat("reducer function ", func_name, " not found"));
+          return nullopt;
+        }
+
+        string source_field = "";
+        if (nargs > 0) {
+          source_field = parser.Next<string>();
+        }
+
+        parser.ExpectTag("AS");
+        string result_field = parser.Next<string>();
+
+        reducers.push_back(aggregate::Reducer{source_field, result_field, std::move(func)});
+      }
+
+      params.steps.push_back(aggregate::MakeGroupStep(fields, std::move(reducers)));
+      continue;
+    }
+
+    // SORTBY nargs
+    if (parser.Check("SORTBY").ExpectTail(1)) {
+      parser.ExpectTag("1");
+      string_view field = parser.Next();
+      bool desc = bool(parser.Check("DESC").IgnoreCase());
+
+      params.steps.push_back(aggregate::MakeSortStep(field, desc));
+      continue;
+    }
+
+    // LIMIT
+    if (parser.Check("LIMIT").ExpectTail(2)) {
+      auto [offset, num] = parser.Next<size_t, size_t>();
+      params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      continue;
+    }
+
+    // PARAMS
+    if (parser.Check("PARAMS").ExpectTail(1)) {
+      params.params = ParseQueryParams(&parser);
+      continue;
+    }
   }
 
   if (auto err = parser.Error(); err) {
@@ -596,24 +688,28 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
-  string_view index_name = ArgS(args, 0);
-  string_view query_str = ArgS(args, 1);
+  const auto params = ParseAggregatorParamsOrReply(args, cntx);
+  if (!params)
+    return;
 
-  SearchParams params;
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, &params.query_params, nullptr))
+  if (!search_algo.Init(params->query, &params->params, nullptr))
     return cntx->SendError("Query syntax error");
 
-  using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
-      declval<OpArgs>(), params, &search_algo));
+  using ResultContainer =
+      decltype(declval<ShardDocIndex>().SearchForAggregator(declval<OpArgs>(), {}, &search_algo));
 
-  vector<ResultContainer> results(shard_set->size());
+  vector<ResultContainer> query_results(shard_set->size());
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      results[es->shard_id()] = index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
+    if (auto* index = es->search_indices()->GetIndex(params->index); index) {
+      query_results[es->shard_id()] =
+          index->SearchForAggregator(t->GetOpArgs(es), params->load_fields, &search_algo);
+      VLOG(0) << "Collected " << query_results[es->shard_id()].size();
+    }
     return OpStatus::OK;
   });
 
+  // TODO: REMOVE THIS BRIDGE
   auto convert = [](const search::ResultScore& score) -> aggregate::Value {
     if (holds_alternative<search::WrappedStrPtr>(score))
       return string(string_view(get<search::WrappedStrPtr>(score)));
@@ -625,21 +721,40 @@ void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   };
 
   vector<aggregate::DocValues> values;
-  for (const auto& sub_results : results) {
+  for (const auto& sub_results : query_results) {
     for (const auto& entry : sub_results) {
       aggregate::DocValues entry_kv;
       for (const auto& [k, v] : entry) {
         entry_kv[k] = convert(v);
       }
+      values.push_back(std::move(entry_kv));
     }
   }
 
-  vector<aggregate::PipelineStep> steps;
+  VLOG(0) << "In total " << values.size();
 
-  auto aggregate_results = aggregate::Process(std::move(values), absl::MakeSpan(steps));
+  auto agg_results = aggregate::Process(std::move(values), params->steps);
+  if (!agg_results.has_value())
+    return cntx->SendError(agg_results.error());
+
+  VLOG(0) << "Processed " << agg_results->size();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendOk();
+  Overloaded replier{
+      [rb](monostate) { rb->SendNull(); },
+      [rb](double d) { rb->SendDouble(d); },
+      [rb](const string& s) { rb->SendBulkString(s); },
+  };
+
+  rb->StartArray(agg_results->size());
+  for (const auto& result : agg_results.value()) {
+    rb->StartArray(result.size());
+    for (const auto& [k, v] : result) {
+      rb->StartArray(2);
+      rb->SendBulkString(k);
+      visit(replier, v);
+    }
+  }
 }
 
 #define HFUNC(x) SetHandler(&SearchFamily::x)
@@ -664,6 +779,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
             // Underscore same as in RediSearch because it's "temporary" (long time already)
             << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
             << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
+            << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
             << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
 }
 
