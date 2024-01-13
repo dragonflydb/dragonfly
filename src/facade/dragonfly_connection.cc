@@ -373,6 +373,10 @@ bool Connection::MessageHandle::IsPubMsg() const {
   return holds_alternative<PubMessagePtr>(handle);
 }
 
+bool Connection::MessageHandle::IsReplying() const {
+  return IsPipelineMsg() || IsPubMsg() || holds_alternative<MonitorMessage>(handle);
+}
+
 void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
@@ -1256,6 +1260,13 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     } else {
       MessageHandle msg = std::move(dispatch_q_.front());
       dispatch_q_.pop_front();
+
+      // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
+      // last command to reply and flush. If it doesn't reply (i.e. is a control message like
+      // migrate), we have to flush manually.
+      if (dispatch_q_.empty() && !msg.IsReplying()) {
+        builder->FlushBatch();
+      }
 
       if (ShouldEndDispatchFiber(msg)) {
         RecycleMessage(std::move(msg));

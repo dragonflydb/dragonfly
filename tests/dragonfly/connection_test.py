@@ -510,6 +510,38 @@ async def test_parser_while_script_running(async_client: aioredis.Redis, df_serv
     await writer.wait_closed()
 
 
+"""
+    This test makes sure that we can migrate while handling pipelined commands and don't keep replies
+    batched even if the stream suddenly stops.
+"""
+
+
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 0})
+async def test_pipeline_batching_while_migrating(
+    async_client: aioredis.Redis, df_server: DflyInstance
+):
+    sha = await async_client.script_load("return redis.call('GET', KEYS[1])")
+
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+
+    # First, write a EVALSHA that will ask for migration (75% it's on the wrong shard)
+    # and some more pipelined commands that will keep Dragonfly busy
+    incrs = "".join("INCR a\r\n" for _ in range(50))
+    writer.write((f"EVALSHA {sha} 1 a\r\n" + incrs).encode())
+    await writer.drain()
+
+    # We migrate only when the socket wakes up, so send another batch to trigger migration
+    writer.write("INCR a\r\n".encode())
+    await writer.drain()
+
+    # Make sure we recived all replies
+    reply = await reader.read(520)
+    assert reply.decode().strip().endswith("51")
+
+    writer.close()
+    await writer.wait_closed()
+
+
 @dfly_args({"proactor_threads": 1})
 async def test_large_cmd(async_client: aioredis.Redis):
     MAX_ARR_SIZE = 65535
