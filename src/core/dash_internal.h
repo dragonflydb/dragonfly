@@ -473,7 +473,6 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   }
 
   bool IsBusy(unsigned bid, unsigned slot) const {
-    assert(bucket_[bid].GetBusy() & (1U << slot));
     return bucket_[bid].GetBusy() & (1U << slot);
   }
 
