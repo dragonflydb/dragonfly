@@ -299,4 +299,35 @@ TEST_F(TieredStorageTest, SetAndGet) {
   EXPECT_EQ(m.db_stats[0].obj_memory_usage, 0);
 }
 
+TEST_F(TieredStorageTest, GetValueValidation) {
+  string val1(5000, 'a');
+  string val2(5000, 'b');
+
+  Run({"set", "key1", val1});
+  Run({"set", "key2", val2});
+  usleep(20000);  // 0.02 milliseconds
+  Metrics m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 2);
+
+  EXPECT_EQ(Run({"get", "key1"}), val1);
+  EXPECT_EQ(Run({"get", "key2"}), val2);
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
+
+  for (unsigned i = 0; i < 100; ++i) {
+    string val(100, i);  // small entries
+    Run({"set", StrCat("k", i), val});
+  }
+  usleep(20000);  // 0.02 milliseconds
+  m = GetMetrics();
+  EXPECT_GE(m.db_stats[0].tiered_entries, 0);
+
+  for (unsigned i = 0; i < 100; ++i) {
+    string val(100, i);  // small entries
+    EXPECT_EQ(Run({"get", StrCat("k", i)}), val);
+  }
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
+}
+
 }  // namespace dfly
