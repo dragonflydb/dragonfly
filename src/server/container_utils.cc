@@ -3,6 +3,7 @@
 //
 #include "server/container_utils.h"
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -20,6 +21,8 @@ extern "C" {
 #include "redis/util.h"
 #include "redis/zset.h"
 }
+
+ABSL_FLAG(bool, singlehop_blocking, true, "Use single hop optimization for blocking commands");
 
 namespace dfly::container_utils {
 
@@ -91,14 +94,16 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   if (std::find(find_res.begin(), find_res.end(), OpStatus::WRONG_TYPE) != find_res.end())
     return OpStatus::WRONG_TYPE;
 
+  // Order result by their keys position in the command arguments, push errors to back
   auto comp = [trans](const OpResult<FFResult>& lhs, const OpResult<FFResult>& rhs) {
     if (!lhs || !rhs)
-      return lhs.ok();  // push errors to back
+      return lhs.ok();
     size_t i1 = trans->ReverseArgIndex(std::get<ShardId>(*lhs), std::get<unsigned>(*lhs));
     size_t i2 = trans->ReverseArgIndex(std::get<ShardId>(*rhs), std::get<unsigned>(*rhs));
     return i1 < i2;
   };
 
+  // Find first element by the order above, so the first key. Returns error only if all are errors
   auto it = std::min_element(find_res.begin(), find_res.end(), comp);
   DCHECK(it != find_res.end());
 
@@ -272,7 +277,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   // If we don't find anything, we abort concluding and keep scheduled.
   // Slow path: schedule, find results from shards, execute action if found.
   OpResult<ShardFFResult> result;
-  if (trans->GetUniqueShardCnt() == 1) {
+  if (trans->GetUniqueShardCnt() == 1 && absl::GetFlag(FLAGS_singlehop_blocking)) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
     if (res.ok())
       return res;

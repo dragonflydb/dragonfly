@@ -496,7 +496,10 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   // Handle result flags to alter behaviour.
   if (result.flags & RunnableResult::AVOID_CONCLUDING) {
-    CHECK_EQ(unique_shard_cnt_, 1u);  // multi shard must know it ahead, so why do those tricks?
+    // Multi shard callbacks should either all or none choose to conclude. Because they can't
+    // communicate, the must know their decision ahead, consequently there is no point in using this
+    // flag.
+    CHECK_EQ(unique_shard_cnt_, 1u);
     DCHECK(is_concluding || multi_->concluding);
     is_concluding = false;
   }
@@ -986,7 +989,7 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
 
   shard->db_slice().OnCbFinish();
 
-  // Handling the reesult, along with conclusion and journaling, is done by the caller
+  // Handling the result, along with conclusion and journaling, is done by the caller
 
   sd.is_armed.store(false, memory_order_relaxed);
   cb_ptr_ = nullptr;  // We can do it because only a single shard runs the callback.
@@ -1032,7 +1035,8 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 
 // Runs within a engine shard thread.
 // Optimized path that schedules and runs transactions out of order if possible.
-// Returns true if was eagerly executed, false if it was scheduled into queue.
+// Returns true if eagerly executed, false if the callback will be handled by the transaction
+// queue.
 bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   DCHECK(!IsAtomicMulti());
   DCHECK_EQ(txid_, 0u);
