@@ -782,7 +782,7 @@ void CompactObj::SetJson(JsonType&& j) {
 
 void CompactObj::SetString(std::string_view str) {
   uint8_t mask = mask_ & ~kEncMask;
-
+  CHECK(!IsExternal());
   // Trying auto-detection heuristics first.
   if (str.size() <= 20) {
     long long ival;
@@ -958,6 +958,7 @@ void __attribute__((noinline)) CompactObj::GetString(string* res) const {
 }
 
 void CompactObj::GetString(char* dest) const {
+  CHECK(!IsExternal());
   uint8_t is_encoded = mask_ & kEncMask;
 
   if (IsInline()) {

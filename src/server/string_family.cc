@@ -41,16 +41,7 @@ constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
 size_t CopyValueToBuffer(const PrimeValue& pv, EngineShard* shard, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
-
-  if (pv.IsExternal()) {
-    auto* tiered = shard->tiered_storage();
-    auto [offset, size] = pv.GetExternalSlice();
-
-    error_code ec = tiered->Read(offset, size, dest);
-    CHECK(!ec) << "TBD: " << ec;
-    return size;
-  }
-
+  DCHECK(!pv.IsExternal());
   pv.GetString(dest);
   return pv.Size();
 }
@@ -66,10 +57,7 @@ string GetString(EngineShard* shard, const PrimeValue& pv) {
 }
 
 string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
-  if (pv.IsExternal()) {
-    *tmp = GetString(shard, pv);
-    return *tmp;
-  }
+  DCHECK(!pv.IsExternal());
   return pv.GetSlice(tmp);
 }
 
@@ -91,7 +79,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   DbSlice::AddOrFindResult res;
 
   try {
-    res = db_slice.AddOrFind(op_args.db_cntx, key);
+    res = db_slice.AddOrFind(op_args.db_cntx, key, true);
 
     string s;
 
@@ -116,7 +104,8 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeConstIterator> it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it_res =
+      db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING, true);
   if (!it_res.ok())
     return it_res.status();
 
@@ -166,12 +155,14 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
                                bool prepend) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
+
   DbSlice::AddOrFindResult add_res;
   try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key, true);
   } catch (const std::bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
+
   if (add_res.is_new) {
     add_res.it->second.SetString(val);
     return val.size();
@@ -185,7 +176,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING, true);
   if (!it_res) {
     return false;
   }
@@ -195,7 +186,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 
 OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_hit = false,
                               const DbSlice::ExpireParams& exp_params = {}) {
-  auto res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key);
+  auto res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, true);
   res.post_updater.Run();
 
   if (!IsValid(res.it))
@@ -513,7 +504,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   size_t total_size = 0;
   for (size_t i = 0; i < args.size(); ++i) {
     OpResult<PrimeConstIterator> it_res =
-        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
+        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_STRING, true);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -562,7 +553,8 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
   if (params.IsConditionalSet()) {
-    const auto res = db_slice.FindMutable(op_args_.db_cntx, key);
+    bool load_external = params.prev_val || (params.flags & SET_GET);
+    const auto res = db_slice.FindMutable(op_args_.db_cntx, key, load_external);
     if (IsValid(res.it)) {
       result_builder.CachePrevValueIfNeeded(shard, res.it->second);
     }
@@ -586,7 +578,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   // Trying to add a new entry.
   DbSlice::AddOrFindResult add_res;
   try {
-    add_res = db_slice.AddOrFind(op_args_.db_cntx, key);
+    add_res = db_slice.AddOrFind(op_args_.db_cntx, key);  // TODO do we free the space for existing?
   } catch (bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -617,7 +609,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   if (shard->tiered_storage() &&
       TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
-    // afterwards.
+    // afterwards. handle this
     shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
   }
 
@@ -673,18 +665,10 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
   }
 
+  db_slice.RemoveFromTiered(it, op_args_.db_cntx.db_index);
   // overwrite existing entry.
   prime_value.SetString(value);
   DCHECK(!prime_value.HasIoPending());
-
-  if (TieredStorage::EligibleForOffload(value)) {
-    // TODO: if UnloadItem can block the calling fiber, then we have the bug because then "it"
-    // can be invalid after the function returns and the functions that follow may access invalid
-    // entry.
-    if (shard->tiered_storage()) {
-      shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
-    }
-  }
 
   if (manual_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
@@ -847,7 +831,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
     auto op_args = t->GetOpArgs(shard);
     DbSlice& db_slice = op_args.shard->db_slice();
-    auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+    auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING, true);
     if (!res) {
       return res.status();
     }

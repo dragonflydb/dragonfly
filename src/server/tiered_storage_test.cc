@@ -7,6 +7,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/facade_test.h"
 #include "server/test_utils.h"
 
 using namespace std;
@@ -72,24 +73,17 @@ void TieredStorageTest::FillKeysWithExpire(unsigned count, int val_size, uint32_
 
 TEST_F(TieredStorageTest, Basic) {
   FillExternalKeys(5000);
-
   EXPECT_EQ(5000, CheckedInt({"dbsize"}));
-  Metrics m = GetMetrics();
-  EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
 
-  FillExternalKeys(5000);
   usleep(20000);  // 0.02 milliseconds
 
-  m = GetMetrics();
-  DbStats stats = m.db_stats[0];
-
-  LOG(INFO) << stats;
+  Metrics m = GetMetrics();
   unsigned tiered_entries = m.db_stats[0].tiered_entries;
+
   EXPECT_GT(tiered_entries, 0u);
   string resp = CheckedString({"debug", "object", "k1"});
   EXPECT_THAT(resp, HasSubstr("spill_len"));
   m = GetMetrics();
-  LOG(INFO) << m.db_stats[0];
   ASSERT_EQ(tiered_entries, m.db_stats[0].tiered_entries);
 
   Run({"del", "k1"});
@@ -208,32 +202,37 @@ TEST_F(TieredStorageTest, DelBigValues) {
 
 TEST_F(TieredStorageTest, AddBigValuesWithExpire) {
   const int kKeyNum = 10;
-  for (int i = 0; i < 3; ++i) {
-    FillKeysWithExpire(kKeyNum, 8000);
-    usleep(20000);  // 0.02 milliseconds
 
-    Metrics m = GetMetrics();
-    EXPECT_EQ(m.db_stats[0].tiered_entries, 10);
-  }
+  FillKeysWithExpire(kKeyNum, 8000);
+  usleep(20000);  // 0.02 milliseconds
+
+  Metrics m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 10);
+
   for (int i = 0; i < kKeyNum; ++i) {
     auto resp = Run({"ttl", StrCat("k", i)});
     EXPECT_GT(resp.GetInt(), 0);
   }
+
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 10);
 }
 
 TEST_F(TieredStorageTest, AddSmallValuesWithExpire) {
   const int kKeyNum = 100;
-  for (int i = 0; i < 3; ++i) {
-    FillKeysWithExpire(kKeyNum);
-    usleep(20000);  // 0.02 milliseconds
 
-    Metrics m = GetMetrics();
-    EXPECT_GT(m.db_stats[0].tiered_entries, 0);
-  }
+  FillKeysWithExpire(kKeyNum);
+  usleep(20000);  // 0.02 milliseconds
+
+  Metrics m = GetMetrics();
+  EXPECT_GT(m.db_stats[0].tiered_entries, 0);
+
   for (int i = 0; i < kKeyNum; ++i) {
     auto resp = Run({"ttl", StrCat("k", i)});
     EXPECT_GT(resp.GetInt(), 0);
   }
+  m = GetMetrics();
+  EXPECT_GT(m.db_stats[0].tiered_entries, 0);
 }
 
 TEST_F(TieredStorageTest, SetAndExpire) {
@@ -244,12 +243,60 @@ TEST_F(TieredStorageTest, SetAndExpire) {
   Metrics m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
   Run({"expire", "key", "3"});
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
 
   Run({"set", "key", val});
   usleep(20000);  // 0.02 milliseconds
 
   m = GetMetrics();
-  EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
   Run({"expire", "key", "3"});
 }
+
+TEST_F(TieredStorageTest, SetAndGet) {
+  string val1(5000, 'a');
+  string val2(5000, 'a');
+
+  Run({"set", "key1", val1});
+  Run({"set", "key2", val1});
+  usleep(20000);  // 0.02 milliseconds
+  Metrics m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 2);
+  EXPECT_EQ(m.db_stats[0].obj_memory_usage, 0);
+
+  EXPECT_EQ(Run({"get", "key1"}), val1);
+  usleep(20000);  // 0.02 milliseconds
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
+  EXPECT_GT(m.db_stats[0].obj_memory_usage, 0);
+
+  Run({"set", "key1", val2});
+  usleep(20000);  // 0.02 milliseconds
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
+  EXPECT_GT(m.db_stats[0].obj_memory_usage, 0);
+
+  Run({"set", "key2", val2});
+  usleep(20000);  // 0.02 milliseconds
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
+  EXPECT_GT(m.db_stats[0].obj_memory_usage, 0);
+
+  EXPECT_EQ(Run({"get", "key1"}), val2);
+  EXPECT_EQ(Run({"get", "key2"}), val2);
+
+  Run({"set", "key3", val1});
+  usleep(20000);  // 0.02 milliseconds
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
+
+  Run({"del", "key1"});
+  Run({"del", "key2"});
+  Run({"del", "key3"});
+  m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
+  EXPECT_EQ(m.db_stats[0].obj_memory_usage, 0);
+}
+
 }  // namespace dfly

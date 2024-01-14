@@ -1059,6 +1059,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
 
+<<<<<<< HEAD
   bool unlocked_keys =
       shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode);
   bool quick_run = unlocked_keys;
@@ -1076,6 +1077,14 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
     } else {
       LogAutoJournalOnShard(shard);
     }
+=======
+  // Fast path - for uncontended keys, just run the callback.
+  // That applies for single key operations like set, get, lpush etc.
+  if (shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
+    // TBD add acquire lock here
+    RunQuickie(shard);
+    return true;
+>>>>>>> da33d453 (server(tiering): load data on read)
   }
 
   // Slow path. Some of the keys are locked, so we schedule on the transaction queue.

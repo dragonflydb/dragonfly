@@ -194,9 +194,9 @@ class DbSlice {
     ExpireIterator exp_it;
     AutoUpdater post_updater;
   };
-  ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
+  ItAndUpdater FindMutable(const Context& cntx, std::string_view key, bool load_external = false);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
-                                     unsigned req_obj_type);
+                                     unsigned req_obj_type, bool load_external = false);
 
   struct ItAndExpConst {
     PrimeConstIterator it;
@@ -204,7 +204,7 @@ class DbSlice {
   };
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                            unsigned req_obj_type);
+                                            unsigned req_obj_type, bool load_external = false);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -221,7 +221,8 @@ class DbSlice {
     AddOrFindResult& operator=(ItAndUpdater&& o);
   };
 
-  AddOrFindResult AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
+  AddOrFindResult AddOrFind(const Context& cntx, std::string_view key,
+                            bool load_external = false) noexcept(false);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   AddOrFindResult AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
@@ -256,6 +257,7 @@ class DbSlice {
   void ActivateDb(DbIndex db_ind);
 
   bool Del(DbIndex db_ind, PrimeIterator it);
+  void RemoveFromTiered(PrimeIterator it, DbIndex index);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -390,7 +392,7 @@ class DbSlice {
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
   // Delete a key referred by its iterator.
-  void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
+  void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
@@ -412,8 +414,7 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
 
-  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
-                       DbTable* table);
+  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, DbTable* table);
 
   // Send invalidation message to the clients that are tracking the change to a key.
   void SendInvalidationTrackingMessage(std::string_view key);
@@ -425,11 +426,13 @@ class DbSlice {
     kUpdateReadStats,
     kUpdateMutableStats,
   };
-  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode);
+  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode,
+                        bool load_external);
 
   uint64_t NextVersion() {
     return version_++;
   }
+  void RemoveFromTiered(PrimeIterator it, DbTable* table);
 
  private:
   ShardId shard_id_;

@@ -26,7 +26,7 @@ class TieredStorage {
 
   std::error_code Open(const std::string& path);
 
-  std::error_code Read(size_t offset, size_t len, char* dest);
+  PrimeIterator Load(DbIndex db_index, PrimeIterator it, std::string_view key);
 
   // Schedules unloading of the item, pointed by the iterator.
   std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it);
@@ -37,7 +37,7 @@ class TieredStorage {
     return val.size() >= kMinBlobLen;
   }
 
-  void Free(size_t offset, size_t len);
+  void Free(PrimeIterator it, DbTableStats* stats);
 
   void Shutdown();
 
@@ -56,6 +56,7 @@ class TieredStorage {
 
   void FinishIoRequest(int io_res, InflightWriteRequest* req);
   void SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest);
+  std::error_code Read(size_t offset, size_t len, char* dest);
 
   DbSlice& db_slice_;
   IoMgr io_mgr_;
