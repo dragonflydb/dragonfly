@@ -566,7 +566,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
   } else {
     return cntx->SendError(absl::StrCat("Killed ", killed_connections.load(),
                                         " client(s), but unable to kill ", kill_errors.load(),
-                                        " client(s) from admin port."));
+                                        " admin client(s)."));
   }
 }
 
