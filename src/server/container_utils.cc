@@ -30,6 +30,9 @@ struct ShardFFResult {
   ShardId sid = kInvalidSid;
 };
 
+// Find first non-empty key of a single shard transaction, pass it to `func` and return the key.
+// If no such key exists or a wrong type is found, the apropriate status is returned.
+// Optimized version of `FindFirstNonEmpty` below.
 OpResult<std::string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_type,
                                                    BlockingResultCb func) {
   DCHECK_EQ(trans->GetUniqueShardCnt(), 1u);
@@ -50,12 +53,15 @@ OpResult<std::string> FindFirstNonEmptySingleShard(Transaction* trans, int req_o
     return OpStatus::OK;
   };
 
+  // Schedule single hop and hopefully find a key, otherwise avoid concluding
   OpStatus status = trans->ScheduleSingleHop(cb);
   if (status == OpStatus::OK)
     return key;
   return status;
 }
 
+// Find first non-empty key (sorted by order in command arguments) and return it,
+// otherwise return not found or wrong type error.
 OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) {
   DCHECK_GT(trans->GetUniqueShardCnt(), 1u);
 
