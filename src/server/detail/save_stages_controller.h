@@ -26,7 +26,7 @@ struct SaveStagesInputs {
   Service* service_;
   std::atomic_bool* is_saving_;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
-  std::shared_ptr<LastSaveInfo>* last_save_info_;
+  LastSaveInfo* last_save_info_ ABSL_GUARDED_BY(save_mu_);
   util::fb2::Mutex* save_mu_;
   std::function<size_t()>* save_bytes_cb_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;

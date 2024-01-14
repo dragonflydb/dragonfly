@@ -6,6 +6,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
+#include <zstd.h>
 
 #include <filesystem>
 
@@ -60,6 +61,11 @@ struct ObjInfo {
 
   bool has_sec_precision = false;
   bool found = false;
+};
+
+struct ValueCompressInfo {
+  size_t raw_size = 0;
+  size_t compressed_size = 0;
 };
 
 void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value_str,
@@ -210,6 +216,75 @@ void DoBuildObjHist(EngineShard* shard, ObjHistMap* obj_hist_map) {
   }
 }
 
+ObjInfo InspectOp(string_view key, DbIndex db_index) {
+  auto& db_slice = EngineShard::tlocal()->db_slice();
+  auto [pt, exp_t] = db_slice.GetTables(db_index);
+
+  PrimeIterator it = pt->Find(key);
+  ObjInfo oinfo;
+  if (IsValid(it)) {
+    const PrimeValue& pv = it->second;
+
+    oinfo.found = true;
+    oinfo.encoding = pv.Encoding();
+    oinfo.bucket_id = it.bucket_id();
+    oinfo.slot_id = it.slot_id();
+    if (pv.IsExternal()) {
+      oinfo.external_len.emplace(pv.GetExternalSlice().second);
+    }
+
+    if (pv.HasExpire()) {
+      ExpireIterator exp_it = exp_t->Find(it->first);
+      CHECK(!exp_it.is_done());
+
+      time_t exp_time = db_slice.ExpireTime(exp_it);
+      oinfo.ttl = exp_time - GetCurrentTimeMs();
+      oinfo.has_sec_precision = exp_it->second.is_second_precision();
+    }
+  }
+
+  KeyLockArgs lock_args;
+  lock_args.args = ArgSlice{&key, 1};
+  lock_args.key_step = 1;
+  lock_args.db_index = db_index;
+
+  if (!db_slice.CheckLock(IntentLock::EXCLUSIVE, lock_args)) {
+    oinfo.lock_status = db_slice.CheckLock(IntentLock::SHARED, lock_args) ? ObjInfo::S : ObjInfo::X;
+  }
+
+  return oinfo;
+}
+
+OpResult<ValueCompressInfo> EstimateCompression(string_view key, DbIndex db_index) {
+  auto& db_slice = EngineShard::tlocal()->db_slice();
+  auto [pt, exp_t] = db_slice.GetTables(db_index);
+
+  PrimeIterator it = pt->Find(key);
+  if (!IsValid(it)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  // Only strings are supported right now.
+  if (it->second.ObjType() != OBJ_STRING) {
+    return OpStatus::WRONG_TYPE;
+  }
+  string scratch;
+  string_view value = it->second.GetSlice(&scratch);
+
+  ValueCompressInfo info;
+  info.raw_size = value.size();
+  info.compressed_size = info.raw_size;
+
+  if (info.raw_size >= 32) {
+    size_t compressed_size = ZSTD_compressBound(value.size());
+    unique_ptr<char[]> compressed(new char[compressed_size]);
+    info.compressed_size =
+        ZSTD_compress(compressed.get(), compressed_size, value.data(), value.size(), 5);
+  }
+
+  return info;
+};
+
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
@@ -225,7 +300,7 @@ void DebugCmd::Run(CmdArgList args) {
         "    the server. For each EXEC/i descriptor, 'i' is the number of shards it touches. ",
         "    Each descriptor details the commands it contained followed by number of their ",
         "    arguments. Each descriptor is prefixed by its frequency count",
-        "OBJECT <key>",
+        "OBJECT <key> [COMPRESS]",
         "    Show low-level info about `key` and associated value.",
         "LOAD <filename>",
         "RELOAD [option ...]",
@@ -287,9 +362,10 @@ void DebugCmd::Run(CmdArgList args) {
     return Load(ArgS(args, 1));
   }
 
-  if (subcmd == "OBJECT" && args.size() == 2) {
+  if (subcmd == "OBJECT" && args.size() >= 2) {
     string_view key = ArgS(args, 1);
-    return Inspect(key);
+    args.remove_prefix(2);
+    return Inspect(key, args);
   }
 
   if (subcmd == "TX") {
@@ -350,7 +426,7 @@ void DebugCmd::Reload(CmdArgList args) {
     }
   }
 
-  string last_save_file = sf_.GetLastSaveInfo()->file_name;
+  string last_save_file = sf_.GetLastSaveInfo().file_name;
   Load(last_save_file);
 }
 
@@ -580,6 +656,11 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   ess.AwaitRunningOnShardQueue([&](EngineShard* shard) {
     DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values, params,
                     ps[shard->shard_id()]);
+    // Debug populate does not use transaction framework therefore we call OnCbFinish manually
+    // after running the callback
+    // Note that running debug populate while running flushall/db can cause dcheck fail because the
+    // finish cb is executed just when we finish populating the database.
+    shard->db_slice().OnCbFinish();
   });
 }
 
@@ -621,72 +702,49 @@ void DebugCmd::LogTraffic(CmdArgList args) {
   cntx_->SendOk();
 }
 
-void DebugCmd::Inspect(string_view key) {
+void DebugCmd::Inspect(string_view key, CmdArgList args) {
   EngineShardSet& ess = *shard_set;
   ShardId sid = Shard(key, ess.size());
   VLOG(1) << "DebugCmd::Inspect " << key;
 
-  auto cb = [&]() -> ObjInfo {
-    auto& db_slice = EngineShard::tlocal()->db_slice();
-    auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
-
-    PrimeIterator it = pt->Find(key);
-    ObjInfo oinfo;
-    if (IsValid(it)) {
-      const PrimeValue& pv = it->second;
-
-      oinfo.found = true;
-      oinfo.encoding = pv.Encoding();
-      oinfo.bucket_id = it.bucket_id();
-      oinfo.slot_id = it.slot_id();
-      if (pv.IsExternal()) {
-        oinfo.external_len.emplace(pv.GetExternalSlice().second);
-      }
-
-      if (pv.HasExpire()) {
-        ExpireIterator exp_it = exp_t->Find(it->first);
-        CHECK(!exp_it.is_done());
-
-        time_t exp_time = db_slice.ExpireTime(exp_it);
-        oinfo.ttl = exp_time - GetCurrentTimeMs();
-        oinfo.has_sec_precision = exp_it->second.is_second_precision();
-      }
-    }
-
-    KeyLockArgs lock_args;
-    lock_args.args = ArgSlice{&key, 1};
-    lock_args.key_step = 1;
-    lock_args.db_index = cntx_->db_index();
-
-    if (!db_slice.CheckLock(IntentLock::EXCLUSIVE, lock_args)) {
-      oinfo.lock_status =
-          db_slice.CheckLock(IntentLock::SHARED, lock_args) ? ObjInfo::S : ObjInfo::X;
-    }
-
-    return oinfo;
-  };
-
-  ObjInfo res = ess.Await(sid, cb);
+  bool check_compression = (args.size() == 1) && ArgS(args, 0) == "COMPRESS";
   string resp;
 
-  if (!res.found) {
-    cntx_->SendError(kKeyNotFoundErr);
-    return;
-  }
+  if (check_compression) {
+    auto cb = [&] { return EstimateCompression(key, cntx_->db_index()); };
+    auto res = ess.Await(sid, std::move(cb));
+    if (!res) {
+      cntx_->SendError(res.status());
+      return;
+    }
+    StrAppend(&resp, "raw_size: ", res->raw_size, ", compressed_size: ", res->compressed_size);
+    if (res->raw_size > 0) {
+      StrAppend(&resp, " ratio: ", static_cast<double>(res->compressed_size) / (res->raw_size));
+    }
+  } else {
+    auto cb = [&] { return InspectOp(key, cntx_->db_index()); };
 
-  StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
-  StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
+    ObjInfo res = ess.Await(sid, std::move(cb));
 
-  if (res.ttl != INT64_MAX) {
-    StrAppend(&resp, " ttl:", res.ttl, res.has_sec_precision ? "s" : "ms");
-  }
+    if (!res.found) {
+      cntx_->SendError(kKeyNotFoundErr);
+      return;
+    }
 
-  if (res.external_len) {
-    StrAppend(&resp, " spill_len:", *res.external_len);
-  }
+    StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
+    StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
 
-  if (res.lock_status != ObjInfo::NONE) {
-    StrAppend(&resp, " lock:", res.lock_status == ObjInfo::X ? "x" : "s");
+    if (res.ttl != INT64_MAX) {
+      StrAppend(&resp, " ttl:", res.ttl, res.has_sec_precision ? "s" : "ms");
+    }
+
+    if (res.external_len) {
+      StrAppend(&resp, " spill_len:", *res.external_len);
+    }
+
+    if (res.lock_status != ObjInfo::NONE) {
+      StrAppend(&resp, " lock:", res.lock_status == ObjInfo::X ? "x" : "s");
+    }
   }
   cntx_->SendSimpleString(resp);
 }

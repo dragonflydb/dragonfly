@@ -102,10 +102,15 @@ struct Metrics {
 };
 
 struct LastSaveInfo {
+  // last success save info
   time_t save_time = 0;  // epoch time in seconds.
-  uint32_t duration_sec = 0;
+  uint32_t success_duration_sec = 0;
   std::string file_name;                                      //
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
+  // last error save info
+  GenericError last_error;
+  time_t last_error_time = 0;      // epoch time in seconds.
+  time_t failed_duration_sec = 0;  // epoch time in seconds.
 };
 
 struct SnapshotSpec {
@@ -158,7 +163,7 @@ class ServerFamily {
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
-  std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;
+  LastSaveInfo GetLastSaveInfo() const;
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
@@ -272,8 +277,11 @@ class ServerFamily {
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
+  LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
   std::atomic_bool is_saving_{false};
+  // this field duplicate SaveStagesController::start_save_time_
+  // TODO make SaveStagesController as member of this class
+  std::optional<absl::Time> start_save_time_;
   // If a save operation is currently in progress, calling this function will provide information
   // about the memory consumption during the save operation.
   std::function<size_t()> save_bytes_cb_ = nullptr;

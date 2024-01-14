@@ -14,7 +14,7 @@
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 
-ABSL_FLAG(uint32_t, tx_queue_warning_len, 40,
+ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
           "Length threshold for warning about long transaction queue");
 
 namespace dfly {

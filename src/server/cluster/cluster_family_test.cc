@@ -694,7 +694,7 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   EXPECT_EQ(Run({"save", "df"}), "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  EXPECT_EQ(Run({"debug", "load", save_info->file_name}), "OK");
+  EXPECT_EQ(Run({"debug", "load", save_info.file_name}), "OK");
   EXPECT_EQ(CheckedInt({"dbsize"}), 50000);
 
   EXPECT_EQ(RunPrivileged({"dflycluster", "config", R"json(

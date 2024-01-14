@@ -249,6 +249,20 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     }
 
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
+    auto& lt = table->trans_locks;
+    string tmp;
+    string_view key = last_slot_it->first.GetSlice(&tmp);
+    // do not evict locked keys
+    if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+      return 0;
+
+    // log the evicted keys to journal.
+    if (auto journal = db_slice_->shard_owner()->journal(); journal) {
+      ArgSlice delete_args{key};
+      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, ClusterConfig::KeySlot(key),
+                           make_pair("DEL", delete_args), false);
+    }
+
     db_slice_->PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
   }
@@ -1260,7 +1274,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
             continue;
 
           if (auto journal = owner_->journal(); journal) {
-            keys_to_journal.push_back(tmp);
+            keys_to_journal.push_back(string(key));
           }
 
           PerformDeletion(evict_it, shard_owner(), db_table.get());

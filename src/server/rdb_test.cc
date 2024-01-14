@@ -166,7 +166,7 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     ASSERT_EQ(resp, "OK");
 
     auto save_info = service_->server_family().GetLastSaveInfo();
-    resp = Run({"debug", "load", save_info->file_name});
+    resp = Run({"debug", "load", save_info.file_name});
     ASSERT_EQ(resp, "OK");
     ASSERT_EQ(50000, CheckedInt({"dbsize"}));
   }
@@ -181,7 +181,7 @@ TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"debug", "load", save_info->file_name});
+  resp = Run({"debug", "load", save_info.file_name});
   ASSERT_EQ(resp, "OK");
 }
 
@@ -323,8 +323,8 @@ TEST_F(RdbTest, SaveFlush) {
   Run({"flushdb"});
   save_fb.Join();
   auto save_info = service_->server_family().GetLastSaveInfo();
-  ASSERT_EQ(1, save_info->freq_map.size());
-  auto& k_v = save_info->freq_map.front();
+  ASSERT_EQ(1, save_info.freq_map.size());
+  auto& k_v = save_info.freq_map.front();
   EXPECT_EQ("string", k_v.first);
   EXPECT_EQ(500000, k_v.second);
 }
@@ -360,8 +360,8 @@ TEST_F(RdbTest, SaveManyDbs) {
   save_fb.Join();
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  ASSERT_EQ(1, save_info->freq_map.size());
-  auto& k_v = save_info->freq_map.front();
+  ASSERT_EQ(1, save_info.freq_map.size());
+  auto& k_v = save_info.freq_map.front();
 
   EXPECT_EQ("string", k_v.first);
   EXPECT_EQ(60000, k_v.second);
