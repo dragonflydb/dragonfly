@@ -101,7 +101,7 @@ jobs:
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
-          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
 
           echo "Running tests with --force_epoll"
 
@@ -114,7 +114,7 @@ jobs:
           EOF
 
           gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_force_epoll=true ctest -V -L DFLY
+          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
 
           echo "Finished running tests with --force_epoll"
 
@@ -128,6 +128,12 @@ jobs:
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
       - name: Run regression tests
         if: matrix.container == 'ubuntu-dev:20'
         uses: ./.github/actions/regression-tests

@@ -2134,9 +2134,10 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
   }
 
   io::Result<size_t> res = src_->ReadAtLeast(out_buf, min_sz);
-  if (!res)
+  if (!res) {
+    VLOG(1) << "Error reading from source: " << res.error() << " " << min_sz << " bytes";
     return res.error();
-
+  }
   if (*res < min_sz)
     return RdbError(errc::rdb_file_corrupted);
 
