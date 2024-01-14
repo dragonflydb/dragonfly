@@ -404,12 +404,17 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   if (db_arr_[db_index] == nullptr) {
     db_arr_[db_index] = new PerDb;
   }
+
   unsigned max_pending_writes = GetFlag(FLAGS_tiered_storage_max_pending_writes);
   unsigned throttle_usec = GetFlag(FLAGS_tiered_storage_throttle_us);
   if (num_active_requests_ >= max_pending_writes && throttle_usec > 0) {
     chrono::steady_clock::time_point next =
         chrono::steady_clock::now() + chrono::microseconds(throttle_usec);
     stats_.throttled_write_cnt++;
+
+    // TODO: we should reset `it` in case concurrent inserts invalidated the iterator.
+    // This can happen because we operate on the table from differrent fibers
+    // (for example, due to inline operations or evictions).
     throttle_ec_.await_until([&]() { return num_active_requests_ < max_pending_writes; }, next);
   }
 
