@@ -79,8 +79,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   DbSlice::AddOrFindResult res;
 
   try {
-    res = db_slice.AddOrFind(op_args.db_cntx, key, true);
-
+    res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
     string s;
 
     if (res.is_new) {
@@ -105,7 +104,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
   OpResult<PrimeConstIterator> it_res =
-      db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING, true);
+      db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -158,7 +157,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
 
   DbSlice::AddOrFindResult add_res;
   try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key, true);
+    add_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
   } catch (const std::bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -176,7 +175,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING, true);
+  auto it_res = db_slice.FindAndFetchMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }
@@ -186,7 +185,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 
 OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_hit = false,
                               const DbSlice::ExpireParams& exp_params = {}) {
-  auto res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, true);
+  auto res = op_args.shard->db_slice().FindAndFetchMutable(op_args.db_cntx, key);
   res.post_updater.Run();
 
   if (!IsValid(res.it))
@@ -504,7 +503,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   size_t total_size = 0;
   for (size_t i = 0; i < args.size(); ++i) {
     OpResult<PrimeConstIterator> it_res =
-        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_STRING, true);
+        db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -553,22 +552,27 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
   if (params.IsConditionalSet()) {
-    bool load_external = params.prev_val || (params.flags & SET_GET);
-    const auto res = db_slice.FindMutable(op_args_.db_cntx, key, load_external);
-    if (IsValid(res.it)) {
-      result_builder.CachePrevValueIfNeeded(shard, res.it->second);
+    bool fetch_value = params.prev_val || (params.flags & SET_GET);
+    DbSlice::ItAndUpdater find_res;
+    if (fetch_value) {
+      find_res = db_slice.FindAndFetchMutable(op_args_.db_cntx, key);
+    } else {
+      find_res = db_slice.FindMutable(op_args_.db_cntx, key);
+    }
+    if (IsValid(find_res.it)) {
+      result_builder.CachePrevValueIfNeeded(shard, find_res.it->second);
     }
 
     // Make sure that we have this key, and only add it if it does exists
     if (params.flags & SET_IF_EXISTS) {
-      if (IsValid(res.it)) {
+      if (IsValid(find_res.it)) {
         return std::move(result_builder)
-            .Return(SetExisting(params, res.it, res.exp_it, key, value));
+            .Return(SetExisting(params, find_res.it, find_res.exp_it, key, value));
       } else {
         return std::move(result_builder).Return(OpStatus::SKIPPED);
       }
     } else {
-      if (IsValid(res.it)) {  // if the policy is not to overide and have the key, just return
+      if (IsValid(find_res.it)) {  // if the policy is not to overide and have the key, just return
         return std::move(result_builder).Return(OpStatus::SKIPPED);
       }
     }
@@ -831,7 +835,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
     auto op_args = t->GetOpArgs(shard);
     DbSlice& db_slice = op_args.shard->db_slice();
-    auto res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING, true);
+    auto res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (!res) {
       return res.status();
     }

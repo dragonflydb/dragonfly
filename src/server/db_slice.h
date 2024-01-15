@@ -194,9 +194,12 @@ class DbSlice {
     ExpireIterator exp_it;
     AutoUpdater post_updater;
   };
-  ItAndUpdater FindMutable(const Context& cntx, std::string_view key, bool load_external = false);
+  ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
+  ItAndUpdater FindAndFetchMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
-                                     unsigned req_obj_type, bool load_external = false);
+                                     unsigned req_obj_type);
+  OpResult<ItAndUpdater> FindAndFetchMutable(const Context& cntx, std::string_view key,
+                                             unsigned req_obj_type);
 
   struct ItAndExpConst {
     PrimeConstIterator it;
@@ -204,7 +207,9 @@ class DbSlice {
   };
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                            unsigned req_obj_type, bool load_external = false);
+                                            unsigned req_obj_type);
+  OpResult<PrimeConstIterator> FindAndFetchReadOnly(const Context& cntx, std::string_view key,
+                                                    unsigned req_obj_type);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -221,8 +226,8 @@ class DbSlice {
     AddOrFindResult& operator=(ItAndUpdater&& o);
   };
 
-  AddOrFindResult AddOrFind(const Context& cntx, std::string_view key,
-                            bool load_external = false) noexcept(false);
+  AddOrFindResult AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
+  AddOrFindResult AddOrFindAndFetch(const Context& cntx, std::string_view key) noexcept(false);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   AddOrFindResult AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
@@ -422,12 +427,25 @@ class DbSlice {
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
-  enum class FindInternalMode {
+  enum class UpdateStatsMode {
     kUpdateReadStats,
     kUpdateMutableStats,
   };
-  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode,
-                        bool load_external);
+
+  enum class LoadExternalMode {
+    kLoadExternal,
+    kDontLoadExternal,
+  };
+  ItAndExp FindInternal(const Context& cntx, std::string_view key, UpdateStatsMode stats_mode,
+                        LoadExternalMode load_mode);
+  OpResult<PrimeConstIterator> FindAReadOnlyInternal(const Context& cntx, std::string_view key,
+                                                     unsigned req_obj_type,
+                                                     LoadExternalMode load_mode);
+  AddOrFindResult AddOrFindInternal(const Context& cntx, std::string_view key,
+                                    LoadExternalMode load_mode) noexcept(false);
+  OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
+                                             std::optional<unsigned> req_obj_type,
+                                             LoadExternalMode load_mode);
 
   uint64_t NextVersion() {
     return version_++;

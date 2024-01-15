@@ -366,32 +366,34 @@ DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) 
   return *this;
 }
 
-DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key,
-                                           bool load_external) {
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats, load_external);
+DbSlice::ItAndUpdater DbSlice::FindAndFetchMutable(const Context& cntx, string_view key) {
+  return std::move(
+      FindMutableInternal(cntx, key, std::nullopt, LoadExternalMode::kLoadExternal).value());
+}
 
-  if (IsValid(it)) {
-    PreUpdate(cntx.db_index, it);
-    return {it, exp_it,
-            AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                         .db_slice = this,
-                         .db_ind = cntx.db_index,
-                         .it = it,
-                         .key = key})};
-  } else {
-    return {it, exp_it, {}};
-  }
+DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
+  return std::move(
+      FindMutableInternal(cntx, key, std::nullopt, LoadExternalMode::kDontLoadExternal).value());
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
-                                                     unsigned req_obj_type, bool load_external) {
-  // Don't use FindMutable() so that we don't call PreUpdate()
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats, load_external);
+                                                     unsigned req_obj_type) {
+  return FindMutableInternal(cntx, key, req_obj_type, LoadExternalMode::kDontLoadExternal);
+}
 
+OpResult<DbSlice::ItAndUpdater> DbSlice::FindAndFetchMutable(const Context& cntx, string_view key,
+                                                             unsigned req_obj_type) {
+  return FindMutableInternal(cntx, key, req_obj_type, LoadExternalMode::kLoadExternal);
+}
+
+OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
+                                                             std::optional<unsigned> req_obj_type,
+                                                             LoadExternalMode load_mode) {
+  auto [it, exp_it] = FindInternal(cntx, key, UpdateStatsMode::kUpdateMutableStats, load_mode);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
-  if (it->second.ObjType() != req_obj_type) {
+  if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
     return OpStatus::WRONG_TYPE;
   }
 
@@ -405,13 +407,27 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
-  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateReadStats, false);
+  auto res = FindInternal(cntx, key, UpdateStatsMode::kUpdateReadStats,
+                          LoadExternalMode::kDontLoadExternal);
   return {res.it, res.exp_it};
 }
 
 OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                   unsigned req_obj_type, bool load_external) {
-  auto it = FindInternal(cntx, key, FindInternalMode::kUpdateReadStats, load_external).it;
+                                                   unsigned req_obj_type) {
+  return FindAReadOnlyInternal(cntx, key, req_obj_type, LoadExternalMode::kDontLoadExternal);
+}
+
+OpResult<PrimeConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cntx,
+                                                           std::string_view key,
+                                                           unsigned req_obj_type) {
+  return FindAReadOnlyInternal(cntx, key, req_obj_type, LoadExternalMode::kLoadExternal);
+}
+
+OpResult<PrimeConstIterator> DbSlice::FindAReadOnlyInternal(const Context& cntx,
+                                                            std::string_view key,
+                                                            unsigned req_obj_type,
+                                                            LoadExternalMode load_mode) {
+  auto it = FindInternal(cntx, key, UpdateStatsMode::kUpdateReadStats, load_mode).it;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -424,7 +440,7 @@ OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_v
 }
 
 DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view key,
-                                        FindInternalMode mode, bool load_external) {
+                                        UpdateStatsMode stats_mode, LoadExternalMode load_mode) {
   DbSlice::ItAndExp res;
 
   if (!IsDbValid(cntx.db_index))
@@ -433,23 +449,24 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
   auto& db = *db_arr_[cntx.db_index];
   res.it = db.prime.Find(key);
 
-  auto update_stats_on_miss = [&](FindInternalMode mode) {
-    switch (mode) {
-      case FindInternalMode::kUpdateMutableStats:
+  auto update_stats_on_miss = [&](UpdateStatsMode stats_mode) {
+    switch (stats_mode) {
+      case UpdateStatsMode::kUpdateMutableStats:
         events_.mutations++;
         break;
-      case FindInternalMode::kUpdateReadStats:
+      case UpdateStatsMode::kUpdateReadStats:
         events_.misses++;
         break;
     }
   };
 
   if (!IsValid(res.it)) {
-    update_stats_on_miss(mode);
+    update_stats_on_miss(stats_mode);
     return res;
   }
 
-  if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered && load_external) {
+  if (TieredStorage* tiered = shard_owner()->tiered_storage();
+      tiered && load_mode == LoadExternalMode::kLoadExternal) {
     if (res.it->second.HasIoPending()) {
       tiered->CancelIo(cntx.db_index, res.it);
     } else if (res.it->second.IsExternal()) {
@@ -457,7 +474,7 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
       // We will update the iterator if it changed during the preemption
       res.it = tiered->Load(cntx.db_index, res.it, key);
       if (!IsValid(res.it)) {
-        update_stats_on_miss(mode);
+        update_stats_on_miss(stats_mode);
         return res;
       }
     }
@@ -467,7 +484,7 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
   if (res.it->second.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
-      update_stats_on_miss(mode);
+      update_stats_on_miss(stats_mode);
       return res;
     }
   }
@@ -489,11 +506,11 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
 
   db.top_keys.Touch(key);
 
-  switch (mode) {
-    case FindInternalMode::kUpdateMutableStats:
+  switch (stats_mode) {
+    case UpdateStatsMode::kUpdateMutableStats:
       events_.mutations++;
       break;
-    case FindInternalMode::kUpdateReadStats:
+    case UpdateStatsMode::kUpdateReadStats:
       events_.hits++;
       if (ClusterConfig::IsEnabled()) {
         db.slots_stats[ClusterConfig::KeySlot(key)].total_reads++;
@@ -521,13 +538,20 @@ OpResult<pair<PrimeConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Co
   return OpStatus::KEY_NOTFOUND;
 }
 
-DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key,
-                                            bool load_external) noexcept(false) {
+DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key) {
+  return AddOrFindInternal(cntx, key, LoadExternalMode::kDontLoadExternal);
+}
+
+DbSlice::AddOrFindResult DbSlice::AddOrFindAndFetch(const Context& cntx, string_view key) {
+  return AddOrFindInternal(cntx, key, LoadExternalMode::kLoadExternal);
+}
+
+DbSlice::AddOrFindResult DbSlice::AddOrFindInternal(const Context& cntx, string_view key,
+                                                    LoadExternalMode load_mode) noexcept(false) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
-
-  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats, load_external);
+  auto res = FindInternal(cntx, key, UpdateStatsMode::kUpdateMutableStats, load_mode);
 
   if (IsValid(res.it)) {
     PreUpdate(cntx.db_index, res.it);
