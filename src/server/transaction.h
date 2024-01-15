@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/base/internal/spinlock.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
@@ -569,7 +570,7 @@ class Transaction {
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
 
-  std::atomic<uint32_t> wakeup_requested_{0};  // whether tx was woken up
+  std::atomic_uint32_t wakeup_requested_{0};  // whether tx was woken up
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
@@ -586,8 +587,9 @@ class Transaction {
   // If COORDINATOR_XXX has been set, it means we passed or crossed stage XXX.
   uint8_t coordinator_state_ = 0;
 
-  // Used for single-hop transactions with unique_shards_ == 1, hence no data-race.
+  // Result of callbacks. Usually written by single shard only, lock below for multishard oom error
   OpStatus local_result_ = OpStatus::OK;
+  absl::base_internal::SpinLock local_result_mu_;
 
  private:
   struct TLTmpSpace {
