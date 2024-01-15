@@ -14,7 +14,7 @@ using namespace testing;
 using absl::SetFlag;
 using absl::StrCat;
 
-ABSL_DECLARE_FLAG(string, spill_file_prefix);
+ABSL_DECLARE_FLAG(string, tiered_prefix);
 
 namespace dfly {
 
@@ -32,7 +32,7 @@ class TieredStorageTest : public BaseFamilyTest {
 
 void TieredStorageTest::SetUpTestSuite() {
   BaseFamilyTest::SetUpTestSuite();
-  SetFlag(&FLAGS_spill_file_prefix, "/tmp/spill");
+  SetFlag(&FLAGS_tiered_prefix, "/tmp/spill");
 
   auto* force_epoll = absl::FindCommandLineFlag("force_epoll");
   if (force_epoll->CurrentValue() == "true") {
