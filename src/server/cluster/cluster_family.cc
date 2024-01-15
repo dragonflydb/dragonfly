@@ -58,11 +58,39 @@ ClusterFamily::MigrationInfo::MigrationInfo(std::uint32_t flows_num, std::string
                                             std::vector<ClusterConfig::SlotRange> slots,
                                             Context::ErrHandler err_handler)
     : host_ip(ip),
-      flows(flows_num),
-      slots(slots),
       port(port),
+      slots(slots),
       cntx(err_handler),
-      state(ClusterSlotMigration::State::C_CONNECTING) {
+      state(ClusterSlotMigration::State::C_CONNECTING),
+      flows(flows_num) {
+}
+
+void ClusterFamily::MigrationInfo::StartFlow(DbSlice* slice, uint32_t sync_id,
+                                             journal::Journal* journal, io::Sink* dest) {
+  state = ClusterSlotMigration::State::C_FULL_SYNC;
+
+  // TODO refactor: maybe we can use vector<slotRange> instead of SlotSet
+  SlotSet sset;
+  for (const auto& slot_range : slots) {
+    for (auto i = slot_range.start; i <= slot_range.end; ++i)
+      sset.insert(i);
+  }
+
+  const auto shard_id = slice->shard_id();
+
+  flows[shard_id].streamer =
+      std::make_unique<RestoreStreamer>(slice, std::move(sset), sync_id, journal, &cntx);
+
+  flows[shard_id].streamer->Start(dest);
+}
+
+ClusterSlotMigration::State ClusterFamily::MigrationInfo::GetState() {
+  if (state == ClusterSlotMigration::State::C_FULL_SYNC) {
+    bool is_stable_sync = std::all_of(
+        flows.begin(), flows.end(), [](const auto& flow) { return flow.streamer->IsStableSync(); });
+    state = is_stable_sync ? ClusterSlotMigration::State::C_STABLE_SYNC : state;
+  }
+  return state;
 }
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
@@ -680,8 +708,8 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     }
     // find outgoing slot migration
     for (const auto& [_, info] : outgoing_migration_infos_) {
-      if (info->host_ip == host_ip && info->port == port)
-        return rb->SendSimpleString(state_to_str(info->state));
+      if (info->GetHostIp() == host_ip && info->GetPort() == port)
+        return rb->SendSimpleString(state_to_str(info->GetState()));
     }
   } else if (auto arr_size = incoming_migrations_jobs_.size() + outgoing_migration_infos_.size();
              arr_size != 0) {
@@ -697,7 +725,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
       send_answer("in", info.host, info.port, info.state);
     }
     for (const auto& [_, info] : outgoing_migration_infos_) {
-      send_answer("out", info->host_ip, info->port, info->state);
+      send_answer("out", info->GetHostIp(), info->GetPort(), info->GetState());
     }
     return;
   }
@@ -811,27 +839,10 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->SendOk();
 
-  // TODO refactor: maybe we can use vector<slotRange> instead of SlotSet
-  SlotSet sset;
-  for (const auto& slot_range : info->slots) {
-    for (auto i = slot_range.start; i <= slot_range.end; ++i)
-      sset.insert(i);
-  }
-  info->state = ClusterSlotMigration::State::C_FULL_SYNC;
-
   EngineShard* shard = EngineShard::tlocal();
-  info->flows[shard_id].streamer = std::make_unique<RestoreStreamer>(
-      &shard->db_slice(), std::move(sset), sync_id, shard_id, server_family_->journal(),
-      &info->cntx, [weak_info = weak_ptr(info), shard_id] {
-        if (auto info = weak_info.lock(); info) {
-          VLOG(1) << "Change state to C_STABLE_SYNC for shard_id: " << shard_id;
-          info->state = ClusterSlotMigration::State::C_STABLE_SYNC;
-        }
-      });
+  DCHECK(shard->shard_id() == shard_id);
 
-  info->flows[shard_id].streamer->Start(cntx->conn()->socket());
-
-  LOG(INFO) << "Started migation with target node " << info->host_ip << ":" << info->port;
+  info->StartFlow(&shard->db_slice(), sync_id, server_family_->journal(), cntx->conn()->socket());
 }
 
 void ClusterFamily::FullSyncCut(CmdArgList args, ConnectionContext* cntx) {

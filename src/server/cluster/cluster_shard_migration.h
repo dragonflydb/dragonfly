@@ -25,10 +25,10 @@ class ClusterShardMigration : public ProtocolClient {
   void Cancel();
 
   void setStableSync() {
-    is_stable_sync = true;
+    is_stable_sync_ = true;
   }
   bool isStableSync() {
-    return is_stable_sync;
+    return is_stable_sync_;
   }
 
  private:
@@ -42,12 +42,12 @@ class ClusterShardMigration : public ProtocolClient {
   uint32_t source_shard_id_;
   uint32_t sync_id_;
   Service& service_;
-  bool is_stable_sync = false;
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<JournalExecutor> executor_;
-  EventCount waker_;
   Fiber sync_fb_;
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
+
+  std::atomic_bool is_stable_sync_ = false;
 };
 
 }  // namespace dfly

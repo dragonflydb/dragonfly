@@ -18,6 +18,11 @@ class CommandRegistry;
 class ConnectionContext;
 class ServerFamily;
 class RestoreStreamer;
+class DbSlice;
+
+namespace journal {
+class Journal;
+}
 
 class ClusterFamily {
  public:
@@ -91,12 +96,25 @@ class ClusterFamily {
     ~MigrationInfo();
     MigrationInfo(std::uint32_t flows_num, std::string ip, uint16_t port,
                   std::vector<ClusterConfig::SlotRange> slots, Context::ErrHandler err_handler);
+
+    void StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal, io::Sink* dest);
+
+    ClusterSlotMigration::State GetState();
+
+    const std::string& GetHostIp() const {
+      return host_ip;
+    };
+    uint16_t GetPort() const {
+      return port;
+    };
+
+   private:
     std::string host_ip;
-    std::vector<FlowInfo> flows;
-    std::vector<ClusterConfig::SlotRange> slots;
     uint16_t port;
+    std::vector<ClusterConfig::SlotRange> slots;
     Context cntx;
-    ClusterSlotMigration::State state = ClusterSlotMigration::State::C_NO_STATE;
+    ClusterSlotMigration::State state;
+    std::vector<FlowInfo> flows;
   };
 
   std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);

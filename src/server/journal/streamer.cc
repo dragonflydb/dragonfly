@@ -49,15 +49,12 @@ void JournalStreamer::WriterFb(io::Sink* dest) {
   }
 }
 
-RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id, uint32_t flow_id,
-                                 journal::Journal* journal, Context* cntx,
-                                 std::function<void()> full_sync_cut_cb)
+RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id,
+                                 journal::Journal* journal, Context* cntx)
     : JournalStreamer(journal, cntx),
       db_slice_(slice),
       my_slots_(std::move(slots)),
-      sync_id_(sync_id),
-      flow_id_(flow_id),
-      full_sync_cut_cb(std::move(full_sync_cut_cb)) {
+      sync_id_(sync_id) {
   DCHECK(slice != nullptr);
 }
 
@@ -86,11 +83,11 @@ void RestoreStreamer::Start(io::Sink* dest) {
       }
     } while (cursor);
 
-    VLOG(2) << "FULL-SYNC-CUT for " << sync_id_ << " : " << flow_id_;
-    WriteCommand(make_pair(
-        "DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_), absl::StrCat(flow_id_)}));
+    VLOG(2) << "FULL-SYNC-CUT for " << sync_id_ << " : " << db_slice_->shard_id();
+    WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_),
+                                                   absl::StrCat(db_slice_->shard_id())}));
     NotifyWritten(true);
-    full_sync_cut_cb();
+    is_stable_sync_ = true;
   });
 }
 
