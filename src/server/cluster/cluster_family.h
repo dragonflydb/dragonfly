@@ -81,7 +81,6 @@ class ClusterFamily {
   // FlowInfo is used to store state, connection, and all auxiliary data
   // that is needed for correct slots (per shard) data transfer
   struct FlowInfo {
-    // facade::Connection* conn = nullptr;
     std::unique_ptr<RestoreStreamer> streamer;
     ~FlowInfo();
   };

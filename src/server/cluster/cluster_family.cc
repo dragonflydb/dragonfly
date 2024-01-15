@@ -807,8 +807,6 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   if (!info)
     return cntx->SendError(kIdNotFound);
 
-  // info->flows[shard_id].conn = cntx->conn();
-
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
 
   cntx->SendOk();

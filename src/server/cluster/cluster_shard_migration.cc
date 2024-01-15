@@ -66,17 +66,6 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
-  // uint8_t ok_buf[4];
-  // ps.ReadAtLeast(io::MutableBytes{ok_buf, 4}, 4);
-
-  // if (string_view(reinterpret_cast<char*>(ok_buf), 4) != "SYNC") {
-  //   VLOG(1) << "FullSyncShardFb incorrect data transfer";
-  //   cntx->ReportError(std::make_error_code(errc::protocol_error),
-  //                     "Incorrect FullSync data, only for tets");
-  // }
-
-  // VLOG(1) << "FullSyncShardFb finished after reading 4 bytes";
-
   JournalReader reader{&ps, 0};
   TransactionReader tx_reader{};
 
@@ -93,8 +82,7 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
     if (!tx_data->is_ping) {
       ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
     } else {
-      // force_ping_ = true;
-      // journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      // TODO check about ping logic
     }
   }
 }
@@ -147,7 +135,6 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
     VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
   }
-  // journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from
