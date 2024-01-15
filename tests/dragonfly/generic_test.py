@@ -119,3 +119,21 @@ async def test_restricted_commands(df_local_factory):
         async with aioredis.Redis(port=server.admin_port) as admin_client:
             await admin_client.get("foo")
             await admin_client.set("foo", "bar")
+
+
+@pytest.mark.asyncio
+async def test_reply_guard_oom(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(
+        proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
+    )
+    df_local_factory.start_all([master])
+    c_master = master.client()
+    await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
+
+    seeder = df_seeder_factory.create(
+        port=master.port, keys=5000, val_size=1000, stop_on_failure=False
+    )
+    await seeder.run(target_deviation=0.1)
+
+    info = await c_master.info("stats")
+    assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
