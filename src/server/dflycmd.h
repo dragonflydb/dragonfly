@@ -104,20 +104,22 @@ class DflyCmd {
   struct ReplicaInfo {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION},
+        : replica_state{SyncState::PREPARATION},
           cntx{std::move(err_handler)},
           address{std::move(address)},
           listening_port(listening_port),
           flows{flow_count} {
     }
 
-    std::atomic<SyncState> state;
+    SyncState replica_state;  // always guarded by ReplicaInfo::mu
     Context cntx;
 
     std::string address;
     uint32_t listening_port;
     DflyVersion version = DflyVersion::VER0;
 
+    // Flows describe the state of shard-local flow.
+    // They are always indexed by the shard index on the master.
     std::vector<FlowInfo> flows;
     Mutex mu;  // See top of header for locking levels.
   };

@@ -5,9 +5,9 @@ WORKDIR /build
 
 COPY . ./
 
-RUN make HELIO_RELEASE=y release
+RUN make release
 
-RUN build-opt/dragonfly --version
+RUN build-release/dragonfly --version
 
 RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/212b75144bbc06722fbd7661f651390dc47a43d1/su-exec.c && \
     gcc -Wall -O2 su-exec.c -o su-exec
@@ -28,7 +28,7 @@ WORKDIR /data
 COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=builder /build/su-exec /usr/local/bin/
-COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
+COPY --from=builder /build/build-release/dragonfly /usr/local/bin/
 
 HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
 ENTRYPOINT ["entrypoint.sh"]

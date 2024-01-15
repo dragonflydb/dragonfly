@@ -74,15 +74,26 @@ async def test_get_databases(async_client: aioredis.Redis):
     assert dbnum == {"databases": "16"}
 
 
-async def test_client_list(df_factory):
+async def test_client_kill(df_factory):
     with df_factory.create(port=1111, admin_port=1112) as instance:
         client = aioredis.Redis(port=instance.port)
         admin_client = aioredis.Redis(port=instance.admin_port)
-
-        await client.ping()
         await admin_client.ping()
-        assert len(await client.execute_command("CLIENT LIST")) == 2
-        assert len(await admin_client.execute_command("CLIENT LIST")) == 2
+
+        # This creates `client_conn` as a non-auto-reconnect client
+        async with client.client() as client_conn:
+            assert len(await client_conn.execute_command("CLIENT LIST")) == 2
+            assert len(await admin_client.execute_command("CLIENT LIST")) == 2
+
+            # Can't kill admin from regular connection
+            with pytest.raises(Exception) as e_info:
+                await client_conn.execute_command("CLIENT KILL LADDR 127.0.0.1:1112")
+
+            assert len(await admin_client.execute_command("CLIENT LIST")) == 2
+            await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
+            assert len(await admin_client.execute_command("CLIENT LIST")) == 1
+            with pytest.raises(Exception) as e_info:
+                await client_conn.ping()
 
         await disconnect_clients(client, admin_client)
 

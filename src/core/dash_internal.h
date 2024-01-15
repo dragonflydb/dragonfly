@@ -413,6 +413,14 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   template <typename HashFn> void Split(HashFn&& hfunc, Segment* dest);
 
+  // Moves all the entries from 'src' segment to this segment.
+  // The calling code must ensure first that we actually can move all the key and we do not
+  // have hot, overfilled buckets that will prevent us from moving all the keys.
+  // If MoveFrom fails, the dashtable will abort, assert and will be left in an inconsistent state.
+  // If MoveFrom succeeds, the src segment will be left empty but with inconsistent metadata, so
+  // should it should be deallocated or reinitialized.
+  template <typename HashFn> void MoveFrom(HashFn&& hfunc, Segment* src);
+
   void Delete(const Iterator& it, Hash_t key_hash);
 
   void Clear();  // clears the segment.
@@ -1289,6 +1297,37 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 
     stash.ForEachSlot(std::move(cb));
     stash.ClearSlots(invalid_mask);
+  }
+}
+
+template <typename Key, typename Value, typename Policy>
+template <typename HFunc>
+void Segment<Key, Value, Policy>::MoveFrom(HFunc&& hfunc, Segment* src) {
+  for (unsigned bid = 0; bid < kTotalBuckets; ++bid) {
+    Bucket& src_bucket = src->bucket_[bid];
+    bool success = true;
+    auto cb = [&, hfunc = std::move(hfunc)](Bucket* bucket, unsigned slot, bool probe) {
+      auto& key = bucket->key[slot];
+      Hash_t hash = hfunc(key);
+
+      auto it = this->InsertUniq(std::forward<Key_t>(key),
+                                 std::forward<Value_t>(bucket->value[slot]), hash, false);
+      (void)it;
+      assert(it.index != kNanBid);
+      if (it.index == kNanBid) {
+        success = false;
+        return;
+      }
+
+      if constexpr (USE_VERSION) {
+        // Update the version in the destination bucket.
+        this->bucket_[it.index].UpdateVersion(bucket->GetVersion());
+      }
+    };
+
+    src_bucket.ForEachSlot(std::move(cb));
+    if (!success)
+      break;
   }
 }
 

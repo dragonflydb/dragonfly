@@ -283,9 +283,10 @@ void MemoryCmd::Usage(std::string_view key) {
     }
   });
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   if (memory_usage < 0)
-    return cntx_->SendError(kKeyNotFoundErr);
-  cntx_->SendLong(memory_usage);
+    return rb->SendNull();
+  rb->SendLong(memory_usage);
 }
 
 }  // namespace dfly

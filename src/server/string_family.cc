@@ -88,24 +88,29 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     }
   }
 
-  auto res = db_slice.AddOrFind(op_args.db_cntx, key);
+  DbSlice::AddOrFindResult res;
 
-  string s;
+  try {
+    res = db_slice.AddOrFind(op_args.db_cntx, key);
 
-  if (res.is_new) {
-    s.resize(range_len);
-  } else {
-    if (res.it->second.ObjType() != OBJ_STRING)
-      return OpStatus::WRONG_TYPE;
+    string s;
 
-    s = GetString(op_args.shard, res.it->second);
-    if (s.size() < range_len)
+    if (res.is_new) {
       s.resize(range_len);
+    } else {
+      if (res.it->second.ObjType() != OBJ_STRING)
+        return OpStatus::WRONG_TYPE;
+
+      s = GetString(op_args.shard, res.it->second);
+      if (s.size() < range_len)
+        s.resize(range_len);
+    }
+
+    memcpy(s.data() + start, value.data(), value.size());
+    res.it->second.SetString(s);
+  } catch (const std::bad_alloc& e) {
+    return OpStatus::OUT_OF_MEMORY;
   }
-
-  memcpy(s.data() + start, value.data(), value.size());
-  res.it->second.SetString(s);
-
   return res.it->second.Size();
 }
 
@@ -161,7 +166,12 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
                                bool prepend) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  auto add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  DbSlice::AddOrFindResult add_res;
+  try {
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  } catch (const std::bad_alloc& e) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
   if (add_res.is_new) {
     add_res.it->second.SetString(val);
     return val.size();
@@ -224,7 +234,12 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
   auto& db_slice = op_args.shard->db_slice();
-  auto add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  DbSlice::AddOrFindResult add_res;
+  try {
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  } catch (const std::bad_alloc& e) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
 
   char buf[128];
 
@@ -1351,7 +1366,7 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<uint32_t> result = trans->ScheduleSingleHopT(std::move(cb));
 
-  if (result.status() == OpStatus::WRONG_TYPE) {
+  if (!result.ok()) {
     cntx->SendError(result.status());
   } else {
     cntx->SendLong(result.value());

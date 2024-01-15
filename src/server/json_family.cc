@@ -1076,7 +1076,12 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    SetJson(op_args, key, std::move(parsed_json.value()));
+    try {
+      SetJson(op_args, key, std::move(parsed_json.value()));
+
+    } catch (const bad_alloc& e) {
+      return OpStatus::OUT_OF_MEMORY;
+    }
     return true;
   }
 
@@ -1154,7 +1159,9 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
+
   OpResult<bool> result = trans->ScheduleSingleHopT(std::move(cb));
+
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     if (*result) {

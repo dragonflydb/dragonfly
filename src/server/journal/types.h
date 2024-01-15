@@ -3,9 +3,11 @@
 //
 #pragma once
 
+#include <optional>
 #include <string>
 #include <variant>
 
+#include "server/cluster/cluster_config.h"
 #include "server/common.h"
 #include "server/table.h"
 
@@ -27,6 +29,7 @@ struct EntryBase {
   Op opcode;
   DbIndex dbid;
   uint32_t shard_cnt;
+  std::optional<SlotId> slot;
 };
 
 // This struct represents a single journal entry.
@@ -39,15 +42,18 @@ struct Entry : public EntryBase {
                    std::pair<std::string_view, ArgSlice>     // Command and its shard parts.
                    >;
 
-  Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt, Payload pl)
-      : EntryBase{txid, opcode, dbid, shard_cnt}, payload{pl} {
+  Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt, std::optional<SlotId> slot_id,
+        Payload pl)
+      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{pl} {
   }
 
-  Entry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid, 0}, payload{} {
+  Entry(journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
+      : EntryBase{0, opcode, dbid, 0, slot_id}, payload{} {
   }
 
-  Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt)
-      : EntryBase{txid, opcode, dbid, shard_cnt}, payload{} {
+  Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt,
+        std::optional<SlotId> slot_id)
+      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{} {
   }
 
   bool HasPayload() const {
@@ -73,6 +79,7 @@ struct JournalItem {
   LSN lsn;
   Op opcode;
   std::string data;
+  std::optional<SlotId> slot;
 };
 
 using ChangeCallback = std::function<void(const JournalItem&, bool await)>;

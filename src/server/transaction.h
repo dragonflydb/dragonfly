@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/base/internal/spinlock.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
@@ -16,6 +17,7 @@
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
+#include "server/cluster/unique_slot_checker.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
@@ -168,7 +170,7 @@ class Transaction {
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
-  explicit Transaction(const Transaction* parent, ShardId shard_id);
+  explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -594,12 +596,13 @@ class Transaction {
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
 
-  std::atomic<uint32_t> wakeup_requested_{0};  // whether tx was woken up
+  std::atomic_uint32_t wakeup_requested_{0};  // whether tx was woken up
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};          // Number of unique shards active
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
+  UniqueSlotChecker unique_slot_checker_;
 
   EventCount blocking_ec_;  // Used to wake blocking transactions.
   EventCount run_ec_;       // Used to wait for shard callbacks
@@ -610,8 +613,9 @@ class Transaction {
   // If COORDINATOR_XXX has been set, it means we passed or crossed stage XXX.
   uint8_t coordinator_state_ = 0;
 
-  // Used for single-hop transactions with unique_shards_ == 1, hence no data-race.
+  // Result of callbacks. Usually written by single shard only, lock below for multishard oom error
   OpStatus local_result_ = OpStatus::OK;
+  absl::base_internal::SpinLock local_result_mu_;
 
  private:
   struct TLTmpSpace {

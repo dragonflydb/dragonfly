@@ -220,13 +220,14 @@ void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
 void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
-  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, make_pair("DEL", ArgSlice{key}), false);
+  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, ClusterConfig::KeySlot(key),
+                       make_pair("DEL", ArgSlice{key}), false);
 }
 
 void TriggerJournalWriteToSink() {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
-  journal->RecordEntry(0, journal::Op::NOOP, 0, 0, {}, true);
+  journal->RecordEntry(0, journal::Op::NOOP, 0, 0, nullopt, {}, true);
 }
 
 #define ADD(x) (x) += o.x

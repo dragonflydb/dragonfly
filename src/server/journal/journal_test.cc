@@ -98,15 +98,15 @@ TEST(Journal, WriteRead) {
   auto list = [v = &lists](auto... ss) { return StoreList(v, ss...); };
 
   std::vector<journal::Entry> test_entries = {
-      {0, journal::Op::COMMAND, 0, 2, make_pair("MSET", slice("A", "1", "B", "2"))},
-      {0, journal::Op::COMMAND, 0, 2, make_pair("MSET", slice("C", "3"))},
-      {1, journal::Op::COMMAND, 0, 2, make_pair("DEL", list("A", "B"))},
-      {2, journal::Op::COMMAND, 1, 1, make_pair("LPUSH", list("l", "v1", "v2"))},
-      {3, journal::Op::COMMAND, 0, 1, make_pair("MSET", slice("D", "4"))},
-      {4, journal::Op::COMMAND, 1, 1, make_pair("DEL", list("l1"))},
-      {5, journal::Op::COMMAND, 2, 1, make_pair("DEL", list("E", "2"))},
-      {6, journal::Op::MULTI_COMMAND, 2, 1, make_pair("SET", list("E", "2"))},
-      {6, journal::Op::EXEC, 2, 1}};
+      {0, journal::Op::COMMAND, 0, 2, nullopt, make_pair("MSET", slice("A", "1", "B", "2"))},
+      {0, journal::Op::COMMAND, 0, 2, nullopt, make_pair("MSET", slice("C", "3"))},
+      {1, journal::Op::COMMAND, 0, 2, nullopt, make_pair("DEL", list("A", "B"))},
+      {2, journal::Op::COMMAND, 1, 1, nullopt, make_pair("LPUSH", list("l", "v1", "v2"))},
+      {3, journal::Op::COMMAND, 0, 1, nullopt, make_pair("MSET", slice("D", "4"))},
+      {4, journal::Op::COMMAND, 1, 1, nullopt, make_pair("DEL", list("l1"))},
+      {5, journal::Op::COMMAND, 2, 1, nullopt, make_pair("DEL", list("E", "2"))},
+      {6, journal::Op::MULTI_COMMAND, 2, 1, nullopt, make_pair("SET", list("E", "2"))},
+      {6, journal::Op::EXEC, 2, 1, nullopt}};
 
   // Write all entries to a buffer.
   base::IoBuf buf;

@@ -249,6 +249,20 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     }
 
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
+    auto& lt = table->trans_locks;
+    string tmp;
+    string_view key = last_slot_it->first.GetSlice(&tmp);
+    // do not evict locked keys
+    if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+      return 0;
+
+    // log the evicted keys to journal.
+    if (auto journal = db_slice_->shard_owner()->journal(); journal) {
+      ArgSlice delete_args{key};
+      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, ClusterConfig::KeySlot(key),
+                           make_pair("DEL", delete_args), false);
+    }
+
     db_slice_->PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
   }
@@ -1260,7 +1274,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
             continue;
 
           if (auto journal = owner_->journal(); journal) {
-            keys_to_journal.push_back(tmp);
+            keys_to_journal.push_back(string(key));
           }
 
           PerformDeletion(evict_it, shard_owner(), db_table.get());
@@ -1279,12 +1293,11 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
 finish:
   // send the deletion to the replicas.
   // fiber preemption could happen in this phase.
-  vector<string_view> args(keys_to_journal.begin(), keys_to_journal.end());
-  if (!args.empty()) {
-    ArgSlice delete_args(&args[0], args.size());
-    if (auto journal = owner_->journal(); journal) {
-      journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, make_pair("DEL", delete_args),
-                           false);
+  if (auto journal = owner_->journal(); journal) {
+    for (string_view key : keys_to_journal) {
+      ArgSlice delete_args(&key, 1);
+      journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, ClusterConfig::KeySlot(key),
+                           make_pair("DEL", delete_args), false);
     }
   }
 

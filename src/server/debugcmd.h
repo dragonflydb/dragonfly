@@ -28,6 +28,8 @@ class DebugCmd {
 
   void Run(CmdArgList args);
 
+  static void Shutdown();
+
  private:
   void Populate(CmdArgList args);
   std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args);
@@ -37,12 +39,13 @@ class DebugCmd {
   void Replica(CmdArgList args);
   void Load(std::string_view filename);
   void Exec();
-  void Inspect(std::string_view key);
+  void Inspect(std::string_view key, CmdArgList args);
   void Watched();
   void TxAnalysis();
   void ObjHist();
   void Stacktrace();
   void Shards();
+  void LogTraffic(CmdArgList);
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;

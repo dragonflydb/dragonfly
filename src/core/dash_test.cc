@@ -334,6 +334,16 @@ TEST_F(DashTest, Split) {
   EXPECT_EQ(4 * Segment::kNumSlots, keys.size());
 }
 
+TEST_F(DashTest, Merge) {
+  set<Segment::Key_t> keys = FillSegment(0);
+  Segment s2{2};  // segment with local depth 2.
+
+  segment_.Split(&UInt64Policy::HashFn, &s2);
+  ASSERT_EQ(segment_.SlowSize() + s2.SlowSize(), keys.size());
+  segment_.MoveFrom(&UInt64Policy::HashFn, &s2);
+  EXPECT_EQ(segment_.SlowSize(), keys.size());
+}
+
 TEST_F(DashTest, BumpUp) {
   set<Segment::Key_t> keys = FillSegment(0);
   constexpr unsigned kFirstStashId = Segment::kRegularBucketCnt;

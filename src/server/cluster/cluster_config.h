@@ -24,6 +24,7 @@ using SlotSet = absl::flat_hash_set<SlotId>;
 class ClusterConfig {
  public:
   static constexpr SlotId kMaxSlotNum = 0x3FFF;
+  static constexpr SlotId kInvalidSlotId = kMaxSlotNum + 1;
 
   struct Node {
     std::string id;
