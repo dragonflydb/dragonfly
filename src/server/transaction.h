@@ -470,7 +470,9 @@ class Transaction {
   bool CancelShardCb(EngineShard* shard);
 
   // Run callback inline as part of multi stub.
-  OpStatus RunSquashedMultiCb(RunnableType cb);
+  void RunSquashedMultiCb(RunnableType cb);
+
+  void SafeRunCb(RunnableType cb);
 
   void UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* shard,
                           uint32_t shard_journals_cnt);

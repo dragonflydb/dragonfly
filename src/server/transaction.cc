@@ -471,30 +471,15 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   /*************************************************************************/
   // Actually running the callback.
-  // If you change the logic here, also please change the logic
-  try {
-    OpStatus status = OpStatus::OK;
+  // if a transaction is suspended, we still run it because of brpoplpush/blmove case
+  // that needs to run lpush on its suspended shard.
+  SafeRunCb(*cb_ptr_);
 
-    // if a transaction is suspended, we still run it because of brpoplpush/blmove case
-    // that needs to run lpush on its suspended shard.
-    status = (*cb_ptr_)(this, shard);
-
-    if (unique_shard_cnt_ == 1) {
-      cb_ptr_ = nullptr;  // We can do it because only a single thread runs the callback.
-      local_result_ = status;
-    } else {
-      if (status == OpStatus::OUT_OF_MEMORY) {
-        local_result_ = status;
-      } else {
-        CHECK_EQ(OpStatus::OK, status);
-      }
-    }
-  } catch (std::bad_alloc&) {
-    // TODO: to log at most once per sec.
-    LOG_FIRST_N(ERROR, 16) << " out of memory";
-    local_result_ = OpStatus::OUT_OF_MEMORY;
-  } catch (std::exception& e) {
-    LOG(FATAL) << "Unexpected exception " << e.what();
+  if (unique_shard_cnt_ == 1) {
+    cb_ptr_ = nullptr;  // We can do it because only a single thread runs the callback.
+  } else {
+    CHECK(local_result_ == OpStatus::OK || local_result_ == OpStatus::OUT_OF_MEMORY)
+        << local_result_;
   }
 
   /*************************************************************************/
@@ -677,7 +662,8 @@ void Transaction::ScheduleInternal() {
 // BLPOP where a data must be read from multiple shards before performing another hop.
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   if (multi_ && multi_->role == SQUASHED_STUB) {
-    return RunSquashedMultiCb(cb);
+    RunSquashedMultiCb(cb);
+    return local_result_;
   }
 
   DCHECK(!cb_ptr_);
@@ -974,14 +960,8 @@ void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
   // Calling the callback in somewhat safe way
-  try {
-    local_result_ = (*cb_ptr_)(this, shard);
-  } catch (std::bad_alloc&) {
-    LOG_FIRST_N(ERROR, 16) << " out of memory";
-    local_result_ = OpStatus::OUT_OF_MEMORY;
-  } catch (std::exception& e) {
-    LOG(FATAL) << "Unexpected exception " << e.what();
-  }
+  SafeRunCb(*cb_ptr_);
+
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard);
 
@@ -1298,14 +1278,24 @@ void Transaction::ExpireShardCb(ArgSlice wkeys, EngineShard* shard) {
   CHECK_GE(DecreaseRunCnt(), 1u);
 }
 
-OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
+void Transaction::RunSquashedMultiCb(RunnableType cb) {
   DCHECK(multi_ && multi_->role == SQUASHED_STUB);
   DCHECK_EQ(unique_shard_cnt_, 1u);
+  SafeRunCb(cb);
   auto* shard = EngineShard::tlocal();
-  auto status = cb(this, shard);
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard);
-  return status;
+}
+
+void Transaction::SafeRunCb(RunnableType cb) {
+  try {
+    local_result_ = cb(this, EngineShard::tlocal());
+  } catch (std::bad_alloc&) {
+    LOG_FIRST_N(ERROR, 16) << " out of memory";
+    local_result_ = OpStatus::OUT_OF_MEMORY;
+  } catch (std::exception& e) {
+    LOG(FATAL) << "Unexpected exception " << e.what();
+  }
 }
 
 void Transaction::UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* shard,
@@ -1448,6 +1438,9 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
 
   auto journal = shard->journal();
   if (journal == nullptr)
+    return;
+
+  if (local_result_ != OpStatus::OK)
     return;
 
   // TODO: Handle complex commands like LMPOP correctly once they are implemented.
