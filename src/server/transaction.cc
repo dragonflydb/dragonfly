@@ -31,6 +31,17 @@ atomic_uint64_t op_seq{1};
 
 constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
 
+OpStatus SafeRunCb(Transaction::RunnableType cb, Transaction* tx, EngineShard* shard) {
+  try {
+    return cb(tx, shard);
+  } catch (std::bad_alloc&) {
+    LOG_FIRST_N(ERROR, 16) << " out of memory";
+    return OpStatus::OUT_OF_MEMORY;
+  } catch (std::exception& e) {
+    LOG(FATAL) << "Unexpected exception " << e.what();
+  }
+}
+
 }  // namespace
 
 IntentLock::Mode Transaction::LockMode() const {
@@ -471,15 +482,18 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   /*************************************************************************/
   // Actually running the callback.
-  // if a transaction is suspended, we still run it because of brpoplpush/blmove case
+  // If a transaction is suspended, we still run it because of brpoplpush/blmove case
   // that needs to run lpush on its suspended shard.
-  SafeRunCb(*cb_ptr_);
+  OpStatus status = SafeRunCb(*cb_ptr_, this, shard);
 
   if (unique_shard_cnt_ == 1) {
     cb_ptr_ = nullptr;  // We can do it because only a single thread runs the callback.
+    local_result_ = status;
+  } else if (status == OpStatus::OUT_OF_MEMORY) {
+    // TODO: Use spinlock https://github.com/dragonflydb/dragonfly/pull/2417
+    local_result_ = status;
   } else {
-    CHECK(local_result_ == OpStatus::OK || local_result_ == OpStatus::OUT_OF_MEMORY)
-        << local_result_;
+    CHECK_EQ(OpStatus::OK, status);
   }
 
   /*************************************************************************/
@@ -960,7 +974,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
   // Calling the callback in somewhat safe way
-  SafeRunCb(*cb_ptr_);
+  local_result_ = SafeRunCb(*cb_ptr_, this, shard);
 
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard);
@@ -1281,21 +1295,10 @@ void Transaction::ExpireShardCb(ArgSlice wkeys, EngineShard* shard) {
 void Transaction::RunSquashedMultiCb(RunnableType cb) {
   DCHECK(multi_ && multi_->role == SQUASHED_STUB);
   DCHECK_EQ(unique_shard_cnt_, 1u);
-  SafeRunCb(cb);
   auto* shard = EngineShard::tlocal();
+  local_result_ = SafeRunCb(cb, this, shard);
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard);
-}
-
-void Transaction::SafeRunCb(RunnableType cb) {
-  try {
-    local_result_ = cb(this, EngineShard::tlocal());
-  } catch (std::bad_alloc&) {
-    LOG_FIRST_N(ERROR, 16) << " out of memory";
-    local_result_ = OpStatus::OUT_OF_MEMORY;
-  } catch (std::exception& e) {
-    LOG(FATAL) << "Unexpected exception " << e.what();
-  }
 }
 
 void Transaction::UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* shard,
