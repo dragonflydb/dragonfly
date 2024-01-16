@@ -468,12 +468,9 @@ class Transaction {
   // Returns true if transaction ran out-of-order during the scheduling phase.
   bool ScheduleUniqueShard(EngineShard* shard);
 
-  // Schedule on shards transaction queue.
-  // Returns pair(schedule_success, lock_granted)
-  // schedule_success is true if transaction was scheduled on db_slice.
-  // lock_granted is true if lock was granted for all the keys on this shard.
-  // Runs in the shard thread.
-  std::pair<bool, bool> ScheduleInShard(EngineShard* shard);
+  // Schedule on shards transaction queue. Returns true if scheduled successfully,
+  // false if inconsistent order was detected and the schedule needs to be cancelled.
+  bool ScheduleInShard(EngineShard* shard);
 
   // Optimized version of RunInShard for single shard uncontended cases.
   RunnableResult RunQuickie(EngineShard* shard);
@@ -545,12 +542,11 @@ class Transaction {
 
   // Iterate over shards and run function accepting (PerShardData&, ShardId) on all active ones.
   template <typename F> void IterateActiveShards(F&& f) {
-    if (!global_ && unique_shard_cnt_ == 1) {  // unique_shard_id_ is set only for non-global.
-      auto i = unique_shard_id_;
-      f(shard_data_[SidToId(i)], i);
+    if (unique_shard_cnt_ == 1) {
+      f(shard_data_[SidToId(unique_shard_id_)], unique_shard_id_);
     } else {
       for (ShardId i = 0; i < shard_data_.size(); ++i) {
-        if (auto& sd = shard_data_[i]; global_ || (sd.local_mask & ACTIVE)) {
+        if (auto& sd = shard_data_[i]; sd.local_mask & ACTIVE) {
           f(sd, i);
         }
       }
