@@ -53,7 +53,6 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 }  // namespace
 
 ClusterFamily::FlowInfo::~FlowInfo() = default;
-ClusterFamily::MigrationInfo::~MigrationInfo() = default;
 ClusterFamily::MigrationInfo::MigrationInfo(std::uint32_t flows_num, std::string ip, uint16_t port,
                                             std::vector<ClusterConfig::SlotRange> slots,
                                             Context::ErrHandler err_handler)
@@ -78,14 +77,17 @@ void ClusterFamily::MigrationInfo::StartFlow(DbSlice* slice, uint32_t sync_id,
 
   const auto shard_id = slice->shard_id();
 
-  flows[shard_id].streamer =
+  auto streamer =
       std::make_unique<RestoreStreamer>(slice, std::move(sset), sync_id, journal, &cntx);
+  streamer->Start(dest);
 
-  flows[shard_id].streamer->Start(dest);
+  std::scoped_lock lck(flows_mu_);
+  flows[shard_id].streamer = std::move(streamer);
 }
 
 ClusterSlotMigration::State ClusterFamily::MigrationInfo::GetState() {
   if (state == ClusterSlotMigration::State::C_FULL_SYNC) {
+    std::scoped_lock lck(flows_mu_);
     bool is_stable_sync = std::all_of(
         flows.begin(), flows.end(), [](const auto& flow) { return flow.streamer->IsStableSync(); });
     state = is_stable_sync ? ClusterSlotMigration::State::C_STABLE_SYNC : state;
@@ -739,9 +741,9 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   if (sub_cmd == "CONF") {
     MigrationConf(args, cntx);
   } else if (sub_cmd == "FLOW") {
-    Flow(args, cntx);
+    DflyMigrateFlow(args, cntx);
   } else if (sub_cmd == "FULL-SYNC-CUT") {
-    FullSyncCut(args, cntx);
+    DflyMigrateFullSyncCut(args, cntx);
   } else {
     cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -818,7 +820,7 @@ uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t
   return sync_id;
 }
 
-void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
+void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
 
@@ -826,8 +828,7 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(err->MakeReply());
   }
 
-  VLOG(1) << "Create flow "
-          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
+  VLOG(1) << "Create flow sync_id: " << sync_id << " shard_id: " << shard_id;
 
   cntx->conn()->SetName(absl::StrCat("migration_flow_", sync_id));
 
@@ -845,7 +846,7 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
   info->StartFlow(&shard->db_slice(), sync_id, server_family_->journal(), cntx->conn()->socket());
 }
 
-void ClusterFamily::FullSyncCut(CmdArgList args, ConnectionContext* cntx) {
+void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
 
@@ -861,10 +862,12 @@ void ClusterFamily::FullSyncCut(CmdArgList args, ConnectionContext* cntx) {
       std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
                    [sync_id](const auto& el) { return el->getSyncId() == sync_id; });
 
-  if (migration_it == incoming_migrations_jobs_.end())
+  if (migration_it == incoming_migrations_jobs_.end()) {
+    LOG(WARNING) << "Couldn't find migration id";
     return cntx->SendError(kIdNotFound);
+  }
 
-  if ((*migration_it)->trySetStableSync(shard_id)) {
+  if ((*migration_it)->TrySetStableSync(shard_id)) {
     LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
   }
   cntx->SendOk();

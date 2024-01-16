@@ -24,10 +24,10 @@ class ClusterShardMigration : public ProtocolClient {
   std::error_code StartSyncFlow(Context* cntx);
   void Cancel();
 
-  void setStableSync() {
+  void SetStableSync() {
     is_stable_sync_ = true;
   }
-  bool isStableSync() {
+  bool IsStableSync() {
     return is_stable_sync_;
   }
 

@@ -71,9 +71,9 @@ class ClusterFamily {
   // this request should be done for every shard on the target node
   // this method assocciate connection and shard that will be the data
   // source for migration
-  void Flow(CmdArgList args, ConnectionContext* cntx);
+  void DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx);
 
-  void FullSyncCut(CmdArgList args, ConnectionContext* cntx);
+  void DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx);
 
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
@@ -93,7 +93,6 @@ class ClusterFamily {
   // Whole slots migration process information
   struct MigrationInfo {
     MigrationInfo() = default;
-    ~MigrationInfo();
     MigrationInfo(std::uint32_t flows_num, std::string ip, uint16_t port,
                   std::vector<ClusterConfig::SlotRange> slots, Context::ErrHandler err_handler);
 
@@ -114,7 +113,9 @@ class ClusterFamily {
     std::vector<ClusterConfig::SlotRange> slots;
     Context cntx;
     ClusterSlotMigration::State state;
-    std::vector<FlowInfo> flows;
+    mutable Mutex flows_mu_;
+    std::vector<FlowInfo> flows ABSL_GUARDED_BY(flows_mu_);
+    ;
   };
 
   std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);
