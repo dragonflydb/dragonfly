@@ -348,9 +348,6 @@ class Transaction {
                          bool multi_commands, bool allow_await) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
-  // Utility to run a single hop on a no-key command
-  static void RunOnceAsCommand(const CommandId* cid, RunnableType cb);
-
   void Refurbish();
 
   void IterateMultiLocks(ShardId sid, std::function<void(const std::string&)> cb) const;

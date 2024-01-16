@@ -1522,22 +1522,6 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
                        unique_slot_checker_.GetUniqueSlotId(), {}, false);
 }
 
-void Transaction::RunOnceAsCommand(const CommandId* cid, RunnableType cb) {
-  if (!ProactorBase::IsProactorThread())
-    return shard_set->pool()->at(0)->Await([cid, cb] { return RunOnceAsCommand(cid, cb); });
-
-  DCHECK(cid);
-  DCHECK(cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL));
-  DCHECK(ProactorBase::IsProactorThread());
-
-  boost::intrusive_ptr<Transaction> trans{new Transaction{cid}};
-  trans->InitByArgs(0, {});
-  trans->ScheduleSingleHop([cb](auto* trans, auto* es) {
-    cb(trans, es);
-    return OpStatus::OK;
-  });
-}
-
 void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
   if ((coordinator_state_ & COORD_BLOCKED) == 0)
     return;
