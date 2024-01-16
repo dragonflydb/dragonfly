@@ -251,11 +251,11 @@ class Transaction {
   // Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  //! Returns true if the transaction spans this shard_id.
-  //! Runs from the coordinator thread.
+  // Returns true if the transaction spans this shard_id.
+  // Runs from the coordinator thread.
   bool IsActive(ShardId shard_id) const {
-    return unique_shard_cnt_ == 1 ? unique_shard_id_ == shard_id
-                                  : shard_data_[shard_id].arg_count > 0;
+    return unique_shard_cnt_ == 1 ? (unique_shard_id_ == shard_id)
+                                  : shard_data_[shard_id].local_mask & ACTIVE;
   }
 
   //! Returns true if the transaction is armed for execution on this sid (used to avoid

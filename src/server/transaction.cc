@@ -628,10 +628,7 @@ void Transaction::ScheduleInternal() {
 
   DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards";
 
-  auto is_active = [this](uint32_t i) {
-    // ACTIVE flags are not cleared for multi after we compress shard data, so use shard cnt
-    return unique_shard_cnt_ == 1 ? (i == unique_shard_id_) : shard_data_[i].local_mask & ACTIVE;
-  };
+  auto is_active = [this](uint32_t i) { return IsActive(i); };
 
   // Loop until successfully scheduled in all shards.
   while (true) {
