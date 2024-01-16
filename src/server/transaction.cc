@@ -62,6 +62,7 @@ void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
 
 void RecordTxScheduleStats(const Transaction* tx) {
   auto* ss = ServerState::tlocal();
+  DCHECK(ss);
   ss->stats.tx_width_freq_arr[tx->GetUniqueShardCnt() - 1]++;
   if (tx->IsGlobal()) {
     ss->stats.tx_type_cnt[ServerState::GLOBAL]++;
@@ -617,7 +618,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
 // TODO: For multi-transactions we should be able to deduce mode() at run-time based
 // on the context. For regular multi-transactions we can actually inspect all commands.
-// For eval-like transactions - we can decided based on the command flavor (EVAL/EVALRO) or
+// For eval-like transactions - we can decide based on the command flavor (EVAL/EVALRO) or
 // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
 void Transaction::ScheduleInternal() {
   DCHECK(!shard_data_.empty());
