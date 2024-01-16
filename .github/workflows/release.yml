@@ -10,14 +10,8 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Create Release
-        uses: ncipollo/release-action@v1
-        with:
-          allowUpdates: true
-          omitBody: true
-          prerelease: true
-          draft: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Print Message
+        run: echo "Release created successfully!"
 
   build-qemu:
     runs-on: ubuntu-latest
