@@ -238,6 +238,8 @@ class ServerState {  // public struct - to allow initialization.
     channel_store_ = replacement;
   }
 
+  bool ShouldLogSlowCmd(unsigned latency_usec) const;
+
   Stats stats;
 
   bool is_master = true;

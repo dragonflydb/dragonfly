@@ -1228,8 +1228,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   const auto* conn = cntx->conn();
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
       // Use SafeTLocal() to avoid accessing the wrong thread local instance
-      ServerState::SafeTLocal()->GetSlowLog().IsEnabled() &&
-      invoke_time_usec >= ServerState::SafeTLocal()->log_slower_than_usec) {
+      ServerState::SafeTLocal()->ShouldLogSlowCmd(invoke_time_usec)) {
     vector<string> aux_params;
     CmdArgVec aux_slices;
 
