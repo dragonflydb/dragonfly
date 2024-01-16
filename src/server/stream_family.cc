@@ -616,11 +616,11 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
     }
     add_res = std::move(*res_it);
   } else {
-    try {
-      add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
-    } catch (bad_alloc&) {
-      return OpStatus::OUT_OF_MEMORY;
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
+    if (!op_res) {
+      return op_res.status();
     }
+    add_res = std::move(*op_res);
   }
 
   robj* stream_obj = nullptr;

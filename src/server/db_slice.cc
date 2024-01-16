@@ -495,7 +495,8 @@ OpResult<pair<PrimeConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Co
   return OpStatus::KEY_NOTFOUND;
 }
 
-DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key) noexcept(false) {
+OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFind(const Context& cntx,
+                                                      string_view key) noexcept(false) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
@@ -504,14 +505,15 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
 
   if (IsValid(res.it)) {
     PreUpdate(cntx.db_index, res.it);
-    return {.it = res.it,
-            .exp_it = res.exp_it,
-            .is_new = false,
-            .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                                         .db_slice = this,
-                                         .db_ind = cntx.db_index,
-                                         .it = res.it,
-                                         .key = key})};
+    return DbSlice::AddOrFindResult{
+        .it = res.it,
+        .exp_it = res.exp_it,
+        .is_new = false,
+        .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                                     .db_slice = this,
+                                     .db_ind = cntx.db_index,
+                                     .it = res.it,
+                                     .key = key})};
   }
 
   // It's a new entry.
@@ -542,7 +544,7 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
   if (apply_memory_limit && !caching_mode_ && evp.mem_budget() < 0) {
     VLOG(2) << "AddOrFind: over limit, budget: " << evp.mem_budget();
     events_.insertion_rejections++;
-    throw bad_alloc();
+    return OpStatus::OUT_OF_MEMORY;
   }
 
   // Fast-path if change_cb_ is empty so we Find or Add using
@@ -556,8 +558,7 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
   } catch (bad_alloc& e) {
     VLOG(2) << "AddOrFind2: bad alloc exception, budget: " << evp.mem_budget();
     events_.insertion_rejections++;
-
-    throw e;
+    return OpStatus::OUT_OF_MEMORY;
   }
 
   size_t evicted_obj_bytes = 0;
@@ -589,14 +590,15 @@ DbSlice::AddOrFindResult DbSlice::AddOrFind(const Context& cntx, string_view key
     db.slots_stats[sid].key_count += 1;
   }
 
-  return {.it = it,
-          .exp_it = ExpireIterator{},
-          .is_new = true,
-          .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                                       .db_slice = this,
-                                       .db_ind = cntx.db_index,
-                                       .it = it,
-                                       .key = key})};
+  return DbSlice::AddOrFindResult{
+      .it = it,
+      .exp_it = ExpireIterator{},
+      .is_new = true,
+      .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                                   .db_slice = this,
+                                   .db_ind = cntx.db_index,
+                                   .it = it,
+                                   .key = key})};
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -774,12 +776,18 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   return it->second;
 }
 
-DbSlice::ItAndUpdater DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
-                                      uint64_t expire_at_ms) noexcept(false) {
-  auto res = AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
+OpResult<DbSlice::ItAndUpdater> DbSlice::AddNew(const Context& cntx, string_view key,
+                                                PrimeValue obj,
+                                                uint64_t expire_at_ms) noexcept(false) {
+  auto op_result = AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
+  if (!op_result) {
+    return op_result.status();
+  }
+  auto res = std::move(*op_result);
   CHECK(res.is_new);
 
-  return {.it = res.it, .exp_it = res.exp_it, .post_updater = std::move(res.post_updater)};
+  return DbSlice::ItAndUpdater{
+      .it = res.it, .exp_it = res.exp_it, .post_updater = std::move(res.post_updater)};
 }
 
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms) const {
@@ -832,14 +840,21 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime
   }
 }
 
-DbSlice::AddOrFindResult DbSlice::AddOrUpdateInternal(const Context& cntx, std::string_view key,
-                                                      PrimeValue obj, uint64_t expire_at_ms,
-                                                      bool force_update) noexcept(false) {
+OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& cntx,
+                                                                std::string_view key,
+                                                                PrimeValue obj,
+                                                                uint64_t expire_at_ms,
+                                                                bool force_update) noexcept(false) {
   DCHECK(!obj.IsRef());
 
-  auto res = AddOrFind(cntx, key);
+  auto op_result = AddOrFind(cntx, key);
+  if (!op_result) {
+    return op_result;
+  }
+
+  auto& res = *op_result;
   if (!res.is_new && !force_update)  // have not inserted.
-    return res;
+    return op_result;
 
   auto& db = *db_arr_[cntx.db_index];
   auto& it = res.it;
@@ -856,11 +871,12 @@ DbSlice::AddOrFindResult DbSlice::AddOrUpdateInternal(const Context& cntx, std::
     }
   }
 
-  return res;
+  return op_result;
 }
 
-DbSlice::AddOrFindResult DbSlice::AddOrUpdate(const Context& cntx, string_view key, PrimeValue obj,
-                                              uint64_t expire_at_ms) noexcept(false) {
+OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdate(const Context& cntx, string_view key,
+                                                        PrimeValue obj,
+                                                        uint64_t expire_at_ms) noexcept(false) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
 }
 

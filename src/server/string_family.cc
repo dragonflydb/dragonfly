@@ -88,29 +88,27 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     }
   }
 
-  DbSlice::AddOrFindResult res;
-
-  try {
-    res = db_slice.AddOrFind(op_args.db_cntx, key);
-
-    string s;
-
-    if (res.is_new) {
-      s.resize(range_len);
-    } else {
-      if (res.it->second.ObjType() != OBJ_STRING)
-        return OpStatus::WRONG_TYPE;
-
-      s = GetString(op_args.shard, res.it->second);
-      if (s.size() < range_len)
-        s.resize(range_len);
-    }
-
-    memcpy(s.data() + start, value.data(), value.size());
-    res.it->second.SetString(s);
-  } catch (const std::bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  if (!op_res) {
+    return op_res.status();
   }
+  auto res = std::move(*op_res);
+
+  string s;
+
+  if (res.is_new) {
+    s.resize(range_len);
+  } else {
+    if (res.it->second.ObjType() != OBJ_STRING)
+      return OpStatus::WRONG_TYPE;
+
+    s = GetString(op_args.shard, res.it->second);
+    if (s.size() < range_len)
+      s.resize(range_len);
+  }
+
+  memcpy(s.data() + start, value.data(), value.size());
+  res.it->second.SetString(s);
   return res.it->second.Size();
 }
 
@@ -166,12 +164,11 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
                                bool prepend) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (const std::bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  if (!op_res) {
+    return op_res.status();
   }
+  auto add_res = std::move(*op_res);
   if (add_res.is_new) {
     add_res.it->second.SetString(val);
     return val.size();
@@ -234,12 +231,12 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
   auto& db_slice = op_args.shard->db_slice();
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (const std::bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
+
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  if (!op_res) {
+    return op_res.status();
   }
+  auto add_res = std::move(*op_res);
 
   char buf[128];
 
@@ -292,10 +289,9 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
     CompactObj cobj;
     cobj.SetInt(incr);
 
-    try {
-      res = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
-    } catch (bad_alloc&) {
-      return OpStatus::OUT_OF_MEMORY;
+    auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
+    if (!op_result) {
+      return op_result.status();
     }
 
     return incr;
@@ -463,10 +459,9 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
       CompactObj cobj;
       cobj.SetInt(new_tat_ms);
 
-      try {
-        db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
-      } catch (bad_alloc&) {
-        return OpStatus::OUT_OF_MEMORY;
+      auto res = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
+      if (!res) {
+        return res.status();
       }
     }
   }
@@ -584,12 +579,11 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   // At this point we either need to add missing entry, or we
   // will override an existing one
   // Trying to add a new entry.
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFind(op_args_.db_cntx, key);
-  } catch (bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
+  auto op_res = db_slice.AddOrFind(op_args_.db_cntx, key);
+  if (!op_res) {
+    return op_res.status();
   }
+  auto add_res = std::move(*op_res);
 
   PrimeIterator it = add_res.it;
   if (!add_res.is_new) {

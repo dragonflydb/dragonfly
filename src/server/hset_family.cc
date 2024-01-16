@@ -168,12 +168,11 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.shard->db_slice();
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (const bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  if (!op_res) {
+    return op_res.status();
   }
+  auto add_res = std::move(*op_res);
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
@@ -620,12 +619,11 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   VLOG(2) << "OpSet(" << key << ")";
 
   auto& db_slice = op_args.shard->db_slice();
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  if (!op_res) {
+    return op_res.status();
   }
+  auto add_res = std::move(*op_res);
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 

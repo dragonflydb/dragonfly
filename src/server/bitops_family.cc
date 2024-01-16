@@ -323,21 +323,22 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 }
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
-  try {
-    auto add_res = shard->db_slice().AddOrFind(context_, key_);
-    if (!add_res.is_new) {
-      if (add_res.it->second.ObjType() != OBJ_STRING) {
-        return OpStatus::WRONG_TYPE;
-      }
-    }
-    element_iter_ = add_res.it;
-    added_ = add_res.is_new;
-    shard_ = shard;
-    post_updater_ = std::move(add_res.post_updater);
-    return OpStatus::OK;
-  } catch (const std::bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
+  auto op_res = shard->db_slice().AddOrFind(context_, key_);
+  if (!op_res) {
+    return op_res.status();
   }
+  auto add_res = std::move(*op_res);
+
+  if (!add_res.is_new) {
+    if (add_res.it->second.ObjType() != OBJ_STRING) {
+      return OpStatus::WRONG_TYPE;
+    }
+  }
+  element_iter_ = add_res.it;
+  added_ = add_res.is_new;
+  shard_ = shard;
+  post_updater_ = std::move(add_res.post_updater);
+  return OpStatus::OK;
 }
 
 std::string ElementAccess::Value() const {
