@@ -623,7 +623,7 @@ void Transaction::ScheduleInternal() {
   DCHECK(!shard_data_.empty());
   DCHECK_EQ(0u, txid_);
   DCHECK_EQ(0, coordinator_state_ & (COORD_SCHED | COORD_OOO));
-  DCHECK_GT(unique_shard_cnt_, 0);
+  DCHECK_GT(unique_shard_cnt_, 0u);
 
   DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards";
 
