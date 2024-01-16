@@ -389,63 +389,54 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindAndFetchMutable(const Context& cntx
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
                                                              std::optional<unsigned> req_obj_type,
                                                              LoadExternalMode load_mode) {
-  auto [it, exp_it] = FindInternal(cntx, key, UpdateStatsMode::kUpdateMutableStats, load_mode);
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
-
-  if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
-    return OpStatus::WRONG_TYPE;
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kUpdateMutableStats, load_mode);
+  if (!res.ok()) {
+    return res.status();
   }
 
-  PreUpdate(cntx.db_index, it);
-  return {{it, exp_it,
+  PreUpdate(cntx.db_index, res->it);
+  return {{res->it, res->exp_it,
            AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                         .db_slice = this,
                         .db_ind = cntx.db_index,
-                        .it = it,
+                        .it = res->it,
                         .key = key})}};
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
-  auto res = FindInternal(cntx, key, UpdateStatsMode::kUpdateReadStats,
+  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kUpdateReadStats,
                           LoadExternalMode::kDontLoadExternal);
-  return {res.it, res.exp_it};
+  return {res->it, res->exp_it};
 }
 
 OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
                                                    unsigned req_obj_type) {
-  return FindAReadOnlyInternal(cntx, key, req_obj_type, LoadExternalMode::kDontLoadExternal);
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kUpdateReadStats,
+                          LoadExternalMode::kDontLoadExternal);
+  if (res.ok()) {
+    return {res->it};
+  }
+  return res.status();
 }
 
 OpResult<PrimeConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cntx,
                                                            std::string_view key,
                                                            unsigned req_obj_type) {
-  return FindAReadOnlyInternal(cntx, key, req_obj_type, LoadExternalMode::kLoadExternal);
-}
-
-OpResult<PrimeConstIterator> DbSlice::FindAReadOnlyInternal(const Context& cntx,
-                                                            std::string_view key,
-                                                            unsigned req_obj_type,
-                                                            LoadExternalMode load_mode) {
-  auto it = FindInternal(cntx, key, UpdateStatsMode::kUpdateReadStats, load_mode).it;
-
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
-
-  if (it->second.ObjType() != req_obj_type) {
-    return OpStatus::WRONG_TYPE;
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kUpdateReadStats,
+                          LoadExternalMode::kLoadExternal);
+  if (res.ok()) {
+    return {res->it};
   }
-
-  return {it};
+  return res.status();
 }
 
-DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view key,
-                                        UpdateStatsMode stats_mode, LoadExternalMode load_mode) {
+OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
+                                                  std::optional<unsigned> req_obj_type,
+                                                  UpdateStatsMode stats_mode,
+                                                  LoadExternalMode load_mode) {
+  DCHECK(IsDbValid(cntx.db_index));
+
   DbSlice::ItAndExp res;
-
-  if (!IsDbValid(cntx.db_index))
-    return res;
-
   auto& db = *db_arr_[cntx.db_index];
   res.it = db.prime.Find(key);
 
@@ -462,7 +453,11 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
 
   if (!IsValid(res.it)) {
     update_stats_on_miss(stats_mode);
-    return res;
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
+    return OpStatus::WRONG_TYPE;
   }
 
   if (TieredStorage* tiered = shard_owner()->tiered_storage();
@@ -475,7 +470,7 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
       res.it = tiered->Load(cntx.db_index, res.it, key);
       if (!IsValid(res.it)) {
         update_stats_on_miss(stats_mode);
-        return res;
+        return OpStatus::KEY_NOTFOUND;
       }
     }
   }
@@ -485,7 +480,7 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       update_stats_on_miss(stats_mode);
-      return res;
+      return OpStatus::KEY_NOTFOUND;
     }
   }
 
@@ -551,19 +546,20 @@ DbSlice::AddOrFindResult DbSlice::AddOrFindInternal(const Context& cntx, string_
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
-  auto res = FindInternal(cntx, key, UpdateStatsMode::kUpdateMutableStats, load_mode);
+  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kUpdateMutableStats, load_mode);
 
-  if (IsValid(res.it)) {
-    PreUpdate(cntx.db_index, res.it);
-    return {.it = res.it,
-            .exp_it = res.exp_it,
+  if (res.ok()) {
+    PreUpdate(cntx.db_index, res->it);
+    return {.it = res->it,
+            .exp_it = res->exp_it,
             .is_new = false,
             .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                          .db_slice = this,
                                          .db_ind = cntx.db_index,
-                                         .it = res.it,
+                                         .it = res->it,
                                          .key = key})};
   }
+  CHECK_EQ(res.status(), OpStatus::KEY_NOTFOUND);
 
   // It's a new entry.
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;

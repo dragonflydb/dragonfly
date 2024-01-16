@@ -436,11 +436,9 @@ class DbSlice {
     kLoadExternal,
     kDontLoadExternal,
   };
-  ItAndExp FindInternal(const Context& cntx, std::string_view key, UpdateStatsMode stats_mode,
-                        LoadExternalMode load_mode);
-  OpResult<PrimeConstIterator> FindAReadOnlyInternal(const Context& cntx, std::string_view key,
-                                                     unsigned req_obj_type,
-                                                     LoadExternalMode load_mode);
+  OpResult<ItAndExp> FindInternal(const Context& cntx, std::string_view key,
+                                  std::optional<unsigned> req_obj_type, UpdateStatsMode stats_mode,
+                                  LoadExternalMode load_mode);
   AddOrFindResult AddOrFindInternal(const Context& cntx, std::string_view key,
                                     LoadExternalMode load_mode) noexcept(false);
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
