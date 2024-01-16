@@ -515,24 +515,15 @@ void Connection::OnPostMigrateThread() {
     break_cb_engaged_ = true;
   }
 
-  auto update_tl_vars = [this] [[gnu::noinline]] {
-    // The compiler barrier that does not allow reordering memory accesses
-    // to before this function starts. See https://stackoverflow.com/a/75622732
-    asm volatile("");
+  // Update tl variables
+  queue_backpressure_ = &tl_queue_backpressure_;
 
-    queue_backpressure_ = &tl_queue_backpressure_;
-
-    stats_ = &tl_facade_stats->conn_stats;
-    ++stats_->num_conns;
-    stats_->read_buf_capacity += io_buf_.Capacity();
-    if (cc_->replica_conn) {
-      ++stats_->num_replicas;
-    }
-  };
-
-  // We're now running in `dest` thread. We use non-inline lambda to force reading new thread's
-  // thread local vars.
-  update_tl_vars();
+  stats_ = &tl_facade_stats->conn_stats;
+  ++stats_->num_conns;
+  stats_->read_buf_capacity += io_buf_.Capacity();
+  if (cc_->replica_conn) {
+    ++stats_->num_replicas;
+  }
 }
 
 auto Connection::RegisterShutdownHook(ShutdownCb cb) -> ShutdownHandle {

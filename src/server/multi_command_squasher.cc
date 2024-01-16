@@ -235,8 +235,8 @@ bool MultiCommandSquasher::ExecuteSquashed() {
       break;
   }
   uint64_t after_reply = proactor->GetMonotonicTimeNs();
-  ServerState::tlocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
-  ServerState::tlocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
+  ServerState::SafeTLocal()->stats.multi_squash_exec_hop_usec += (after_hop - start) / 1000;
+  ServerState::SafeTLocal()->stats.multi_squash_exec_reply_usec += (after_reply - after_hop) / 1000;
 
   for (auto& sinfo : sharded_)
     sinfo.cmds.clear();

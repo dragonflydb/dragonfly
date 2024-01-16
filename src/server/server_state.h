@@ -125,9 +125,14 @@ class ServerState {  // public struct - to allow initialization.
     Stats& operator=(const Stats&) = delete;
   };
 
+  // Unsafe version. Do not use after fiber migration.
+  // See https://stackoverflow.com/a/75622732
   static ServerState* tlocal() {
     return state_;
   }
+
+  // Safe version. https://stackoverflow.com/a/75622732
+  static ServerState* __attribute__((noinline)) SafeTLocal();
 
   static facade::ConnectionStats* tl_connection_stats() {
     return &facade::tl_facade_stats->conn_stats;
