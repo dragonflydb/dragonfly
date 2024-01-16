@@ -156,8 +156,7 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,  // Set on all active shards.
-    // UNUSED = 1 << 1,
+    ACTIVE = 1,                 // Set on all active shards.
     OUT_OF_ORDER = 1 << 2,      // Whether it can run as out of order
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
@@ -423,7 +422,6 @@ class Transaction {
 
   enum CoordinatorState : uint8_t {
     COORD_SCHED = 1,
-
     COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
     COORD_BLOCKED = 1 << 2,
     COORD_CANCELLED = 1 << 3,
