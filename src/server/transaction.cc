@@ -648,10 +648,8 @@ void Transaction::ScheduleInternal() {
 
     if (success.load(memory_order_acquire) == unique_shard_cnt_) {
       coordinator_state_ |= COORD_SCHED;
-      bool ooo_disabled = IsAtomicMulti() && multi_->mode != LOCK_AHEAD;
-      if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == unique_shard_cnt_) {
-        // If we granted all locks, we can run out of order.
-        coordinator_state_ |= COORD_OOO;
+      if (lock_granted_cnt.load(memory_order_relaxed) == unique_shard_cnt_) {
+        coordinator_state_ |= COORD_OOO;  // If we granted all locks, we can run out of order.
       }
 
       RecordTxScheduleStats(this);
