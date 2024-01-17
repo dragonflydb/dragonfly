@@ -581,6 +581,10 @@ std::string_view GetOSString() {
   return os_string;
 }
 
+string_view GetRedisMode() {
+  return ClusterConfig::IsEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
+}
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -1735,11 +1739,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
-    string_view redis_mode = ClusterConfig::IsEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
 
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
-    append("redis_mode", redis_mode);
+    append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
     append("os", GetOSString());
     append("multiplexing_api", multiplex_api);
@@ -2122,7 +2125,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   rb->SendBulkString("id");
   rb->SendLong(cntx->conn()->GetClientId());
   rb->SendBulkString("mode");
-  rb->SendBulkString("standalone");
+  rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
   rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
