@@ -380,6 +380,9 @@ class DbSlice {
   // Resets the event counter for updates/insertions
   void ResetUpdateEvents();
 
+  // Resets events_ member. Used by CONFIG RESETSTAT
+  void ResetEvents();
+
   void SetExpireAllowed(bool is_allowed) {
     expire_allowed_ = is_allowed;
   }
