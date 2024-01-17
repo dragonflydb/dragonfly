@@ -1385,6 +1385,10 @@ void DbSlice::ResetUpdateEvents() {
   events_.update = 0;
 }
 
+void DbSlice::ResetEvents() {
+  events_ = {};
+}
+
 void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice& keys) {
   if (conn.IsExpired()) {
     DVLOG(2) << "Connection expired, exiting TrackKey function.";
