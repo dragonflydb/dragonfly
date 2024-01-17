@@ -434,7 +434,9 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
                                                   std::optional<unsigned> req_obj_type,
                                                   UpdateStatsMode stats_mode,
                                                   LoadExternalMode load_mode) {
-  DCHECK(IsDbValid(cntx.db_index));
+  if (!IsDbValid(cntx.db_index)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
 
   DbSlice::ItAndExp res;
   auto& db = *db_arr_[cntx.db_index];
