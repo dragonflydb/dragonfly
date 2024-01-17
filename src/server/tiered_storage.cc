@@ -414,7 +414,7 @@ PrimeIterator TieredStorage::Load(DbIndex db_index, PrimeIterator it, string_vie
 
   // Read will preempt, check if iterator still points to our entry
   PrimeTable* pt = db_slice_.GetTables(db_index).first;
-  if (!it.is_occupied() || it->first != key) {
+  if (!it.is_occupied() || !(it->first == key)) {
     it = pt->Find(key);
     if (it.is_done()) {
       // Entry was remove from db while reading from disk. (background expire task)
