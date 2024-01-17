@@ -296,6 +296,8 @@ class Transaction {
   // This method is meaningless if GetUniqueShardCnt() != 1.
   ShardId GetUniqueShard() const;
 
+  std::optional<SlotId> GetUniqueSlotId() const;
+
   bool IsMulti() const {
     return bool(multi_);
   }
@@ -520,7 +522,7 @@ class Transaction {
 
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
   // Should be called immediately after the last phase (hop).
-  void LogAutoJournalOnShard(EngineShard* shard);
+  void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
 
   // Returns the previous value of run count.
   uint32_t DecreaseRunCnt();
