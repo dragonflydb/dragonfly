@@ -853,6 +853,7 @@ void CompactObj::SetString(std::string_view str) {
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {
+  CHECK(!IsExternal());
   uint8_t is_encoded = mask_ & kEncMask;
 
   if (IsInline()) {

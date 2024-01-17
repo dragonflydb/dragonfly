@@ -94,7 +94,6 @@ static size_t ExternalizeEntry(size_t item_offset, DbTableStats* stats, PrimeVal
   size_t heap_size = entry->MallocUsed();
   size_t item_size = entry->Size();
 
-  stats->obj_memory_usage -= heap_size;
   stats->AddTypeMemoryUsage(entry->ObjType(), -heap_size);
 
   entry->SetExternal(item_offset, item_size);
@@ -407,14 +406,13 @@ PrimeIterator TieredStorage::Load(DbIndex db_index, PrimeIterator it, string_vie
   CHECK(entry->IsExternal());
   DCHECK_EQ(entry->ObjType(), OBJ_STRING);
   auto [offset, size] = entry->GetExternalSlice();
-  string res;
-  res.resize(size);
+  string res(size, '\0');
   auto ec = Read(offset, size, res.data());
   CHECK(!ec) << "TBD";
 
   // Read will preempt, check if iterator still points to our entry
   PrimeTable* pt = db_slice_.GetTables(db_index).first;
-  if (!it.is_occupied() || it->first != key) {
+  if (!it.IsOccupied() || it->first != key) {
     it = pt->Find(key);
     if (it.is_done()) {
       // Entry was remove from db while reading from disk. (background expire task)
@@ -425,18 +423,17 @@ PrimeIterator TieredStorage::Load(DbIndex db_index, PrimeIterator it, string_vie
 
   if (!entry->IsExternal()) {
     // Because 2 reads can happen at the same time, then if the other read
-    // already loaded the data from disk to memeory we dont need to do anything now just return.
+    // already loaded the data from disk to memory we don't need to do anything now just return.
     // TODO we can register to reads with multiple callbacks so if there is already a callback
     // reading the data from disk we will not run read twice.
     return it;
   }
 
-  auto stats = db_slice_.MutableStats(db_index);
+  auto* stats = db_slice_.MutableStats(db_index);
   Free(it, stats);
   entry->SetString(res);
 
   size_t heap_size = entry->MallocUsed();
-  stats->obj_memory_usage += heap_size;
   stats->AddTypeMemoryUsage(entry->ObjType(), heap_size);
   return it;
 }

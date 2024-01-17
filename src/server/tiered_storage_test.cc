@@ -75,7 +75,7 @@ TEST_F(TieredStorageTest, Basic) {
   FillExternalKeys(5000);
   EXPECT_EQ(5000, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
 
   Metrics m = GetMetrics();
   unsigned tiered_entries = m.db_stats[0].tiered_entries;
@@ -95,7 +95,7 @@ TEST_F(TieredStorageTest, DelBeforeOffload) {
   FillExternalKeys(100);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   Metrics m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
   EXPECT_LT(m.db_stats[0].tiered_entries, 100);
@@ -107,7 +107,7 @@ TEST_F(TieredStorageTest, DelBeforeOffload) {
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0u);
 
   FillExternalKeys(100);
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
   EXPECT_LT(m.db_stats[0].tiered_entries, 100);
@@ -121,7 +121,7 @@ TEST_F(TieredStorageTest, AddMultiDb) {
   FillExternalKeys(100);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
 
   Metrics m = GetMetrics();
   EXPECT_GT(m.db_stats[1].tiered_entries, 0u);
@@ -142,7 +142,7 @@ TEST_F(TieredStorageTest, FlushDBAfterSet) {
   FillExternalKeys(100);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_GT(m.db_stats[5].tiered_entries, 0u);
   EXPECT_LT(m.db_stats[5].tiered_entries, 100);
@@ -160,7 +160,7 @@ TEST_F(TieredStorageTest, FlushAllAfterSet) {
   FillExternalKeys(100);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_GT(m.db_stats[5].tiered_entries, 0u);
   EXPECT_LT(m.db_stats[5].tiered_entries, 100);
@@ -177,7 +177,7 @@ TEST_F(TieredStorageTest, AddBigValues) {
   FillExternalKeys(100, 5000);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
 }
@@ -195,7 +195,7 @@ TEST_F(TieredStorageTest, DelBigValues) {
   FillExternalKeys(100, 5000);
   EXPECT_EQ(100, CheckedInt({"dbsize"}));
 
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0u);
 }
@@ -204,7 +204,7 @@ TEST_F(TieredStorageTest, AddBigValuesWithExpire) {
   const int kKeyNum = 10;
 
   FillKeysWithExpire(kKeyNum, 8000);
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
 
   Metrics m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 10);
@@ -222,7 +222,7 @@ TEST_F(TieredStorageTest, AddSmallValuesWithExpire) {
   const int kKeyNum = 100;
 
   FillKeysWithExpire(kKeyNum);
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
 
   Metrics m = GetMetrics();
   EXPECT_GT(m.db_stats[0].tiered_entries, 0);
@@ -238,8 +238,7 @@ TEST_F(TieredStorageTest, AddSmallValuesWithExpire) {
 TEST_F(TieredStorageTest, SetAndExpire) {
   string val(5000, 'a');
   Run({"set", "key", val});
-  usleep(20000);  // 0.02 milliseconds
-
+  usleep(20000);  // 20 milliseconds
   Metrics m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
   Run({"expire", "key", "3"});
@@ -247,7 +246,7 @@ TEST_F(TieredStorageTest, SetAndExpire) {
   EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
 
   Run({"set", "key", val});
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
 
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
@@ -260,25 +259,25 @@ TEST_F(TieredStorageTest, SetAndGet) {
 
   Run({"set", "key1", val1});
   Run({"set", "key2", val1});
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   Metrics m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 2);
   EXPECT_EQ(m.db_stats[0].obj_memory_usage, 0);
 
   EXPECT_EQ(Run({"get", "key1"}), val1);
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
   EXPECT_GT(m.db_stats[0].obj_memory_usage, 0);
 
   Run({"set", "key1", val2});
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
   EXPECT_GT(m.db_stats[0].obj_memory_usage, 0);
 
   Run({"set", "key2", val2});
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
   EXPECT_GT(m.db_stats[0].obj_memory_usage, 0);
@@ -287,7 +286,7 @@ TEST_F(TieredStorageTest, SetAndGet) {
   EXPECT_EQ(Run({"get", "key2"}), val2);
 
   Run({"set", "key3", val1});
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 1);
 
@@ -305,7 +304,7 @@ TEST_F(TieredStorageTest, GetValueValidation) {
 
   Run({"set", "key1", val1});
   Run({"set", "key2", val2});
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   Metrics m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 2);
 
@@ -318,7 +317,7 @@ TEST_F(TieredStorageTest, GetValueValidation) {
     string val(100, i);  // small entries
     Run({"set", StrCat("k", i), val});
   }
-  usleep(20000);  // 0.02 milliseconds
+  usleep(20000);  // 20 milliseconds
   m = GetMetrics();
   EXPECT_GE(m.db_stats[0].tiered_entries, 0);
 

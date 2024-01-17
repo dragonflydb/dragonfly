@@ -404,7 +404,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return owner_ == nullptr;
   }
 
-  bool is_occupied() const {
+  bool IsOccupied() const {
     return (seg_id_ < owner_->segment_.size()) &&
            ((owner_->segment_[seg_id_]->IsBusy(bucket_id_, slot_id_)));
   }

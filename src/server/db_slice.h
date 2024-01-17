@@ -428,13 +428,13 @@ class DbSlice {
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
   enum class UpdateStatsMode {
-    kUpdateReadStats,
-    kUpdateMutableStats,
+    kReadStats,
+    kMutableStats,
   };
 
   enum class LoadExternalMode {
-    kLoadExternal,
-    kDontLoadExternal,
+    kLoad,
+    kDontLoad,
   };
   OpResult<ItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                   std::optional<unsigned> req_obj_type, UpdateStatsMode stats_mode,

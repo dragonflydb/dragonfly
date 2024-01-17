@@ -39,26 +39,21 @@ using CI = CommandId;
 constexpr uint32_t kMaxStrLen = 1 << 28;
 constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
-size_t CopyValueToBuffer(const PrimeValue& pv, EngineShard* shard, char* dest) {
+size_t CopyValueToBuffer(const PrimeValue& pv, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
   DCHECK(!pv.IsExternal());
   pv.GetString(dest);
   return pv.Size();
 }
 
-string GetString(EngineShard* shard, const PrimeValue& pv) {
+string GetString(const PrimeValue& pv) {
   string res;
   if (pv.ObjType() != OBJ_STRING)
     return res;
   res.resize(pv.Size());
-  CopyValueToBuffer(pv, shard, res.data());
+  CopyValueToBuffer(pv, res.data());
 
   return res;
-}
-
-string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
-  DCHECK(!pv.IsExternal());
-  return pv.GetSlice(tmp);
 }
 
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
@@ -88,7 +83,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
       if (res.it->second.ObjType() != OBJ_STRING)
         return OpStatus::WRONG_TYPE;
 
-      s = GetString(op_args.shard, res.it->second);
+      s = GetString(res.it->second);
       if (s.size() < range_len)
         s.resize(range_len);
     }
@@ -129,7 +124,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
     end = strlen - 1;
 
   string tmp;
-  string_view slice = GetSlice(op_args.shard, co, &tmp);
+  string_view slice = co.GetSlice(&tmp);
 
   return string(slice.substr(start, end - start + 1));
 };
@@ -137,8 +132,8 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
 size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val,
                       bool prepend) {
   string tmp, new_val;
-  auto* shard = op_args.shard;
-  string_view slice = GetSlice(shard, it->second, &tmp);
+  string_view slice = it->second.GetSlice(&tmp);
+
   if (prepend)
     new_val = absl::StrCat(val, slice);
   else
@@ -197,7 +192,7 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
   const PrimeValue& pv = res.it->second;
 
   if (del_hit) {
-    string key_bearer = GetString(op_args.shard, pv);
+    string key_bearer = GetString(pv);
 
     DVLOG(1) << "Del: " << key;
     auto& db_slice = op_args.shard->db_slice();
@@ -208,7 +203,7 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
   }
 
   /*Get value before expire*/
-  string ret_val = GetString(op_args.shard, pv);
+  string ret_val = GetString(pv);
 
   if (exp_params.IsDefined()) {
     DVLOG(1) << "Expire: " << key;
@@ -247,7 +242,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
     return OpStatus::INVALID_FLOAT;
 
   string tmp;
-  string_view slice = GetSlice(op_args.shard, add_res.it->second, &tmp);
+  string_view slice = add_res.it->second.GetSlice(&tmp);
 
   double base = 0;
   if (!ParseDouble(slice, &base)) {
@@ -469,10 +464,10 @@ class SetResultBuilder {
   explicit SetResultBuilder(bool return_prev_value) : return_prev_value_(return_prev_value) {
   }
 
-  void CachePrevValueIfNeeded(EngineShard* shard, const PrimeValue& pv) {
+  void CachePrevValueIfNeeded(const PrimeValue& pv) {
     if (return_prev_value_) {
       // We call lazily call GetString() here to save string copying when not needed.
-      prev_value_ = GetString(shard, pv);
+      prev_value_ = GetString(pv);
     }
   }
 
@@ -520,7 +515,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
 
     auto& resp = response.resp_arr[i].emplace();
 
-    size_t size = CopyValueToBuffer(it->second, shard, next);
+    size_t size = CopyValueToBuffer(it->second, next);
     resp.value = string_view(next, size);
     next += size;
 
@@ -560,7 +555,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
       find_res = db_slice.FindMutable(op_args_.db_cntx, key);
     }
     if (IsValid(find_res.it)) {
-      result_builder.CachePrevValueIfNeeded(shard, find_res.it->second);
+      result_builder.CachePrevValueIfNeeded(find_res.it->second);
     }
 
     // Make sure that we have this key, and only add it if it does exists
@@ -589,7 +584,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   PrimeIterator it = add_res.it;
   if (!add_res.is_new) {
-    result_builder.CachePrevValueIfNeeded(shard, it->second);
+    result_builder.CachePrevValueIfNeeded(it->second);
     return std::move(result_builder).Return(SetExisting(params, it, add_res.exp_it, key, value));
   }
 
@@ -636,7 +631,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     if (prime_value.ObjType() != OBJ_STRING)
       return OpStatus::WRONG_TYPE;
 
-    string val = GetString(shard, prime_value);
+    string val = GetString(prime_value);
     params.prev_val->emplace(std::move(val));
   }
 
@@ -840,7 +835,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
       return res.status();
     }
 
-    return GetString(op_args.shard, (*res)->second);
+    return GetString((*res)->second);
   };
 
   DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
