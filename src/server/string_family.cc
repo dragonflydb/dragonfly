@@ -358,17 +358,16 @@ void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
     // We write a custom journal because an OOM in the above loop could lead to partial success, so
     // we replicate only what was changed.
     const Transaction* tx = op_args.tx;
+    journal::Entry::Payload payload;
     if (i == 0) {
-      // All shards must record the tx was executed for the replica to execute it, so we send a NOOP
+      // All shards must record the tx was executed for the replica to execute it, so we send a PING
       // in case nothing was changed
-      journal->RecordEntry(tx->txid(), journal::Op::NOOP, op_args.db_cntx.db_index,
-                           tx->GetUniqueShardCnt(), tx->GetUniqueSlotId(),
-                           journal::Entry::Payload{}, true);
+      payload = make_pair("PING", ArgSlice());
     } else {
       // journal [0, i)
-      tx->LogJournalOnShard(op_args.shard, make_pair("MSET", ArgSlice(&args[0], i)),
-                            tx->GetUniqueShardCnt(), false, true);
+      payload = make_pair("MSET", ArgSlice(&args[0], i));
     }
+    tx->LogJournalOnShard(op_args.shard, std::move(payload), tx->GetUniqueShardCnt(), false, false);
   }
 }
 
