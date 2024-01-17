@@ -165,7 +165,7 @@ class RoundRobinSharder {
   static Mutex mutex_;
 };
 
-bool HasContendedLocks(unsigned shard_id, Transaction* trx, DbTable* table) {
+bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
   bool has_contended_locks = false;
 
   if (trx->IsMulti()) {
@@ -713,7 +713,7 @@ void EngineShard::TEST_EnableHeartbeat() {
   });
 }
 
-auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
+auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
   const TxQueue* queue = txq();
 
   ShardId sid = shard_id();
@@ -742,7 +742,7 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
       if (trx->IsGlobal() || (trx->IsMulti() && trx->GetMultiMode() == Transaction::GLOBAL)) {
         info.tx_global++;
       } else {
-        DbTable* table = db_slice().GetDBTable(trx->GetDbIndex());
+        const DbTable* table = db_slice().GetDBTable(trx->GetDbIndex());
         bool can_run = !HasContendedLocks(sid, trx, table);
         if (can_run) {
           info.tx_runnable++;
@@ -754,7 +754,7 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
 
   // Analyze locks
   for (unsigned i = 0; i <= max_db_id; ++i) {
-    DbTable* table = db_slice().GetDBTable(i);
+    const DbTable* table = db_slice().GetDBTable(i);
     if (table == nullptr)
       continue;
 

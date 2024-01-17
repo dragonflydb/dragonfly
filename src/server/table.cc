@@ -24,7 +24,7 @@ void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
     DCHECK(false) << "Unsupported type " << type;
     return;
   }
-
+  obj_memory_usage += delta;
   memory_usage_by_type[type] += delta;
 }
 

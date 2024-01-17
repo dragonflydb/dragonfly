@@ -156,8 +156,7 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,  // Set on all active shards.
-    // UNUSED = 1 << 1,
+    ACTIVE = 1,                 // Set on all active shards.
     OUT_OF_ORDER = 1 << 2,      // Whether it can run as out of order
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
@@ -252,11 +251,11 @@ class Transaction {
   // Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  //! Returns true if the transaction spans this shard_id.
-  //! Runs from the coordinator thread.
+  // Returns true if the transaction spans this shard_id.
+  // Runs from the coordinator thread.
   bool IsActive(ShardId shard_id) const {
-    return unique_shard_cnt_ == 1 ? unique_shard_id_ == shard_id
-                                  : shard_data_[shard_id].arg_count > 0;
+    return unique_shard_cnt_ == 1 ? (unique_shard_id_ == shard_id)
+                                  : shard_data_[shard_id].local_mask & ACTIVE;
   }
 
   //! Returns true if the transaction is armed for execution on this sid (used to avoid
@@ -422,7 +421,6 @@ class Transaction {
 
   enum CoordinatorState : uint8_t {
     COORD_SCHED = 1,
-
     COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
     COORD_BLOCKED = 1 << 2,
     COORD_CANCELLED = 1 << 3,

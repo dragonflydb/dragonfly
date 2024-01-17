@@ -86,6 +86,10 @@ class EngineShard {
     return &txq_;
   }
 
+  const TxQueue* txq() const {
+    return &txq_;
+  }
+
   TxId committed_txid() const {
     return committed_txid_;
   }
@@ -174,7 +178,7 @@ class EngineShard {
     std::string max_contention_lock_name;
   };
 
-  TxQueueInfo AnalyzeTxQueue();
+  TxQueueInfo AnalyzeTxQueue() const;
 
  private:
   struct DefragTaskState {

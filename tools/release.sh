@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 
-APP_PATH=build-opt/dragonfly
+APP_PATH=build-release/dragonfly
 
 set -e
 
@@ -14,7 +14,7 @@ fi
 
 pwd
 
-make HELIO_RELEASE=y release
+make release
 
 if ! [ -f ${APP_PATH} ]; then
    echo "ERROR"

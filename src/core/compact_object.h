@@ -180,6 +180,10 @@ class CompactObj {
 
   bool operator==(std::string_view sl) const;
 
+  bool operator!=(std::string_view sl) const {
+    return !(*this == sl);
+  }
+
   friend bool operator!=(const CompactObj& lhs, const CompactObj& rhs) {
     return !(lhs == rhs);
   }
