@@ -1066,6 +1066,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   // Fast path. If none of the keys are locked, we can run briefly atomically on the thread
   // without acquiring them at all.
   if (quick_run) {
+    // TBD add acquire lock here
     auto result = RunQuickie(shard);
     local_result_ = result.status;
 
