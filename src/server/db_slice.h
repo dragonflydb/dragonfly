@@ -469,12 +469,21 @@ class DbSlice {
     }
   };
 
-  using AllocatorType = PMR_NS::polymorphic_allocator<
-      std::pair<std::string, absl::flat_hash_set<facade::Connection::WeakRef, Hash>>>;
+  using HashSetAllocator = PMR_NS::polymorphic_allocator<facade::Connection::WeakRef>;
 
-  absl::flat_hash_map<std::string, absl::flat_hash_set<facade::Connection::WeakRef, Hash>,
-                      absl::container_internal::hash_default_hash<std::string>,
-                      absl::container_internal::hash_default_eq<std::string>, AllocatorType>
+  using AllocatorType = PMR_NS::polymorphic_allocator<std::pair<
+      std::string,
+      absl::flat_hash_set<facade::Connection::WeakRef, Hash,
+                          absl::container_internal::hash_default_eq<facade::Connection::WeakRef>,
+                          HashSetAllocator>>>;
+
+  absl::flat_hash_map<
+      std::string,
+      absl::flat_hash_set<facade::Connection::WeakRef, Hash,
+                          absl::container_internal::hash_default_eq<facade::Connection::WeakRef>,
+                          HashSetAllocator>,
+      absl::container_internal::hash_default_hash<std::string>,
+      absl::container_internal::hash_default_eq<std::string>, AllocatorType>
       client_tracking_map_;
 };
 
