@@ -1735,10 +1735,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
+    string_view redis_mode = ClusterConfig::IsEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
 
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
-    append("redis_mode", "standalone");
+    append("redis_mode", redis_mode);
     append("arch_bits", 64);
     append("os", GetOSString());
     append("multiplexing_api", multiplex_api);
