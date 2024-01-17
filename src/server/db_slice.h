@@ -469,6 +469,12 @@ class DbSlice {
     }
   };
 
+  // the following type definitions are confusing, and they are for achieving memory
+  // usage tracking for client_tracking_map_ data structure through C++'s memory resource and
+  // and polymorphic allocator (new C++ features)
+  // the declarations below meant to say:
+  // absl::flat_hash_map<std::string,
+  //                    absl::flat_hash_set<facade::Connection::WeakRef, Hash>> client_tracking_map_
   using HashSetAllocator = PMR_NS::polymorphic_allocator<facade::Connection::WeakRef>;
 
   using ConnectionHashSet =
