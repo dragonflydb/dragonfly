@@ -310,12 +310,11 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 #undef ADD
 
-DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner,
-                 MiMemoryResource* mi_resource)
+DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
     : shard_id_(index),
       caching_mode_(caching_mode),
       owner_(owner),
-      client_tracking_map_(mi_resource) {
+      client_tracking_map_(owner->memory_resource()) {
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
