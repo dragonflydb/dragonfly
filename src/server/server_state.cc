@@ -181,4 +181,13 @@ void ServerState::ReturnInterpreter(Interpreter* ir) {
   interpreter_mgr_.Return(ir);
 }
 
+ServerState* ServerState::SafeTLocal() {
+  // https://stackoverflow.com/a/75622732
+  asm volatile("");
+  return state_;
+}
+
+bool ServerState::ShouldLogSlowCmd(unsigned latency_usec) const {
+  return slow_log_shard_.IsEnabled() && latency_usec >= log_slower_than_usec;
+}
 }  // end of namespace dfly

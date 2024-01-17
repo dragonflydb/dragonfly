@@ -610,15 +610,15 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   if (params.memcache_flags)
     db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
 
+  if (params.flags & SET_STICK) {
+    it->first.SetSticky(true);
+  }
+
   if (shard->tiered_storage() &&
       TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards.
     shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
-  }
-
-  if (params.flags & SET_STICK) {
-    it->first.SetSticky(true);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -677,7 +677,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   prime_value.SetString(value);
   DCHECK(!prime_value.HasIoPending());
 
-  if (value.size() >= kMinTieredLen) {  // external storage enabled.
+  if (TieredStorage::EligibleForOffload(value)) {
     // TODO: if UnloadItem can block the calling fiber, then we have the bug because then "it"
     // can be invalid after the function returns and the functions that follow may access invalid
     // entry.

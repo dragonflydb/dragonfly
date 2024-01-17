@@ -2495,10 +2495,9 @@ void RdbLoader::PerformPreLoad(Service* service) {
   if (cmd == nullptr)
     return;  // MacOS
 
-  Transaction::RunOnceAsCommand(cmd, [](auto* trans, auto* es) {
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     for (const auto& name : es->search_indices()->GetIndexNames())
       es->search_indices()->DropIndex(name);
-    return OpStatus::OK;
   });
 }
 
@@ -2508,9 +2507,8 @@ void RdbLoader::PerformPostLoad(Service* service) {
     return;
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
-  Transaction::RunOnceAsCommand(cmd, [](auto* trans, auto* es) {
-    es->search_indices()->RebuildAllIndices(trans->GetOpArgs(es));
-    return OpStatus::OK;
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+    es->search_indices()->RebuildAllIndices(OpArgs{es, nullptr, DbContext{0, GetCurrentTimeMs()}});
   });
 }
 

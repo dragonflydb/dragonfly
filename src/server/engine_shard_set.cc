@@ -27,11 +27,11 @@ extern "C" {
 
 using namespace std;
 
-ABSL_FLAG(string, spill_file_prefix, "",
+ABSL_FLAG(string, tiered_prefix, "",
           "Experimental flag. Enables tiered storage if set. "
           "The string denotes the path and prefix of the files "
-          " associated with tiered storage. E.g,"
-          "spill_file_prefix=/path/to/file-prefix");
+          " associated with tiered storage. Stronly advised to use "
+          "high performance NVME ssd disks for this.");
 
 ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "
@@ -407,7 +407,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  string backing_prefix = GetFlag(FLAGS_spill_file_prefix);
+  string backing_prefix = GetFlag(FLAGS_tiered_prefix);
   if (!backing_prefix.empty()) {
     if (pb->GetKind() != ProactorBase::IOURING) {
       LOG(ERROR) << "Only ioring based backing storage is supported. Exiting...";
@@ -786,7 +786,7 @@ auto EngineShard::AnalyzeTxQueue() -> TxQueueInfo {
  */
 
 uint64_t GetFsLimit() {
-  std::filesystem::path file_path(GetFlag(FLAGS_spill_file_prefix));
+  std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix));
   std::string dir_name_str = file_path.parent_path().string();
 
   struct statvfs stat;
@@ -803,7 +803,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   cached_stats.resize(sz);
   shard_queue_.resize(sz);
 
-  string file_prefix = GetFlag(FLAGS_spill_file_prefix);
+  string file_prefix = GetFlag(FLAGS_tiered_prefix);
   size_t max_shard_file_size = 0;
   if (!file_prefix.empty()) {
     size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;

@@ -3,6 +3,7 @@
 //
 #include "server/container_utils.h"
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -21,7 +22,100 @@ extern "C" {
 #include "redis/zset.h"
 }
 
+ABSL_FLAG(bool, singlehop_blocking, true, "Use single hop optimization for blocking commands");
+
 namespace dfly::container_utils {
+
+namespace {
+
+struct ShardFFResult {
+  PrimeKey key;
+  ShardId sid = kInvalidSid;
+};
+
+// Find first non-empty key of a single shard transaction, pass it to `func` and return the key.
+// If no such key exists or a wrong type is found, the apropriate status is returned.
+// Optimized version of `FindFirstNonEmpty` below.
+OpResult<std::string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_type,
+                                                   BlockingResultCb func) {
+  DCHECK_EQ(trans->GetUniqueShardCnt(), 1u);
+  std::string key;
+  auto cb = [&](Transaction* t, EngineShard* shard) -> Transaction::RunnableResult {
+    auto args = t->GetShardArgs(shard->shard_id());
+    auto ff_res = shard->db_slice().FindFirstReadOnly(t->GetDbContext(), args, req_obj_type);
+
+    if (ff_res == OpStatus::WRONG_TYPE)
+      return OpStatus::WRONG_TYPE;
+
+    if (ff_res == OpStatus::KEY_NOTFOUND)
+      return {OpStatus::KEY_NOTFOUND, Transaction::RunnableResult::AVOID_CONCLUDING};
+
+    CHECK(ff_res.ok());  // No other errors possible
+    ff_res->first->first.GetString(&key);
+    func(t, shard, key);
+    return OpStatus::OK;
+  };
+
+  // Schedule single hop and hopefully find a key, otherwise avoid concluding
+  OpStatus status = trans->ScheduleSingleHop(cb);
+  if (status == OpStatus::OK)
+    return key;
+  return status;
+}
+
+// Find first non-empty key (sorted by order in command arguments) and return it,
+// otherwise return not found or wrong type error.
+OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) {
+  DCHECK_GT(trans->GetUniqueShardCnt(), 1u);
+
+  using FFResult = std::tuple<PrimeKey, unsigned, ShardId>;  // key, argument index, sid
+  VLOG(2) << "FindFirst::Find " << trans->DebugId();
+
+  // Holds Find results: (iterator to a found key, and its index in the passed arguments).
+  // See DbSlice::FindFirst for more details.
+  std::vector<OpResult<FFResult>> find_res(shard_set->size());
+  std::fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto args = t->GetShardArgs(shard->shard_id());
+    auto ff_res = shard->db_slice().FindFirstReadOnly(t->GetDbContext(), args, req_obj_type);
+    if (ff_res) {
+      find_res[shard->shard_id()] =
+          FFResult{ff_res->first->first.AsRef(), ff_res->second, shard->shard_id()};
+    } else {
+      find_res[shard->shard_id()] = ff_res.status();
+    }
+    return OpStatus::OK;
+  };
+
+  trans->Execute(std::move(cb), false);
+
+  // If any key is of the wrong type, report it immediately
+  if (std::find(find_res.begin(), find_res.end(), OpStatus::WRONG_TYPE) != find_res.end())
+    return OpStatus::WRONG_TYPE;
+
+  // Order result by their keys position in the command arguments, push errors to back
+  auto comp = [trans](const OpResult<FFResult>& lhs, const OpResult<FFResult>& rhs) {
+    if (!lhs || !rhs)
+      return lhs.ok();
+    size_t i1 = trans->ReverseArgIndex(std::get<ShardId>(*lhs), std::get<unsigned>(*lhs));
+    size_t i2 = trans->ReverseArgIndex(std::get<ShardId>(*rhs), std::get<unsigned>(*rhs));
+    return i1 < i2;
+  };
+
+  // Find first element by the order above, so the first key. Returns error only if all are errors
+  auto it = std::min_element(find_res.begin(), find_res.end(), comp);
+  DCHECK(it != find_res.end());
+
+  if (*it == OpStatus::KEY_NOTFOUND)
+    return OpStatus::KEY_NOTFOUND;
+
+  CHECK(it->ok());  // No other errors than WRONG_TYPE and KEY_NOTFOUND
+  FFResult& res = **it;
+  return ShardFFResult{std::get<PrimeKey>(res).AsRef(), std::get<ShardId>(res)};
+}
+
+}  // namespace
 
 using namespace std;
 
@@ -174,76 +268,25 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
   return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
 }
 
-OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_type) {
-  using FFResult = std::pair<PrimeKey, unsigned>;  // key, argument index.
-  VLOG(2) << "FindFirst::Find " << trans->DebugId();
-
-  // Holds Find results: (iterator to a found key, and its index in the passed arguments).
-  // See DbSlice::FindFirst for more details.
-  // spans all the shards for now.
-  std::vector<OpResult<FFResult>> find_res(shard_set->size());
-  std::fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto args = t->GetShardArgs(shard->shard_id());
-    OpResult<std::pair<PrimeConstIterator, unsigned>> ff_res =
-        shard->db_slice().FindFirstReadOnly(t->GetDbContext(), args, req_obj_type);
-
-    if (ff_res) {
-      FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
-      find_res[shard->shard_id()] = std::move(ff_result);
-    } else {
-      find_res[shard->shard_id()] = ff_res.status();
-    }
-
-    return OpStatus::OK;
-  };
-
-  trans->Execute(std::move(cb), false);
-
-  uint32_t min_arg_indx = UINT32_MAX;
-  ShardFFResult shard_result;
-
-  // We iterate over all results to find the key with the minimal arg_index
-  // after reversing the arg indexing permutation.
-  for (size_t sid = 0; sid < find_res.size(); ++sid) {
-    const auto& fr = find_res[sid];
-    auto status = fr.status();
-    if (status == OpStatus::KEY_NOTFOUND)
-      continue;
-    if (status == OpStatus::WRONG_TYPE) {
-      return status;
-    }
-    CHECK(fr);
-
-    const auto& it_pos = fr.value();
-
-    size_t arg_indx = trans->ReverseArgIndex(sid, it_pos.second);
-    if (arg_indx < min_arg_indx) {
-      min_arg_indx = arg_indx;
-      shard_result.sid = sid;
-
-      // we do not dereference the key, do not extract the string value, so it it
-      // ok to just move it. We can not dereference it due to limitations of SmallString
-      // that rely on thread-local data-structure for pointer translation.
-      shard_result.key = it_pos.first.AsRef();
-    }
-  }
-
-  if (shard_result.sid == kInvalidSid) {
-    return OpStatus::KEY_NOTFOUND;
-  }
-
-  return OpResult<ShardFFResult>{std::move(shard_result)};
-}
-
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
                                               bool* block_flag) {
-  trans->Schedule();
-
   string result_key;
-  OpResult<ShardFFResult> result = FindFirstNonEmptyKey(trans, req_obj_type);
+
+  // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
+  // If we don't find anything, we abort concluding and keep scheduled.
+  // Slow path: schedule, find results from shards, execute action if found.
+  OpResult<ShardFFResult> result;
+  if (trans->GetUniqueShardCnt() == 1 && absl::GetFlag(FLAGS_singlehop_blocking)) {
+    auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
+    if (res.ok())
+      return res;
+    else
+      result = res.status();
+  } else {
+    trans->Schedule();
+    result = FindFirstNonEmpty(trans, req_obj_type);
+  }
 
   // If a non-empty key exists, execute the callback immediately
   if (result.ok()) {
@@ -255,7 +298,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
       return OpStatus::OK;
     };
     trans->Execute(std::move(cb), true);
-
     return result_key;
   }
 
@@ -271,6 +313,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::TIMED_OUT;
   }
 
+  DCHECK(trans->IsScheduled());  // single shard optimization didn't forget to schedule
   VLOG(1) << "Blocking " << trans->DebugId();
 
   // If timeout (limit_ms) is zero, block indefinitely

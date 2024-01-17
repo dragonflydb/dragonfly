@@ -125,9 +125,17 @@ class ServerState {  // public struct - to allow initialization.
     Stats& operator=(const Stats&) = delete;
   };
 
+  // Unsafe version.
+  // Do not use after fiber migration because it can cause a data race.
   static ServerState* tlocal() {
     return state_;
   }
+
+  // Safe version.
+  // Calls to tlocal() before and after a fiber migrates to a different thread may both
+  // return the thread local of the thread that run the fiber before the migration. Use this
+  // function to avoid this and access the correct thread local after the migration.
+  static ServerState* __attribute__((noinline)) SafeTLocal();
 
   static facade::ConnectionStats* tl_connection_stats() {
     return &facade::tl_facade_stats->conn_stats;
@@ -229,6 +237,8 @@ class ServerState {  // public struct - to allow initialization.
   void UpdateChannelStore(ChannelStore* replacement) {
     channel_store_ = replacement;
   }
+
+  bool ShouldLogSlowCmd(unsigned latency_usec) const;
 
   Stats stats;
 
