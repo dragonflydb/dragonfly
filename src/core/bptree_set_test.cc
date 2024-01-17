@@ -280,7 +280,9 @@ TEST_F(BPTreeSetTest, Ranges) {
 TEST_F(BPTreeSetTest, MemoryUsage) {
   zskiplist* zsl = zslCreate();
   std::vector<sds> sds_vec;
-  for (size_t i = 0; i < 10'000; ++i) {
+
+  constexpr size_t kLength = 3000;
+  for (size_t i = 0; i < kLength; ++i) {
     sds_vec.push_back(sdsnew("f"));
   }
   size_t sz_before = zmalloc_used_memory_tl;
@@ -289,11 +291,12 @@ TEST_F(BPTreeSetTest, MemoryUsage) {
   for (size_t i = 0; i < sds_vec.size(); ++i) {
     zslInsert(zsl, i, sds_vec[i]);
   }
-  LOG(INFO) << "zskiplist took: " << zmalloc_used_memory_tl - sz_before << " bytes";
+  LOG(INFO) << "zskiplist takes: " << double(zmalloc_used_memory_tl - sz_before) / sds_vec.size()
+            << " bytes per entry";
   zslFree(zsl);
 
   sds_vec.clear();
-  for (size_t i = 0; i < 10'000; ++i) {
+  for (size_t i = 0; i < kLength; ++i) {
     sds_vec.push_back(sdsnew("f"));
   }
 
@@ -302,11 +305,23 @@ TEST_F(BPTreeSetTest, MemoryUsage) {
   AllocType alloc(&mi_alloc);
   absl::btree_set<pair<double, sds>, std::greater<pair<double, sds>>, AllocType> btree(alloc);
 
-  LOG(INFO) << "btree before: " << mi_alloc.used() << " bytes";
+  ASSERT_EQ(0, mi_alloc.used());
   for (size_t i = 0; i < sds_vec.size(); ++i) {
     btree.emplace(i, sds_vec[i]);
   }
-  LOG(INFO) << "btree after: " << mi_alloc.used() << " bytes";
+  ASSERT_GT(mi_alloc.used(), 0u);
+  LOG(INFO) << "abseil btree: " << double(mi_alloc.used()) / sds_vec.size() << " bytes per entry";
+  btree.clear();
+
+  ASSERT_EQ(0, mi_alloc.used());
+  SDSTree df_tree(&mi_alloc);
+  for (size_t i = 0; i < sds_vec.size(); ++i) {
+    btree.emplace(i, sds_vec[i]);
+    VLOG(1) << "df btree: " << i << " " << double(mi_alloc.used()) / btree.size()
+            << " bytes per entry";
+  }
+  ASSERT_GT(mi_alloc.used(), 0u);
+  LOG(INFO) << "df btree: " << double(mi_alloc.used()) / sds_vec.size() << " bytes per entry";
 }
 
 TEST_F(BPTreeSetTest, InsertSDS) {
