@@ -308,6 +308,10 @@ class DbSlice {
     return db_arr_[id].get();
   }
 
+  const DbTable* GetDBTable(DbIndex id) const {
+    return db_arr_[id].get();
+  }
+
   std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
     return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime, &db_arr_[id]->expire);
   }
