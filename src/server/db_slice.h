@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/mi_memory_resource.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
 #include "server/common.h"
@@ -149,7 +150,7 @@ class DbSlice {
     std::pair<int64_t, int64_t> Calculate(int64_t now_msec) const;
   };
 
-  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
+  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner, MiMemoryResource* mi_resource);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
@@ -465,8 +466,12 @@ class DbSlice {
     }
   };
 
-  // the table that maps keys to the clients that are tracking them.
-  absl::flat_hash_map<std::string, absl::flat_hash_set<facade::Connection::WeakRef, Hash>>
+  using AllocatorType = PMR_NS::polymorphic_allocator<
+      std::pair<std::string, absl::flat_hash_set<facade::Connection::WeakRef, Hash>>>;
+
+  absl::flat_hash_map<std::string, absl::flat_hash_set<facade::Connection::WeakRef, Hash>,
+                      absl::container_internal::hash_default_hash<std::string>,
+                      absl::container_internal::hash_default_eq<std::string>, AllocatorType>
       client_tracking_map_;
 };
 

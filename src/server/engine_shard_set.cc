@@ -353,7 +353,7 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
     : queue_(kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
-      db_slice_(pb->GetPoolIndex(), GetFlag(FLAGS_cache_mode), this) {
+      db_slice_(pb->GetPoolIndex(), GetFlag(FLAGS_cache_mode), this, &mi_resource_) {
   fiber_q_ = MakeFiber([this, index = pb->GetPoolIndex()] {
     ThisFiber::SetName(absl::StrCat("shard_queue", index));
     queue_.Run();
