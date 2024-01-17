@@ -11,6 +11,7 @@
 #include "facade/conn_context.h"
 #include "server/cluster/cluster_config.h"
 #include "server/cluster/cluster_slot_migration.h"
+#include "server/cluster/outgoing_slot_migration.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -19,10 +20,6 @@ class ConnectionContext;
 class ServerFamily;
 class RestoreStreamer;
 class DbSlice;
-
-namespace journal {
-class Journal;
-}
 
 class ClusterFamily {
  public:
@@ -63,7 +60,7 @@ class ClusterFamily {
 
   // DFLYMIGRATE CONF initiate first step in slots migration procedure
   // MigrationConf process this request and saving slots range and
-  // target node port in outgoing_migration_infos_.
+  // target node port in outgoing_migration_jobs_.
   // return sync_id and shard number to the target node
   void MigrationConf(CmdArgList args, ConnectionContext* cntx);
 
@@ -80,45 +77,10 @@ class ClusterFamily {
                                      std::vector<ClusterConfig::SlotRange> slots);
 
   // store info about migration and create unique session id
-  uint32_t CreateMigrationSession(ConnectionContext* cntx, uint16_t port,
-                                  std::vector<ClusterConfig::SlotRange> slots);
+  uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
+                                   std::vector<ClusterConfig::SlotRange> slots);
 
-  // FlowInfo is used to store state, connection, and all auxiliary data
-  // that is needed for correct slots (per shard) data transfer
-  struct FlowInfo {
-    std::unique_ptr<RestoreStreamer> streamer;
-    ~FlowInfo();
-  };
-
-  // Whole slots migration process information
-  struct MigrationInfo {
-    MigrationInfo() = default;
-    MigrationInfo(std::uint32_t flows_num, std::string ip, uint16_t port,
-                  std::vector<ClusterConfig::SlotRange> slots, Context::ErrHandler err_handler);
-
-    void StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal, io::Sink* dest);
-
-    ClusterSlotMigration::State GetState();
-
-    const std::string& GetHostIp() const {
-      return host_ip;
-    };
-    uint16_t GetPort() const {
-      return port;
-    };
-
-   private:
-    std::string host_ip;
-    uint16_t port;
-    std::vector<ClusterConfig::SlotRange> slots;
-    Context cntx;
-    ClusterSlotMigration::State state;
-    mutable Mutex flows_mu_;
-    std::vector<FlowInfo> flows ABSL_GUARDED_BY(flows_mu_);
-    ;
-  };
-
-  std::shared_ptr<MigrationInfo> GetMigrationInfo(uint32_t sync_id);
+  std::shared_ptr<OutgoingMigration> GetOutgoingMigration(uint32_t sync_id);
 
   mutable Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
@@ -127,8 +89,8 @@ class ClusterFamily {
 
   uint32_t next_sync_id_ = 1;
   // holds all outgoing slots migrations that are currently in progress
-  using MigrationInfoMap = absl::btree_map<uint32_t, std::shared_ptr<MigrationInfo>>;
-  MigrationInfoMap outgoing_migration_infos_;
+  using OutgoingMigrationMap = absl::btree_map<uint32_t, std::shared_ptr<OutgoingMigration>>;
+  OutgoingMigrationMap outgoing_migration_jobs_;
 
  private:
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;

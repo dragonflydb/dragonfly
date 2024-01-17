@@ -64,7 +64,7 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
-  state_ = ClusterSlotMigration::C_CONNECTING;
+  state_ = MigrationState::C_CONNECTING;
 
   VLOG(1) << "Greeting";
   ec = Greet();
@@ -110,7 +110,7 @@ bool ClusterSlotMigration::TrySetStableSync(uint32_t flow) {
                          [](const auto& el) { return el->IsStableSync(); });
   if (res) {
     // TODO make this when we set new config
-    state_ = ClusterSlotMigration::C_STABLE_SYNC;
+    state_ = MigrationState::C_STABLE_SYNC;
     for (auto& flow : shard_flows_) {
       flow->Cancel();
     }
@@ -121,7 +121,7 @@ bool ClusterSlotMigration::TrySetStableSync(uint32_t flow) {
 void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "Main migration fiber started";
 
-  state_ = ClusterSlotMigration::C_FULL_SYNC;
+  state_ = MigrationState::C_FULL_SYNC;
 
   // TODO add reconnection code
   if (auto ec = InitiateSlotsMigration(); ec) {
@@ -131,11 +131,9 @@ void ClusterSlotMigration::MainMigrationFb() {
 }
 
 std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
-  multi_shard_exe_ = std::make_shared<MultiShardExecution>();
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(
-        new ClusterShardMigration(server(), i, sync_id_, &service_, multi_shard_exe_));
+    shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_, &service_));
   }
 
   // Switch to new error handler that closes flow sockets.
@@ -147,8 +145,6 @@ std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
       flow->Cancel();
-
-    multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 

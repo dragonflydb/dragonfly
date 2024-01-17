@@ -22,13 +22,8 @@ using namespace util;
 using absl::GetFlag;
 
 ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t shard_id,
-                                             uint32_t sync_id, Service* service,
-                                             std::shared_ptr<MultiShardExecution> cmse)
-    : ProtocolClient(server_context),
-      source_shard_id_(shard_id),
-      sync_id_(sync_id),
-      service_(*service),
-      multi_shard_exe_(cmse) {
+                                             uint32_t sync_id, Service* service)
+    : ProtocolClient(server_context), source_shard_id_(shard_id), sync_id_(sync_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
 }
 
@@ -91,58 +86,13 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
   if (cntx->IsCancelled()) {
     return;
   }
-
-  bool inserted_by_me = tx_data.IsGlobalCmd() &&
-                        multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
-
-  if (tx_data.shard_cnt <= 1 || !tx_data.IsGlobalCmd()) {
+  CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
+  if (!tx_data.IsGlobalCmd()) {
     VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
-    return;
-  }
-
-  auto& multi_shard_data = multi_shard_exe_->Find(tx_data.txid);
-
-  VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
-  // Wait until shards flows got transaction data and inserted to map.
-  // This step enforces that replica will execute multi shard commands that finished on master
-  // and replica recieved all the commands from all shards.
-  multi_shard_data.block.Wait();
-  // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
-    return;
-  VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
-
-  if (tx_data.IsGlobalCmd()) {
-    VLOG(2) << "Execute txid: " << tx_data.txid << " global command execution";
-    // Wait until all shards flows get to execution step of this transaction.
-    multi_shard_data.barrier.Wait();
-    // Check if we woke up due to cancellation.
-    if (cntx_.IsCancelled())
-      return;
-    // Global command will be executed only from one flow fiber. This ensure corectness of data in
-    // replica.
-    if (inserted_by_me) {
-      executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
-    }
-    // Wait until exection is done, to make sure we done execute next commands while the global is
-    // executed.
-    multi_shard_data.barrier.Wait();
-    // Check if we woke up due to cancellation.
-    if (cntx_.IsCancelled())
-      return;
-  } else {  // Non global command will be executed by each flow fiber
-    VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
-    executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
-  }
-
-  // Erase from map can be done only after all flow fibers executed the transaction commands.
-  // The last fiber which will decrease the counter to 0 will be the one to erase the data from
-  // map
-  auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
-  VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
-  if (val == 1) {
-    multi_shard_exe_->Erase(tx_data.txid);
+  } else {
+    // TODO check which global commands should be supported
+    LOG(WARNING) << "We don't support global commands for slot migration process";
   }
 }
 

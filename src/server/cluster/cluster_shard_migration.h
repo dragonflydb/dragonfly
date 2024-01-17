@@ -18,7 +18,7 @@ class MultiShardExecution;
 class ClusterShardMigration : public ProtocolClient {
  public:
   ClusterShardMigration(ServerContext server_context, uint32_t shard_id, uint32_t sync_id,
-                        Service* service, std::shared_ptr<MultiShardExecution> cmse);
+                        Service* service);
   ~ClusterShardMigration();
 
   std::error_code StartSyncFlow(Context* cntx);
@@ -41,12 +41,9 @@ class ClusterShardMigration : public ProtocolClient {
  private:
   uint32_t source_shard_id_;
   uint32_t sync_id_;
-  Service& service_;
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<JournalExecutor> executor_;
   Fiber sync_fb_;
-  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
-
   std::atomic_bool is_stable_sync_ = false;
 };
 

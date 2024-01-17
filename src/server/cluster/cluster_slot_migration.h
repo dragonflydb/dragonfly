@@ -3,10 +3,10 @@
 //
 #pragma once
 
-#include "server/cluster/cluster_shard_migration.h"
 #include "server/protocol_client.h"
 
 namespace dfly {
+class ClusterShardMigration;
 
 class Service;
 
@@ -15,12 +15,10 @@ class Service;
 // manage migration process state and data
 class ClusterSlotMigration : ProtocolClient {
  public:
-  enum State : uint8_t { C_NO_STATE, C_CONNECTING, C_FULL_SYNC, C_STABLE_SYNC };
-
   struct Info {
     std::string host;
     uint16_t port;
-    State state;
+    MigrationState state;
   };
 
   ClusterSlotMigration(std::string host_ip, uint16_t port, Service* se,
@@ -49,8 +47,7 @@ class ClusterSlotMigration : ProtocolClient {
   std::vector<ClusterConfig::SlotRange> slots_;
   uint32_t source_shards_num_ = 0;
   uint32_t sync_id_ = 0;
-  State state_ = C_NO_STATE;
-  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
+  MigrationState state_ = MigrationState::C_NO_STATE;
 
   Fiber sync_fb_;
 };

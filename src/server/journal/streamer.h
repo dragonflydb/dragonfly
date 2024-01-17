@@ -80,7 +80,7 @@ class RestoreStreamer : public JournalStreamer {
   uint32_t sync_id_;
   Fiber snapshot_fb_;
   Cancellation fiber_cancellation_;
-  atomic_bool is_stable_sync_ = false;
+  bool is_stable_sync_ = false;
 };
 
 }  // namespace dfly
