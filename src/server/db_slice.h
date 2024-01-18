@@ -221,17 +221,17 @@ class DbSlice {
     AddOrFindResult& operator=(ItAndUpdater&& o);
   };
 
-  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
+  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   OpResult<AddOrFindResult> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
-                                        uint64_t expire_at_ms) noexcept(false);
+                                        uint64_t expire_at_ms);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // Returns OpStatus::OUT_OF_MEMORY if bad_alloc is thrown
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
-                                uint64_t expire_at_ms) noexcept(false);
+                                uint64_t expire_at_ms);
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
@@ -399,7 +399,7 @@ class DbSlice {
 
   OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                 PrimeValue obj, uint64_t expire_at_ms,
-                                                bool force_update) noexcept(false);
+                                                bool force_update);
 
   void FlushSlotsFb(const SlotSet& slot_ids);
   void FlushDbIndexes(const std::vector<DbIndex>& indexes);

@@ -2372,7 +2372,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       break;
     }
 
-    auto res = std::move(*op_res);
+    auto& res = *op_res;
     res.it->first.SetSticky(item->is_sticky);
     if (!res.is_new) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;

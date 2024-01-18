@@ -327,12 +327,10 @@ OpStatus ElementAccess::Find(EngineShard* shard) {
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
-  if (!add_res.is_new) {
-    if (add_res.it->second.ObjType() != OBJ_STRING) {
-      return OpStatus::WRONG_TYPE;
-    }
+  if (!add_res.is_new && add_res.it->second.ObjType() != OBJ_STRING) {
+    return OpStatus::WRONG_TYPE;
   }
   element_iter_ = add_res.it;
   added_ = add_res.is_new;

@@ -60,7 +60,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
     return op_res.status();
   }
 
-  auto res = std::move(*op_res);
+  auto& res = *op_res;
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 

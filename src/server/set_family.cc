@@ -570,7 +570,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
   CompactObj& co = add_res.it->second;
 
@@ -647,7 +647,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
   CompactObj& co = add_res.it->second;
 

@@ -495,8 +495,7 @@ OpResult<pair<PrimeConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Co
   return OpStatus::KEY_NOTFOUND;
 }
 
-OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFind(const Context& cntx,
-                                                      string_view key) noexcept(false) {
+OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFind(const Context& cntx, string_view key) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
@@ -777,13 +776,12 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddNew(const Context& cntx, string_view key,
-                                                PrimeValue obj,
-                                                uint64_t expire_at_ms) noexcept(false) {
+                                                PrimeValue obj, uint64_t expire_at_ms) {
   auto op_result = AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
   if (!op_result) {
     return op_result.status();
   }
-  auto res = std::move(*op_result);
+  auto& res = *op_result;
   CHECK(res.is_new);
 
   return DbSlice::ItAndUpdater{
@@ -844,7 +842,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& c
                                                                 std::string_view key,
                                                                 PrimeValue obj,
                                                                 uint64_t expire_at_ms,
-                                                                bool force_update) noexcept(false) {
+                                                                bool force_update) {
   DCHECK(!obj.IsRef());
 
   auto op_result = AddOrFind(cntx, key);
@@ -875,8 +873,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& c
 }
 
 OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdate(const Context& cntx, string_view key,
-                                                        PrimeValue obj,
-                                                        uint64_t expire_at_ms) noexcept(false) {
+                                                        PrimeValue obj, uint64_t expire_at_ms) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
 }
 

@@ -251,7 +251,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   if (!op_res) {
     return op_res.status();
   }
-  auto dest_res = std::move(*op_res);
+  auto& dest_res = *op_res;
 
   // Insertion of dest could invalidate src_it. Find it again.
   src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);

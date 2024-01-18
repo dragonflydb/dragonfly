@@ -74,7 +74,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   if (!op_res) {
     return op_res.status();
   }
-  auto res = std::move(*op_res);
+  auto& res = *op_res;
   if (res.is_new) {
     hll.resize(getDenseHllSize());
     createDenseHll(StringToHllPtr(hll));
@@ -262,7 +262,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
     if (!op_res) {
       return op_res.status();
     }
-    auto res = std::move(*op_res);
+    auto& res = *op_res;
     res.it->second.SetString(hll);
     return OpStatus::OK;
   };

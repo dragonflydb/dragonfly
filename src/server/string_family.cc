@@ -92,7 +92,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   if (!op_res) {
     return op_res.status();
   }
-  auto res = std::move(*op_res);
+  auto& res = *op_res;
 
   string s;
 
@@ -168,7 +168,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
   if (add_res.is_new) {
     add_res.it->second.SetString(val);
     return val.size();
@@ -236,7 +236,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
   char buf[128];
 
@@ -583,7 +583,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
   PrimeIterator it = add_res.it;
   if (!add_res.is_new) {

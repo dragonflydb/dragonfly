@@ -172,7 +172,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
@@ -623,7 +623,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 

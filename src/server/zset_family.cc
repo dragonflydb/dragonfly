@@ -197,7 +197,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs&
   if (!op_res) {
     return op_res.status();
   }
-  auto add_res = std::move(*op_res);
+  auto& add_res = *op_res;
 
   PrimeIterator& it = add_res.it;
   PrimeValue& pv = it->second;

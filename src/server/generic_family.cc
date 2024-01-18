@@ -369,10 +369,12 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
       if (src_res_.ref_val.ObjType() == OBJ_STRING) {
         pv_.SetString(str_val_);
       }
-      auto res = db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
-      if (!res) {
-        return res.status();
+      auto op_res =
+          db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
+      if (!op_res) {
+        return op_res.status();
       }
+      res = std::move(*op_res);
     }
 
     dest_it->first.SetSticky(src_res_.sticky);
@@ -1502,7 +1504,7 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   if (!op_result) {
     return op_result.status();
   }
-  auto add_res = std::move(*op_result);
+  auto& add_res = *op_result;
   add_res.it->first.SetSticky(sticky);
 
   if (add_res.it->second.ObjType() == OBJ_LIST && op_args.shard->blocking_controller()) {
