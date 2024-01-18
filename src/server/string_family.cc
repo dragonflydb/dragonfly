@@ -343,7 +343,7 @@ void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
     // We write a custom journal because an OOM in the above loop could lead to partial success, so
     // we replicate only what was changed.
     string_view cmd;
-    ArgSlice args;
+    ArgSlice cmd_args;
     if (i == 0) {
       // All shards must record the tx was executed for the replica to execute it, so we send a PING
       // in case nothing was changed
@@ -351,9 +351,9 @@ void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
     } else {
       // journal [0, i)
       cmd = "MSET";
-      args = ArgSlice(&args[0], i);
+      cmd_args = ArgSlice(&args[0], i);
     }
-    RecordJournal(op_args, cmd, args, op_args.tx->GetUniqueShardCnt());
+    RecordJournal(op_args, cmd, cmd_args, op_args.tx->GetUniqueShardCnt());
   }
 }
 
