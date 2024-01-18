@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/mi_memory_resource.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
 #include "server/common.h"
@@ -195,8 +196,11 @@ class DbSlice {
     AutoUpdater post_updater;
   };
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
+  ItAndUpdater FindAndFetchMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
                                      unsigned req_obj_type);
+  OpResult<ItAndUpdater> FindAndFetchMutable(const Context& cntx, std::string_view key,
+                                             unsigned req_obj_type);
 
   struct ItAndExpConst {
     PrimeConstIterator it;
@@ -205,6 +209,8 @@ class DbSlice {
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                             unsigned req_obj_type);
+  OpResult<PrimeConstIterator> FindAndFetchReadOnly(const Context& cntx, std::string_view key,
+                                                    unsigned req_obj_type);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
@@ -222,6 +228,7 @@ class DbSlice {
   };
 
   AddOrFindResult AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
+  AddOrFindResult AddOrFindAndFetch(const Context& cntx, std::string_view key) noexcept(false);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   AddOrFindResult AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
@@ -256,6 +263,7 @@ class DbSlice {
   void ActivateDb(DbIndex db_ind);
 
   bool Del(DbIndex db_ind, PrimeIterator it);
+  void RemoveFromTiered(PrimeIterator it, DbIndex index);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -298,6 +306,10 @@ class DbSlice {
   }
 
   DbTable* GetDBTable(DbIndex id) {
+    return db_arr_[id].get();
+  }
+
+  const DbTable* GetDBTable(DbIndex id) const {
     return db_arr_[id].get();
   }
 
@@ -379,6 +391,9 @@ class DbSlice {
   // Resets the event counter for updates/insertions
   void ResetUpdateEvents();
 
+  // Resets events_ member. Used by CONFIG RESETSTAT
+  void ResetEvents();
+
   void SetExpireAllowed(bool is_allowed) {
     expire_allowed_ = is_allowed;
   }
@@ -387,7 +402,7 @@ class DbSlice {
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
   // Delete a key referred by its iterator.
-  void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table);
+  void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
@@ -409,8 +424,7 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
 
-  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
-                       DbTable* table);
+  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, DbTable* table);
 
   // Send invalidation message to the clients that are tracking the change to a key.
   void SendInvalidationTrackingMessage(std::string_view key);
@@ -418,15 +432,28 @@ class DbSlice {
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
-  enum class FindInternalMode {
-    kUpdateReadStats,
-    kUpdateMutableStats,
+  enum class UpdateStatsMode {
+    kReadStats,
+    kMutableStats,
   };
-  ItAndExp FindInternal(const Context& cntx, std::string_view key, FindInternalMode mode);
+
+  enum class LoadExternalMode {
+    kLoad,
+    kDontLoad,
+  };
+  OpResult<ItAndExp> FindInternal(const Context& cntx, std::string_view key,
+                                  std::optional<unsigned> req_obj_type, UpdateStatsMode stats_mode,
+                                  LoadExternalMode load_mode);
+  AddOrFindResult AddOrFindInternal(const Context& cntx, std::string_view key,
+                                    LoadExternalMode load_mode) noexcept(false);
+  OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
+                                             std::optional<unsigned> req_obj_type,
+                                             LoadExternalMode load_mode);
 
   uint64_t NextVersion() {
     return version_++;
   }
+  void RemoveFromTiered(PrimeIterator it, DbTable* table);
 
  private:
   ShardId shard_id_;
@@ -465,8 +492,24 @@ class DbSlice {
     }
   };
 
-  // the table that maps keys to the clients that are tracking them.
-  absl::flat_hash_map<std::string, absl::flat_hash_set<facade::Connection::WeakRef, Hash>>
+  // the following type definitions are confusing, and they are for achieving memory
+  // usage tracking for client_tracking_map_ data structure through C++'s memory resource and
+  // and polymorphic allocator (new C++ features)
+  // the declarations below meant to say:
+  // absl::flat_hash_map<std::string,
+  //                    absl::flat_hash_set<facade::Connection::WeakRef, Hash>> client_tracking_map_
+  using HashSetAllocator = PMR_NS::polymorphic_allocator<facade::Connection::WeakRef>;
+
+  using ConnectionHashSet =
+      absl::flat_hash_set<facade::Connection::WeakRef, Hash,
+                          absl::container_internal::hash_default_eq<facade::Connection::WeakRef>,
+                          HashSetAllocator>;
+
+  using AllocatorType = PMR_NS::polymorphic_allocator<std::pair<std::string, ConnectionHashSet>>;
+
+  absl::flat_hash_map<std::string, ConnectionHashSet,
+                      absl::container_internal::hash_default_hash<std::string>,
+                      absl::container_internal::hash_default_eq<std::string>, AllocatorType>
       client_tracking_map_;
 };
 

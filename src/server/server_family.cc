@@ -581,6 +581,10 @@ std::string_view GetOSString() {
   return os_string;
 }
 
+string_view GetRedisMode() {
+  return ClusterConfig::IsEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
+}
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -1536,14 +1540,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "RESETSTAT") {
-    shard_set->pool()->Await([registry = service_.mutable_registry()](unsigned index, auto*) {
-      registry->ResetCallStats(index);
-      SinkReplyBuilder::ResetThreadLocalStats();
-      auto& stats = tl_facade_stats->conn_stats;
-      stats.command_cnt = 0;
-      stats.pipelined_cmd_cnt = 0;
-    });
-
+    ResetStat();
     return cntx->SendOk();
   } else {
     return cntx->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
@@ -1610,6 +1607,32 @@ static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
 
   dest->events += src.events;
   dest->small_string_bytes += src.small_string_bytes;
+}
+
+void ServerFamily::ResetStat() {
+  shard_set->pool()->Await([registry = service_.mutable_registry(), this](unsigned index, auto*) {
+    registry->ResetCallStats(index);
+    SinkReplyBuilder::ResetThreadLocalStats();
+    auto& stats = tl_facade_stats->conn_stats;
+    stats.command_cnt = 0;
+    stats.pipelined_cmd_cnt = 0;
+
+    EngineShard* shard = EngineShard::tlocal();
+    shard->db_slice().ResetEvents();
+    tl_facade_stats->conn_stats.conn_received_cnt = 0;
+    tl_facade_stats->conn_stats.pipelined_cmd_cnt = 0;
+    tl_facade_stats->conn_stats.command_cnt = 0;
+    tl_facade_stats->conn_stats.io_read_cnt = 0;
+    tl_facade_stats->conn_stats.io_read_bytes = 0;
+
+    tl_facade_stats->reply_stats.io_write_bytes = 0;
+    tl_facade_stats->reply_stats.io_write_cnt = 0;
+    for (auto& send_stat : tl_facade_stats->reply_stats.send_stats) {
+      send_stat = {};
+    }
+
+    service_.mutable_registry()->ResetCallStats(index);
+  });
 }
 
 Metrics ServerFamily::GetMetrics() const {
@@ -1719,7 +1742,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     append("redis_version", kRedisVersion);
     append("dragonfly_version", GetVersion());
-    append("redis_mode", "standalone");
+    append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
     append("os", GetOSString());
     append("multiplexing_api", multiplex_api);
@@ -2102,7 +2125,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   rb->SendBulkString("id");
   rb->SendLong(cntx->conn()->GetClientId());
   rb->SendBulkString("mode");
-  rb->SendBulkString("standalone");
+  rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
   rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }

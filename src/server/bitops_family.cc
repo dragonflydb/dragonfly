@@ -57,7 +57,7 @@ OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, std::string_view 
                                         int64_t end, bool bit_value);
 OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view key, bool value,
                                         int64_t start, int64_t end, bool as_bit);
-std::string GetString(const PrimeValue& pv, EngineShard* shard);
+std::string GetString(const PrimeValue& pv);
 bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry);
 std::size_t CountBitSetByByteIndices(std::string_view at, std::size_t start, std::size_t end);
 std::size_t CountBitSet(std::string_view str, int64_t start, int64_t end, bool bits);
@@ -324,7 +324,7 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
   try {
-    auto add_res = shard->db_slice().AddOrFind(context_, key_);
+    auto add_res = shard->db_slice().AddOrFindAndFetch(context_, key_);
     if (!add_res.is_new) {
       if (add_res.it->second.ObjType() != OBJ_STRING) {
         return OpStatus::WRONG_TYPE;
@@ -343,7 +343,7 @@ OpStatus ElementAccess::Find(EngineShard* shard) {
 std::string ElementAccess::Value() const {
   CHECK_NOTNULL(shard_);
   if (!added_) {  // Exist entry - return it
-    return GetString(element_iter_->second, shard_);
+    return GetString(element_iter_->second);
   } else {  // we only have reference to the new entry but no value
     return std::string{};
   }
@@ -459,9 +459,9 @@ OpResult<std::string> RunBitOpNot(const OpArgs& op_args, ArgSlice keys) {
   // if we found the value, just return, if not found then skip, otherwise report an error
   auto key = keys.front();
   OpResult<PrimeConstIterator> find_res =
-      es->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+      es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
-    return GetString(find_res.value()->second, es);
+    return GetString(find_res.value()->second);
   } else {
     return find_res.status();
   }
@@ -481,9 +481,9 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
   // collect all the value for this shard
   for (auto& key : keys) {
     OpResult<PrimeConstIterator> find_res =
-        es->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+        es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (find_res) {
-      values.emplace_back(GetString(find_res.value()->second, es));
+      values.emplace_back(GetString(find_res.value()->second));
     } else {
       if (find_res.status() == OpStatus::KEY_NOTFOUND) {
         continue;  // this is allowed, just return empty string per Redis
@@ -1237,19 +1237,9 @@ void SetBit(CmdArgList args, ConnectionContext* cntx) {
 
 // ------------------------------------------------------------------------- //
 // This are the "callbacks" that we're using from above
-std::string GetString(const PrimeValue& pv, EngineShard* shard) {
+std::string GetString(const PrimeValue& pv) {
   std::string res;
-  if (pv.IsExternal()) {
-    auto* tiered = shard->tiered_storage();
-    auto [offset, size] = pv.GetExternalSlice();
-    res.resize(size);
-
-    std::error_code ec = tiered->Read(offset, size, res.data());
-    CHECK(!ec) << "TBD: " << ec;
-  } else {
-    pv.GetString(&res);
-  }
-
+  pv.GetString(&res);
   return res;
 }
 
@@ -1264,14 +1254,15 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
 
 OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
                                 EngineShard* shard) {
-  OpResult<PrimeConstIterator> it_res = shard->db_slice().FindReadOnly(context, key, OBJ_STRING);
+  OpResult<PrimeConstIterator> it_res =
+      shard->db_slice().FindAndFetchReadOnly(context, key, OBJ_STRING);
   if (!it_res.ok()) {
     return it_res.status();
   }
 
   const PrimeValue& pv = it_res.value()->second;
 
-  return GetString(pv, shard);
+  return GetString(pv);
 }
 
 OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, std::string_view key, int64_t start,
