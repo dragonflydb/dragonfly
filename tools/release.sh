@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 
-APP_PATH=build-opt/dragonfly
+RELEASE_DIR=build-release
+APP_PATH=$RELEASE_DIR/dragonfly
 
 set -e
 
@@ -14,7 +15,7 @@ fi
 
 pwd
 
-make HELIO_RELEASE=y release
+make release
 
 if ! [ -f ${APP_PATH} ]; then
    echo "ERROR"
@@ -22,6 +23,7 @@ if ! [ -f ${APP_PATH} ]; then
    exit 1
 fi
 
+echo "Running ${APP_PATH} --version"
 ${APP_PATH} --version
 
 if readelf -a ${APP_PATH} | grep GLIBC_PRIVATE >/dev/null 2>&1 ; then
@@ -31,3 +33,5 @@ if readelf -a ${APP_PATH} | grep GLIBC_PRIVATE >/dev/null 2>&1 ; then
 fi
 
 make package
+echo "Release package created: "
+ls -lh $RELEASE_DIR/

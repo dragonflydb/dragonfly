@@ -8,6 +8,8 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <absl/cleanup/cleanup.h>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "generic_family.h"
@@ -52,7 +54,6 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
   DCHECK_GE(static_cast<int64_t>(stats.obj_memory_usage) + size, 0)
       << "Can't decrease " << size << " from " << stats.obj_memory_usage;
 
-  stats.obj_memory_usage += size;
   stats.AddTypeMemoryUsage(type, size);
 
   if (ClusterConfig::IsEnabled()) {
@@ -194,12 +195,13 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
     // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
-      ArgSlice delete_args{key};
+      ArgSlice delete_args(&key, 1);
       journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, ClusterConfig::KeySlot(key),
                            make_pair("DEL", delete_args), false);
     }
 
-    db_slice_->PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
+    db_slice_->PerformDeletion(last_slot_it, table);
+
     ++evicted_;
   }
   me->ShiftRight(bucket_it);
@@ -247,7 +249,10 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 #undef ADD
 
 DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
-    : shard_id_(index), caching_mode_(caching_mode), owner_(owner) {
+    : shard_id_(index),
+      caching_mode_(caching_mode),
+      owner_(owner),
+      client_tracking_map_(owner->memory_resource()) {
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
@@ -322,6 +327,7 @@ void DbSlice::AutoUpdater::Run() {
   if (fields_.action == DestructorAction::kDoNothing) {
     return;
   }
+  // TBD add logic to update iterator if needed as we can now preempt in cb
 
   // Check that AutoUpdater does not run after a key was removed.
   // If this CHECK() failed for you, it probably means that you deleted a key while having an auto
@@ -364,86 +370,120 @@ DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) 
   return *this;
 }
 
-DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
+DbSlice::ItAndUpdater DbSlice::FindAndFetchMutable(const Context& cntx, string_view key) {
+  return std::move(FindMutableInternal(cntx, key, std::nullopt, LoadExternalMode::kLoad).value());
+}
 
-  if (IsValid(it)) {
-    PreUpdate(cntx.db_index, it);
-    return {it, exp_it,
-            AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                         .db_slice = this,
-                         .db_ind = cntx.db_index,
-                         .it = it,
-                         .key = key})};
-  } else {
-    return {it, exp_it, {}};
-  }
+DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
+  return std::move(
+      FindMutableInternal(cntx, key, std::nullopt, LoadExternalMode::kDontLoad).value());
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string_view key,
                                                      unsigned req_obj_type) {
-  // Don't use FindMutable() so that we don't call PreUpdate()
-  auto [it, exp_it] = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
+  return FindMutableInternal(cntx, key, req_obj_type, LoadExternalMode::kDontLoad);
+}
 
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
+OpResult<DbSlice::ItAndUpdater> DbSlice::FindAndFetchMutable(const Context& cntx, string_view key,
+                                                             unsigned req_obj_type) {
+  return FindMutableInternal(cntx, key, req_obj_type, LoadExternalMode::kLoad);
+}
 
-  if (it->second.ObjType() != req_obj_type) {
-    return OpStatus::WRONG_TYPE;
+OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
+                                                             std::optional<unsigned> req_obj_type,
+                                                             LoadExternalMode load_mode) {
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats, load_mode);
+  if (!res.ok()) {
+    return res.status();
   }
 
-  PreUpdate(cntx.db_index, it);
-  return {{it, exp_it,
+  PreUpdate(cntx.db_index, res->it);
+  return {{res->it, res->exp_it,
            AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                         .db_slice = this,
                         .db_ind = cntx.db_index,
-                        .it = it,
+                        .it = res->it,
                         .key = key})}};
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
-  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateReadStats);
-  return {res.it, res.exp_it};
+  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats,
+                          LoadExternalMode::kDontLoad);
+  return {res->it, res->exp_it};
 }
 
 OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
                                                    unsigned req_obj_type) {
-  auto it = FindReadOnly(cntx, key).it;
-
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
-
-  if (it->second.ObjType() != req_obj_type) {
-    return OpStatus::WRONG_TYPE;
+  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats,
+                          LoadExternalMode::kDontLoad);
+  if (res.ok()) {
+    return {res->it};
   }
-
-  return {it};
+  return res.status();
 }
 
-DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view key,
-                                        FindInternalMode mode) {
+OpResult<PrimeConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cntx,
+                                                           std::string_view key,
+                                                           unsigned req_obj_type) {
+  auto res =
+      FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats, LoadExternalMode::kLoad);
+  if (res.ok()) {
+    return {res->it};
+  }
+  return res.status();
+}
+
+OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
+                                                  std::optional<unsigned> req_obj_type,
+                                                  UpdateStatsMode stats_mode,
+                                                  LoadExternalMode load_mode) {
+  if (!IsDbValid(cntx.db_index)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
   DbSlice::ItAndExp res;
-
-  if (!IsDbValid(cntx.db_index))
-    return res;
-
   auto& db = *db_arr_[cntx.db_index];
   res.it = db.prime.Find(key);
-  FiberAtomicGuard fg;
-  if (!IsValid(res.it)) {
-    switch (mode) {
-      case FindInternalMode::kUpdateMutableStats:
+
+  absl::Cleanup update_stats_on_miss = [&]() {
+    switch (stats_mode) {
+      case UpdateStatsMode::kMutableStats:
         events_.mutations++;
         break;
-      case FindInternalMode::kUpdateReadStats:
+      case UpdateStatsMode::kReadStats:
         events_.misses++;
         break;
     }
-    return res;
+  };
+
+  if (!IsValid(res.it)) {
+    return OpStatus::KEY_NOTFOUND;
   }
 
+  if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
+    return OpStatus::WRONG_TYPE;
+  }
+
+  if (TieredStorage* tiered = shard_owner()->tiered_storage();
+      tiered && load_mode == LoadExternalMode::kLoad) {
+    if (res.it->second.HasIoPending()) {
+      tiered->CancelIo(cntx.db_index, res.it);
+    } else if (res.it->second.IsExternal()) {
+      // Load reads data from disk therefore we will preempt in this function.
+      // We will update the iterator if it changed during the preemption
+      res.it = tiered->Load(cntx.db_index, res.it, key);
+      if (!IsValid(res.it)) {
+        return OpStatus::KEY_NOTFOUND;
+      }
+    }
+  }
+
+  FiberAtomicGuard fg;
   if (res.it->second.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
+    if (!IsValid(res.it)) {
+      return OpStatus::KEY_NOTFOUND;
+    }
   }
 
   if (caching_mode_ && IsValid(res.it)) {
@@ -463,11 +503,12 @@ DbSlice::ItAndExp DbSlice::FindInternal(const Context& cntx, std::string_view ke
 
   db.top_keys.Touch(key);
 
-  switch (mode) {
-    case FindInternalMode::kUpdateMutableStats:
+  std::move(update_stats_on_miss).Cancel();
+  switch (stats_mode) {
+    case UpdateStatsMode::kMutableStats:
       events_.mutations++;
       break;
-    case FindInternalMode::kUpdateReadStats:
+    case UpdateStatsMode::kReadStats:
       events_.hits++;
       if (ClusterConfig::IsEnabled()) {
         db.slots_stats[ClusterConfig::KeySlot(key)].total_reads++;
@@ -496,24 +537,35 @@ OpResult<pair<PrimeConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Co
 }
 
 OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFind(const Context& cntx, string_view key) {
+  return AddOrFindInternal(cntx, key, LoadExternalMode::kDontLoad);
+}
+
+OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindAndFetch(const Context& cntx,
+                                                              string_view key) {
+  return AddOrFindInternal(cntx, key, LoadExternalMode::kLoad);
+}
+
+OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cntx, string_view key,
+                                                              LoadExternalMode load_mode) {
   DCHECK(IsDbValid(cntx.db_index));
 
   DbTable& db = *db_arr_[cntx.db_index];
+  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kMutableStats, load_mode);
 
-  auto res = FindInternal(cntx, key, FindInternalMode::kUpdateMutableStats);
-
-  if (IsValid(res.it)) {
-    PreUpdate(cntx.db_index, res.it);
+  if (res.ok()) {
+    PreUpdate(cntx.db_index, res->it);
     return DbSlice::AddOrFindResult{
-        .it = res.it,
-        .exp_it = res.exp_it,
+        .it = res->it,
+        .exp_it = res->exp_it,
         .is_new = false,
         .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                      .db_slice = this,
                                      .db_ind = cntx.db_index,
-                                     .it = res.it,
+                                     .it = res->it,
                                      .key = key})};
   }
+  auto status = res.status();
+  CHECK_EQ(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY, true);
 
   // It's a new entry.
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
@@ -621,7 +673,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     doc_del_cb_(key, cntx, it->second);
   }
   bumped_items_.erase(it->first.AsRef());
-  PerformDeletion(it, shard_owner(), db.get());
+  PerformDeletion(it, db.get());
   deletion_count_++;
 
   return true;
@@ -638,7 +690,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     std::string_view key = it->first.GetSlice(&tmp);
     SlotId sid = ClusterConfig::KeySlot(key);
     if (slot_ids.contains(sid) && it.GetVersion() < next_version) {
-      PerformDeletion(it, shard_owner(), db_arr_[0].get());
+      PerformDeletion(it, db_arr_[0].get());
     }
     return true;
   };
@@ -687,7 +739,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
           if (it->second.IsExternal())
-            PerformDeletion(it, shard_owner(), db_ptr.get());
+            PerformDeletion(it, db_ptr.get());
         }
 
         DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
@@ -986,27 +1038,6 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
     ccb.second(db_ind, ChangeReq{it});
   }
 
-  auto* stats = MutableStats(db_ind);
-  if (it->second.ObjType() == OBJ_STRING) {
-    if (it->second.IsExternal()) {
-      // We assume here that the operation code either loaded the entry into memory
-      // before calling to PreUpdate or it does not need to read it at all.
-      // After this code executes, the external blob is lost.
-      TieredStorage* tiered = shard_owner()->tiered_storage();
-      auto [offset, size] = it->second.GetExternalSlice();
-      tiered->Free(offset, size);
-      bool has_expire = it->second.HasExpire();
-      it->second.Reset();
-      it->second.SetExpire(has_expire);  // we keep expire data
-
-      stats->tiered_entries -= 1;
-      stats->tiered_size -= size;
-    } else if (it->second.HasIoPending()) {
-      TieredStorage* tiered = shard_owner()->tiered_storage();
-      tiered->CancelIo(db_ind, it);
-    }
-  }
-
   it.SetVersion(NextVersion());
 }
 
@@ -1067,7 +1098,7 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it)
     doc_del_cb_(tmp_key, cntx, it->second);
   }
 
-  PerformDeletion(it, expire_it, shard_owner(), db.get());
+  PerformDeletion(it, expire_it, db.get());
   ++events_.expired_keys;
 
   return {PrimeIterator{}, ExpireIterator{}};
@@ -1226,7 +1257,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
             keys_to_journal.push_back(string(key));
           }
 
-          PerformDeletion(evict_it, shard_owner(), db_table.get());
+          PerformDeletion(evict_it, db_table.get());
           ++evicted;
 
           used_memory_after = owner_->UsedMemory();
@@ -1305,7 +1336,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      PerformDeletion(evict_it, shard_owner(), table);
+      PerformDeletion(evict_it, table);
       ++evicted;
 
       if (freed_memory_fun() > memory_to_free) {
@@ -1332,7 +1363,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      PerformDeletion(evict_it, shard_owner(), table);
+      PerformDeletion(evict_it, table);
       ++evicted;
 
       if (freed_memory_fun() > memory_to_free) {
@@ -1398,6 +1429,10 @@ void DbSlice::ResetUpdateEvents() {
   events_.update = 0;
 }
 
+void DbSlice::ResetEvents() {
+  events_ = {};
+}
+
 void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice& keys) {
   if (conn.IsExpired()) {
     DVLOG(2) << "Connection expired, exiting TrackKey function.";
@@ -1435,8 +1470,25 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   }
 }
 
-void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
-                              DbTable* table) {
+void DbSlice::RemoveFromTiered(PrimeIterator it, DbIndex index) {
+  DbTable* table = GetDBTable(index);
+  RemoveFromTiered(it, table);
+}
+
+void DbSlice::RemoveFromTiered(PrimeIterator it, DbTable* table) {
+  DbTableStats& stats = table->stats;
+  PrimeValue& pv = it->second;
+  if (pv.IsExternal()) {
+    TieredStorage* tiered = shard_owner()->tiered_storage();
+    tiered->Free(it, &stats);
+  }
+  if (pv.HasIoPending()) {
+    TieredStorage* tiered = shard_owner()->tiered_storage();
+    tiered->CancelIo(table->index, it);
+  }
+}
+
+void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, DbTable* table) {
   std::string tmp;
   std::string_view key = del_it->first.GetSlice(&tmp);
 
@@ -1453,18 +1505,7 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, Engin
 
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
-  if (pv.IsExternal()) {
-    auto [offset, size] = pv.GetExternalSlice();
-
-    stats.tiered_entries--;
-    stats.tiered_size -= size;
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->Free(offset, size);
-  }
-  if (pv.HasIoPending()) {
-    TieredStorage* tiered = shard->tiered_storage();
-    tiered->CancelIo(table->index, del_it);
-  }
+  RemoveFromTiered(del_it, table);
 
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
@@ -1485,17 +1526,19 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, Engin
   SendInvalidationTrackingMessage(key);
 }
 
-void DbSlice::PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table) {
+void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
   ExpireIterator exp_it;
   if (del_it->second.HasExpire()) {
     exp_it = table->expire.Find(del_it->first);
     DCHECK(!exp_it.is_done());
   }
 
-  PerformDeletion(del_it, exp_it, shard, table);
+  PerformDeletion(del_it, exp_it, table);
 }
 
 void DbSlice::OnCbFinish() {
+  // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
+  // btw what do we do with inline?
   bumped_items_.clear();
 }
 

@@ -31,6 +31,48 @@ atomic_uint64_t op_seq{1};
 
 constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
 
+void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
+  unsigned q_limit = absl::GetFlag(FLAGS_tx_queue_warning_len);
+  if (txq->size() > q_limit) {
+    static thread_local time_t last_log_time = 0;
+    // TODO: glog provides LOG_EVERY_T, which uses precise clock.
+    // We should introduce inside helio LOG_PERIOD_ATLEAST macro that takes seconds and
+    // uses low precision clock.
+    time_t now = time(nullptr);
+    if (now >= last_log_time + 10) {
+      last_log_time = now;
+      EngineShard::TxQueueInfo info = shard->AnalyzeTxQueue();
+      string msg =
+          StrCat("TxQueue is too long. Tx count:", info.tx_total, ", armed:", info.tx_armed,
+                 ", runnable:", info.tx_runnable, ", total locks: ", info.total_locks,
+                 ", contended locks: ", info.contended_locks, "\n");
+      absl::StrAppend(&msg, "max contention score: ", info.max_contention_score,
+                      ", lock: ", info.max_contention_lock_name,
+                      ", poll_executions:", shard->stats().poll_execution_total);
+      const Transaction* cont_tx = shard->GetContTx();
+      if (cont_tx) {
+        absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(), " ",
+                        cont_tx->IsArmedInShard(shard->shard_id()) ? " armed" : "");
+      }
+
+      LOG(WARNING) << msg;
+    }
+  }
+}
+
+void RecordTxScheduleStats(const Transaction* tx) {
+  auto* ss = ServerState::tlocal();
+  DCHECK(ss);
+  ss->stats.tx_width_freq_arr[tx->GetUniqueShardCnt() - 1]++;
+  if (tx->IsGlobal()) {
+    ss->stats.tx_type_cnt[ServerState::GLOBAL]++;
+  } else if (tx->IsOOO()) {
+    ss->stats.tx_type_cnt[ServerState::OOO]++;
+  } else {
+    ss->stats.tx_type_cnt[ServerState::NORMAL]++;
+  }
+}
+
 }  // namespace
 
 IntentLock::Mode Transaction::LockMode() const {
@@ -464,10 +506,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   IntentLock::Mode mode = LockMode();
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
-
-  if (txq_ooo) {
-    DCHECK(sd.local_mask & OUT_OF_ORDER);
-  }
+  DCHECK(!txq_ooo || (sd.local_mask & OUT_OF_ORDER));
 
   /*************************************************************************/
   // Actually running the callback.
@@ -516,7 +555,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   // Log to jounrnal only once the command finished running
   if (is_concluding || (multi_ && multi_->concluding))
-    LogAutoJournalOnShard(shard);
+    LogAutoJournalOnShard(shard, result);
 
   // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
   // and successive hops are run by continuation_trans_ in engine shard.
@@ -577,36 +616,21 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   return !is_concluding;
 }
 
+// TODO: For multi-transactions we should be able to deduce mode() at run-time based
+// on the context. For regular multi-transactions we can actually inspect all commands.
+// For eval-like transactions - we can decide based on the command flavor (EVAL/EVALRO) or
+// auto-tune based on the static analysis (by identifying commands with hardcoded command names).
 void Transaction::ScheduleInternal() {
   DCHECK(!shard_data_.empty());
   DCHECK_EQ(0u, txid_);
   DCHECK_EQ(0, coordinator_state_ & (COORD_SCHED | COORD_OOO));
+  DCHECK_GT(unique_shard_cnt_, 0u);
 
-  bool span_all = IsGlobal();
+  DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards";
 
-  uint32_t num_shards;
-  std::function<bool(uint32_t)> is_active;
-
-  // TODO: For multi-transactions we should be able to deduce mode() at run-time based
-  // on the context. For regular multi-transactions we can actually inspect all commands.
-  // For eval-like transactions - we can decided based on the command flavor (EVAL/EVALRO) or
-  // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
-  if (span_all) {
-    is_active = [](uint32_t) { return true; };
-    num_shards = shard_set->size();
-  } else {
-    num_shards = unique_shard_cnt_;
-    DCHECK_GT(num_shards, 0u);
-
-    is_active = [&](uint32_t i) {
-      return num_shards == 1 ? (i == unique_shard_id_) : shard_data_[i].local_mask & ACTIVE;
-    };
-  }
+  auto is_active = [this](uint32_t i) { return IsActive(i); };
 
   // Loop until successfully scheduled in all shards.
-  ServerState* ss = ServerState::tlocal();
-  DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << num_shards << " shards";
-  DCHECK(ss);
   while (true) {
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
     time_now_ms_ = GetCurrentTimeMs();
@@ -621,26 +645,16 @@ void Transaction::ScheduleInternal() {
     };
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
-    if (success.load(memory_order_acquire) == num_shards) {
+    if (success.load(memory_order_acquire) == unique_shard_cnt_) {
       coordinator_state_ |= COORD_SCHED;
-      bool ooo_disabled = IsAtomicMulti() && multi_->mode != LOCK_AHEAD;
-
-      DCHECK_GT(num_shards, 0u);
-
-      ss->stats.tx_width_freq_arr[num_shards - 1]++;
-
-      if (IsGlobal()) {
-        ss->stats.tx_type_cnt[ServerState::GLOBAL]++;
-      } else if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
-        // If we granted all locks, we can run out of order.
-        coordinator_state_ |= COORD_OOO;
-        ss->stats.tx_type_cnt[ServerState::OOO]++;
-      } else {
-        ss->stats.tx_type_cnt[ServerState::NORMAL]++;
+      if (lock_granted_cnt.load(memory_order_relaxed) == unique_shard_cnt_) {
+        coordinator_state_ |= COORD_OOO;  // If we granted all locks, we can run out of order.
       }
+
+      RecordTxScheduleStats(this);
       VLOG(2) << "Scheduled " << DebugId()
               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
-              << " num_shards: " << num_shards;
+              << " num_shards: " << unique_shard_cnt_;
 
       break;
     }
@@ -1033,6 +1047,10 @@ ShardId Transaction::GetUniqueShard() const {
   return unique_shard_id_;
 }
 
+optional<SlotId> Transaction::GetUniqueSlotId() const {
+  return unique_slot_checker_.GetUniqueSlotId();
+}
+
 KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;
@@ -1066,6 +1084,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   // Fast path. If none of the keys are locked, we can run briefly atomically on the thread
   // without acquiring them at all.
   if (quick_run) {
+    // TBD add acquire lock here
     auto result = RunQuickie(shard);
     local_result_ = result.status;
 
@@ -1074,7 +1093,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
       DCHECK_EQ(sd.is_armed, false);
       unlocked_keys = false;
     } else {
-      LogAutoJournalOnShard(shard);
+      LogAutoJournalOnShard(shard, result);
     }
   }
 
@@ -1149,33 +1168,8 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   TxQueue::Iterator it = txq->Insert(this);
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
   sd.pq_pos = it;
-  unsigned q_limit = absl::GetFlag(FLAGS_tx_queue_warning_len);
 
-  if (txq->size() > q_limit) {
-    static thread_local time_t last_log_time = 0;
-    // TODO: glog provides LOG_EVERY_T, which uses precise clock.
-    // We should introduce inside helio LOG_PERIOD_ATLEAST macro that takes seconds and
-    // uses low precision clock.
-    time_t now = time(nullptr);
-    if (now >= last_log_time + 10) {
-      last_log_time = now;
-      EngineShard::TxQueueInfo info = shard->AnalyzeTxQueue();
-      string msg =
-          StrCat("TxQueue is too long. Tx count:", info.tx_total, ", armed:", info.tx_armed,
-                 ", runnable:", info.tx_runnable, ", total locks: ", info.total_locks,
-                 ", contended locks: ", info.contended_locks, "\n");
-      absl::StrAppend(&msg, "max contention score: ", info.max_contention_score,
-                      ", lock: ", info.max_contention_lock_name,
-                      ", poll_executions:", shard->stats().poll_execution_total);
-      const Transaction* cont_tx = shard->GetContTx();
-      if (cont_tx) {
-        absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(), " ",
-                        cont_tx->IsArmedInShard(sid) ? " armed" : "");
-      }
-
-      LOG(WARNING) << msg;
-    }
-  }
+  AnalyzeTxQueue(shard, txq);
   DVLOG(1) << "Insert into tx-queue, sid(" << sid << ") " << DebugId() << ", qlen " << txq->size();
 
   return {true, lock_granted};
@@ -1337,7 +1331,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto* shard = EngineShard::tlocal();
   auto result = cb(this, shard);
   shard->db_slice().OnCbFinish();
-  LogAutoJournalOnShard(shard);
+  LogAutoJournalOnShard(shard, result);
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
@@ -1464,7 +1458,7 @@ optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
   return GetShardArgs(sid).at(sd.wake_key_pos);
 }
 
-void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
+void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {
   // TODO: For now, we ignore non shard coordination.
   if (shard == nullptr)
     return;
@@ -1477,12 +1471,20 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   if (cid_->IsWriteOnly() == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
-  // If autojournaling was disabled and not re-enabled, skip it
-  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !renabled_auto_journal_.load(memory_order_relaxed))
-    return;
-
   auto journal = shard->journal();
   if (journal == nullptr)
+    return;
+
+  if (result.status != OpStatus::OK) {
+    // We log NOOP even for NO_AUTOJOURNAL commands because the non-success status could have been
+    // due to OOM in a single shard, while other shards succeeded
+    journal->RecordEntry(txid_, journal::Op::NOOP, db_index_, unique_shard_cnt_,
+                         unique_slot_checker_.GetUniqueSlotId(), journal::Entry::Payload{}, true);
+    return;
+  }
+
+  // If autojournaling was disabled and not re-enabled, skip it
+  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !renabled_auto_journal_.load(memory_order_relaxed))
     return;
 
   // TODO: Handle complex commands like LMPOP correctly once they are implemented.

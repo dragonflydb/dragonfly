@@ -94,7 +94,6 @@ static size_t ExternalizeEntry(size_t item_offset, DbTableStats* stats, PrimeVal
   size_t heap_size = entry->MallocUsed();
   size_t item_size = entry->Size();
 
-  stats->obj_memory_usage -= heap_size;
   stats->AddTypeMemoryUsage(entry->ObjType(), -heap_size);
 
   entry->SetExternal(item_offset, item_size);
@@ -334,7 +333,12 @@ std::error_code TieredStorage::Read(size_t offset, size_t len, char* dest) {
   return io_mgr_.Read(offset, io::MutableBytes{reinterpret_cast<uint8_t*>(dest), len});
 }
 
-void TieredStorage::Free(size_t offset, size_t len) {
+void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
+  PrimeValue& entry = it->second;
+  CHECK(entry.IsExternal());
+  DCHECK_EQ(entry.ObjType(), OBJ_STRING);
+  auto [offset, len] = entry.GetExternalSlice();
+
   if (offset % kBlockLen == 0) {
     alloc_.Free(offset, len);
   } else {
@@ -347,6 +351,13 @@ void TieredStorage::Free(size_t offset, size_t len) {
       page_refcnt_.erase(it);
     }
   }
+
+  bool has_expire = entry.HasExpire();
+  entry.Reset();
+  entry.SetExpire(has_expire);  // we keep expire data
+
+  stats->tiered_entries -= 1;
+  stats->tiered_size -= len;
 }
 
 void TieredStorage::Shutdown() {
@@ -388,6 +399,43 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
     this->throttle_ec_.notifyAll();
   }
   VLOG_IF(2, num_active_requests_ == 0) << "Finished active requests";
+}
+
+PrimeIterator TieredStorage::Load(DbIndex db_index, PrimeIterator it, string_view key) {
+  PrimeValue* entry = &it->second;
+  CHECK(entry->IsExternal());
+  DCHECK_EQ(entry->ObjType(), OBJ_STRING);
+  auto [offset, size] = entry->GetExternalSlice();
+  string res(size, '\0');
+  auto ec = Read(offset, size, res.data());
+  CHECK(!ec) << "TBD";
+
+  // Read will preempt, check if iterator still points to our entry
+  PrimeTable* pt = db_slice_.GetTables(db_index).first;
+  if (!it.IsOccupied() || it->first != key) {
+    it = pt->Find(key);
+    if (it.is_done()) {
+      // Entry was remove from db while reading from disk. (background expire task)
+      return it;
+    }
+    entry = &it->second;
+  }
+
+  if (!entry->IsExternal()) {
+    // Because 2 reads can happen at the same time, then if the other read
+    // already loaded the data from disk to memory we don't need to do anything now just return.
+    // TODO we can register to reads with multiple callbacks so if there is already a callback
+    // reading the data from disk we will not run read twice.
+    return it;
+  }
+
+  auto* stats = db_slice_.MutableStats(db_index);
+  Free(it, stats);
+  entry->SetString(res);
+
+  size_t heap_size = entry->MallocUsed();
+  stats->AddTypeMemoryUsage(entry->ObjType(), heap_size);
+  return it;
 }
 
 error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
@@ -580,6 +628,7 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   ++num_active_requests_;
 
   io_mgr_.WriteAsync(res, string_view{req->block_ptr, req->page_size}, std::move(cb));
+  ++stats_.tiered_writes;
 }
 
 bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {

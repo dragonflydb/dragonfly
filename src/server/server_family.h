@@ -138,6 +138,8 @@ class ServerFamily {
     return service_;
   }
 
+  void ResetStat();
+
   Metrics GetMetrics() const;
 
   ScriptMgr* script_mgr() {

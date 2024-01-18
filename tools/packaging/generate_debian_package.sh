@@ -19,13 +19,24 @@
 
 set -eu
 
+
+if [ $# -ge 1 ]; then
+    VERSION_FILE=$1
+    if ! [ -f ${VERSION_FILE} ]; then
+        echo "binary file ${VERSION_FILE} does not exist"
+        exit 1
+    fi
+
+else
+    echo "no binary file provided"
+    exit 1
+fi
+
 SCRIPT_ABS_PATH=$(realpath $0)
 SCRIPT_PATH=$(dirname ${SCRIPT_ABS_PATH})
 PACKAGES_PATH=${SCRIPT_PATH}/debian
 CHANGELOG_SCRIPT=generate_changelog.sh
-BUILD_DIR=build-opt
-ROOT_ABS_PATH=$(cd ${SCRIPT_PATH}; while [ ! -d ${BUILD_DIR} ]; do cd ..; done ; pwd)
-REPO_PATH=${ROOT_ABS_PATH}
+ROOT_ABS_PATH=$(realpath $SCRIPT_PATH/../..)
 TEMP_WORK_DIR=$(mktemp -d)
 BASE_DIR=${TEMP_WORK_DIR}/packages
 BASE_PATH=${BASE_DIR}/dragonfly
@@ -37,16 +48,6 @@ function cleanup {
     exit 1
 }
 
-if [ $# -ge 1 ]; then
-    VERSION_FILE=$1
-else
-    if ! [ -f ${ROOT_ABS_PATH}/${BUILD_DIR}/dragonfly ]; then
-        cleanup "no dragonfly binary found at ${ROOT_ABS_PATH}/${BUILD_DIR}"
-    else
-        VERSION_FILE=${ROOT_ABS_PATH}/${BUILD_DIR}/dragonfly
-    fi
-fi
-
 mkdir -p ${BASE_PATH} || cleanup "failed to create working directory for building the package"
 
 cp -r ${PACKAGES_PATH} ${BASE_PATH} || cleanup "failed to copy required files for the package build from ${PACKAGES_PATH}"
@@ -57,7 +58,7 @@ mkdir -p ${BINARY_TARGET_DIR} || cleanup "failed to create install directory for
 
 cp ${VERSION_FILE} ${BINARY_TARGET_DIR}/dragonfly || cleanup "failed to copy binary to target dir"
 
-${BASE_PATH}/${CHANGELOG_SCRIPT} ${REPO_PATH} || cleanup "failed to generate changelog for package"
+${BASE_PATH}/${CHANGELOG_SCRIPT} ${ROOT_ABS_PATH} || cleanup "failed to generate changelog for package"
 
 MY_DIR=${PWD}
 cd ${BASE_PATH}
@@ -77,4 +78,3 @@ cd ${MY_DIR}
 RESULT_FILE=$(ls *.deb 2>/dev/null)
 echo "successfully built the install package at ${MY_DIR}/${RESULT_FILE}"
 rm -rf ${TEMP_WORK_DIR}
-exit 0
