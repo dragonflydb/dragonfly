@@ -1287,6 +1287,10 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
                                   bool ignore_state) {
+  if (shard_set->IsTieringEnabled()) {
+    return GenericError{make_error_code(errc::operation_not_permitted),
+                        StrCat("Can not save database in tiering mode")};
+  }
   if (!ignore_state) {
     auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
     if (!success) {

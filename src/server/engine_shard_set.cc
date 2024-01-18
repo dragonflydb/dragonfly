@@ -825,6 +825,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
                  << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
       exit(1);
     }
+    is_tiering_enabled_ = true;
     LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
   }
 
