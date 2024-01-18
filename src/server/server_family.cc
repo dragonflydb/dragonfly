@@ -873,6 +873,10 @@ void ServerFamily::SnapshotScheduling() {
   if (!cron_expr) {
     return;
   }
+  if (shard_set->IsTieringEnabled()) {
+    LOG(ERROR) << "Snapshot not allowed when using tiering.  Exiting..";
+    exit(1);
+  }
 
   const auto loading_check_interval = std::chrono::seconds(10);
   while (service_.GetGlobalState() == GlobalState::LOADING) {
@@ -1287,6 +1291,10 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
                                   bool ignore_state) {
+  if (shard_set->IsTieringEnabled()) {
+    return GenericError{make_error_code(errc::operation_not_permitted),
+                        StrCat("Can not save database in tiering mode")};
+  }
   if (!ignore_state) {
     auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
     if (!success) {
