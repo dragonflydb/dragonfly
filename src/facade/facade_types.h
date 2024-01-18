@@ -49,7 +49,7 @@ struct ConnectionStats {
 
   uint64_t command_cnt = 0;
   uint64_t pipelined_cmd_cnt = 0;
-
+  uint64_t pipelined_cmd_latency = 0;  // in microseconds
   uint64_t conn_received_cnt = 0;
 
   uint32_t num_conns = 0;
