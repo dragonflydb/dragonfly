@@ -235,6 +235,51 @@ TEST_F(MultiTest, MultiConsistent) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
+TEST_F(MultiTest, MultiConsistent2) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped MultiConsistent2 test because multi_exec_mode is non atomic";
+    return;
+  }
+
+  const int kKeyCount = 50;
+  const int kRuns = 50;
+  const int kJobs = 20;
+
+  vector<string> all_keys(kKeyCount);
+  for (size_t i = 0; i < kKeyCount; i++)
+    all_keys[i] = absl::StrCat("key", i);
+
+  auto cb = [&](string id) {
+    for (size_t r = 0; r < kRuns; r++) {
+      size_t num_keys = (rand() % 5) + 1;
+      set<string_view> keys;
+      for (size_t i = 0; i < num_keys; i++)
+        keys.insert(all_keys[rand() % kKeyCount]);
+
+      Run(id, {"MULTI"});
+      for (auto key : keys)
+        Run(id, {"INCR", key});
+      for (auto key : keys)
+        Run(id, {"DECR", key});
+      auto resp = Run(id, {"EXEC"});
+
+      ASSERT_EQ(resp.GetVec().size(), keys.size() * 2);
+      for (size_t i = 0; i < keys.size(); i++) {
+        EXPECT_EQ(resp.GetVec()[i].GetInt(), optional<int64_t>(1));
+        EXPECT_EQ(resp.GetVec()[i + keys.size()].GetInt(), optional<int64_t>(0));
+      }
+    }
+  };
+
+  vector<Fiber> fbs(kJobs);
+  for (size_t i = 0; i < kJobs; i++) {
+    fbs[i] = pp_->at(i % pp_->size())->LaunchFiber([i, cb]() { cb(absl::StrCat("worker", i)); });
+  }
+
+  for (auto& fb : fbs)
+    fb.Join();
+}
+
 TEST_F(MultiTest, MultiRename) {
   RespExpr resp = Run({"mget", kKey1, kKey4});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
