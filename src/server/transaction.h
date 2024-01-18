@@ -157,7 +157,7 @@ class Transaction {
   // State on specific shard.
   enum LocalMask : uint16_t {
     ACTIVE = 1,                 // Set on all active shards.
-    OUT_OF_ORDER = 1 << 2,      // Whether it can run as out of order
+    OUT_OF_ORDER = 1 << 2,      // Whether it can run out of order, meaningless without keylock
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())

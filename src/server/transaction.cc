@@ -1110,7 +1110,12 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
 // This function should not block since it's run via RunBriefInParallel.
 bool Transaction::ScheduleInShard(EngineShard* shard) {
-  DCHECK(shard_data_[SidToId(shard->shard_id())].local_mask & ACTIVE);
+  ShardId sid = SidToId(shard->shard_id());
+  auto& sd = shard_data_[sid];
+
+  DCHECK(sd.local_mask & ACTIVE);
+  DCHECK_EQ(sd.local_mask & KEYLOCK_ACQUIRED, 0);
+  sd.local_mask &= ~OUT_OF_ORDER;
 
   // If a more recent transaction already commited, we abort
   if (shard->committed_txid() >= txid_)
@@ -1120,9 +1125,6 @@ bool Transaction::ScheduleInShard(EngineShard* shard) {
   KeyLockArgs lock_args;
   IntentLock::Mode mode = LockMode();
   bool lock_granted = false;
-
-  ShardId sid = SidToId(shard->shard_id());
-  auto& sd = shard_data_[sid];
 
   // Acquire intent locks. Intent locks are always acquired, even if already locked by others.
   if (!IsGlobal()) {
@@ -1147,7 +1149,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard) {
   if (!txq->Empty() && txid_ < txq->TailScore() && !lock_granted) {
     if (sd.local_mask & KEYLOCK_ACQUIRED) {
       shard->db_slice().Release(mode, lock_args);
-      sd.local_mask &= ~(KEYLOCK_ACQUIRED | OUT_OF_ORDER);
+      sd.local_mask &= ~KEYLOCK_ACQUIRED;
     }
     return false;
   }
