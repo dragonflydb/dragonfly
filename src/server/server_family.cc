@@ -873,6 +873,10 @@ void ServerFamily::SnapshotScheduling() {
   if (!cron_expr) {
     return;
   }
+  if (shard_set->IsTieringEnabled()) {
+    LOG(ERROR) << "Snapshot not allowed when using tiering.  Exiting..";
+    exit(1);
+  }
 
   const auto loading_check_interval = std::chrono::seconds(10);
   while (service_.GetGlobalState() == GlobalState::LOADING) {
