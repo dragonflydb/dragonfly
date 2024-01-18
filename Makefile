@@ -5,6 +5,7 @@ HELIO_USE_STATIC_LIBS = ON
 HELIO_OPENSSL_USE_STATIC_LIBS = ON
 HELIO_ENABLE_GIT_VERSION = ON
 HELIO_WITH_UNWIND = OFF
+RELEASE_DIR=build-release
 
 # Some distributions (old fedora) have incorrect dependencies for crypto
 # so we add -lz for them.
@@ -29,14 +30,14 @@ HELIO_FLAGS = -DHELIO_RELEASE_FLAGS="-g" \
 .PHONY: default
 
 configure:
-	cmake -L -B build-release -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS)
+	cmake -L -B $(RELEASE_DIR) -DCMAKE_BUILD_TYPE=Release -GNinja $(HELIO_FLAGS)
 
 build:
-	cd build-release; \
+	cd $(RELEASE_DIR); \
 	ninja dragonfly && ldd dragonfly
 
 package:
-	cd build-release; \
+	cd $(RELEASE_DIR); \
 	tar cvfz $(RELEASE_NAME)-debug.tar.gz dragonfly ../LICENSE.md; \
 	objcopy \
 		--remove-section=".debug_*" \
