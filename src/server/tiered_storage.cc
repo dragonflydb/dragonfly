@@ -631,9 +631,6 @@ std::pair<bool, PrimeIterator> TieredStorage::CanScheduleOffload(DbIndex db_inde
         chrono::steady_clock::now() + chrono::microseconds(throttle_usec);
     stats_.throttled_write_cnt++;
 
-    // TODO: we should reset `it` in case concurrent inserts invalidated the iterator.
-    // This can happen because we operate on the table from differrent fibers
-    // (for example, due to inline operations or evictions).
     throttle_ec_.await_until([&]() { return num_active_requests_ < max_pending_writes; }, next);
 
     PrimeTable* pt = db_slice_.GetTables(db_index).first;

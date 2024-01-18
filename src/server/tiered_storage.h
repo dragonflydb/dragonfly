@@ -49,6 +49,9 @@ class TieredStorage {
   class InflightWriteRequest;
 
   void WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_len);
+
+  // Returns a pair consisting of an bool denoting whether we can write to disk, and updated
+  // iterator as this function can yield.
   std::pair<bool, PrimeIterator> CanScheduleOffload(DbIndex db_index, PrimeIterator it,
                                                     std::string_view key);
 
