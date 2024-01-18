@@ -1878,13 +1878,13 @@ async def test_heartbeat_eviction_propagation(df_local_factory):
 @pytest.mark.asyncio
 async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(
-        proactor_threads=1,
+        proactor_threads=2,
         cache_mode="true",
         maxmemory="256mb",
         logtostdout="true",
         enable_heartbeat_eviction="false",
     )
-    replica = df_local_factory.create(proactor_threads=1)
+    replica = df_local_factory.create(proactor_threads=2)
     df_local_factory.start_all([master, replica])
 
     c_master = master.client()
