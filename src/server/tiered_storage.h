@@ -29,7 +29,7 @@ class TieredStorage {
   PrimeIterator Load(DbIndex db_index, PrimeIterator it, std::string_view key);
 
   // Schedules unloading of the item, pointed by the iterator.
-  std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it);
+  std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it, std::string_view key);
 
   void CancelIo(DbIndex db_index, PrimeIterator it);
 
@@ -49,6 +49,8 @@ class TieredStorage {
   class InflightWriteRequest;
 
   void WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_len);
+  std::pair<bool, PrimeIterator> CanScheduleOffload(DbIndex db_index, PrimeIterator it,
+                                                    std::string_view key);
 
   bool FlushPending(DbIndex db_index, unsigned bin_index);
 
