@@ -27,8 +27,7 @@ extern "C" {
 #include "strings/human_readable.h"
 
 ABSL_FLAG(bool, lock_on_hashtags, false,
-          "When true, locks are done in the {hashtag} level instead of key level. "
-          "Only use this with --cluster_mode=emulated|yes.");
+          "When true, locks are done in the {hashtag} level instead of key level.");
 
 namespace dfly {
 

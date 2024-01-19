@@ -858,11 +858,8 @@ void EngineShardSet::TEST_EnableCacheMode() {
 }
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  if (ClusterConfig::IsEnabledOrEmulated()) {
-    string_view v_hash_tag = ClusterConfig::KeyTag(v);
-    if (v_hash_tag.size() != v.size()) {
-      v = v_hash_tag;
-    }
+  if (ClusterConfig::IsShardedByTag()) {
+    v = ClusterConfig::KeyTag(v);
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);

@@ -51,10 +51,6 @@ bool ClusterConfig::IsEmulated() {
   return cluster_mode == ClusterMode::kEmulatedCluster;
 }
 
-bool ClusterConfig::IsEnabledOrEmulated() {
-  return IsEnabled() || IsEmulated();
-}
-
 string_view ClusterConfig::KeyTag(string_view key) {
   size_t start = key.find('{');
   if (start == key.npos) {
