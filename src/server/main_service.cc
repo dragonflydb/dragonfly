@@ -727,11 +727,6 @@ Service::Service(ProactorPool* pp)
   CHECK(pp);
   CHECK(shard_set == NULL);
 
-  if (KeyLockArgs::IsLockHashTagEnabled() && !ClusterConfig::IsEnabledOrEmulated()) {
-    LOG(ERROR) << "Setting --lock_on_hashtags without --cluster_mode is unsupported";
-    exit(1);
-  }
-
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
   LOG(INFO) << "PRINT STACKTRACES REGISTERED";
   pp_.GetNextProactor()->RegisterSignal({SIGUSR1}, [this](int signal) {
