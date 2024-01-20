@@ -21,7 +21,7 @@ namespace dfly::search {
 template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
   SimpleValueSortIndex(PMR_NS::memory_resource* mr);
 
-  ResultScore Lookup(DocId doc) const override;
+  SortableValue Lookup(DocId doc) const override;
   std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;

@@ -43,6 +43,7 @@ struct SortOption {
   bool descending = false;
 };
 
+// Comparable string stored as char[]. Used to reduce size of std::variant with strings.
 struct WrappedStrPtr {
   // Intentionally implicit and const std::string& for use in templates
   WrappedStrPtr(const PMR_NS::string& s);
@@ -56,7 +57,13 @@ struct WrappedStrPtr {
   std::unique_ptr<char[]> ptr;
 };
 
+// Score produced either by KNN (float) or SORT (double / wrapped str)
 using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
+
+// Values are eitehr sortable as doubles or strings, or not sortable at all.
+// Contrary to ResultScore it doesn't include KNN results and is not optimized for smaller struct
+// size.
+using SortableValue = std::variant<std::monostate, double, std::string>;
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
@@ -81,7 +88,7 @@ struct BaseIndex {
 
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
-  virtual ResultScore Lookup(DocId doc) const = 0;
+  virtual SortableValue Lookup(DocId doc) const = 0;
   virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
 };
 

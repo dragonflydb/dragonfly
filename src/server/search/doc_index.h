@@ -127,7 +127,7 @@ class ShardDocIndex {
                       search::SearchAlgorithm* search_algo) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
-  std::vector<std::vector<std::pair<std::string, search::ResultScore>>> SearchForAggregator(
+  std::vector<absl::flat_hash_map<std::string, search::SortableValue>> SearchForAggregator(
       const OpArgs& op_args, ArgSlice load_fields, search::SearchAlgorithm* search_algo) const;
 
   // Return whether base index matches

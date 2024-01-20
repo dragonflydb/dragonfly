@@ -10,13 +10,16 @@
 #include <string>
 #include <variant>
 
+#include "core/search/base.h"
 #include "facade/reply_builder.h"
 #include "io/io.h"
 
 namespace dfly::aggregate {
 
-using Value = std::variant<std::monostate, double, std::string>;
+using Value = ::dfly::search::SortableValue;
 using DocValues = absl::flat_hash_map<std::string, Value>;  // documents sent through the pipeline
+
+// TODO: Replace DocValues with compact linear search map instead of hash map
 
 using PipelineResult = io::Result<std::vector<DocValues>, facade::ErrorReply>;
 using PipelineStep = std::function<PipelineResult(std::vector<DocValues>)>;  // Group, Sort, etc.

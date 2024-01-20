@@ -704,40 +704,19 @@ void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
     if (auto* index = es->search_indices()->GetIndex(params->index); index) {
       query_results[es->shard_id()] =
           index->SearchForAggregator(t->GetOpArgs(es), params->load_fields, &search_algo);
-      VLOG(0) << "Collected " << query_results[es->shard_id()].size();
     }
     return OpStatus::OK;
   });
 
-  // TODO: REMOVE THIS BRIDGE
-  auto convert = [](const search::ResultScore& score) -> aggregate::Value {
-    if (holds_alternative<search::WrappedStrPtr>(score))
-      return string(string_view(get<search::WrappedStrPtr>(score)));
-
-    if (holds_alternative<double>(score))
-      return get<double>(score);
-
-    return std::monostate{};
-  };
-
   vector<aggregate::DocValues> values;
-  for (const auto& sub_results : query_results) {
-    for (const auto& entry : sub_results) {
-      aggregate::DocValues entry_kv;
-      for (const auto& [k, v] : entry) {
-        entry_kv[k] = convert(v);
-      }
-      values.push_back(std::move(entry_kv));
-    }
+  for (auto& sub_results : query_results) {
+    values.insert(values.end(), make_move_iterator(sub_results.begin()),
+                  make_move_iterator(sub_results.end()));
   }
-
-  VLOG(0) << "In total " << values.size();
 
   auto agg_results = aggregate::Process(std::move(values), params->steps);
   if (!agg_results.has_value())
     return cntx->SendError(agg_results.error());
-
-  VLOG(0) << "Processed " << agg_results->size();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   Overloaded replier{

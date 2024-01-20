@@ -21,7 +21,7 @@ template <typename T>
 SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr) : values_{mr} {
 }
 
-template <typename T> ResultScore SimpleValueSortIndex<T>::Lookup(DocId doc) const {
+template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) const {
   DCHECK_LT(doc, values_.size());
   return values_[doc];
 }
