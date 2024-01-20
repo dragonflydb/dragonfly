@@ -65,8 +65,7 @@ cd ${BASE_PATH}
 
 # if dbg package, then update the control file to reflect that
 if [[ $VERSION_FILE == *"-dbg"* ]]; then
-    ls -l
-    sed -i 's/^Package: dragonfly$/Package: dragonfly-dbg/' ./control
+    sed -i 's/^Package: dragonfly$/Package: dragonfly-dbg/' ./debian/control
 fi
 
 dpkg-buildpackage --build=binary || cleanup "failed to generate the package"
