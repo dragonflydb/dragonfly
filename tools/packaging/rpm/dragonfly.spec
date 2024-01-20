@@ -1,5 +1,4 @@
-%define     pkg_name dragonfly
-%define     archive dragonfly-%{_arch}.tar.gz
+%define     archive %{pkg_name}-%{_arch}.tar.gz
 
 # How the package name looks like
 %define     _build_name_fmt  %%{NAME}.%%{ARCH}.rpm
