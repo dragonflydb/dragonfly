@@ -29,7 +29,7 @@ getent passwd dfly >/dev/null || useradd -r -g dfly -M -s /sbin/nologin -c "User
 
 %build
 tar xvfz %{SOURCE0}
-mv ./dragonfly-%{_arch} ./dragonfly
+mv ./{%pkg_name}-%{_arch} ./dragonfly
 
 %install
 mkdir -p %{buildroot}/usr/local/bin
