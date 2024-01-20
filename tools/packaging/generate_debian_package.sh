@@ -81,6 +81,7 @@ for fl in ${TEMP_RESULT_FILE}; do
 done
 
 cd ${MY_DIR}
+ls -lh *.deb
 RESULT_FILE=$(ls *.deb 2>/dev/null)
 echo "successfully built the install package at ${MY_DIR}/${RESULT_FILE}"
 rm -rf ${TEMP_WORK_DIR}
