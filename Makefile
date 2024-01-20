@@ -38,7 +38,7 @@ build:
 
 package:
 	cd $(RELEASE_DIR); \
-	tar cvfz $(RELEASE_NAME)-debug.tar.gz dragonfly ../LICENSE.md; \
+	tar cvfz $(RELEASE_NAME)-dbg.tar.gz dragonfly ../LICENSE.md; \
 	objcopy \
 		--remove-section=".debug_*" \
 		--remove-section="!.debug_line" \
