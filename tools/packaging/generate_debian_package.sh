@@ -39,7 +39,7 @@ CHANGELOG_SCRIPT=generate_changelog.sh
 ROOT_ABS_PATH=$(realpath $SCRIPT_PATH/../..)
 TEMP_WORK_DIR=$(mktemp -d)
 BASE_DIR=${TEMP_WORK_DIR}/packages
-BASE_PATH=${BASE_DIR}/dragonfly
+BASE_PATH=${BASE_DIR}/${VERSION_FILE}
 BINARY_TARGET_DIR=${BASE_PATH}/debian/bin
 
 function cleanup {
@@ -56,11 +56,7 @@ cp ${SCRIPT_PATH}/${CHANGELOG_SCRIPT} ${BASE_PATH} || cleanup "failed to copy ch
 
 mkdir -p ${BINARY_TARGET_DIR} || cleanup "failed to create install directory for building the package"
 
-if [[ ${VERSION_FILE} == *"dragonfly-dbg"* ]]; then
-    cp ${VERSION_FILE} ${BINARY_TARGET_DIR}/dragonfly-dbg || cleanup "failed to copy debug binary to target dir"
-else
-    cp ${VERSION_FILE} ${BINARY_TARGET_DIR}/dragonfly || cleanup "failed to copy binary to target dir"
-fi
+cp ${VERSION_FILE} ${BINARY_TARGET_DIR}/dragonfly || cleanup "failed to copy binary to target dir"
 
 ${BASE_PATH}/${CHANGELOG_SCRIPT} ${ROOT_ABS_PATH} || cleanup "failed to generate changelog for package"
 
