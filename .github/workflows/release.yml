@@ -123,6 +123,7 @@ jobs:
           else
             echo "Creating package for ${{github.ref_name}}"
             ./tools/packaging/rpm/build_rpm.sh ${{ env.RELEASE_DIR }}/dragonfly-x86_64.tar.gz ${{github.ref_name}}
+            ./tools/packaging/rpm/build_rpm.sh ${{ env.RELEASE_DIR }}/dragonfly-x86_64-dbg.tar.gz ${{github.ref_name}}
           fi
 
       - name: Run regression tests
