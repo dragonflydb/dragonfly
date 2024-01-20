@@ -62,6 +62,12 @@ ${BASE_PATH}/${CHANGELOG_SCRIPT} ${ROOT_ABS_PATH} || cleanup "failed to generate
 
 MY_DIR=${PWD}
 cd ${BASE_PATH}
+
+# if dbg package, then update the control file to reflect that
+if [[ $VERSION_FILE == *"-dbg"* ]]; then
+    sed -i 's/^Package: dragonfly$/Package: dragonfly-dbg/' control
+fi
+
 dpkg-buildpackage --build=binary || cleanup "failed to generate the package"
 
 TEMP_RESULT_FILE=$(ls ../*.deb)
