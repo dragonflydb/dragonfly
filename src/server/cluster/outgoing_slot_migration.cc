@@ -12,29 +12,29 @@ namespace dfly {
 class OutgoingMigration::Flow {
  public:
   Flow(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal, Context* cntx)
-      : streamer(slice, std::move(slots), sync_id, journal, cntx) {
+      : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
   }
 
   void Start(io::Sink* dest) {
-    streamer.Start(dest);
-    state = MigrationState::C_FULL_SYNC;
+    streamer_.Start(dest);
+    state_ = MigrationState::C_FULL_SYNC;
   }
 
   MigrationState GetState() const {
-    return state == MigrationState::C_FULL_SYNC && streamer.IsStableSync()
+    return state_ == MigrationState::C_FULL_SYNC && streamer_.IsStableSync()
                ? MigrationState::C_STABLE_SYNC
-               : state;
+               : state_;
   }
 
  private:
-  RestoreStreamer streamer;
-  MigrationState state = MigrationState::C_CONNECTING;
+  RestoreStreamer streamer_;
+  MigrationState state_ = MigrationState::C_CONNECTING;
 };
 
 OutgoingMigration::OutgoingMigration(std::uint32_t flows_num, std::string ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots,
                                      Context::ErrHandler err_handler)
-    : host_ip(ip), port(port), slots(slots), cntx(err_handler), flows(flows_num) {
+    : host_ip_(ip), port_(port), slots_(slots), cntx_(err_handler), flows_(flows_num) {
 }
 
 OutgoingMigration::~OutgoingMigration() = default;
@@ -43,7 +43,7 @@ void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Jou
                                   io::Sink* dest) {
   // TODO refactor: maybe we can use vector<slotRange> instead of SlotSet
   SlotSet sset;
-  for (const auto& slot_range : slots) {
+  for (const auto& slot_range : slots_) {
     for (auto i = slot_range.start; i <= slot_range.end; ++i)
       sset.insert(i);
   }
@@ -51,14 +51,14 @@ void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Jou
   const auto shard_id = slice->shard_id();
 
   std::scoped_lock lck(flows_mu_);
-  flows[shard_id] = std::make_unique<Flow>(slice, std::move(sset), sync_id, journal, &cntx);
-  flows[shard_id]->Start(dest);
+  flows_[shard_id] = std::make_unique<Flow>(slice, std::move(sset), sync_id, journal, &cntx_);
+  flows_[shard_id]->Start(dest);
 }
 
 MigrationState OutgoingMigration::GetState() {
   std::scoped_lock lck(flows_mu_);
   MigrationState min_state = MigrationState::C_STABLE_SYNC;
-  for (const auto& flow : flows) {
+  for (const auto& flow : flows_) {
     if (flow)
       min_state = std::min(min_state, flow->GetState());
   }

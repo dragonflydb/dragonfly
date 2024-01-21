@@ -22,7 +22,6 @@
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
-//#include "server/replica.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 
