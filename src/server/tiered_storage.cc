@@ -636,6 +636,9 @@ std::pair<bool, PrimeIterator> TieredStorage::CanScheduleOffload(DbIndex db_inde
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
     if (!it.IsOccupied() || it->first != key) {
       res_it = pt->Find(key);
+      // During the database write flow, when offloading a value, we acquire a write lock on the
+      // key. No other operations are allowed to modify or remove the key until the lock is
+      // released.
       CHECK(!res_it.is_done());
       VLOG(1) << "Update iterator after await";
     }
