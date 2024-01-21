@@ -626,7 +626,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
       TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards. handle this
-    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
+    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it, key);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
