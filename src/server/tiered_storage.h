@@ -45,6 +45,8 @@ class TieredStorage {
 
   void CancelAllIos(DbIndex db_index);
 
+  std::error_code Read(size_t offset, size_t len, char* dest);
+
  private:
   class InflightWriteRequest;
 
@@ -61,7 +63,6 @@ class TieredStorage {
 
   void FinishIoRequest(int io_res, InflightWriteRequest* req);
   void SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest);
-  std::error_code Read(size_t offset, size_t len, char* dest);
 
   DbSlice& db_slice_;
   IoMgr io_mgr_;
