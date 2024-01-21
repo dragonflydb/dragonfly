@@ -96,7 +96,6 @@ class ServerState {  // public struct - to allow initialization.
   enum TxType { GLOBAL, NORMAL, QUICK, INLINE, NUM_TX_TYPES };
   struct Stats {
     std::array<uint64_t, NUM_TX_TYPES> tx_type_cnt;
-    uint64_t tx_shard_ooo_cnt = 0;
     uint64_t tx_schedule_cancel_cnt = 0;
 
     uint64_t eval_io_coordination_cnt = 0;

@@ -1920,7 +1920,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       val.pop_back();  // last comma.
       append("tx_width_freq", val);
     }
-    append("tx_shard_ooo_total", m.coordinator_stats.tx_shard_ooo_cnt);
+    append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
     append("tx_queue_len", m.tx_queue_len);
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);

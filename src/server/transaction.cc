@@ -1127,7 +1127,6 @@ bool Transaction::ScheduleInShard(EngineShard* shard) {
     sd.local_mask |= KEYLOCK_ACQUIRED;
     if (lock_granted) {
       sd.local_mask |= OUT_OF_ORDER;
-      ServerState::tlocal()->stats.tx_shard_ooo_cnt++;
     }
 
     DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
