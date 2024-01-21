@@ -1,5 +1,6 @@
 BUILD_ARCH := $(shell uname -m)
 RELEASE_NAME := "dragonfly-${BUILD_ARCH}"
+DEBUG_RELEASE_NAME := "dragonfly-dbg-${BUILD_ARCH}"
 HELIO_RELEASE_FLAGS = -DHELIO_RELEASE_FLAGS="-g"
 HELIO_USE_STATIC_LIBS = ON
 HELIO_OPENSSL_USE_STATIC_LIBS = ON
@@ -38,6 +39,8 @@ build:
 
 package:
 	cd $(RELEASE_DIR); \
+	cp dragonfly $(DEBUG_RELEASE_NAME); \
+	tar cvfz $(DEBUG_RELEASE_NAME).tar.gz $(DEBUG_RELEASE_NAME) ../LICENSE.md; \
 	objcopy \
 		--remove-section=".debug_*" \
 		--remove-section="!.debug_line" \

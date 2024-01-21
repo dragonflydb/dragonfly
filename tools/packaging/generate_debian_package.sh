@@ -39,7 +39,7 @@ CHANGELOG_SCRIPT=generate_changelog.sh
 ROOT_ABS_PATH=$(realpath $SCRIPT_PATH/../..)
 TEMP_WORK_DIR=$(mktemp -d)
 BASE_DIR=${TEMP_WORK_DIR}/packages
-BASE_PATH=${BASE_DIR}/dragonfly
+BASE_PATH=${BASE_DIR}/${VERSION_FILE}
 BINARY_TARGET_DIR=${BASE_PATH}/debian/bin
 
 function cleanup {
@@ -62,6 +62,12 @@ ${BASE_PATH}/${CHANGELOG_SCRIPT} ${ROOT_ABS_PATH} || cleanup "failed to generate
 
 MY_DIR=${PWD}
 cd ${BASE_PATH}
+
+# if dbg package, then update the control file to reflect that
+if [[ $VERSION_FILE == *"-dbg"* ]]; then
+    sed -i 's/^Package: dragonfly$/Package: dragonfly-dbg/' ./debian/control
+fi
+
 dpkg-buildpackage --build=binary || cleanup "failed to generate the package"
 
 TEMP_RESULT_FILE=$(ls ../*.deb)
@@ -75,6 +81,7 @@ for fl in ${TEMP_RESULT_FILE}; do
 done
 
 cd ${MY_DIR}
+ls -lh *.deb
 RESULT_FILE=$(ls *.deb 2>/dev/null)
 echo "successfully built the install package at ${MY_DIR}/${RESULT_FILE}"
 rm -rf ${TEMP_WORK_DIR}

@@ -1,5 +1,4 @@
-%define     pkg_name dragonfly
-%define     archive dragonfly-%{_arch}.tar.gz
+%define     archive %{pkg_name}-%{_arch}.tar.gz
 
 # How the package name looks like
 %define     _build_name_fmt  %%{NAME}.%%{ARCH}.rpm
@@ -30,7 +29,7 @@ getent passwd dfly >/dev/null || useradd -r -g dfly -M -s /sbin/nologin -c "User
 
 %build
 tar xvfz %{SOURCE0}
-mv ./dragonfly-%{_arch} ./dragonfly
+mv ./%{pkg_name}-%{_arch} ./dragonfly
 
 %install
 mkdir -p %{buildroot}/usr/local/bin
