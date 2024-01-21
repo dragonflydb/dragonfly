@@ -1159,8 +1159,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricHeader("transaction_types_total", "Transaction counts by their types",
                      MetricType::COUNTER, &resp->body());
 
-  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "ooo", "quick",
-                                                         "inline"};
+  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "quick", "inline"};
   for (unsigned type = 0; type < ServerState::NUM_TX_TYPES; ++type) {
     if (tc[type] > 0) {
       AppendMetricValue("transaction_types_total", tc[type], {"type"}, {kTxTypeNames[type]},
@@ -1908,8 +1907,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("TRANSACTION", true)) {
     const auto& tc = m.coordinator_stats.tx_type_cnt;
     string val = StrCat("global=", tc[ServerState::GLOBAL], ",normal=", tc[ServerState::NORMAL],
-                        ",ooo=", tc[ServerState::OOO], ",quick=", tc[ServerState::QUICK],
-                        ",inline=", tc[ServerState::INLINE]);
+                        ",quick=", tc[ServerState::QUICK], ",inline=", tc[ServerState::INLINE]);
     append("tx_type_cnt", val);
     val.clear();
     for (unsigned width = 0; width < shard_set->size(); ++width) {
@@ -1922,12 +1920,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       val.pop_back();  // last comma.
       append("tx_width_freq", val);
     }
+    append("tx_shard_ooo_total", m.coordinator_stats.tx_shard_ooo_cnt);
+    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
+    append("tx_queue_len", m.tx_queue_len);
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
-    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
-    append("tx_queue_len", m.tx_queue_len);
     append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
     append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
     append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);

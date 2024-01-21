@@ -156,8 +156,9 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,                 // Set on all active shards.
-    OUT_OF_ORDER = 1 << 2,      // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED is not set.
+    ACTIVE = 1,  // Set on all active shards.
+    OUT_OF_ORDER =
+        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED is not set.
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
@@ -309,10 +310,6 @@ class Transaction {
 
   bool IsGlobal() const;
 
-  bool IsOOO() const {
-    return coordinator_state_ & COORD_OOO;
-  }
-
   // If blocking tx was woken up on this shard, get wake key.
   std::optional<std::string_view> GetWakeKey(ShardId sid) const;
 
@@ -422,7 +419,6 @@ class Transaction {
     COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
     COORD_BLOCKED = 1 << 2,
     COORD_CANCELLED = 1 << 3,
-    COORD_OOO = 1 << 4,
   };
 
   struct PerShardCache {

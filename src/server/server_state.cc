@@ -39,6 +39,7 @@ auto ServerState::Stats::operator=(Stats&& other) -> Stats& {
   this->eval_shardlocal_coordination_cnt = other.eval_shardlocal_coordination_cnt;
   this->eval_squashed_flushes = other.eval_squashed_flushes;
   this->tx_schedule_cancel_cnt = other.tx_schedule_cancel_cnt;
+  this->tx_shard_ooo_cnt = other.tx_shard_ooo_cnt;
 
   delete[] this->tx_width_freq_arr;
   this->tx_width_freq_arr = other.tx_width_freq_arr;
@@ -58,6 +59,7 @@ ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerSta
   this->eval_shardlocal_coordination_cnt += other.eval_shardlocal_coordination_cnt;
   this->eval_squashed_flushes += other.eval_squashed_flushes;
   this->tx_schedule_cancel_cnt += other.tx_schedule_cancel_cnt;
+  this->tx_shard_ooo_cnt += other.tx_shard_ooo_cnt;
 
   this->multi_squash_executions += other.multi_squash_executions;
   this->multi_squash_exec_hop_usec += other.multi_squash_exec_hop_usec;

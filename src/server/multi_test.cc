@@ -556,9 +556,9 @@ TEST_F(MultiTest, MultiOOO) {
   // OOO works in LOCK_AHEAD mode.
   int mode = absl::GetFlag(FLAGS_multi_exec_mode);
   if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
-    EXPECT_EQ(200, metrics.coordinator_stats.tx_type_cnt[ServerState::OOO]);
+    EXPECT_EQ(200, metrics.coordinator_stats.tx_shard_ooo_cnt);
   else
-    EXPECT_EQ(0, metrics.coordinator_stats.tx_type_cnt[ServerState::OOO]);
+    EXPECT_EQ(0, metrics.coordinator_stats.tx_shard_ooo_cnt);
 }
 
 // Lua scripts lock their keys ahead and thus can run out of order.

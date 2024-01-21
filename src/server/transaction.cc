@@ -66,8 +66,6 @@ void RecordTxScheduleStats(const Transaction* tx) {
   ss->stats.tx_width_freq_arr[tx->GetUniqueShardCnt() - 1]++;
   if (tx->IsGlobal()) {
     ss->stats.tx_type_cnt[ServerState::GLOBAL]++;
-  } else if (tx->IsOOO()) {
-    ss->stats.tx_type_cnt[ServerState::OOO]++;
   } else {
     ss->stats.tx_type_cnt[ServerState::NORMAL]++;
   }
@@ -623,7 +621,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 void Transaction::ScheduleInternal() {
   DCHECK(!shard_data_.empty());
   DCHECK_EQ(0u, txid_);
-  DCHECK_EQ(0, coordinator_state_ & (COORD_SCHED | COORD_OOO));
+  DCHECK_EQ(0, coordinator_state_ & COORD_SCHED);
   DCHECK_GT(unique_shard_cnt_, 0u);
 
   DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards";
@@ -646,15 +644,8 @@ void Transaction::ScheduleInternal() {
     if (schedule_fails.load(memory_order_relaxed) == 0) {
       coordinator_state_ |= COORD_SCHED;
 
-      bool all_ooo = false;
-      IterateActiveShards([&](auto& sd, auto) { all_ooo &= (sd.local_mask & OUT_OF_ORDER); });
-      if (all_ooo)
-        coordinator_state_ |= COORD_OOO;
-
       RecordTxScheduleStats(this);
-      VLOG(2) << "Scheduled " << DebugId()
-              << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
-              << " num_shards: " << unique_shard_cnt_;
+      VLOG(2) << "Scheduled " << DebugId() << " num_shards: " << unique_shard_cnt_;
       break;
     }
 
@@ -768,7 +759,6 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   if (schedule_fast) {
     CHECK(!cb_ptr_);  // we should have reset it within the callback.
     if (was_ooo) {
-      coordinator_state_ |= COORD_OOO;
       ss->stats.tx_type_cnt[run_inline ? ServerState::INLINE : ServerState::QUICK]++;
     } else {
       ss->stats.tx_type_cnt[ServerState::NORMAL]++;
@@ -1137,6 +1127,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard) {
     sd.local_mask |= KEYLOCK_ACQUIRED;
     if (lock_granted) {
       sd.local_mask |= OUT_OF_ORDER;
+      ServerState::tlocal()->stats.tx_shard_ooo_cnt++;
     }
 
     DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
