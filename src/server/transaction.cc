@@ -553,7 +553,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   // Log to jounrnal only once the command finished running
   if (is_concluding || (multi_ && multi_->concluding))
-    LogAutoJournalOnShard(shard);
+    LogAutoJournalOnShard(shard, result);
 
   // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
   // and successive hops are run by continuation_trans_ in engine shard.
@@ -1030,6 +1030,10 @@ ShardId Transaction::GetUniqueShard() const {
   return unique_shard_id_;
 }
 
+optional<SlotId> Transaction::GetUniqueSlotId() const {
+  return unique_slot_checker_.GetUniqueSlotId();
+}
+
 KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;
@@ -1072,7 +1076,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
       DCHECK_EQ(sd.is_armed, false);
       unlocked_keys = false;
     } else {
-      LogAutoJournalOnShard(shard);
+      LogAutoJournalOnShard(shard, result);
     }
   }
 
@@ -1315,7 +1319,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto* shard = EngineShard::tlocal();
   auto result = cb(this, shard);
   shard->db_slice().OnCbFinish();
-  LogAutoJournalOnShard(shard);
+  LogAutoJournalOnShard(shard, result);
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
@@ -1442,7 +1446,7 @@ optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
   return GetShardArgs(sid).at(sd.wake_key_pos);
 }
 
-void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
+void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {
   // TODO: For now, we ignore non shard coordination.
   if (shard == nullptr)
     return;
@@ -1455,12 +1459,20 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   if (cid_->IsWriteOnly() == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
-  // If autojournaling was disabled and not re-enabled, skip it
-  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !renabled_auto_journal_.load(memory_order_relaxed))
-    return;
-
   auto journal = shard->journal();
   if (journal == nullptr)
+    return;
+
+  if (result.status != OpStatus::OK) {
+    // We log NOOP even for NO_AUTOJOURNAL commands because the non-success status could have been
+    // due to OOM in a single shard, while other shards succeeded
+    journal->RecordEntry(txid_, journal::Op::NOOP, db_index_, unique_shard_cnt_,
+                         unique_slot_checker_.GetUniqueSlotId(), journal::Entry::Payload{}, true);
+    return;
+  }
+
+  // If autojournaling was disabled and not re-enabled, skip it
+  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !renabled_auto_journal_.load(memory_order_relaxed))
     return;
 
   // TODO: Handle complex commands like LMPOP correctly once they are implemented.

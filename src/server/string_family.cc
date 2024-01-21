@@ -323,21 +323,38 @@ int64_t AbsExpiryToTtl(int64_t abs_expiry_time, bool as_milli) {
 }
 
 // Returns true if keys were set, false otherwise.
-OpStatus OpMSet(const OpArgs& op_args, ArgSlice args) {
+void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
 
   SetCmd::SetParams params;
   SetCmd sg(op_args, false);
 
-  for (size_t i = 0; i < args.size(); i += 2) {
+  size_t i = 0;
+  for (; i < args.size(); i += 2) {
     DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
     OpResult<optional<string>> res = sg.Set(params, args[i], args[i + 1]);
     if (res.status() != OpStatus::OK) {  // OOM for example.
-      return res.status();
+      success->store(false);
+      break;
     }
   }
 
-  return OpStatus::OK;
+  if (auto journal = op_args.shard->journal(); journal) {
+    // We write a custom journal because an OOM in the above loop could lead to partial success, so
+    // we replicate only what was changed.
+    string_view cmd;
+    ArgSlice cmd_args;
+    if (i == 0) {
+      // All shards must record the tx was executed for the replica to execute it, so we send a PING
+      // in case nothing was changed
+      cmd = "PING";
+    } else {
+      // journal [0, i)
+      cmd = "MSET";
+      cmd_args = ArgSlice(&args[0], i);
+    }
+    RecordJournal(op_args, cmd, cmd_args, op_args.tx->GetUniqueShardCnt());
+  }
 }
 
 // See comment for SetCmd::Set() for when and how OpResult's value (i.e. optional<string>) is set.
@@ -609,7 +626,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
       TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards. handle this
-    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
+    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it, key);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -1227,13 +1244,15 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     LOG(INFO) << "MSET/" << transaction->GetUniqueShardCnt() << str;
   }
 
+  atomic_bool success = true;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    return OpMSet(t->GetOpArgs(shard), args);
+    OpMSet(t->GetOpArgs(shard), args, &success);
+    return OpStatus::OK;
   };
 
   OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
-  if (status == OpStatus::OK) {
+  if (success.load()) {
     cntx->SendOk();
   } else {
     cntx->SendError(status);
@@ -1261,19 +1280,20 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
   };
 
   transaction->Execute(std::move(cb), false);
-  bool to_skip = exists.load(memory_order_relaxed) == true;
+  const bool to_skip = exists.load(memory_order_relaxed);
 
+  atomic_bool success = true;
   auto epilog_cb = [&](Transaction* t, EngineShard* shard) {
     if (to_skip)
       return OpStatus::OK;
 
     auto args = t->GetShardArgs(shard->shard_id());
-    return OpMSet(t->GetOpArgs(shard), std::move(args));
+    OpMSet(t->GetOpArgs(shard), std::move(args), &success);
+    return OpStatus::OK;
   };
-
   transaction->Execute(std::move(epilog_cb), true);
 
-  cntx->SendLong(to_skip ? 0 : 1);
+  cntx->SendLong(to_skip || !success.load() ? 0 : 1);
 }
 
 void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
@@ -1500,6 +1520,9 @@ constexpr uint32_t kClThrottle = THROTTLE;
 }  // namespace acl
 
 void StringFamily::Register(CommandRegistry* registry) {
+  constexpr uint32_t kMSetMask =
+      CO::WRITE | CO::DENYOOM | CO::INTERLEAVED_KEYS | CO::NO_AUTOJOURNAL;
+
   registry->StartFamily();
   *registry
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kSet}.HFUNC(Set)
@@ -1522,10 +1545,8 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::kGetSet}.HFUNC(GetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, acl::kMGet}.HFUNC(
              MGet)
-      << CI{"MSET", CO::WRITE | CO::DENYOOM | CO::INTERLEAVED_KEYS, -3, 1, -1, acl::kMSet}.HFUNC(
-             MSet)
-      << CI{"MSETNX", CO::WRITE | CO::DENYOOM | CO::INTERLEAVED_KEYS, -3, 1, -1, acl::kMSetNx}
-             .HFUNC(MSetNx)
+      << CI{"MSET", kMSetMask, -3, 1, -1, acl::kMSet}.HFUNC(MSet)
+      << CI{"MSETNX", kMSetMask, -3, 1, -1, acl::kMSetNx}.HFUNC(MSetNx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kStrLen}.HFUNC(StrLen)
       << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, acl::kGetRange}.HFUNC(GetRange)
       << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, acl::kSubStr}.HFUNC(
