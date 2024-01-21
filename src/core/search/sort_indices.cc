@@ -10,6 +10,7 @@
 #include <absl/strings/str_split.h>
 
 #include <algorithm>
+#include <type_traits>
 
 namespace dfly::search {
 
@@ -23,7 +24,11 @@ SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr) : val
 
 template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) const {
   DCHECK_LT(doc, values_.size());
-  return values_[doc];
+  if constexpr (is_same_v<T, PMR_NS::string>) {
+    return std::string(values_[doc]);
+  } else {
+    return values_[doc];
+  }
 }
 
 template <typename T>

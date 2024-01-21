@@ -293,6 +293,9 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
       params.params = ParseQueryParams(&parser);
       continue;
     }
+
+    cntx->SendError(absl::StrCat("Unknown clause: ", parser.Peek()));
+    return nullopt;
   }
 
   if (auto err = parser.Error(); err) {

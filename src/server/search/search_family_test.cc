@@ -629,4 +629,21 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
                                    IsArray("max_val", "100"), IsArray("min_val", "0"))));
 }
 
+TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
+  for (size_t i = 0; i < 101; i++) {  // 51 even, 50 odd
+    Run({"hset", absl::StrCat("k", i), "even", (i % 2 == 0) ? "true" : "false", "value",
+         absl::StrCat(i)});
+  }
+  Run({"ft.create", "i1", "schema", "value", "numeric", "sortable"});
+
+  // clang-format off
+  auto resp = Run({"ft.aggregate", "i1", "*",
+                  "LOAD", "1", "even",
+                  "GROUPBY", "1", "even"});
+  // clang-format on
+
+  EXPECT_THAT(resp, IsUnordArray(IsUnordArray(IsArray("even", "false")),
+                                 IsUnordArray(IsArray("even", "true"))));
+}
+
 }  // namespace dfly
