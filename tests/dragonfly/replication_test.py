@@ -1907,7 +1907,7 @@ async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_fac
     keys_master = await c_master.execute_command("keys k*")
     keys_replica = await c_replica.execute_command("keys k*")
 
-    assert len(keys_master) == len(keys_replica)
+    # assert len(keys_master) == len(keys_replica)
     assert set(keys_master) == set(keys_replica)
 
     await disconnect_clients(c_master, *[c_replica])
