@@ -883,8 +883,6 @@ void Transaction::ExecuteAsync() {
   IterateActiveShards(
       [](PerShardData& sd, auto i) { sd.is_armed.store(true, memory_order_relaxed); });
 
-  uint32_t seq = seqlock_.load(memory_order_relaxed);
-
   // this fence prevents that a read or write operation before a release fence will be reordered
   // with a write operation after a release fence. Specifically no writes below will be reordered
   // upwards. Important, because it protects non-threadsafe local_mask from being accessed by
@@ -900,42 +898,10 @@ void Transaction::ExecuteAsync() {
     return;
   }
 
-  // We verify seq lock has the same generation number. See below for more info.
-  auto cb = [seq, this] {
-    EngineShard* shard = EngineShard::tlocal();
+  auto cb = [this] {
+    EngineShard::tlocal()->PollExecution("exec_cb", this);
 
-    bool is_armed = IsArmedInShard(shard->shard_id());
-    // First we check that this shard should run a callback by checking IsArmedInShard.
-    if (is_armed) {
-      uint32_t seq_after = seqlock_.load(memory_order_relaxed);
-
-      DVLOG(3) << "PollExecCb " << DebugId() << " sid(" << shard->shard_id() << ") "
-               << run_count_.load(memory_order_relaxed);
-
-      // We also make sure that for multi-operation transactions like Multi/Eval
-      // this callback runs on a correct operation. We want to avoid a situation
-      // where the first operation is executed and the second operation is armed and
-      // now this callback from the previous operation finally runs and calls PollExecution.
-      // It is usually ok, but for single shard operations we abuse index 0 in shard_data_
-      // Therefore we may end up with a situation where this old callback runs on shard 7,
-      // accessing shard_data_[0] that now represents shard 5 for the next operation.
-      // seqlock provides protection for that so each cb will only run on the operation it has
-      // been tasked with.
-      // We also must first check is_armed and only then seqlock. The first check ensures that
-      // the coordinator thread crossed
-      // "run_count_.store(unique_shard_cnt_, memory_order_release);" barrier and our seqlock_
-      // is valid.
-      if (seq_after == seq) {
-        // shard->PollExecution(this) does not necessarily execute this transaction.
-        // Therefore, everything that should be handled during the callback execution
-        // should go into RunInShard.
-        shard->PollExecution("exec_cb", this);
-      } else {
-        VLOG(1) << "Skipping PollExecution " << DebugId() << " sid(" << shard->shard_id() << ")";
-      }
-    }
-
-    DVLOG(3) << "ptr_release " << DebugId() << " " << seq;
+    DVLOG(3) << "ptr_release " << DebugId();
     intrusive_ptr_release(this);  // against use_count_.fetch_add above.
   };
 
@@ -993,6 +959,8 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
+  sd.is_armed.store(false, memory_order_relaxed);
+
   // Calling the callback in somewhat safe way
   RunnableResult result;
   try {
@@ -1008,7 +976,6 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
 
   // Handling the result, along with conclusion and journaling, is done by the caller
 
-  sd.is_armed.store(false, memory_order_relaxed);
   cb_ptr_ = nullptr;  // We can do it because only a single shard runs the callback.
   return result;
 }

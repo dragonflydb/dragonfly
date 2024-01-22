@@ -457,20 +457,28 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
-  uint16_t trans_mask = trans ? trans->GetLocalMask(sid) : 0;
-  if (trans_mask & Transaction::AWAKED_Q) {
+  // Check if the caller was handled by a previous poll.
+  if (trans && !trans->IsArmedInShard(sid))
+    return;
+
+  auto local_mask = trans ? trans->GetLocalMask(sid) : 0;  // safe only when trans is armed
+
+  // Blocked transactions are executed immediately after waking up
+  if (local_mask & Transaction::AWAKED_Q) {
     CHECK(continuation_trans_ == nullptr)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
-        << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs " << trans_mask;
+        << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs "
+        << trans->GetLocalMask(sid);
 
+    // Currently we expect blocking transactions to conclude within one hop after wakeup
     bool keep = trans->RunInShard(this, false);
-    if (keep) {
-      return;
-    }
+    CHECK(!keep);
+    trans = nullptr;  // Avoid handling the caller below
   }
 
   string dbg_id;
 
+  // Check the currently running transaction, we have to handle it first until it concludes
   if (continuation_trans_) {
     if (trans == continuation_trans_)
       trans = nullptr;
@@ -479,7 +487,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       if (VLOG_IS_ON(1)) {
         dbg_id = continuation_trans_->DebugId();
       }
+
       bool to_keep = continuation_trans_->RunInShard(this, false);
+
       DVLOG(1) << "RunContTrans: " << dbg_id << " keep: " << to_keep;
       if (!to_keep) {
         // if this holds, we can remove this check altogether.
@@ -489,44 +499,36 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
   }
 
+  // Progress on the transaction queue if no transaction is running currently.
   Transaction* head = nullptr;
   if (continuation_trans_ == nullptr) {
     while (!txq_.Empty()) {
-      // we must check every iteration so that if the current transaction awakens
-      // another transaction, the loop won't proceed further and will break, because we must run
-      // the notified transaction before all other transactions in the queue can proceed.
-      bool has_awaked_trans = blocking_controller_ && blocking_controller_->HasAwakedTransaction();
-      if (has_awaked_trans)
+      // Break if there are any awakened transactions, as we must give way to them
+      // before continuing to handle regular transactions from the queue.
+      if (blocking_controller_ && blocking_controller_->HasAwakedTransaction())
         break;
 
-      auto val = txq_.Front();
-      head = absl::get<Transaction*>(val);
+      head = get<Transaction*>(txq_.Front());
 
-      // The fact that Tx is in the queue, already means that coordinator fiber will not progress,
-      // hence here it's enough to test for run_count and check local_mask.
       bool is_armed = head->IsArmedInShard(sid);
       VLOG(2) << "Considering head " << head->DebugId() << " isarmed: " << is_armed;
 
+      // If the transaction isn't armed yet, it will be handled by a successive poll
       if (!is_armed)
         break;
 
-      // It could be that head is processed and unblocks multi-hop transaction .
-      // The transaction will schedule again and will arm another callback.
-      // Then we will reach invalid state by running trans after this loop,
-      // which is not what we want.
-      // This function should not process 2 different callbacks for the same transaction.
-      // Hence we make sure to reset trans if it has been processed via tx-queue.
+      // Avoid processing the caller transaction below if we found it in the queue,
+      // because it most likely won't have enough time to arm itself again.
       if (head == trans)
         trans = nullptr;
+
       TxId txid = head->txid();
 
-      // committed_txid_ is strictly increasing when processed via TxQueue.
-      DCHECK_LT(committed_txid_, txid);
-
-      // We update committed_txid_ before calling RunInShard() to avoid cases where
-      // a transaction stalls the execution with IO while another fiber queries this shard for
-      // committed_txid_ (for example during the scheduling).
+      // Update commited_txid before running, because RunInShard might block on i/o.
+      // This way scheduling transactions won't see an understated value.
+      DCHECK_LT(committed_txid_, txid);  //  strictly increasing when processed via txq
       committed_txid_ = txid;
+
       if (VLOG_IS_ON(2)) {
         dbg_id = head->DebugId();
       }
@@ -545,12 +547,21 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DVLOG(1) << "Skipped TxQueue " << continuation_trans_;
   }
 
-  // we need to run trans if it's OOO or when trans is blocked in this shard.
-  bool should_run = trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q);
+  // Either the poll had no caller or it was handled above
+  if (trans == nullptr)
+    return;
 
-  // It may be that there are other transactions that touch those keys but they necessary ordered
-  // after trans in the queue, hence it's safe to run trans out of order.
-  if (trans && should_run) {
+  // If the pointer is valid, we didn't handle it above, so trans is still armed
+  DCHECK(trans->IsArmedInShard(sid));
+
+  // OOO means no transaction before us in the txq accesses our keys, so we can run earlier
+  bool is_ooo = local_mask & Transaction::OUT_OF_ORDER;
+
+  // Still suspended shards need to run just to finalize and unregister, so we can run anytime
+  bool is_suspended = local_mask & Transaction::SUSPENDED_Q;
+  DCHECK_EQ(local_mask & Transaction::AWAKED_Q, 0);
+
+  if (is_ooo || is_suspended) {
     DCHECK(trans != head);
 
     dbg_id.clear();
@@ -558,16 +569,14 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       dbg_id = trans->DebugId();
     }
 
-    bool txq_ooo = trans_mask & Transaction::OUT_OF_ORDER;
-    bool keep = trans->RunInShard(this, txq_ooo);
-
-    if (txq_ooo && !keep) {
+    bool keep = trans->RunInShard(this, is_ooo);
+    if (is_ooo && !keep) {
       stats_.tx_ooo_total++;
     }
 
     // If the transaction concluded, it must remove itself from the tx queue.
     // Otherwise it is required to stay there to keep the relative order.
-    if (txq_ooo && !trans->IsMulti())
+    if (is_ooo && !trans->IsMulti())
       DCHECK_EQ(keep, trans->GetLocalTxqPos(sid) != TxQueue::kEnd);
 
     DLOG_IF(INFO, !dbg_id.empty()) << "Eager run " << sid << ", " << dbg_id << ", keep " << keep;
