@@ -415,9 +415,13 @@ static void BM_FindRandomBPTree(benchmark::State& state) {
     bptree.Insert(vals[i]);
   }
 
-  while (state.KeepRunning()) {
-    for (unsigned i = 0; i < iters; ++i) {
-      benchmark::DoNotOptimize(bptree.Contains(vals[i]));
+  unsigned i = 0;
+  while (state.KeepRunningBatch(10)) {
+    for (unsigned j = 0; j < 10; ++j) {
+      benchmark::DoNotOptimize(bptree.GEQ(vals[i]));
+      ++i;
+      if (vals.size() == i)
+        i = 0;
     }
   }
   for (const auto v : vals) {
@@ -434,9 +438,20 @@ static void BM_FindRandomZSL(benchmark::State& state) {
     zslInsert(zsl, vals[i].d, sdsdup(vals[i].s));
   }
 
-  while (state.KeepRunning()) {
-    for (unsigned i = 0; i < iters; ++i) {
-      benchmark::DoNotOptimize(zslGetRank(zsl, vals[i].d, vals[i].s));
+  zrangespec spec;
+  spec.maxex = 0;
+  spec.minex = 0;
+
+  unsigned i = 0;
+  while (state.KeepRunningBatch(10)) {
+    for (unsigned j = 0; j < 10; ++j) {
+      spec.min = vals[i].d;
+      spec.max = spec.min;
+      benchmark::DoNotOptimize(zslFirstInRange(zsl, &spec));
+
+      ++i;
+      if (vals.size() == i)
+        i = 0;
     }
   }
 
