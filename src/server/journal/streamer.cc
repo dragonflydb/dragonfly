@@ -87,7 +87,7 @@ void RestoreStreamer::Start(io::Sink* dest) {
     WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_),
                                                    absl::StrCat(db_slice_->shard_id())}));
     NotifyWritten(true);
-    is_stable_sync_ = true;
+    snapshot_finished_ = true;
   });
 }
 

@@ -103,9 +103,12 @@ ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   return {ctx.host, ctx.port, state_};
 }
 
-bool ClusterSlotMigration::TrySetStableSync(uint32_t flow) {
+void ClusterSlotMigration::setStableSyncForFlow(uint32_t flow) {
   DCHECK(shard_flows_.size() > flow);
   shard_flows_[flow]->SetStableSync();
+}
+
+bool ClusterSlotMigration::AreAllFlowsInStableSync() {
   auto res = std::all_of(shard_flows_.begin(), shard_flows_.end(),
                          [](const auto& el) { return el->IsStableSync(); });
   if (res) {

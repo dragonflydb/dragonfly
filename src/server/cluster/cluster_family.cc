@@ -816,14 +816,15 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
   std::lock_guard lck(migration_mu_);
   auto migration_it =
       std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-                   [sync_id](const auto& el) { return el->getSyncId() == sync_id; });
+                   [sync_id](const auto& el) { return el->GetSyncId() == sync_id; });
 
   if (migration_it == incoming_migrations_jobs_.end()) {
     LOG(WARNING) << "Couldn't find migration id";
     return cntx->SendError(kIdNotFound);
   }
 
-  if ((*migration_it)->TrySetStableSync(shard_id)) {
+  (*migration_it)->setStableSyncForFlow(shard_id);
+  if ((*migration_it)->AreAllFlowsInStableSync()) {
     LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
   }
   cntx->SendOk();

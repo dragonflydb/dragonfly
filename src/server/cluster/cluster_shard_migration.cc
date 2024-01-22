@@ -93,6 +93,7 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
   } else {
     // TODO check which global commands should be supported
     LOG(WARNING) << "We don't support global commands for slot migration process";
+    CHECK(false);
   }
 }
 

@@ -59,8 +59,8 @@ class RestoreStreamer : public JournalStreamer {
   void Start(io::Sink* dest) override;
   void Cancel() override;
 
-  bool IsStableSync() const {
-    return is_stable_sync_;
+  bool IsSnapshotFinished() const {
+    return snapshot_finished_;
   }
 
   ~RestoreStreamer();
@@ -80,7 +80,7 @@ class RestoreStreamer : public JournalStreamer {
   uint32_t sync_id_;
   Fiber snapshot_fb_;
   Cancellation fiber_cancellation_;
-  bool is_stable_sync_ = false;
+  bool snapshot_finished_ = false;
 };
 
 }  // namespace dfly

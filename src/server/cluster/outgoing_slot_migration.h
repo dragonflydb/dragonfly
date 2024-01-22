@@ -13,7 +13,6 @@ namespace journal {
 class Journal;
 }
 
-class RestoreStreamer;
 class DbSlice;
 
 // Whole slots migration process information
@@ -35,8 +34,8 @@ class OutgoingMigration {
     return port_;
   };
 
-  // Flow manages state and data transfering for the corresponding shard
-  class Flow;
+  // SliceSlotMigration manages state and data transfering for the corresponding shard
+  class SliceSlotMigration;
 
  private:
   std::string host_ip_;
@@ -44,7 +43,7 @@ class OutgoingMigration {
   std::vector<ClusterConfig::SlotRange> slots_;
   Context cntx_;
   mutable Mutex flows_mu_;
-  std::vector<std::unique_ptr<Flow>> flows_ ABSL_GUARDED_BY(flows_mu_);
+  std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_ ABSL_GUARDED_BY(flows_mu_);
 };
 
 }  // namespace dfly

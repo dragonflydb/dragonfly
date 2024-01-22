@@ -9,9 +9,10 @@
 
 namespace dfly {
 
-class OutgoingMigration::Flow {
+class OutgoingMigration::SliceSlotMigration {
  public:
-  Flow(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal, Context* cntx)
+  SliceSlotMigration(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal,
+                     Context* cntx)
       : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
   }
 
@@ -21,7 +22,7 @@ class OutgoingMigration::Flow {
   }
 
   MigrationState GetState() const {
-    return state_ == MigrationState::C_FULL_SYNC && streamer_.IsStableSync()
+    return state_ == MigrationState::C_FULL_SYNC && streamer_.IsSnapshotFinished()
                ? MigrationState::C_STABLE_SYNC
                : state_;
   }
@@ -34,7 +35,7 @@ class OutgoingMigration::Flow {
 OutgoingMigration::OutgoingMigration(std::uint32_t flows_num, std::string ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots,
                                      Context::ErrHandler err_handler)
-    : host_ip_(ip), port_(port), slots_(slots), cntx_(err_handler), flows_(flows_num) {
+    : host_ip_(ip), port_(port), slots_(slots), cntx_(err_handler), slot_migrations_(flows_num) {
 }
 
 OutgoingMigration::~OutgoingMigration() = default;
@@ -51,16 +52,17 @@ void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Jou
   const auto shard_id = slice->shard_id();
 
   std::scoped_lock lck(flows_mu_);
-  flows_[shard_id] = std::make_unique<Flow>(slice, std::move(sset), sync_id, journal, &cntx_);
-  flows_[shard_id]->Start(dest);
+  slot_migrations_[shard_id] =
+      std::make_unique<SliceSlotMigration>(slice, std::move(sset), sync_id, journal, &cntx_);
+  slot_migrations_[shard_id]->Start(dest);
 }
 
 MigrationState OutgoingMigration::GetState() {
   std::scoped_lock lck(flows_mu_);
   MigrationState min_state = MigrationState::C_STABLE_SYNC;
-  for (const auto& flow : flows_) {
-    if (flow)
-      min_state = std::min(min_state, flow->GetState());
+  for (const auto& slot_migration : slot_migrations_) {
+    if (slot_migration)
+      min_state = std::min(min_state, slot_migration->GetState());
   }
   return min_state;
 }

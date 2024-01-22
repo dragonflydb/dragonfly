@@ -18,8 +18,6 @@ namespace dfly {
 class CommandRegistry;
 class ConnectionContext;
 class ServerFamily;
-class RestoreStreamer;
-class DbSlice;
 
 class ClusterFamily {
  public:
