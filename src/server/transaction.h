@@ -255,17 +255,14 @@ class Transaction {
   // Returns true if the transaction spans this shard_id.
   bool IsActive(ShardId shard_id) const;
 
-  //! Returns true if the transaction is armed for execution on this sid (used to avoid
-  //! duplicate runs). Supports local transactions under multi as well.
-  //! Can be used in contexts that wait for an event to happen.
+  // Returns true if the transaction is waiting for shard callbacks and the shard is armed.
+  // Safe to read transaction state (and update shard local) until following RunInShard() finishes.
   bool IsArmedInShard(ShardId sid) const {
-    // For multi transactions shard_data_ spans all shards.
-    if (sid >= shard_data_.size())
+    if (sid >= shard_data_.size())  // For multi transactions shard_data_ spans all shards.
       sid = 0;
 
-    // We use acquire so that no reordering will move before this load.
-    return run_count_.load(std::memory_order_acquire) > 0 &&
-           shard_data_[sid].is_armed.load(std::memory_order_relaxed);
+    // Barrier has acquire semantics
+    return run_barrier_.Active() && shard_data_[sid].is_armed.load(std::memory_order_relaxed);
   }
 
   // Called from engine set shard threads.
@@ -419,6 +416,7 @@ class Transaction {
     COORD_CANCELLED = 1 << 3,
   };
 
+  // Auxiliary structure used during initialization
   struct PerShardCache {
     std::vector<std::string_view> args;
     std::vector<uint32_t> original_index;
@@ -427,6 +425,22 @@ class Transaction {
       args.clear();
       original_index.clear();
     }
+  };
+
+  // Barrier akin to helio's BlockingCounter, but with proper acquire semantics
+  // for polling work from other threads (active, inactive phases). And without heap allocation.
+  class PhasedBarrier {
+   public:
+    void Start(uint32_t count);  // Release: Store count
+    void Wait();                 // Acquire: Wait until count = 0
+
+    bool Active() const;                // Acquire: Return if count > 0. Use for polling for work
+    void Dec(Transaction* keep_alive);  // Release: Decrease count, notify ec on count = 0
+
+    uint32_t DEBUG_Count() const;  // Get current counter value
+   private:
+    std::atomic_uint32_t count_{0};
+    EventCount ec_{};
   };
 
  private:
@@ -495,23 +509,9 @@ class Transaction {
   // synchronize the multi-shard transaction.
   uint32_t CalcMultiNumOfShardJournals() const;
 
-  void WaitForShardCallbacks() {
-    run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
-
-    // no reads after this fence will be reordered before it, and if a store operation sequenced
-    // before some release operation that happened before the fence in another thread, this store
-    // will be visible after the fence.
-    // In this specific case we synchronize with DecreaseRunCnt that releases run_count_.
-    // See #997 before changing it.
-    std::atomic_thread_fence(std::memory_order_acquire);
-  }
-
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
-  // Should be called immediately after the last phase (hop).
+  // Should be called immediately after the last hop.
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
-
-  // Returns the previous value of run count.
-  void DecreaseRunCnt();
 
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
@@ -547,17 +547,20 @@ class Transaction {
   }
 
  private:
-  // shard_data spans all the shards in ess_.
-  // I wish we could use a dense array of size [0..uniq_shards] but since
-  // multiple threads access this array to synchronize between themselves using
-  // PerShardData.state, it can be tricky. The complication comes from multi_ transactions where
-  // scheduled transaction is accessed between operations as well.
+  // Main synchronization point for dispatching hop callbacks and waiting for them to finish.
+  // After scheduling, sequential hops are executed as follows:
+  //    coordinator: Prepare hop, then Start(num_shards), dispatch poll jobs and Wait()
+  //    tx queue:    Once IsArmedInShard() /* checks Active() */ -> run in shard and Dec()
+  // As long as barrier is active, any writes by the coordinator are prohibited, so shard threads
+  // can safely read transaction state and modify per-shard state belonging to them.
+  // Inter-thread synchronization is provided by the barriers acquire/release pairs.
+  PhasedBarrier run_barrier_;
 
-  // Stores per-shard data.
-  // For non-multi transactions, it can be of size one in case only one shard is active
-  // (unique_shard_cnt_ = 1).
-  // Never access directly with index, always use SidToId.
-  absl::InlinedVector<PerShardData, 4> shard_data_;  // length = shard_count
+  // Stores per-shard data: state flags and keys. Index only with SidToId(shard index)!
+  // Theoretically, same size as number of shards, but contains only a single element for
+  // single shard non-multi transactions (optimization).
+  // TODO: explore dense packing
+  absl::InlinedVector<PerShardData, 4> shard_data_;
 
   // Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
   absl::InlinedVector<std::string_view, 4> args_;
@@ -580,21 +583,16 @@ class Transaction {
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
 
-  std::atomic_uint32_t wakeup_requested_{0};  // whether tx was woken up
-  std::atomic_uint32_t use_count_{0}, run_count_{0};
+  std::atomic_uint32_t use_count_{0};  // transaction exists only as an intrusive_ptr
 
-  // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};          // Number of unique shards active
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
   UniqueSlotChecker unique_slot_checker_;
 
-  EventCount blocking_ec_;  // Used to wake blocking transactions.
-  EventCount run_ec_;       // Used to wait for shard callbacks
+  std::atomic_uint32_t wakeup_requested_{0};  // incremented when blocking transaction gets notified
+  EventCount blocking_ec_;                    // to wait for wakeup_requested > 0 (or cancelled)
 
   // Transaction coordinator state, written and read by coordinator thread.
-  // Can be read by shard threads as long as we respect ordering rules, i.e. when
-  // they read this variable the coordinator thread is stalled and can not cause data races.
-  // If COORDINATOR_XXX has been set, it means we passed or crossed stage XXX.
   uint8_t coordinator_state_ = 0;
 
   // Result of callbacks. Usually written by single shard only, lock below for multishard oom error
