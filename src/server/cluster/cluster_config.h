@@ -19,7 +19,11 @@
 namespace dfly {
 
 using SlotId = uint16_t;
+// TODO consider to use bit set or some more compact way to store SlotId
 using SlotSet = absl::flat_hash_set<SlotId>;
+
+// MigrationState constants are ordered in state changing order
+enum class MigrationState : uint8_t { C_NO_STATE, C_CONNECTING, C_FULL_SYNC, C_STABLE_SYNC };
 
 class ClusterConfig {
  public:
