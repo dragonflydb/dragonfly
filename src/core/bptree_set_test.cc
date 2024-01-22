@@ -416,11 +416,13 @@ static void BM_FindRandomBPTree(benchmark::State& state) {
   }
 
   unsigned i = 0;
-  while (state.KeepRunning()) {
-    benchmark::DoNotOptimize(bptree.GEQ(vals[i]));
-    ++i;
-    if (vals.size() == i)
-      i = 0;
+  while (state.KeepRunningBatch(10)) {
+    for (unsigned j = 0; j < 10; ++j) {
+      benchmark::DoNotOptimize(bptree.GEQ(vals[i]));
+      ++i;
+      if (vals.size() == i)
+        i = 0;
+    }
   }
   for (const auto v : vals) {
     sdsfree(v.s);
@@ -441,14 +443,16 @@ static void BM_FindRandomZSL(benchmark::State& state) {
   spec.minex = 0;
 
   unsigned i = 0;
-  while (state.KeepRunning()) {
-    spec.min = vals[i].d;
-    spec.max = spec.min;
-    benchmark::DoNotOptimize(zslFirstInRange(zsl, &spec));
+  while (state.KeepRunningBatch(10)) {
+    for (unsigned j = 0; j < 10; ++j) {
+      spec.min = vals[i].d;
+      spec.max = spec.min;
+      benchmark::DoNotOptimize(zslFirstInRange(zsl, &spec));
 
-    ++i;
-    if (vals.size() == i)
-      i = 0;
+      ++i;
+      if (vals.size() == i)
+        i = 0;
+    }
   }
 
   zslFree(zsl);
