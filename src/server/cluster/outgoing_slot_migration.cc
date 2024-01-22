@@ -42,7 +42,6 @@ OutgoingMigration::~OutgoingMigration() = default;
 
 void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal,
                                   io::Sink* dest) {
-  // TODO refactor: maybe we can use vector<slotRange> instead of SlotSet
   SlotSet sset;
   for (const auto& slot_range : slots_) {
     for (auto i = slot_range.start; i <= slot_range.end; ++i)
@@ -51,14 +50,14 @@ void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Jou
 
   const auto shard_id = slice->shard_id();
 
-  std::scoped_lock lck(flows_mu_);
+  std::lock_guard lck(flows_mu_);
   slot_migrations_[shard_id] =
       std::make_unique<SliceSlotMigration>(slice, std::move(sset), sync_id, journal, &cntx_);
   slot_migrations_[shard_id]->Start(dest);
 }
 
-MigrationState OutgoingMigration::GetState() {
-  std::scoped_lock lck(flows_mu_);
+MigrationState OutgoingMigration::GetState() const {
+  std::lock_guard lck(flows_mu_);
   MigrationState min_state = MigrationState::C_STABLE_SYNC;
   for (const auto& slot_migration : slot_migrations_) {
     if (slot_migration)

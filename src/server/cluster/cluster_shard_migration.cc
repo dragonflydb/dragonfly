@@ -92,8 +92,8 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
   } else {
     // TODO check which global commands should be supported
-    LOG(WARNING) << "We don't support global commands for slot migration process";
-    CHECK(false);
+    CHECK(false) << "We don't support command: " << ToSV(tx_data.commands.front().cmd_args[0])
+                 << "in cluster migration process.";
   }
 }
 

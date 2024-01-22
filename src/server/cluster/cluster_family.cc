@@ -661,7 +661,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     for (const auto& m : incoming_migrations_jobs_) {
       const auto& info = m->GetInfo();
       if (info.host == host_ip && info.port == port)
-        return rb->SendSimpleString(state_to_str(info.state));
+        return rb->SendSimpleString(state_to_str(m->GetState()));
     }
     // find outgoing slot migration
     for (const auto& [_, info] : outgoing_migration_jobs_) {
@@ -679,7 +679,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     lock_guard lk(migration_mu_);
     for (const auto& m : incoming_migrations_jobs_) {
       const auto& info = m->GetInfo();
-      send_answer("in", info.host, info.port, info.state);
+      send_answer("in", info.host, info.port, m->GetState());
     }
     for (const auto& [_, info] : outgoing_migration_jobs_) {
       send_answer("out", info->GetHostIp(), info->GetPort(), info->GetState());
@@ -823,10 +823,12 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
     return cntx->SendError(kIdNotFound);
   }
 
-  (*migration_it)->setStableSyncForFlow(shard_id);
-  if ((*migration_it)->AreAllFlowsInStableSync()) {
+  (*migration_it)->SetStableSyncForFlow(shard_id);
+  if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
+    (*migration_it)->Stop();
     LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
   }
+
   cntx->SendOk();
 }
 

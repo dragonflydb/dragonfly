@@ -100,25 +100,23 @@ error_code ClusterSlotMigration::Greet() {
 
 ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   const auto& ctx = server();
-  return {ctx.host, ctx.port, state_};
+  return {ctx.host, ctx.port};
 }
 
-void ClusterSlotMigration::setStableSyncForFlow(uint32_t flow) {
+void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
   DCHECK(shard_flows_.size() > flow);
   shard_flows_[flow]->SetStableSync();
+
+  if (std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                  [](const auto& el) { return el->IsStableSync(); })) {
+    state_ = MigrationState::C_STABLE_SYNC;
+  }
 }
 
-bool ClusterSlotMigration::AreAllFlowsInStableSync() {
-  auto res = std::all_of(shard_flows_.begin(), shard_flows_.end(),
-                         [](const auto& el) { return el->IsStableSync(); });
-  if (res) {
-    // TODO make this when we set new config
-    state_ = MigrationState::C_STABLE_SYNC;
-    for (auto& flow : shard_flows_) {
-      flow->Cancel();
-    }
+void ClusterSlotMigration::Stop() {
+  for (auto& flow : shard_flows_) {
+    flow->Cancel();
   }
-  return res;
 }
 
 void ClusterSlotMigration::MainMigrationFb() {

@@ -25,7 +25,7 @@ class OutgoingMigration {
 
   void StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal, io::Sink* dest);
 
-  MigrationState GetState();
+  MigrationState GetState() const;
 
   const std::string& GetHostIp() const {
     return host_ip_;
@@ -34,6 +34,7 @@ class OutgoingMigration {
     return port_;
   };
 
+ private:
   // SliceSlotMigration manages state and data transfering for the corresponding shard
   class SliceSlotMigration;
 

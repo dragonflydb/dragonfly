@@ -18,7 +18,6 @@ class ClusterSlotMigration : ProtocolClient {
   struct Info {
     std::string host;
     uint16_t port;
-    MigrationState state;
   };
 
   ClusterSlotMigration(std::string host_ip, uint16_t port, Service* se,
@@ -32,8 +31,12 @@ class ClusterSlotMigration : ProtocolClient {
     return sync_id_;
   }
 
-  void setStableSyncForFlow(uint32_t flow);
-  bool AreAllFlowsInStableSync();
+  MigrationState GetState() const {
+    return state_;
+  }
+
+  void SetStableSyncForFlow(uint32_t flow);
+  void Stop();
 
  private:
   // Send DFLYMIGRATE CONF to the source and get info about migration process

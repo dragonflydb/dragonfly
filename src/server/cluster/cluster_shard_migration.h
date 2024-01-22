@@ -25,10 +25,10 @@ class ClusterShardMigration : public ProtocolClient {
   void Cancel();
 
   void SetStableSync() {
-    is_stable_sync_ = true;
+    is_stable_sync_.store(true);
   }
   bool IsStableSync() {
-    return is_stable_sync_;
+    return is_stable_sync_.load();
   }
 
  private:
