@@ -1240,10 +1240,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   if (cntx->transaction && !cntx->conn_state.exec_info.IsRunning() &&
       cntx->conn_state.script_info == nullptr) {
-    bool is_ooo = cntx->transaction->IsOOO();
-
     cntx->last_command_debug.clock = cntx->transaction->txid();
-    cntx->last_command_debug.is_ooo = is_ooo;
   }
 
   return true;

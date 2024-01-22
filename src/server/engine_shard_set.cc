@@ -208,12 +208,13 @@ EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 32);
+  static_assert(sizeof(Stats) == 40);
 
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
   defrag_task_invocation_total += o.defrag_task_invocation_total;
   poll_execution_total += o.poll_execution_total;
+  tx_ooo_total += o.tx_ooo_total;
 
   return *this;
 }
@@ -553,13 +554,16 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DCHECK(trans != head);
 
     dbg_id.clear();
-
     if (VLOG_IS_ON(1)) {
       dbg_id = trans->DebugId();
     }
 
     bool txq_ooo = trans_mask & Transaction::OUT_OF_ORDER;
     bool keep = trans->RunInShard(this, txq_ooo);
+
+    if (txq_ooo && !keep) {
+      stats_.tx_ooo_total++;
+    }
 
     // If the transaction concluded, it must remove itself from the tx queue.
     // Otherwise it is required to stay there to keep the relative order.

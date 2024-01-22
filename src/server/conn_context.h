@@ -173,7 +173,6 @@ class ConnectionContext : public facade::ConnectionContext {
   struct DebugInfo {
     uint32_t shards_count = 0;
     TxClock clock = 0;
-    bool is_ooo = false;
 
     // number of commands in the last exec body.
     unsigned exec_body_len = 0;
