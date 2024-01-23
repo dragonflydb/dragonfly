@@ -465,15 +465,18 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Blocked transactions are executed immediately after waking up
   if (local_mask & Transaction::AWAKED_Q) {
-    CHECK(continuation_trans_ == nullptr)
+    CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
         << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs "
         << trans->GetLocalMask(sid);
 
-    // Currently we expect blocking transactions to conclude within one hop after wakeup
-    bool keep = trans->RunInShard(this, false);
-    CHECK(!keep);
+    if (trans->RunInShard(this, false)) {
+      continuation_trans_ = trans;
+      return;
+    }
+
     trans = nullptr;  // Avoid handling the caller below
+    continuation_trans_ = nullptr;
   }
 
   string dbg_id;
