@@ -231,10 +231,18 @@ void TriggerJournalWriteToSink() {
 
 #define ADD(x) (x) += o.x
 
-TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 56);
+IoMgrStats& IoMgrStats::operator+=(const IoMgrStats& rhs) {
+  static_assert(sizeof(IoMgrStats) == 16);
 
-  ADD(tiered_reads);
+  read_total += rhs.read_total;
+  read_delay_usec += rhs.read_delay_usec;
+
+  return *this;
+}
+
+TieredStats& TieredStats::operator+=(const TieredStats& o) {
+  static_assert(sizeof(TieredStats) == 48);
+
   ADD(tiered_writes);
   ADD(storage_capacity);
   ADD(storage_reserved);

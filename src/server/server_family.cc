@@ -1675,8 +1675,11 @@ Metrics ServerFamily::GetMetrics() const {
       MergeDbSliceStats(shard->db_slice().GetStats(), &result);
       result.shard_stats += shard->stats();
 
-      if (shard->tiered_storage())
+      if (shard->tiered_storage()) {
         result.tiered_stats += shard->tiered_storage()->GetStats();
+        result.disk_stats += shard->tiered_storage()->GetDiskStats();
+      }
+
       if (shard->search_indices())
         result.search_stats += shard->search_indices()->GetStats();
 
@@ -1878,7 +1881,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("TIERED", true)) {
     append("tiered_entries", total.tiered_entries);
     append("tiered_bytes", total.tiered_size);
-    append("tiered_reads", m.tiered_stats.tiered_reads);
+    append("tiered_reads", m.disk_stats.read_total);
+    append("tiered_read_latency_usec", m.disk_stats.read_delay_usec);
     append("tiered_writes", m.tiered_stats.tiered_writes);
     append("tiered_reserved", m.tiered_stats.storage_reserved);
     append("tiered_capacity", m.tiered_stats.storage_capacity);

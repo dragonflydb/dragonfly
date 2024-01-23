@@ -43,6 +43,10 @@ class TieredStorage {
 
   TieredStats GetStats() const;
 
+  const IoMgrStats& GetDiskStats() const {
+    return io_mgr_.GetStats();
+  }
+
   void CancelAllIos(DbIndex db_index);
 
   std::error_code Read(size_t offset, size_t len, char* dest);
