@@ -73,7 +73,7 @@ ABSL_FLAG(bool, force_epoll, false,
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
-ABSL_FLAG(uint16_t, backlog, 128, "TCP listen(2) backlog parameter.");
+ABSL_FLAG(uint16_t, tcp_backlog, 128, "TCP listen(2) backlog parameter.");
 
 using namespace util;
 using namespace facade;
@@ -713,7 +713,7 @@ Usage: dragonfly [FLAGS]
   pool->Run();
 
   AcceptServer acceptor(pool.get());
-  acceptor.set_back_log(absl::GetFlag(FLAGS_backlog));
+  acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
   int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
 
