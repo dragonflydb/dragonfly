@@ -1076,11 +1076,19 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
           break;
       }
 
-      AppendMetricValue(kReplyLatency, stats.total_duration / 1'000'000, {"type"}, {type},
+      AppendMetricValue(kReplyLatency, double(stats.total_duration) * 1e-6, {"type"}, {type},
                         &send_latency_metrics);
       AppendMetricValue(kReplyCount, stats.count, {"type"}, {type}, &send_count_metrics);
     }
 
+    // Tiered metrics.
+    if (m.disk_stats.read_total > 0) {
+      AppendMetricWithoutLabels("tiered_reads_total", "", m.disk_stats.read_total,
+                                MetricType::COUNTER, &resp->body());
+      AppendMetricWithoutLabels("tiered_reads_latency_seconds", "",
+                                double(m.disk_stats.read_delay_usec) * 1e-6, MetricType::COUNTER,
+                                &resp->body());
+    }
     absl::StrAppend(&resp->body(), send_latency_metrics);
     absl::StrAppend(&resp->body(), send_count_metrics);
   }
@@ -1143,7 +1151,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("fiber_longrun_total", "", m.fiber_longrun_cnt, MetricType::COUNTER,
                             &resp->body());
   double longrun_seconds = m.fiber_longrun_usec * 1e-6;
-  AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
+  AppendMetricWithoutLabels("fiber_longrun_seconds", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
 
