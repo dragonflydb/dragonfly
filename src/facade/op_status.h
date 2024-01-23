@@ -82,15 +82,19 @@ template <typename V> class OpResult : public OpResultBase {
     return &v_;
   }
 
-  V& operator*() {
+  V& operator*() & {
     return v_;
+  }
+
+  V&& operator*() && {
+    return std::move(v_);
   }
 
   const V* operator->() const {
     return &v_;
   }
 
-  const V& operator*() const {
+  const V& operator*() const& {
     return v_;
   }
 

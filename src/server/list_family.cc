@@ -247,12 +247,9 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 
   quicklist* dest_ql = nullptr;
   src_res->post_updater.Run();
-  DbSlice::AddOrFindResult dest_res;
-  try {
-    dest_res = db_slice.AddOrFind(op_args.db_cntx, dest);
-  } catch (bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
-  }
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, dest);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& dest_res = *op_res;
 
   // Insertion of dest could invalidate src_it. Find it again.
   src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
@@ -321,11 +318,9 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
     res = std::move(*tmp_res);
   } else {
-    try {
-      res = es->db_slice().AddOrFind(op_args.db_cntx, key);
-    } catch (bad_alloc&) {
-      return OpStatus::OUT_OF_MEMORY;
-    }
+    auto op_res = es->db_slice().AddOrFind(op_args.db_cntx, key);
+    RETURN_ON_BAD_STATUS(op_res);
+    res = std::move(*op_res);
   }
 
   quicklist* ql = nullptr;

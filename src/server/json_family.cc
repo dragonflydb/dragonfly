@@ -4,6 +4,8 @@
 
 #include "server/json_family.h"
 
+#include "facade/op_status.h"
+
 extern "C" {
 #include "redis/object.h"
 }
@@ -50,15 +52,20 @@ inline OpStatus JsonReplaceVerifyNoOp(JsonType&) {
   return OpStatus::OK;
 }
 
-void SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
+facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
   auto& db_slice = op_args.shard->db_slice();
-  auto res = db_slice.AddOrFind(op_args.db_cntx, key);
+
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+
+  auto& res = *op_res;
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
   res.it->second.SetJson(std::move(value));
 
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
+  return OpStatus::OK;
 }
 
 string JsonTypeToName(const JsonType& val) {
@@ -1076,12 +1083,10 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    try {
-      SetJson(op_args, key, std::move(parsed_json.value()));
-
-    } catch (const bad_alloc& e) {
+    if (SetJson(op_args, key, std::move(parsed_json.value())) == OpStatus::OUT_OF_MEMORY) {
       return OpStatus::OUT_OF_MEMORY;
     }
+
     return true;
   }
 

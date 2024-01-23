@@ -28,6 +28,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -193,13 +194,9 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs&
     return db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   }
 
-  DbSlice::AddOrFindResult add_res;
-
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
-  }
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& add_res = *op_res;
 
   PrimeIterator& it = add_res.it;
   PrimeValue& pv = it->second;
