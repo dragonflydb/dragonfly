@@ -561,7 +561,10 @@ async def test_cluster_blocking_command(df_server):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_native_client(df_local_factory: DflyInstanceFactory):
+async def test_cluster_native_client(
+    df_local_factory: DflyInstanceFactory,
+    df_seeder_factory: DflySeederFactory,
+):
     # Start and configure cluster with 3 masters and 3 replicas
     masters = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
@@ -646,6 +649,9 @@ async def test_cluster_native_client(df_local_factory: DflyInstanceFactory):
       ]
     """
     await push_config(config, c_masters_admin + c_replicas_admin)
+
+    seeder = df_seeder_factory.create(port=masters[0].port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
 
     client = aioredis.RedisCluster(decode_responses=True, host="localhost", port=masters[0].port)
 
