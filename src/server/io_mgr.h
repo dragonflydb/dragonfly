@@ -7,7 +7,8 @@
 #include <functional>
 #include <string>
 
-#include "core/uring.h"
+#include "server/common.h"
+#include "util/fibers/uring_file.h"
 
 namespace dfly {
 
@@ -46,8 +47,12 @@ class IoMgr {
     return flags.grow_progress;
   }
 
+  const IoMgrStats& GetStats() const {
+    return stats_;
+  }
+
  private:
-  std::unique_ptr<LinuxFile> backing_file_;
+  std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   size_t sz_ = 0;
 
   union {
@@ -56,6 +61,8 @@ class IoMgr {
       uint8_t grow_progress : 1;
     } flags;
   };
+
+  IoMgrStats stats_;
 };
 
 }  // namespace dfly

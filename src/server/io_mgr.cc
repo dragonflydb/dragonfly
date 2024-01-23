@@ -10,6 +10,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
+#include "util/fibers/uring_proactor.h"
 
 ABSL_FLAG(bool, backing_file_direct, false, "If true uses O_DIRECT to open backing files");
 
@@ -45,23 +46,23 @@ error_code IoMgr::Open(const string& path) {
   if (absl::GetFlag(FLAGS_backing_file_direct)) {
     kFlags |= O_DIRECT;
   }
-  auto res = OpenLinux(path, kFlags, 0666);
+  auto res = fb2::OpenLinux(path, kFlags, 0666);
   if (!res)
     return res.error();
   backing_file_ = std::move(res.value());
   Proactor* proactor = (Proactor*)ProactorBase::me();
   {
-    FiberCall fc(proactor);
+    fb2::FiberCall fc(proactor);
     fc->PrepFallocate(backing_file_->fd(), 0, 0, kInitialSize);
-    FiberCall::IoResult io_res = fc.Get();
+    fb2::FiberCall::IoResult io_res = fc.Get();
     if (io_res < 0) {
       return error_code{-io_res, system_category()};
     }
   }
   {
-    FiberCall fc(proactor);
+    fb2::FiberCall fc(proactor);
     fc->PrepFadvise(backing_file_->fd(), 0, 0, POSIX_FADV_RANDOM);
-    FiberCall::IoResult io_res = fc.Get();
+    fb2::FiberCall::IoResult io_res = fc.Get();
     if (io_res < 0) {
       return error_code{-io_res, system_category()};
     }
@@ -118,7 +119,13 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
 
     uint8_t* space = (uint8_t*)mi_malloc_aligned(space_needed, 4096);
     iovec v{.iov_base = space, .iov_len = space_needed};
+    uint64_t from_ts = ProactorBase::GetMonotonicTimeNs();
     error_code ec = backing_file_->Read(&v, 1, read_offs, 0);
+    uint64_t end_ts = ProactorBase::GetMonotonicTimeNs();
+
+    stats_.read_delay_usec += (end_ts - from_ts) / 1000;
+    ++stats_.read_total;
+
     if (ec) {
       mi_free(space);
       return ec;
@@ -130,7 +137,13 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
   }
 
   iovec v{.iov_base = dest.data(), .iov_len = dest.size()};
-  return backing_file_->Read(&v, 1, offset, 0);
+  uint64_t from_ts = ProactorBase::GetMonotonicTimeNs();
+  auto ec = backing_file_->Read(&v, 1, offset, 0);
+  uint64_t end_ts = ProactorBase::GetMonotonicTimeNs();
+
+  stats_.read_delay_usec += (end_ts - from_ts) / 1000;
+  ++stats_.read_total;
+  return ec;
 }
 
 void IoMgr::Shutdown() {

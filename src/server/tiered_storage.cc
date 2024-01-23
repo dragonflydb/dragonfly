@@ -327,7 +327,6 @@ error_code TieredStorage::Open(const string& base) {
 }
 
 std::error_code TieredStorage::Read(size_t offset, size_t len, char* dest) {
-  stats_.tiered_reads++;
   DVLOG(1) << "Read " << offset << " " << len;
 
   return io_mgr_.Read(offset, io::MutableBytes{reinterpret_cast<uint8_t*>(dest), len});

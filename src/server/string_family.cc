@@ -16,8 +16,8 @@ extern "C" {
 #include <cstdint>
 #include <tuple>
 
+#include "base/flags.h"
 #include "base/logging.h"
-#include "redis/util.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -26,6 +26,10 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+
+ABSL_FLAG(bool, tiered_skip_prefetch, false,
+          "If true, does not load offloaded string back to in-memory store during GET command."
+          "For testing/development purposes only.");
 
 namespace dfly {
 
@@ -847,11 +851,28 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
     auto op_args = t->GetOpArgs(shard);
     DbSlice& db_slice = op_args.shard->db_slice();
-    auto res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+
+    OpResult<PrimeConstIterator> res;
+
+    // A temporary code that allows running dragonfly without filling up memory store
+    // when reading data from disk.
+    if (TieredStorage* tiered = shard->tiered_storage();
+        tiered && absl::GetFlag(FLAGS_tiered_skip_prefetch)) {
+      res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+      if (res && (*res)->second.IsExternal()) {
+        auto [offset, size] = (*res)->second.GetExternalSlice();
+        string blob(size, '\0');
+        auto ec = tiered->Read(offset, size, blob.data());
+        CHECK(!ec) << "TBD";
+        return blob;
+      }
+    } else {
+      res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+    }
+
     if (!res) {
       return res.status();
     }
-
     return GetString((*res)->second);
   };
 
