@@ -191,7 +191,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     string tmp;
     string_view key = last_slot_it->first.GetSlice(&tmp);
     // do not evict locked keys
-    if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+    if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
       return 0;
 
     // log the evicted keys to journal.
@@ -729,7 +729,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     flush_db_arr[index] = std::move(db);
 
     CreateDb(index);
-    db_arr_[index]->trans_locks.swap(flush_db_arr[index]->trans_locks);
+    std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
     if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
       tiered->CancelAllIos(index);
     }
@@ -936,7 +936,7 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
 }
 
 bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  if (lock_args.args.empty()) {
+  if (lock_args.args.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return true;
   }
   DCHECK_GT(lock_args.key_step, 0u);
@@ -946,7 +946,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
-    lock_acquired = lt[key].Acquire(mode);
+    lock_acquired = lt.Acquire(key, mode);
     uniq_keys_ = {key};  // needed only for tests.
   } else {
     uniq_keys_.clear();
@@ -954,8 +954,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
       string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
-        bool res = lt[s].Acquire(mode);
-        lock_acquired &= res;
+        lock_acquired &= lt.Acquire(s, mode);
       }
     }
   }
@@ -966,41 +965,31 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   return lock_acquired;
 }
 
-void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
-                                unsigned count) {
+void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key) {
   DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));
-  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
+  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " "
+           << " for " << key;
 
   auto& lt = db_arr_[db_index]->trans_locks;
-  auto it = lt.find(KeyLockArgs::GetLockKey(key));
-  CHECK(it != lt.end()) << key;
-  it->second.Release(mode, count);
-  if (it->second.IsFree()) {
-    lt.erase(it);
-  }
+  lt.Release(KeyLockArgs::GetLockKey(key), mode);
 }
 
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  if (lock_args.args.empty()) {
+  if (lock_args.args.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return;
   }
 
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
-    ReleaseNormalized(mode, lock_args.db_index, key, 1);
+    ReleaseNormalized(mode, lock_args.db_index, key);
   } else {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
-        auto it = lt.find(s);
-        CHECK(it != lt.end());
-        it->second.Release(mode);
-        if (it->second.IsFree()) {
-          lt.erase(it);
-        }
+        lt.Release(s, mode);
       }
     }
   }
@@ -1018,11 +1007,9 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) co
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-    auto it = lt.find(s);
-    if (it != lt.end() && !it->second.Check(mode)) {
+    string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+    if (auto lock = lt.Find(s); lock && !lock->Check(mode))
       return false;
-    }
   }
   return true;
 }
@@ -1247,7 +1234,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
           // check if the key is locked by looking up transaction table.
           auto& lt = db_table->trans_locks;
           string_view key = evict_it->first.GetSlice(&tmp);
-          if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+          if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
             continue;
 
           if (auto journal = owner_->journal(); journal) {

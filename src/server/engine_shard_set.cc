@@ -167,9 +167,7 @@ class RoundRobinSharder {
 
 bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
   auto is_contended = [table](string_view key) {
-    auto it = table->trans_locks.find(key);
-    DCHECK(it != table->trans_locks.end());
-    return it->second.IsContended();
+    return table->trans_locks.Find(key)->IsContended();
   };
 
   if (trx->IsMulti()) {
@@ -771,13 +769,13 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
     if (table == nullptr)
       continue;
 
-    info.total_locks += table->trans_locks.size();
-    for (const auto& k_v : table->trans_locks) {
-      if (k_v.second.IsContended()) {
+    info.total_locks += table->trans_locks.Size();
+    for (const auto& [key, lock] : table->trans_locks) {
+      if (lock.IsContended()) {
         info.contended_locks++;
-        if (k_v.second.ContentionScore() > info.max_contention_score) {
-          info.max_contention_score = k_v.second.ContentionScore();
-          info.max_contention_lock_name = k_v.first;
+        if (lock.ContentionScore() > info.max_contention_score) {
+          info.max_contention_score = lock.ContentionScore();
+          info.max_contention_lock_name = string_view{key};
         }
       }
     }
