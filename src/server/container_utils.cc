@@ -336,8 +336,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   if (status != OpStatus::OK)
     return status;
 
-  VLOG(0) << "Woken up, re-arming";
-
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
       result_key = *wake_key;
