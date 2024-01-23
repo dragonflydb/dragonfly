@@ -449,13 +449,13 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
     sd.arg_count = sd.arg_start = 0;
 
     if (multi_->mode == NON_ATOMIC) {
-      sd.local_mask = 0;          // Non atomic transactions schedule each time, so remove all flags
-      sd.pq_pos = TxQueue::kEnd;  // and txq pos
+      sd.local_mask = 0;  // Non atomic transactions schedule each time, so remove all flags
+      DCHECK_EQ(sd.pq_pos, TxQueue::kEnd);
     } else {
       DCHECK(IsAtomicMulti());   // Every command determines it's own active shards
       sd.local_mask &= ~ACTIVE;  // so remove ACTIVE flags, but keep KEYLOCK_ACQUIRED
     }
-    DCHECK_EQ(sd.is_armed.load(memory_order_relaxed), false);
+    DCHECK(!sd.is_armed.load(memory_order_relaxed));
   }
 
   if (multi_->mode == NON_ATOMIC) {
