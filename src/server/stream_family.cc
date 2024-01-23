@@ -13,12 +13,12 @@ extern "C" {
 }
 
 #include "base/logging.h"
-#include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 
@@ -617,9 +617,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
     add_res = std::move(*res_it);
   } else {
     auto op_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
-    if (!op_res) {
-      return op_res.status();
-    }
+    RETURN_ON_BAD_STATUS(op_res);
     add_res = std::move(*op_res);
   }
 

@@ -324,9 +324,7 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
   auto op_res = shard->db_slice().AddOrFindAndFetch(context_, key_);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
   if (!add_res.is_new && add_res.it->second.ObjType() != OBJ_STRING) {

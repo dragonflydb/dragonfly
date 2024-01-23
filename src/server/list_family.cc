@@ -248,9 +248,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   quicklist* dest_ql = nullptr;
   src_res->post_updater.Run();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, dest);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& dest_res = *op_res;
 
   // Insertion of dest could invalidate src_it. Find it again.
@@ -321,9 +319,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     res = std::move(*tmp_res);
   } else {
     auto op_res = es->db_slice().AddOrFind(op_args.db_cntx, key);
-    if (!op_res) {
-      return op_res.status();
-    }
+    RETURN_ON_BAD_STATUS(op_res);
     res = std::move(*op_res);
   }
 

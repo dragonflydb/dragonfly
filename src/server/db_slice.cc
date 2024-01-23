@@ -14,6 +14,7 @@ extern "C" {
 #include "base/logging.h"
 #include "generic_family.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -565,7 +566,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
                                      .key = key})};
   }
   auto status = res.status();
-  CHECK_EQ(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY, true);
+  CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   // It's a new entry.
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
@@ -830,9 +831,7 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddNew(const Context& cntx, string_view key,
                                                 PrimeValue obj, uint64_t expire_at_ms) {
   auto op_result = AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
-  if (!op_result) {
-    return op_result.status();
-  }
+  RETURN_ON_BAD_STATUS(op_result);
   auto& res = *op_result;
   CHECK(res.is_new);
 
@@ -898,9 +897,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& c
   DCHECK(!obj.IsRef());
 
   auto op_result = AddOrFind(cntx, key);
-  if (!op_result) {
-    return op_result;
-  }
+  RETURN_ON_BAD_STATUS(op_result);
 
   auto& res = *op_result;
   if (!res.is_new && !force_update)  // have not inserted.

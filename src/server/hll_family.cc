@@ -18,6 +18,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -71,9 +72,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   string hll;
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
   if (res.is_new) {
     hll.resize(getDenseHllSize());
@@ -259,9 +258,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.shard->db_slice();
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key);
-    if (!op_res) {
-      return op_res.status();
-    }
+    RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;
     res.it->second.SetString(hll);
 

@@ -14,12 +14,12 @@ extern "C" {
 
 #include "base/logging.h"
 #include "core/string_map.h"
-#include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/search/doc_index.h"
 #include "server/transaction.h"
 
@@ -169,6 +169,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.shard->db_slice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
   if (!op_res) {
     return op_res.status();
   }
@@ -620,9 +621,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
   auto& db_slice = op_args.shard->db_slice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);

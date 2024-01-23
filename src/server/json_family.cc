@@ -56,9 +56,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
   auto& db_slice = op_args.shard->db_slice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
 
   auto& res = *op_res;
 

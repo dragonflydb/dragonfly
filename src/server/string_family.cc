@@ -72,9 +72,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   }
 
   auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
 
   string s;
@@ -149,9 +147,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
   auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
   if (add_res.is_new) {
     add_res.it->second.SetString(val);
@@ -217,9 +213,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   auto& db_slice = op_args.shard->db_slice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
   char buf[128];
@@ -274,9 +268,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
     cobj.SetInt(incr);
 
     auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
-    if (!op_result) {
-      return op_result.status();
-    }
+    RETURN_ON_BAD_STATUS(op_result);
 
     return incr;
   }
@@ -587,9 +579,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   // will override an existing one
   // Trying to add a new entry.
   auto op_res = db_slice.AddOrFind(op_args_.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
   PrimeIterator it = add_res.it;

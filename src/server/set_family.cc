@@ -567,9 +567,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   }
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
   CompactObj& co = add_res.it->second;
@@ -644,9 +642,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   auto& db_slice = es->db_slice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  if (!op_res) {
-    return op_res.status();
-  }
+  RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
   CompactObj& co = add_res.it->second;
