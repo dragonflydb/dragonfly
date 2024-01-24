@@ -1012,8 +1012,7 @@ void CompactObj::GetString(char* dest) const {
 
   // no encoding.
   if (taglen_ == ROBJ_TAG) {
-    // TODO bring this check back once we find the root cause that this fails
-    // CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
     memcpy(dest, u_.r_obj.inner_obj(), u_.r_obj.Size());
     return;

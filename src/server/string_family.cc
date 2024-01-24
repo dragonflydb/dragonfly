@@ -540,16 +540,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
     auto& resp = response.resp_arr[i].emplace();
     if (it->second.ObjType() != OBJ_STRING) {
       log_error(it);
-      // try one more time
-      // OpResult<PrimeConstIterator> it_res =
-      //  db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
-      //// if we failed continue
-      // if (!it_res && it->second.ObjType() != OBJ_STRING) {
-      //   continue;
-      // }
-      //// update iterators if got the correct type
-      // iters[i] = *it_res;
-      // it = iters[i];
+      continue;
     }
     size_t size = CopyValueToBuffer(it->second, next);
     resp.value = string_view(next, size);
