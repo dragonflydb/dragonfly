@@ -18,6 +18,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -70,33 +71,31 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
 
   string hll;
 
-  try {
-    auto res = db_slice.AddOrFind(op_args.db_cntx, key);
-    if (res.is_new) {
-      hll.resize(getDenseHllSize());
-      createDenseHll(StringToHllPtr(hll));
-    } else if (res.it->second.ObjType() != OBJ_STRING) {
-      return OpStatus::WRONG_TYPE;
-    } else {
-      res.it->second.GetString(&hll);
-      ConvertToDenseIfNeeded(&hll);
-    }
-
-    int updated = 0;
-    for (const auto& value : values) {
-      int added = pfadd(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
-      if (added < 0) {
-        return OpStatus::INVALID_VALUE;
-      }
-      updated += added;
-    }
-
-    res.it->second.SetString(hll);
-
-    return std::min(updated, 1);
-  } catch (const std::bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& res = *op_res;
+  if (res.is_new) {
+    hll.resize(getDenseHllSize());
+    createDenseHll(StringToHllPtr(hll));
+  } else if (res.it->second.ObjType() != OBJ_STRING) {
+    return OpStatus::WRONG_TYPE;
+  } else {
+    res.it->second.GetString(&hll);
+    ConvertToDenseIfNeeded(&hll);
   }
+
+  int updated = 0;
+  for (const auto& value : values) {
+    int added = pfadd(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
+    if (added < 0) {
+      return OpStatus::INVALID_VALUE;
+    }
+    updated += added;
+  }
+
+  res.it->second.SetString(hll);
+
+  return std::min(updated, 1);
 }
 
 void PFAdd(CmdArgList args, ConnectionContext* cntx) {
@@ -258,12 +257,9 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
     string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.shard->db_slice();
-    DbSlice::AddOrFindResult res;
-    try {
-      res = db_slice.AddOrFind(t->GetDbContext(), key);
-    } catch (const bad_alloc& e) {
-      return OpStatus::OUT_OF_MEMORY;
-    }
+    auto op_res = db_slice.AddOrFind(t->GetDbContext(), key);
+    RETURN_ON_BAD_STATUS(op_res);
+    auto& res = *op_res;
     res.it->second.SetString(hll);
 
     if (op_args.shard->journal()) {

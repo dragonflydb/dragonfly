@@ -727,11 +727,6 @@ Service::Service(ProactorPool* pp)
   CHECK(pp);
   CHECK(shard_set == NULL);
 
-  if (KeyLockArgs::IsLockHashTagEnabled() && !ClusterConfig::IsEnabledOrEmulated()) {
-    LOG(ERROR) << "Setting --lock_on_hashtags without --cluster_mode is unsupported";
-    exit(1);
-  }
-
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
   LOG(INFO) << "PRINT STACKTRACES REGISTERED";
   pp_.GetNextProactor()->RegisterSignal({SIGUSR1}, [this](int signal) {
@@ -1245,10 +1240,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   if (cntx->transaction && !cntx->conn_state.exec_info.IsRunning() &&
       cntx->conn_state.script_info == nullptr) {
-    bool is_ooo = cntx->transaction->IsOOO();
-
     cntx->last_command_debug.clock = cntx->transaction->txid();
-    cntx->last_command_debug.is_ooo = is_ooo;
   }
 
   return true;

@@ -29,7 +29,7 @@ class TieredStorage {
   PrimeIterator Load(DbIndex db_index, PrimeIterator it, std::string_view key);
 
   // Schedules unloading of the item, pointed by the iterator.
-  std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it);
+  std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it, std::string_view key);
 
   void CancelIo(DbIndex db_index, PrimeIterator it);
 
@@ -43,12 +43,23 @@ class TieredStorage {
 
   TieredStats GetStats() const;
 
+  const IoMgrStats& GetDiskStats() const {
+    return io_mgr_.GetStats();
+  }
+
   void CancelAllIos(DbIndex db_index);
+
+  std::error_code Read(size_t offset, size_t len, char* dest);
 
  private:
   class InflightWriteRequest;
 
   void WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_len);
+
+  // Returns a pair consisting of an bool denoting whether we can write to disk, and updated
+  // iterator as this function can yield. 'it' should not be used after the call to this function.
+  std::pair<bool, PrimeIterator> CanScheduleOffload(DbIndex db_index, PrimeIterator it,
+                                                    std::string_view key);
 
   bool FlushPending(DbIndex db_index, unsigned bin_index);
 
@@ -56,7 +67,6 @@ class TieredStorage {
 
   void FinishIoRequest(int io_res, InflightWriteRequest* req);
   void SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest);
-  std::error_code Read(size_t offset, size_t len, char* dest);
 
   DbSlice& db_slice_;
   IoMgr io_mgr_;

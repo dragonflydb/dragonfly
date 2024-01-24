@@ -53,11 +53,17 @@ class JournalStreamer : protected BufferedStreamerBase {
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
  public:
-  RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id, uint32_t flow_id,
-                  journal::Journal* journal, Context* cntx);
+  RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal,
+                  Context* cntx);
 
   void Start(io::Sink* dest) override;
   void Cancel() override;
+
+  bool IsSnapshotFinished() const {
+    return snapshot_finished_;
+  }
+
+  ~RestoreStreamer();
 
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -72,9 +78,9 @@ class RestoreStreamer : public JournalStreamer {
   uint64_t snapshot_version_ = 0;
   SlotSet my_slots_;
   uint32_t sync_id_;
-  uint32_t flow_id_;
   Fiber snapshot_fb_;
   Cancellation fiber_cancellation_;
+  bool snapshot_finished_ = false;
 };
 
 }  // namespace dfly

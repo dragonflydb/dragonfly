@@ -41,6 +41,7 @@ class EngineShard {
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
     uint64_t poll_execution_total = 0;
+    uint64_t tx_ooo_total = 0;
     Stats& operator+=(const Stats&);
   };
 
@@ -277,6 +278,9 @@ class EngineShardSet {
     return uint32_t(shard_queue_.size());
   }
 
+  bool IsTieringEnabled() {
+    return is_tiering_enabled_;
+  }
   util::ProactorPool* pool() {
     return pp_;
   }
@@ -339,6 +343,7 @@ class EngineShardSet {
 
   util::ProactorPool* pp_;
   std::vector<FiberQueue*> shard_queue_;
+  bool is_tiering_enabled_ = false;
 };
 
 template <typename U, typename P>

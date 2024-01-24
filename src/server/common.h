@@ -122,8 +122,14 @@ void RecordExpiry(DbIndex dbid, std::string_view key);
 // Must be called from shard thread of journal to sink.
 void TriggerJournalWriteToSink();
 
+struct IoMgrStats {
+  uint64_t read_total = 0;
+  uint64_t read_delay_usec = 0;
+
+  IoMgrStats& operator+=(const IoMgrStats& rhs);
+};
+
 struct TieredStats {
-  uint64_t tiered_reads = 0;
   uint64_t tiered_writes = 0;
 
   size_t storage_capacity = 0;

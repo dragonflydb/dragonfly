@@ -22,7 +22,6 @@
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
-#include "server/replica.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 
@@ -633,18 +632,18 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
   return cntx->SendOk();
 }
 
-static std::string_view state_to_str(ClusterSlotMigration::State state) {
+static std::string_view state_to_str(MigrationState state) {
   switch (state) {
-    case ClusterSlotMigration::C_NO_STATE:
+    case MigrationState::C_NO_STATE:
       return "NO_STATE"sv;
-    case ClusterSlotMigration::C_CONNECTING:
+    case MigrationState::C_CONNECTING:
       return "CONNECTING"sv;
-    case ClusterSlotMigration::C_FULL_SYNC:
+    case MigrationState::C_FULL_SYNC:
       return "FULL_SYNC"sv;
-    case ClusterSlotMigration::C_STABLE_SYNC:
+    case MigrationState::C_STABLE_SYNC:
       return "STABLE_SYNC"sv;
   }
-  DCHECK(false) << "Unknown State value " << state;
+  DCHECK(false) << "Unknown State value " << static_cast<underlying_type_t<MigrationState>>(state);
   return "UNDEFINED_STATE"sv;
 }
 
@@ -662,14 +661,14 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     for (const auto& m : incoming_migrations_jobs_) {
       const auto& info = m->GetInfo();
       if (info.host == host_ip && info.port == port)
-        return rb->SendSimpleString(state_to_str(info.state));
+        return rb->SendSimpleString(state_to_str(m->GetState()));
     }
     // find outgoing slot migration
-    for (const auto& [_, info] : outgoing_migration_infos_) {
-      if (info->host_ip == host_ip && info->port == port)
-        return rb->SendSimpleString(state_to_str(info->state));
+    for (const auto& [_, info] : outgoing_migration_jobs_) {
+      if (info->GetHostIp() == host_ip && info->GetPort() == port)
+        return rb->SendSimpleString(state_to_str(info->GetState()));
     }
-  } else if (auto arr_size = incoming_migrations_jobs_.size() + outgoing_migration_infos_.size();
+  } else if (auto arr_size = incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size();
              arr_size != 0) {
     rb->StartArray(arr_size);
     const auto& send_answer = [rb](std::string_view direction, std::string_view host, uint16_t port,
@@ -680,14 +679,14 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     lock_guard lk(migration_mu_);
     for (const auto& m : incoming_migrations_jobs_) {
       const auto& info = m->GetInfo();
-      send_answer("in", info.host, info.port, info.state);
+      send_answer("in", info.host, info.port, m->GetState());
     }
-    for (const auto& [_, info] : outgoing_migration_infos_) {
-      send_answer("out", info->host_ip, info->port, info->state);
+    for (const auto& [_, info] : outgoing_migration_jobs_) {
+      send_answer("out", info->GetHostIp(), info->GetPort(), info->GetState());
     }
     return;
   }
-  return rb->SendSimpleString(state_to_str(ClusterSlotMigration::C_NO_STATE));
+  return rb->SendSimpleString(state_to_str(MigrationState::C_NO_STATE));
 }
 
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
@@ -697,7 +696,9 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   if (sub_cmd == "CONF") {
     MigrationConf(args, cntx);
   } else if (sub_cmd == "FLOW") {
-    Flow(args, cntx);
+    DflyMigrateFlow(args, cntx);
+  } else if (sub_cmd == "FULL-SYNC-CUT") {
+    DflyMigrateFullSyncCut(args, cntx);
   } else {
     cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -712,7 +713,8 @@ ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t 
     }
   }
   return incoming_migrations_jobs_
-      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port, std::move(slots)))
+      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port,
+                                                      &server_family_->service(), std::move(slots)))
       .get();
 }
 
@@ -746,7 +748,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto sync_id = CreateMigrationSession(cntx, port, std::move(slots));
+  auto sync_id = CreateOutgoingMigration(cntx, port, std::move(slots));
 
   cntx->conn()->SetName("slot_migration_ctrl");
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -756,18 +758,25 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   return;
 }
 
-uint32_t ClusterFamily::CreateMigrationSession(ConnectionContext* cntx, uint16_t port,
-                                               std::vector<ClusterConfig::SlotRange> slots) {
+uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
+                                                std::vector<ClusterConfig::SlotRange> slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
-  auto info = make_shared<MigrationInfo>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(),
-                                         sync_id, port, std::move(slots));
-  auto [it, inserted] = outgoing_migration_infos_.emplace(sync_id, info);
+  auto err_handler = [this, sync_id](const GenericError& err) {
+    LOG(INFO) << "Slot migration error: " << err.Format();
+
+    // Todo add error processing, stop migration process
+    // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
+  };
+  auto info =
+      make_shared<OutgoingMigration>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(), port,
+                                     std::move(slots), err_handler);
+  auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(info));
   CHECK(inserted);
   return sync_id;
 }
 
-void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
+void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
 
@@ -775,32 +784,58 @@ void ClusterFamily::Flow(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(err->MakeReply());
   }
 
-  VLOG(1) << "Create flow "
-          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
+  VLOG(1) << "Create flow sync_id: " << sync_id << " shard_id: " << shard_id;
 
   cntx->conn()->SetName(absl::StrCat("migration_flow_", sync_id));
 
-  auto info = GetMigrationInfo(sync_id);
+  auto info = GetOutgoingMigration(sync_id);
   if (!info)
-    cntx->SendError(kIdNotFound);
-
-  info->flows[shard_id].conn = cntx->conn();
+    return cntx->SendError(kIdNotFound);
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
 
-  info->state = ClusterSlotMigration::State::C_FULL_SYNC;
-
   cntx->SendOk();
 
-  info->flows[shard_id].conn->socket()->Write(io::Buffer("SYNC"));
+  EngineShard* shard = EngineShard::tlocal();
+  DCHECK(shard->shard_id() == shard_id);
 
-  LOG(INFO) << "Started migation with target node " << info->host_ip << ":" << info->port;
+  info->StartFlow(&shard->db_slice(), sync_id, server_family_->journal(), cntx->conn()->socket());
 }
 
-shared_ptr<ClusterFamily::MigrationInfo> ClusterFamily::GetMigrationInfo(uint32_t sync_id) {
+void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
+
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
+  }
+
+  VLOG(1) << "Full sync cut "
+          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
+
+  std::lock_guard lck(migration_mu_);
+  auto migration_it =
+      std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
+                   [sync_id](const auto& el) { return el->GetSyncId() == sync_id; });
+
+  if (migration_it == incoming_migrations_jobs_.end()) {
+    LOG(WARNING) << "Couldn't find migration id";
+    return cntx->SendError(kIdNotFound);
+  }
+
+  (*migration_it)->SetStableSyncForFlow(shard_id);
+  if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
+    (*migration_it)->Stop();
+    LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
+  }
+
+  cntx->SendOk();
+}
+
+shared_ptr<OutgoingMigration> ClusterFamily::GetOutgoingMigration(uint32_t sync_id) {
   unique_lock lk(migration_mu_);
-  auto sync_it = outgoing_migration_infos_.find(sync_id);
-  return sync_it != outgoing_migration_infos_.end() ? sync_it->second : nullptr;
+  auto sync_it = outgoing_migration_jobs_.find(sync_id);
+  return sync_it != outgoing_migration_jobs_.end() ? sync_it->second : nullptr;
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);

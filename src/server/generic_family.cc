@@ -138,8 +138,8 @@ bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& 
   }
 
   DbContext context{.db_index = index, .time_now_ms = GetCurrentTimeMs()};
-  db_slice.AddNew(context, key, std::move(pv), expire_ms);
-  return true;
+  auto res = db_slice.AddNew(context, key, std::move(pv), expire_ms);
+  return res.ok();
 }
 
 class RestoreArgs {
@@ -369,7 +369,10 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
       if (src_res_.ref_val.ObjType() == OBJ_STRING) {
         pv_.SetString(str_val_);
       }
-      res = db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
+      auto op_res =
+          db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
+      RETURN_ON_BAD_STATUS(op_res);
+      res = std::move(*op_res);
     }
 
     dest_it->first.SetSticky(src_res_.sticky);
@@ -1433,7 +1436,9 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     // the value in `from_obj`.
     from_res.post_updater.Run();
     CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
-    to_res = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
+    auto op_result = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
+    RETURN_ON_BAD_STATUS(op_result);
+    to_res = std::move(*op_result);
   }
 
   to_res.it->first.SetSticky(sticky);
@@ -1491,7 +1496,9 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   from_res.it->second.SetExpire(IsValid(from_res.exp_it));
 
   CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
-  auto add_res = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
+  auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
+  RETURN_ON_BAD_STATUS(op_result);
+  auto& add_res = *op_result;
   add_res.it->first.SetSticky(sticky);
 
   if (add_res.it->second.ObjType() == OBJ_LIST && op_args.shard->blocking_controller()) {

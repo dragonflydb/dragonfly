@@ -2364,17 +2364,18 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
       continue;
 
-    try {
-      auto res = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
-      res.it->first.SetSticky(item->is_sticky);
-      if (!res.is_new) {
-        LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
-      }
-    } catch (const std::bad_alloc&) {
+    auto op_res = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+    if (!op_res) {
       LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
       ec_ = RdbError(errc::out_of_memory);
       stop_early_ = true;
       break;
+    }
+
+    auto& res = *op_res;
+    res.it->first.SetSticky(item->is_sticky);
+    if (!res.is_new) {
+      LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
   }
 

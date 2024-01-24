@@ -156,8 +156,9 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,                 // Set on all active shards.
-    OUT_OF_ORDER = 1 << 2,      // Whether it can run as out of order
+    ACTIVE = 1,  // Set on all active shards.
+    OUT_OF_ORDER =
+        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED is not set.
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
@@ -252,11 +253,7 @@ class Transaction {
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
   // Returns true if the transaction spans this shard_id.
-  // Runs from the coordinator thread.
-  bool IsActive(ShardId shard_id) const {
-    return unique_shard_cnt_ == 1 ? (unique_shard_id_ == shard_id)
-                                  : shard_data_[shard_id].local_mask & ACTIVE;
-  }
+  bool IsActive(ShardId shard_id) const;
 
   //! Returns true if the transaction is armed for execution on this sid (used to avoid
   //! duplicate runs). Supports local transactions under multi as well.
@@ -310,10 +307,6 @@ class Transaction {
   }
 
   bool IsGlobal() const;
-
-  bool IsOOO() const {
-    return coordinator_state_ & COORD_OOO;
-  }
 
   // If blocking tx was woken up on this shard, get wake key.
   std::optional<std::string_view> GetWakeKey(ShardId sid) const;
@@ -424,7 +417,6 @@ class Transaction {
     COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
     COORD_BLOCKED = 1 << 2,
     COORD_CANCELLED = 1 << 3,
-    COORD_OOO = 1 << 4,
   };
 
   struct PerShardCache {
@@ -470,12 +462,9 @@ class Transaction {
   // Returns true if transaction ran out-of-order during the scheduling phase.
   bool ScheduleUniqueShard(EngineShard* shard);
 
-  // Schedule on shards transaction queue.
-  // Returns pair(schedule_success, lock_granted)
-  // schedule_success is true if transaction was scheduled on db_slice.
-  // lock_granted is true if lock was granted for all the keys on this shard.
-  // Runs in the shard thread.
-  std::pair<bool, bool> ScheduleInShard(EngineShard* shard);
+  // Schedule on shards transaction queue. Returns true if scheduled successfully,
+  // false if inconsistent order was detected and the schedule needs to be cancelled.
+  bool ScheduleInShard(EngineShard* shard);
 
   // Optimized version of RunInShard for single shard uncontended cases.
   RunnableResult RunQuickie(EngineShard* shard);
@@ -547,12 +536,11 @@ class Transaction {
 
   // Iterate over shards and run function accepting (PerShardData&, ShardId) on all active ones.
   template <typename F> void IterateActiveShards(F&& f) {
-    if (!global_ && unique_shard_cnt_ == 1) {  // unique_shard_id_ is set only for non-global.
-      auto i = unique_shard_id_;
-      f(shard_data_[SidToId(i)], i);
+    if (unique_shard_cnt_ == 1) {
+      f(shard_data_[SidToId(unique_shard_id_)], unique_shard_id_);
     } else {
       for (ShardId i = 0; i < shard_data_.size(); ++i) {
-        if (auto& sd = shard_data_[i]; global_ || (sd.local_mask & ACTIVE)) {
+        if (auto& sd = shard_data_[i]; sd.local_mask & ACTIVE) {
           f(sd, i);
         }
       }

@@ -806,15 +806,15 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     status = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
     )
-    assert "FULL_SYNC" == status
+    assert "STABLE_SYNC" == status
 
     status = await c_nodes_admin[0].execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[1].port)
     )
-    assert "FULL_SYNC" == status
+    assert "STABLE_SYNC" == status
 
     status = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-    assert ["out 127.0.0.1:30002 FULL_SYNC"] == status
+    assert ["out 127.0.0.1:30002 STABLE_SYNC"] == status
 
     try:
         await c_nodes_admin[1].execute_command(
