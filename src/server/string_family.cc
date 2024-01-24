@@ -525,13 +525,32 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
+  auto log_error = [](auto it) {
+    LOG(ERROR) << "Invalid type " << it->second.ObjType();
+    LOG(ERROR) << "Bucket id: " << it.bucket_id();
+    LOG(ERROR) << "Segment " << it.segment_id();
+    LOG(ERROR) << "Slot id " << it.slot_id();
+  };
+
   for (size_t i = 0; i < args.size(); ++i) {
     PrimeConstIterator it = iters[i];
     if (it.is_done())
       continue;
 
     auto& resp = response.resp_arr[i].emplace();
-
+    if (it->second.ObjType() != OBJ_STRING) {
+      log_error(it);
+      // try one more time
+      // OpResult<PrimeConstIterator> it_res =
+      //  db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
+      //// if we failed continue
+      // if (!it_res && it->second.ObjType() != OBJ_STRING) {
+      //   continue;
+      // }
+      //// update iterators if got the correct type
+      // iters[i] = *it_res;
+      // it = iters[i];
+    }
     size_t size = CopyValueToBuffer(it->second, next);
     resp.value = string_view(next, size);
     next += size;
