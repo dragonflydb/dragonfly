@@ -470,6 +470,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs "
         << trans->GetLocalMask(sid);
 
+    // Commands like BRPOPLPUSH don't conclude immediately
     if (trans->RunInShard(this, false)) {
       continuation_trans_ = trans;
       return;
