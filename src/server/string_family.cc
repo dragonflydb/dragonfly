@@ -525,8 +525,10 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
-  auto log_error = [](auto it) {
+  auto log_error = [](auto it, auto expected_key, auto key_found) {
     LOG(ERROR) << "Invalid type " << it->second.ObjType();
+    LOG(ERROR) << "Expected key " << expected_key;
+    LOG(ERROR) << "Key found " << key_found;
     LOG(ERROR) << "Bucket id: " << it.bucket_id();
     LOG(ERROR) << "Segment " << it.segment_id();
     LOG(ERROR) << "Slot id " << it.slot_id();
@@ -537,11 +539,29 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
     if (it.is_done())
       continue;
 
-    auto& resp = response.resp_arr[i].emplace();
-    if (it->second.ObjType() != OBJ_STRING) {
-      log_error(it);
-      continue;
+    std::string key_found;
+    it->first.GetString(&key_found);
+
+    log_error(it, args[i], key_found);
+    if (it->second.ObjType() != OBJ_STRING || key_found != args[i]) {
+      // Do the checks again
+      OpResult<PrimeConstIterator> it_res =
+          db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
+      if (it_res->is_done())
+        continue;
+      if (!it_res && it->second.ObjType() != OBJ_STRING) {
+        continue;
+      }
+      // we continue here because it's hard to readjust the size of response.storage_list in line
+      // 525 An alternative solution would be to allocate more (2x) and remove the check
+      if (it->second.Size() != (*it_res)->second.Size()) {
+        continue;
+      }
+      iters[i] = *it_res;
+      it = iters[i];
     }
+    auto& resp = response.resp_arr[i].emplace();
+
     size_t size = CopyValueToBuffer(it->second, next);
     resp.value = string_view(next, size);
     next += size;
