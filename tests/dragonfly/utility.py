@@ -194,7 +194,7 @@ class CommandGenerator:
             key, _ = self.randomize_key(pop=True)
             if key == None:
                 return None, 0
-            return f"PEXPIRE k{key} {random.randint(0, 50)}", -1
+            return ("PEXPIRE", f"k{key}", f"{random.randint(0, 50)}"), -1
         else:
             keys_gen = (
                 self.randomize_key(pop=True) for _ in range(random.randint(1, self.max_multikey))
@@ -203,7 +203,7 @@ class CommandGenerator:
 
             if len(keys) == 0:
                 return None, 0
-            return "DEL " + " ".join(keys), -len(keys)
+            return ("DEL", *keys), -len(keys)
 
     UPDATE_ACTIONS = [
         ("APPEND {k} {val}", ValueType.STRING),
@@ -228,7 +228,7 @@ class CommandGenerator:
         cmd, t = random.choice(self.UPDATE_ACTIONS)
         k, _ = self.randomize_key(t)
         val = "".join(random.choices(string.ascii_letters, k=3))
-        return cmd.format(k=f"k{k}", val=val) if k is not None else None, 0
+        return cmd.format(k=f"k{k}", val=val).split() if k is not None else None, 0
 
     GROW_ACTINONS = {
         ValueType.STRING: "MSET",
@@ -363,7 +363,14 @@ class DflySeeder:
         log_file=None,
         unsupported_types=[],
         stop_on_failure=True,
+        cluster_mode=False,
     ):
+        if cluster_mode:
+            max_multikey = 1
+            multi_transaction_probability = 0
+            unsupported_types = [ValueType.JSON]  # Cluster aio client doesn't support JSON
+
+        self.cluster_mode = cluster_mode
         self.gen = CommandGenerator(keys, val_size, batch_size, max_multikey, unsupported_types)
         self.port = port
         self.dbcount = dbcount
@@ -499,7 +506,10 @@ class DflySeeder:
         return submitted
 
     async def _executor_task(self, db, queue):
-        client = aioredis.Redis(port=self.port, db=db)
+        if self.cluster_mode:
+            client = aioredis.RedisCluster(host="localhost", port=self.port, db=db)
+        else:
+            client = aioredis.Redis(port=self.port, db=db)
 
         while True:
             tx_data = await queue.get()
@@ -509,10 +519,7 @@ class DflySeeder:
 
             pipe = client.pipeline(transaction=tx_data[1])
             for cmd in tx_data[0]:
-                if isinstance(cmd, str):
-                    pipe.execute_command(cmd)
-                else:
-                    pipe.execute_command(*cmd)
+                pipe.execute_command(*cmd)
 
             try:
                 await pipe.execute()
@@ -522,7 +529,9 @@ class DflySeeder:
             except Exception as e:
                 raise SystemExit(e)
             queue.task_done()
-        await client.connection_pool.disconnect()
+        await client.close()
+        if not self.cluster_mode:
+            await client.connection_pool.disconnect()
 
     CAPTURE_COMMANDS = {
         ValueType.STRING: lambda pipe, k: pipe.get(k),
