@@ -516,6 +516,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   char* next = response.storage_list->data;
 
   auto log_error = [](auto it, auto expected_key, auto key_found) {
+    LOG(ERROR) << "Printing details for iterator of key " << expected_key;
     LOG(ERROR) << "Invalid type " << it->second.ObjType();
     LOG(ERROR) << "Expected key " << expected_key;
     LOG(ERROR) << "Key found " << key_found;
@@ -532,22 +533,35 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
     std::string key_found;
     it->first.GetString(&key_found);
 
-    log_error(it, args[i], key_found);
     if (it->second.ObjType() != OBJ_STRING || key_found != args[i]) {
+      LOG(ERROR) << "!!! Inconsistent state detected";
+      log_error(it, args[i], key_found);
+
+      LOG(ERROR) << "Printing all iterators";
+      for (size_t j = 0; j < args.size(); ++j) {
+        if (IsValid(iters[j])) {
+          std::string tmp_key_found;
+          iters[j]->first.GetString(&tmp_key_found);
+          log_error(iters[j], args[j], tmp_key_found);
+        } else {
+          LOG(ERROR) << "Skipping invalid it " << j << " for key " << args[j];
+        }
+      }
+      LOG(ERROR) << "Finished printing iterators";
+
       // Do the checks again
-      OpResult<PrimeConstIterator> it_res =
-          db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
-      if (it_res->is_done())
-        continue;
-      if (!it_res && it->second.ObjType() != OBJ_STRING) {
+      auto it_res = db_slice.FindReadOnly(t->GetDbContext(), args[i]);
+      if (!IsValid(it_res.it)) {
+        LOG(ERROR) << "Can't find key anymore";
         continue;
       }
-      // we continue here because it's hard to readjust the size of response.storage_list in line
-      // 525 An alternative solution would be to allocate more (2x) and remove the check
-      if (it->second.Size() != (*it_res)->second.Size()) {
+
+      if (it_res.it->second.ObjType() != OBJ_STRING) {
+        LOG(ERROR) << "Object found is of type " << it_res.it->second.ObjType();
         continue;
       }
-      iters[i] = *it_res;
+
+      iters[i] = it_res.it;
       it = iters[i];
     }
     auto& resp = response.resp_arr[i].emplace();
