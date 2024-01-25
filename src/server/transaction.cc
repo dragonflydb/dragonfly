@@ -204,23 +204,25 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
   CHECK_EQ(args_.size(), num_args);
 }
 
-void Transaction::RecordMultiLocks(const KeyIndex& key_index) {
-  DCHECK(multi_);
-  DCHECK(!multi_->lock_mode);
+CmdArgList Transaction::CopyMultiKeys(CmdArgList keys) {
+  DCHECK(multi_->mode == LOCK_AHEAD);
+  DCHECK_GT(keys.size(), 0u);
 
-  if (multi_->mode == NON_ATOMIC)
-    return;
+  // Store all unqiue keys in multi data
+  absl::flat_hash_set<std::string_view> seen_keys;
+  for (MutableSlice key : keys) {
+    auto lock_key = KeyLockArgs::GetLockKey(facade::ToSV(key));
+    if (seen_keys.insert(lock_key).second) {
+      multi_->keys.emplace_back(lock_key);
+    }
+  }
 
-  auto lock_key = [this](string_view key) { multi_->locks.emplace(KeyLockArgs::GetLockKey(key)); };
+  // Replace first 0..n with pointers to stored keys
+  size_t i = 0;
+  for (string& stored_key : multi_->keys)
+    keys[i++] = {stored_key.data(), stored_key.size()};
 
-  multi_->lock_mode.emplace(LockMode());
-  for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
-    lock_key(ArgS(full_args_, i));
-  if (key_index.bonus)
-    lock_key(ArgS(full_args_, *key_index.bonus));
-
-  DCHECK(IsAtomicMulti());
-  DCHECK(multi_->mode == GLOBAL || !multi_->locks.empty());
+  return keys.subspan(0, multi_->keys.size());
 }
 
 void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
@@ -308,8 +310,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   // Initialize shard data based on distributed arguments.
   InitShardData(shard_index, key_index.num_args(), needs_reverse_mapping);
 
-  if (multi_ && !multi_->lock_mode)
-    RecordMultiLocks(key_index);
+  DCHECK(!multi_ || multi_->mode != LOCK_AHEAD || !multi_->keys.empty());
 
   DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
 
@@ -418,6 +419,9 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
   DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
 
   multi_->mode = LOCK_AHEAD;
+  multi_->lock_mode = LockMode();
+
+  keys = CopyMultiKeys(keys);
   InitBase(dbid, keys);
   InitByKeys(KeyIndex::Range(0, keys.size()));
 
@@ -796,10 +800,9 @@ void Transaction::UnlockMulti() {
     return;
 
   auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
-  while (!multi_->locks.empty()) {
-    auto entry = multi_->locks.extract(multi_->locks.begin());
-    ShardId sid = Shard(entry.value(), sharded_keys->size());
-    (*sharded_keys)[sid].emplace_back(std::move(entry.value()));
+  for (string& key : multi_->keys) {
+    ShardId sid = Shard(key, sharded_keys->size());
+    (*sharded_keys)[sid].emplace_back(std::move(key));
   }
 
   unsigned shard_journals_cnt =
@@ -957,14 +960,9 @@ void Transaction::Refurbish() {
   cb_ptr_ = nullptr;
 }
 
-void Transaction::IterateMultiLocks(ShardId sid, std::function<void(const std::string&)> cb) const {
-  unsigned shard_num = shard_set->size();
-  for (const auto& key : multi_->locks) {
-    ShardId key_sid = Shard(key, shard_num);
-    if (key_sid == sid) {
-      cb(key);
-    }
-  }
+absl::Span<const std::string> Transaction::GetMultiKeys() const {
+  DCHECK(multi_);
+  return multi_->keys;
 }
 
 void Transaction::EnableShard(ShardId sid) {

@@ -344,7 +344,8 @@ class Transaction {
 
   void Refurbish();
 
-  void IterateMultiLocks(ShardId sid, std::function<void(const std::string&)> cb) const;
+  // Get keys multi transaction was initialized with
+  absl::Span<const std::string> GetMultiKeys() const;
 
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
@@ -399,7 +400,7 @@ class Transaction {
     MultiMode mode;
 
     std::optional<IntentLock::Mode> lock_mode;
-    absl::flat_hash_set<std::string> locks;
+    std::vector<std::string> keys;  // Unique keys (locks) used for scheduling and initialization
 
     // Set if the multi command is concluding to avoid ambiguity with COORD_CONCLUDING
     bool concluding = false;
@@ -449,11 +450,12 @@ class Transaction {
   void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
                      bool rev_mapping);
 
-  // Init multi. Record locks if needed.
-  void RecordMultiLocks(const KeyIndex& keys);
-
   // Store all key index keys in args_. Used only for single shard initialization.
   void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
+
+  // Multi transactions unlock asynchronously, so they need to keep a copy of all they keys.
+  // Return "laundered" subspan with unique keys and pointers with same lifetime as transaction.
+  CmdArgList CopyMultiKeys(CmdArgList keys);
 
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
