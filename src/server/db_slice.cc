@@ -121,7 +121,7 @@ class PrimeBumpPolicy {
       : bumped_items_(bumped_items) {
   }
   // returns true if key can be made less important for eviction (opposite of bump up)
-  bool CanBumpDown(const CompactObj& obj) const {
+  bool CanBump(const CompactObj& obj) const {
     return !obj.IsSticky() && !bumped_items_.contains(obj);
   }
 
@@ -497,9 +497,12 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
-    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bumped_items_});
-    ++events_.bumpups;
-    bumped_items_.insert(res.it->first.AsRef());
+    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bumped_items_});
+    if (bump_it != res.it) {  // the item was bumped
+      res.it = bump_it;
+      ++events_.bumpups;
+      bumped_items_.insert(res.it->first.AsRef());
+    }
   }
 
   db.top_keys.Touch(key);
