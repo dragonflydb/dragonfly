@@ -279,6 +279,39 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   EXPECT_GT(bumps2, bumps1);
 }
 
+TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
+  absl::FlagSaver fs;
+  SetTestFlag("cache_mode", "true");
+  ResetService();
+  Run({"debug", "populate", "100000", "key", "32", "RAND"});
+
+  // Scan starts traversing the database, because we populated the database with lots of items we
+  // assume that scan will return items from the same bucket that reside next to each other.
+  auto resp = Run({"scan", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  StringVec vec = StrArray(resp.GetVec()[1]);
+  ASSERT_GE(vec.size(), 10);
+
+  auto get_bump_ups = [](const string& str) -> size_t {
+    const string matcher = "bump_ups:";
+    const auto pos = str.find(matcher) + matcher.size();
+    const auto sub = str.substr(pos, 1);
+    return atoi(sub.c_str());
+  };
+
+  resp = Run({"info", "stats"});
+  EXPECT_EQ(get_bump_ups(resp.GetString()), 0);
+
+  Run({"del", vec[1]});
+  Run({"lpush", vec[1], "a"});
+
+  auto mget_resp = StrArray(Run({"mget", vec[2], vec[2], vec[2]}));
+
+  resp = Run({"info", "stats"});
+  size_t bumps1 = get_bump_ups(resp.GetString());
+  EXPECT_EQ(bumps1, 1);
+}
+
 TEST_F(StringFamilyTest, MSetGet) {
   Run({"mset", "x", "0", "y", "0", "a", "0", "b", "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
