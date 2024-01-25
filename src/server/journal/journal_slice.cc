@@ -61,7 +61,7 @@ void JournalSlice::Init(unsigned index) {
     return;
 
   slice_index_ = index;
-  ring_buffer_.emplace(NextPowerOf2(absl::GetFlag(FLAGS_shard_repl_backlog_len)));
+  ring_buffer_.emplace(2);
 }
 
 #if 0
@@ -156,7 +156,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     FiberAtomicGuard fg;
     // GetTail gives a pointer to a new tail entry in the buffer, possibly overriding the last entry
     // if the buffer is full.
-    item = ring_buffer_->GetTail(true);
+    item = &dummy;
     item->opcode = entry.opcode;
     item->lsn = lsn_++;
     item->slot = entry.slot;

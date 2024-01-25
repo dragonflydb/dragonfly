@@ -493,9 +493,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
-  bool prev_armed = sd.is_armed.load(memory_order_relaxed);
-  DCHECK(prev_armed);
-  sd.is_armed.store(false, memory_order_relaxed);
+  CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
 
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
@@ -610,7 +608,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     }
   }
 
-  CHECK_GE(DecreaseRunCnt(), 1u);
+  DecreaseRunCnt();
   // From this point on we can not access 'this'.
 
   return !is_concluding;
@@ -749,7 +747,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
         // If DecreaseRunCnt were called before ScheduleUniqueShard finishes
         // then WaitForShardCallbacks below could exit before schedule_cb assigns return value
         // to was_ooo and cause stack corruption.
-        CHECK_GE(DecreaseRunCnt(), 1u);
+        DecreaseRunCnt();
       }
     };
 
@@ -1321,7 +1319,7 @@ void Transaction::ExpireShardCb(ArgSlice wkeys, EngineShard* shard) {
   // Resume processing of transaction queue
   shard->PollExecution("unwatchcb", nullptr);
 
-  CHECK_GE(DecreaseRunCnt(), 1u);
+  DecreaseRunCnt();
 }
 
 OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
@@ -1385,7 +1383,7 @@ void Transaction::UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* s
   this->DecreaseRunCnt();
 }
 
-inline uint32_t Transaction::DecreaseRunCnt() {
+void Transaction::DecreaseRunCnt() {
   // to protect against cases where Transaction is destroyed before run_ec_.notify
   // finishes running. We can not put it inside the (res == 1) block because then it's too late.
   ::boost::intrusive_ptr guard(this);
@@ -1396,10 +1394,13 @@ inline uint32_t Transaction::DecreaseRunCnt() {
   // The fact that run_ec_.notify() does release operation is not enough, because
   // WaitForCallbacks might skip reading run_ec_ if run_count_ is already 0.
   uint32_t res = run_count_.fetch_sub(1, memory_order_release);
+
+  CHECK_GE(res, 1u) << unique_shard_cnt_ << " " << unique_shard_id_ << " " << cid_->name() << " "
+                    << use_count_.load(memory_order_relaxed) << " " << coordinator_state_;
+
   if (res == 1) {
     run_ec_.notify();
   }
-  return res;
 }
 
 bool Transaction::IsGlobal() const {
