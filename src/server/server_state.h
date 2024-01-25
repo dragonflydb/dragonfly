@@ -11,6 +11,7 @@
 #include "core/interpreter.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/user_registry.h"
+#include "server/cluster/cluster_config.h"
 #include "server/common.h"
 #include "server/script_mgr.h"
 #include "server/slowlog.h"
@@ -264,6 +265,11 @@ class ServerState {  // public struct - to allow initialization.
   // @is_write controls whether the command is a write command or not.
   void AwaitPauseState(bool is_write);
 
+  // Awaits until the migration is finished and new cluster config is applied
+  void AwaitIfMigrationFinalization(uint16_t id);
+  void SetMigratedSlots(SlotSet slots);
+  bool IsMigrationFinalization() const;
+
   bool IsPaused() const;
 
   SlowLogShard& GetSlowLog() {
@@ -292,6 +298,9 @@ class ServerState {  // public struct - to allow initialization.
   // notified when the break is over.
   int client_pauses_[2] = {};
   EventCount client_pause_ec_;
+
+  SlotSet migrated_slots_;
+  EventCount migration_finalization_ec_;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;

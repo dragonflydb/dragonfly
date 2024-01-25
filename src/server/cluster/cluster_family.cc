@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json_object.h"
@@ -712,15 +713,56 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
     return cntx->SendError("Migration process is not in STABLE_SYNC state");
   }
 
-  shard_set->pool()->AwaitFiberOnAll([migration](auto*) {
-    if (const auto* shard = EngineShard::tlocal(); shard)
-      migration->Finalize(shard->shard_id());
+  const auto deleted_slots = ToSlotSet(migration->GetSlotRange());
+
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+  VLOG(2) << "Disable expiration";
+
+  server_family_->service().proactor_pool().AwaitFiberOnAll(
+      [&deleted_slots](auto*) { ServerState::tlocal()->SetMigratedSlots(deleted_slots); });
+
+  absl::Cleanup cleanup([this] {
+    server_family_->service().proactor_pool().AwaitFiberOnAll(
+        [](auto*) { ServerState::tlocal()->SetMigratedSlots({}); });
+
+    shard_set->RunBriefInParallel(
+        [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    VLOG(2) << "Enable expiration";
   });
 
-  // TODO do next after ACK
-  util::ThisFiber::SleepFor(500ms);
+  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
+                          true /* ignore blocked */};
 
-  shard_set->pool()->AwaitFiberOnAll([migration](auto*) {
+  auto cb = [this, &tracker, &migration, &deleted_slots](util::ProactorBase* pb) {
+    auto blocking_filter = [&deleted_slots](ArgSlice keys) {
+      bool moved = any_of(keys.begin(), keys.end(), [&](auto k) {
+        return deleted_slots.find(ClusterConfig::KeySlot(k)) == deleted_slots.end();
+      });
+      return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
+    };
+
+    server_family_->CancelBlockingOnThread(blocking_filter);
+
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      // TODO add error processing to move back into STABLE_SYNC state
+      migration->Finalize(shard->shard_id());
+    }
+    tracker.TrackOnThread();
+  };
+
+  server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
+
+  if (!tracker.Wait(absl::Seconds(1))) {
+    LOG(WARNING) << "Cluster migration finalization timed out";
+  }
+
+  // TODO do next after ACK
+  util::ThisFiber::SleepFor(200ms);
+
+  shard_set->pool()->AwaitFiberOnAll([&migration, &deleted_slots](auto*) mutable {
+    tl_cluster_config->RemoveSlots(deleted_slots);
+
     if (const auto* shard = EngineShard::tlocal(); shard)
       migration->Cancel(shard->shard_id());
   });

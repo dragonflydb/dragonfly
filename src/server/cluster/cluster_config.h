@@ -85,6 +85,8 @@ class ClusterConfig {
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
 
+  void RemoveSlots(SlotSet slots);
+
   // Returns the master configured for `id`.
   Node GetMasterNodeForSlot(SlotId id) const;
 
@@ -105,5 +107,9 @@ class ClusterConfig {
   // True bits in `my_slots_` indicate that this slot is owned by this node.
   std::bitset<kMaxSlotNum + 1> my_slots_;
 };
+
+SlotSet ToSlotSet(const std::vector<ClusterConfig::SlotRange>& slots);
+bool ContainsAllSlots(const SlotSet& sset,
+                      const std::vector<ClusterConfig::SlotRange>& checked_slots);
 
 }  // namespace dfly

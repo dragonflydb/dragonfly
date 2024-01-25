@@ -311,6 +311,12 @@ bool ClusterConfig::IsMySlot(std::string_view key) const {
   return IsMySlot(KeySlot(key));
 }
 
+void ClusterConfig::RemoveSlots(SlotSet slots) {
+  for (const auto s : slots) {
+    my_slots_.set(s, false);
+  }
+}
+
 ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
   CHECK_LT(id, my_slots_.size()) << "Requesting a non-existing slot id " << id;
 
@@ -338,6 +344,28 @@ SlotSet ClusterConfig::GetOwnedSlots() const {
     }
   }
   return set;
+}
+
+SlotSet ToSlotSet(const std::vector<ClusterConfig::SlotRange>& slots) {
+  SlotSet sset;
+  for (const auto& slot_range : slots) {
+    for (auto i = slot_range.start; i <= slot_range.end; ++i)
+      sset.insert(i);
+  }
+  return sset;
+}
+
+bool ContainsAllSlots(const SlotSet& sset,
+                      const std::vector<ClusterConfig::SlotRange>& checked_slots) {
+  bool res = true;
+  for (const auto& slot_range : checked_slots) {
+    for (auto i = slot_range.start; i <= slot_range.end; ++i)
+      if (sset.find(i) == sset.end()) {
+        res = false;
+        break;
+      }
+  }
+  return res;
 }
 
 }  // namespace dfly
