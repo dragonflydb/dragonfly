@@ -1396,7 +1396,7 @@ void Transaction::DecreaseRunCnt() {
   uint32_t res = run_count_.fetch_sub(1, memory_order_release);
 
   CHECK_GE(res, 1u) << unique_shard_cnt_ << " " << unique_shard_id_ << " " << cid_->name() << " "
-                    << use_count_.load(memory_order_relaxed) << " " << coordinator_state_;
+                    << use_count_.load(memory_order_relaxed) << " " << uint32_t(coordinator_state_);
 
   if (res == 1) {
     run_ec_.notify();
