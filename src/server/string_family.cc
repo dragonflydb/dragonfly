@@ -494,18 +494,18 @@ class SetResultBuilder {
 
 SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                                       EngineShard* shard) {
-  auto args = t->GetShardArgs(shard->shard_id());
-  DCHECK(!args.empty());
+  auto keys = t->GetShardArgs(shard->shard_id());
+  DCHECK(!keys.empty());
 
   auto& db_slice = shard->db_slice();
 
-  SinkReplyBuilder::MGetResponse response(args.size());
-  absl::InlinedVector<PrimeConstIterator, 32> iters(args.size());
+  SinkReplyBuilder::MGetResponse response(keys.size());
+  absl::InlinedVector<PrimeConstIterator, 32> iters(keys.size());
 
   size_t total_size = 0;
-  for (size_t i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < keys.size(); ++i) {
     OpResult<PrimeConstIterator> it_res =
-        db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
+        db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -515,7 +515,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
-  for (size_t i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < keys.size(); ++i) {
     PrimeConstIterator it = iters[i];
     if (it.is_done())
       continue;

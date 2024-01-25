@@ -120,7 +120,7 @@ class PrimeBumpPolicy {
   PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& fetched_items)
       : fetched_items_(fetched_items) {
   }
-  // returns true if key can be made less important for eviction (opposite of bump up)
+  // returns true if we can change the object location in dash table.
   bool CanBump(const CompactObj& obj) const {
     return !obj.IsSticky() && !fetched_items_.contains(obj);
   }
