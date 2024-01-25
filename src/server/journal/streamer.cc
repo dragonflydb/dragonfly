@@ -113,6 +113,10 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
   return ShouldWrite(*item.slot);
 }
 
+bool RestoreStreamer::ShouldWrite(std::string_view key) const {
+  return ShouldWrite(ClusterConfig::KeySlot(key));
+}
+
 bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.contains(slot_id);
 }
@@ -123,12 +127,14 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 
   {
     FiberAtomicGuard fg;  // Can't switch fibers because that could invalidate iterator
-
+    string key_buffer;    // we can reuse it
     while (!it.is_done()) {
       const auto& pv = it->second;
 
-      string key_buffer;
       string_view key = it->first.GetSlice(&key_buffer);
+      if (!ShouldWrite(key)) {
+        continue;
+      }
 
       uint64_t expire = 0;
       if (pv.HasExpire()) {
