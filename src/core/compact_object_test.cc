@@ -577,14 +577,15 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
   ASSERT_TRUE(json_array.has_value());
   cobj_.SetJson(std::move(json_array.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type
-  auto f = [](const std::string& /*path*/, JsonType& book) {
+  auto f = [](const auto& /*path*/, JsonType& book) {
     if (book.at("category") == "memoir" && !book.contains("price")) {
       book.try_emplace("price", 140.0);
     }
   };
   JsonType* json = cobj_.GetJson();
   ASSERT_TRUE(json != nullptr);
-  jsonpath::json_replace(*json, "$.books[*]", f);
+  auto allocator_set = jsoncons::combine_allocators(json->get_allocator());
+  jsonpath::json_replace(allocator_set, *json, "$.books[*]"sv, f);
 
   // Check whether we've changed the entry for json in place
   // we should have prices only for memoir books

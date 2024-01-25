@@ -41,8 +41,8 @@ class RdbLoaderBase {
     uint64_t uncompressed_len;
   };
 
-  using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
-                                  std::unique_ptr<LoadTrace>, JsonType>;
+  using RdbVariant =
+      std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>>;
 
   struct OpaqueObj {
     RdbVariant obj;
