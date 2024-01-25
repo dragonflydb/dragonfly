@@ -31,7 +31,6 @@ namespace {
 string ShardName(std::string_view base, unsigned index) {
   return absl::StrCat(base, "-", absl::Dec(index, absl::kZeroPad4), ".log");
 }
-*/
 
 uint32_t NextPowerOf2(uint32_t x) {
   if (x < 2) {
@@ -40,6 +39,8 @@ uint32_t NextPowerOf2(uint32_t x) {
   int log = 32 - __builtin_clz(x - 1);
   return 1 << log;
 }
+
+*/
 
 }  // namespace
 
