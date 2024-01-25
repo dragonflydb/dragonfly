@@ -264,3 +264,12 @@ async def test_lua_auto_async(async_client: aioredis.Redis):
 
     flushes = (await async_client.info("transaction"))["eval_squashed_flushes"]
     assert 1 <= flushes <= 3  # all 100 commands are executed in at most 3 batches
+
+
+@dfly_args({"proactor_threads": 4, "lua_auto_async": None})
+async def test_lua_replicate_commands(async_client: aioredis.Redis):
+    res = await async_client.eval("return redis.replicate_commands()", 0)
+    assert res == 1
+
+    res = await async_client.eval("redis.replicate_commands()", 0)
+    assert res == None

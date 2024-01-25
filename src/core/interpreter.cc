@@ -351,6 +351,13 @@ int RedisStatusReplyCommand(lua_State* lua) {
   return SingleFieldTable(lua, "ok");
 }
 
+// no-op
+int RedisReplicateCommands(lua_State* lua) {
+  lua_pushinteger(lua, 1);
+  // number of results (the number of elements pushed to the lua stack
+  return 1;
+}
+
 // See https://www.lua.org/manual/5.3/manual.html#lua_Alloc
 void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
   (void)ud;
@@ -406,6 +413,11 @@ Interpreter::Interpreter() {
   lua_settable(lua_, -3);
   lua_pushstring(lua_, "status_reply");
   lua_pushcfunction(lua_, RedisStatusReplyCommand);
+  lua_settable(lua_, -3);
+
+  /* no-op function redis.replicate_commands*/
+  lua_pushstring(lua_, "replicate_commands");
+  lua_pushcfunction(lua_, RedisReplicateCommands);
   lua_settable(lua_, -3);
 
   /* Finally set the table as 'redis' global var. */
