@@ -31,7 +31,6 @@ namespace {
 string ShardName(std::string_view base, unsigned index) {
   return absl::StrCat(base, "-", absl::Dec(index, absl::kZeroPad4), ".log");
 }
-*/
 
 uint32_t NextPowerOf2(uint32_t x) {
   if (x < 2) {
@@ -40,6 +39,8 @@ uint32_t NextPowerOf2(uint32_t x) {
   int log = 32 - __builtin_clz(x - 1);
   return 1 << log;
 }
+
+*/
 
 }  // namespace
 
@@ -61,7 +62,7 @@ void JournalSlice::Init(unsigned index) {
     return;
 
   slice_index_ = index;
-  ring_buffer_.emplace(NextPowerOf2(absl::GetFlag(FLAGS_shard_repl_backlog_len)));
+  ring_buffer_.emplace(2);
 }
 
 #if 0
@@ -156,7 +157,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     FiberAtomicGuard fg;
     // GetTail gives a pointer to a new tail entry in the buffer, possibly overriding the last entry
     // if the buffer is full.
-    item = ring_buffer_->GetTail(true);
+    item = &dummy;
     item->opcode = entry.opcode;
     item->lsn = lsn_++;
     item->slot = entry.slot;

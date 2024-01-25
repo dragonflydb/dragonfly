@@ -523,7 +523,7 @@ class Transaction {
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
 
   // Returns the previous value of run count.
-  uint32_t DecreaseRunCnt();
+  void DecreaseRunCnt();
 
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
