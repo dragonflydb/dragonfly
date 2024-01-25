@@ -117,16 +117,16 @@ class PrimeEvictionPolicy {
 
 class PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& bumped_items)
-      : bumped_items_(bumped_items) {
+  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& fetched_items)
+      : fetched_items_(fetched_items) {
   }
   // returns true if key can be made less important for eviction (opposite of bump up)
   bool CanBump(const CompactObj& obj) const {
-    return !obj.IsSticky() && !bumped_items_.contains(obj);
+    return !obj.IsSticky() && !fetched_items_.contains(obj);
   }
 
  private:
-  const absl::flat_hash_set<CompactObjectView>& bumped_items_;
+  const absl::flat_hash_set<CompactObjectView>& fetched_items_;
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
@@ -497,12 +497,12 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
-    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bumped_items_});
+    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
       res.it = bump_it;
       ++events_.bumpups;
-      bumped_items_.insert(res.it->first.AsRef());
     }
+    fetched_items_.insert(res.it->first.AsRef());
   }
 
   db.top_keys.Touch(key);
@@ -676,7 +676,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     DbContext cntx{db_ind, GetCurrentTimeMs()};
     doc_del_cb_(key, cntx, it->second);
   }
-  bumped_items_.erase(it->first.AsRef());
+  fetched_items_.erase(it->first.AsRef());
   PerformDeletion(it, db.get());
   deletion_count_++;
 
@@ -737,7 +737,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
       tiered->CancelAllIos(index);
     }
   }
-  CHECK(bumped_items_.empty());
+  CHECK(fetched_items_.empty());
   auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
     for (auto& db_ptr : flush_db_arr) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
@@ -1539,7 +1539,7 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
 void DbSlice::OnCbFinish() {
   // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
   // btw what do we do with inline?
-  bumped_items_.clear();
+  fetched_items_.clear();
 }
 
 }  // namespace dfly

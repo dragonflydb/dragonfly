@@ -253,7 +253,9 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   auto get_bump_ups = [](const string& str) -> size_t {
     const string matcher = "bump_ups:";
     const auto pos = str.find(matcher) + matcher.size();
-    const auto sub = str.substr(pos, 1);
+    const auto next_new_line =
+        str.find("\r\n", pos);  // Find the position of the next "\r\n" after the initial position
+    const auto sub = str.substr(pos, next_new_line - pos);
     return atoi(sub.c_str());
   };
 
@@ -295,7 +297,9 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   auto get_bump_ups = [](const string& str) -> size_t {
     const string matcher = "bump_ups:";
     const auto pos = str.find(matcher) + matcher.size();
-    const auto sub = str.substr(pos, 1);
+    const auto next_new_line =
+        str.find("\r\n", pos);  // Find the position of the next "\r\n" after the initial position
+    const auto sub = str.substr(pos, next_new_line - pos);
     return atoi(sub.c_str());
   };
 
