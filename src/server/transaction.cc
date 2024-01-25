@@ -494,6 +494,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   auto& sd = shard_data_[idx];
 
   CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
+  CHECK_GT(run_count_.load(memory_order_relaxed), 0u);
 
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
