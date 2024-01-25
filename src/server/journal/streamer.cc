@@ -128,10 +128,9 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   bool is_data_present = false;
   {
     FiberAtomicGuard fg;  // Can't switch fibers because that could invalidate iterator
-
+    string key_buffer;    // we can reuse it
     for (; !it.is_done(); ++it) {
       const auto& pv = it->second;
-      string key_buffer;  // we can reuse it
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {
         is_data_present = true;
