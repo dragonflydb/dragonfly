@@ -351,6 +351,14 @@ int RedisStatusReplyCommand(lua_State* lua) {
   return SingleFieldTable(lua, "ok");
 }
 
+// no-op
+int RedisLogCommand(lua_State* lua) {
+  // if the arguments passed to redis.log are incorrect
+  // we still do not log the error. Therefore, even if
+  // for the no-op case we don't need to parse the arguments
+  return 0;
+}
+
 // See https://www.lua.org/manual/5.3/manual.html#lua_Alloc
 void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
   (void)ud;
@@ -406,6 +414,10 @@ Interpreter::Interpreter() {
   lua_settable(lua_, -3);
   lua_pushstring(lua_, "status_reply");
   lua_pushcfunction(lua_, RedisStatusReplyCommand);
+  lua_settable(lua_, -3);
+
+  lua_pushstring(lua_, "log");
+  lua_pushcfunction(lua_, RedisLogCommand);
   lua_settable(lua_, -3);
 
   /* Finally set the table as 'redis' global var. */
