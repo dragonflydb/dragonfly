@@ -1178,7 +1178,7 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
   res.cg = streamLookupCG(res.s, shard->tmp_str1);
   res.post_updater = std::move(res_it->post_updater);
 
-  return res;
+  return std::move(res);
 }
 
 constexpr uint8_t kClaimForce = 1 << 0;
@@ -3345,8 +3345,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXTrim}.HFUNC(XTrim)
             << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, acl::kXGroupHelp}.SetHandler(
                    XGroupHelp)
-            << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXAdd}.HFUNC(XAck)
-            << CI{"XAUTOCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XAutoClaim);
+            << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXAck}.HFUNC(XAck)
+            << CI{"XAUTOCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXAutoClaim}.HFUNC(XAutoClaim);
 }
 
 }  // namespace dfly

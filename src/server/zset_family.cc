@@ -3072,8 +3072,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         geo_ops.sorting = Sorting::kDesc;
       }
     } else if (cur_arg == "COUNT") {
-      if (i + 1 < args.size()) {
-        absl::SimpleAtoi(std::string(ArgS(args, i + 1)), &geo_ops.count);
+      if (i + 1 < args.size() && absl::SimpleAtoi(ArgS(args, i + 1), &geo_ops.count)) {
         i++;
       } else {
         return cntx->SendError(kSyntaxErr);
@@ -3141,8 +3140,7 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
         geo_ops.sorting = Sorting::kDesc;
       }
     } else if (cur_arg == "COUNT") {
-      if (i + 1 < args.size()) {
-        absl::SimpleAtoi(std::string(ArgS(args, i + 1)), &geo_ops.count);
+      if (i + 1 < args.size() && absl::SimpleAtoi(ArgS(args, i + 1), &geo_ops.count)) {
         i++;
       } else {
         return cntx->SendError(kSyntaxErr);
