@@ -7,6 +7,9 @@ PORT=6379
 if [ -f "/etc/dragonfly/tls/ca.crt" ]
 then
     _healthcheck="openssl s_client -connect ${HOST}:${PORT} -CAfile /etc/dragonfly/tls/ca.crt -quiet -no_ign_eof"
+elif [ -f "/etc/dragonfly/client-ca-cert/ca.crt" ]
+then
+    _healthcheck="openssl s_client -connect ${HOST}:${PORT} -CAfile /etc/dragonfly/client-ca-cert/ca.crt -quiet -no_ign_eof"
 else
     _healthcheck="nc -q1 $HOST $PORT"
 fi
