@@ -534,9 +534,14 @@ async def test_pipeline_batching_while_migrating(
     writer.write("INCR a\r\n".encode())
     await writer.drain()
 
+    # The data doesn't necessarily arrive in a single batch
+    async def read():
+        reply = ""
+        while not reply.strip().endswith("51"):
+            reply = (await reader.read(520)).decode()
+
     # Make sure we recived all replies
-    reply = await reader.read(520)
-    assert reply.decode().strip().endswith("51")
+    await asyncio.wait_for(read(), timeout=2.0)
 
     writer.close()
     await writer.wait_closed()

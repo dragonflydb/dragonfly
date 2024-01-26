@@ -494,18 +494,18 @@ class SetResultBuilder {
 
 SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                                       EngineShard* shard) {
-  auto args = t->GetShardArgs(shard->shard_id());
-  DCHECK(!args.empty());
+  auto keys = t->GetShardArgs(shard->shard_id());
+  DCHECK(!keys.empty());
 
   auto& db_slice = shard->db_slice();
 
-  SinkReplyBuilder::MGetResponse response(args.size());
-  absl::InlinedVector<PrimeConstIterator, 32> iters(args.size());
+  SinkReplyBuilder::MGetResponse response(keys.size());
+  absl::InlinedVector<PrimeConstIterator, 32> iters(keys.size());
 
   size_t total_size = 0;
-  for (size_t i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < keys.size(); ++i) {
     OpResult<PrimeConstIterator> it_res =
-        db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
+        db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -515,11 +515,29 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
-  for (size_t i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < keys.size(); ++i) {
     PrimeConstIterator it = iters[i];
     if (it.is_done())
       continue;
 
+    // If keys contain the same key several time,
+    // then with cache_mode=true we may have a "data race":
+    //   The first Find(key) will return the iterator after it bumped it up,
+    //   the second Find(key) above will also return the iterator but it will
+    //   bump up the key again, and the first iterator will be invalidated.
+    // TODO: to understand better the dynamics of this scenario and to fix it.
+    if (it->first != keys[i]) {
+      LOG(WARNING) << "Inconcistent key(" << i << "), expected " << keys[i] << " but found "
+                   << it->first.ToString();
+      string key_arr;
+      for (unsigned j = 0; j < keys.size(); ++j) {
+        absl::StrAppend(&key_arr, keys[j], ",");
+      }
+      key_arr.pop_back();
+      LOG(WARNING) << "The keys requested are: [" << key_arr << "]";
+      it = db_slice.GetDBTable(t->GetDbContext().db_index)->prime.Find(keys[i]);
+      CHECK(!it.is_done());
+    }
     auto& resp = response.resp_arr[i].emplace();
 
     size_t size = CopyValueToBuffer(it->second, next);

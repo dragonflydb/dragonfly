@@ -12,8 +12,8 @@
 
 namespace dfly {
 
-TopKeys::TopKeys(Options options) : options_(options) {
-  fingerprints_.resize(options_.buckets * options_.arrays);
+TopKeys::TopKeys(Options options)
+    : options_(options), fingerprints_(options.enabled ? options_.buckets * options_.arrays : 0) {
 }
 
 void TopKeys::Touch(std::string_view key) {
@@ -63,8 +63,11 @@ void TopKeys::Touch(std::string_view key) {
 }
 
 absl::flat_hash_map<std::string, uint64_t> TopKeys::GetTopKeys() const {
-  absl::flat_hash_map<std::string, uint64_t> results;
+  if (!IsEnabled()) {
+    return {};
+  }
 
+  absl::flat_hash_map<std::string, uint64_t> results;
   for (uint64_t array = 0; array < options_.arrays; ++array) {
     for (uint64_t bucket = 0; bucket < options_.buckets; ++bucket) {
       const Cell& cell = GetCell(array, bucket);
@@ -73,7 +76,6 @@ absl::flat_hash_map<std::string, uint64_t> TopKeys::GetTopKeys() const {
       }
     }
   }
-
   return results;
 }
 
@@ -82,12 +84,14 @@ bool TopKeys::IsEnabled() const {
 }
 
 TopKeys::Cell& TopKeys::GetCell(uint64_t array, uint64_t bucket) {
+  DCHECK(IsEnabled());
   DCHECK(array < options_.arrays);
   DCHECK(bucket < options_.buckets);
   return fingerprints_[array * options_.buckets + bucket];
 }
 
 const TopKeys::Cell& TopKeys::GetCell(uint64_t array, uint64_t bucket) const {
+  DCHECK(IsEnabled());
   DCHECK(array < options_.arrays);
   DCHECK(bucket < options_.buckets);
   return fingerprints_[array * options_.buckets + bucket];

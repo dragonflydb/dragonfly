@@ -273,3 +273,12 @@ async def test_lua_replicate_commands(async_client: aioredis.Redis):
 
     res = await async_client.eval("redis.replicate_commands()", 0)
     assert res == None
+
+
+@dfly_args({"proactor_threads": 4, "lua_auto_async": None})
+async def test_lua_redis_log_noop(async_client: aioredis.Redis):
+    res = await async_client.eval("redis.log('nonsense', 'nonsense')", 0)
+    assert res == None
+
+    res = await async_client.eval("redis.log(redis.LOG_WARNING, 'warn')", 0)
+    assert res == None

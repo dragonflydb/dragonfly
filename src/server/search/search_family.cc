@@ -10,8 +10,6 @@
 #include <absl/strings/str_format.h>
 
 #include <atomic>
-#include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <variant>
 #include <vector>
 
@@ -41,7 +39,7 @@ static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR"};
 
 bool IsValidJsonPath(string_view path) {
   error_code ec;
-  jsoncons::jsonpath::make_expression<JsonType>(path, ec);
+  MakeJsonPathExpr(path, ec);
   return !ec;
 }
 
