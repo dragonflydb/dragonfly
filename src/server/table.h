@@ -16,6 +16,9 @@
 #include "server/detail/table.h"
 #include "server/top_keys.h"
 
+extern "C" {
+#include "redis/redis_aux.h"
+}
 namespace dfly {
 
 using PrimeKey = detail::PrimeKey;

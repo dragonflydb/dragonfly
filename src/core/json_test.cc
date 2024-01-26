@@ -35,10 +35,15 @@ TEST_F(JsonTest, Basic) {
     }
 )";
 
-  json j = json::parse(data);
+  pmr::json j = pmr::json::parse(data);
   EXPECT_TRUE(j.contains("reputons"));
   jsonpath::json_replace(j, "$.reputons[*].rating", 1.1);
   EXPECT_EQ(1.1, j["reputons"][0]["rating"].as_double());
+}
+
+TEST_F(JsonTest, SetEmpty) {
+  pmr::json dest{json_object_arg};  // crashes on UB without the tag.
+  dest["bar"] = "foo";
 }
 
 TEST_F(JsonTest, Query) {

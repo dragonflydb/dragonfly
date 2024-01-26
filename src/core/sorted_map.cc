@@ -1054,7 +1054,7 @@ uint64_t SortedMap::DfImpl::Scan(uint64_t cursor,
 /***************************************************************************/
 /* SortedMap */
 /***************************************************************************/
-SortedMap::SortedMap(PMR_NS::memory_resource* mr) : impl_(RdImpl()), mr_res_(mr) {
+SortedMap::SortedMap(PMR_NS::memory_resource* mr) : impl_(RdImpl()) {
   if (absl::GetFlag(FLAGS_use_zset_tree)) {
     impl_ = DfImpl();
   }

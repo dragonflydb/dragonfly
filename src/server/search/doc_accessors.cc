@@ -172,7 +172,8 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   }
 
   error_code ec;
-  auto path_expr = jsoncons::jsonpath::make_expression<JsonType>(field, ec);
+  auto path_expr = MakeJsonPathExpr(field, ec);
+
   if (ec) {
     LOG(WARNING) << "Invalid Json path: " << field << ' ' << ec.message();
     return nullptr;
