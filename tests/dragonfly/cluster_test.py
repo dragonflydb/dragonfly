@@ -762,31 +762,13 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     config = f"""
       [
         {{
-          "slot_ranges": [
-            {{
-              "start": 0,
-              "end": LAST_SLOT_CUTOFF
-            }}
-          ],
-          "master": {{
-            "id": "{node_ids[0]}",
-            "ip": "localhost",
-            "port": {nodes[0].port}
-          }},
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
           "replicas": []
         }},
         {{
-          "slot_ranges": [
-            {{
-              "start": NEXT_SLOT_CUTOFF,
-              "end": 16383
-            }}
-          ],
-          "master": {{
-            "id": "{node_ids[1]}",
-            "ip": "localhost",
-            "port": {nodes[1].port}
-          }},
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
           "replicas": []
         }}
       ]
@@ -807,12 +789,13 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     )
     assert "OK" == res
 
-    await asyncio.sleep(0.5)
-
-    status = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-    )
-    assert "STABLE_SYNC" == status
+    while (
+        await c_nodes_admin[1].execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
+        )
+        != "STABLE_SYNC"
+    ):
+        await asyncio.sleep(0.05)
 
     status = await c_nodes_admin[0].execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[1].port)
@@ -862,31 +845,13 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     config = f"""
       [
         {{
-          "slot_ranges": [
-            {{
-              "start": 0,
-              "end": LAST_SLOT_CUTOFF
-            }}
-          ],
-          "master": {{
-            "id": "{node_ids[0]}",
-            "ip": "localhost",
-            "port": {nodes[0].port}
-          }},
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
           "replicas": []
         }},
         {{
-          "slot_ranges": [
-            {{
-              "start": NEXT_SLOT_CUTOFF,
-              "end": 16383
-            }}
-          ],
-          "master": {{
-            "id": "{node_ids[1]}",
-            "ip": "localhost",
-            "port": {nodes[1].port}
-          }},
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
           "replicas": []
         }}
       ]
@@ -924,12 +889,13 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     )
     assert "OK" == res
 
-    await asyncio.sleep(1)
-
-    status = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-    )
-    assert "STABLE_SYNC" == status
+    while (
+        await c_nodes_admin[1].execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
+        )
+        != "STABLE_SYNC"
+    ):
+        await asyncio.sleep(0.05)
 
     await push_config(
         config.replace("LAST_SLOT_CUTOFF", "2999").replace("NEXT_SLOT_CUTOFF", "3000"),
