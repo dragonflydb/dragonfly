@@ -204,7 +204,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
   CHECK_EQ(args_.size(), num_args);
 }
 
-void Transaction::CopyMultiKeys(CmdArgVec* keys) {
+void Transaction::LaunderKeyStorage(CmdArgVec* keys) {
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
   DCHECK_GT(keys->size(), 0u);
 
@@ -423,7 +423,7 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys) {
   multi_->mode = LOCK_AHEAD;
   multi_->lock_mode = LockMode();
 
-  CopyMultiKeys(&keys);  // Filter uniques and normalize
+  LaunderKeyStorage(&keys);  // Filter uniques and normalize
 
   InitBase(dbid, absl::MakeSpan(keys));
   InitByKeys(KeyIndex::Range(0, keys.size()));

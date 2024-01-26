@@ -457,7 +457,7 @@ class Transaction {
 
   // Multi transactions unlock asynchronously, so they need to keep a copy of all they keys.
   // "Launder" keys by filtering uniques and replacing pointers with same lifetime as transaction.
-  void CopyMultiKeys(CmdArgVec* keys);
+  void LaunderKeyStorage(CmdArgVec* keys);
 
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
