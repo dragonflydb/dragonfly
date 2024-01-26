@@ -504,7 +504,6 @@ class Transaction {
     // In this specific case we synchronize with DecreaseRunCnt that releases run_count_.
     // See #997 before changing it.
     std::atomic_thread_fence(std::memory_order_acquire);
-    seqlock_.fetch_add(1, std::memory_order_relaxed);
   }
 
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
@@ -582,7 +581,7 @@ class Transaction {
   uint64_t time_now_ms_{0};
 
   std::atomic_uint32_t wakeup_requested_{0};  // whether tx was woken up
-  std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
+  std::atomic_uint32_t use_count_{0}, run_count_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};          // Number of unique shards active
