@@ -10,7 +10,7 @@
 
 namespace dfly {
 
-class JournalReader;
+struct JournalReader;
 
 // Coordinator for multi shard execution.
 class MultiShardExecution {

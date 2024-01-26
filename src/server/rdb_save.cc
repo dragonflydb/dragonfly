@@ -192,7 +192,8 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
-      return RDB_TYPE_JSON_OLD;
+      return RDB_TYPE_JSON;  // save with RDB_TYPE_JSON, deprecate RDB_TYPE_JSON_OLD after July
+                             // 2024.
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */

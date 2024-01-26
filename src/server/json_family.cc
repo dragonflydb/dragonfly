@@ -90,14 +90,17 @@ string JsonTypeToName(const JsonType& val) {
   return std::string{};
 }
 
-JsonExpression ParseJsonPath(string_view path, error_code* ec) {
+io::Result<JsonExpression> ParseJsonPath(string_view path) {
   if (path == ".") {
     // RedisJson V1 uses the dot for root level access.
     // There are more incompatibilities with legacy paths which are not supported.
     path = "$"sv;
   }
-
-  return jsonpath::make_expression<JsonType>(path, *ec);
+  std::error_code ec;
+  JsonExpression res = MakeJsonPathExpr(path, ec);
+  if (ec)
+    return nonstd::make_unexpected(ec);
+  return res;
 }
 
 template <typename T>
@@ -436,7 +439,7 @@ OpResult<string> OpJsonGet(const OpArgs& op_args, string_view key,
     return expr ? expr->evaluate(json_entry) : json_entry;
   };
 
-  json out;
+  JsonType out{json_object_arg};  // see https://github.com/danielaparker/jsoncons/issues/482
   if (expressions.size() == 1) {
     out = eval_wrapped(expressions[0].second);
   } else {
@@ -558,7 +561,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
   bool is_result_overflow = false;
   double int_part;
   bool has_fractional_part = (modf(num, &int_part) != 0);
-  json output(json_array_arg);
+  JsonType output(json_array_arg);
 
   auto cb = [&](const auto&, JsonType& val) {
     if (val.is_number()) {
@@ -575,7 +578,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
       }
       output.push_back(val);
     } else {
-      output.push_back(json::null());
+      output.push_back(JsonType::null());
     }
   };
 
@@ -624,12 +627,12 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
     return total_deletions;
   }
 
-  json patch(json_array_arg, {});
+  JsonType patch(json_array_arg, {});
   reverse(deletion_items.begin(), deletion_items.end());  // deletion should finish at root keys.
   for (const auto& item : deletion_items) {
     string pointer = ConvertToJsonPointer(item);
     total_deletions++;
-    json patch_item(json_object_arg, {{"op", "remove"}, {"path", pointer}});
+    JsonType patch_item(json_object_arg, {{"op", "remove"}, {"path", pointer}});
     patch.emplace_back(patch_item);
   }
 
@@ -1140,6 +1143,18 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
 
 }  // namespace
 
+// GCC extension of returning a value of multiple statements. The last statement is returned.
+#define PARSE_PATH_ARG(path)                                                   \
+  ({                                                                           \
+    io::Result<JsonExpression> expr_result = ParseJsonPath(path);              \
+    if (!expr_result) {                                                        \
+      VLOG(1) << "Invalid JSONPath syntax: " << expr_result.error().message(); \
+      cntx->SendError(kSyntaxErr);                                             \
+      return;                                                                  \
+    }                                                                          \
+    std::move(*expr_result);                                                   \
+  })
+
 void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
@@ -1186,14 +1201,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
     path = ArgS(args, 1);
   }
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpResp(t->GetOpArgs(shard), key, std::move(expression));
@@ -1239,16 +1247,9 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  error_code ec;
   string_view key = ArgS(args, 1);
   string_view path = ArgS(args, 2);
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return func(t->GetOpArgs(shard), key, std::move(expression));
@@ -1267,15 +1268,8 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
 
-  error_code ec;
   string_view path = ArgS(args, args.size() - 1);
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   Transaction* transaction = cntx->transaction;
   unsigned shard_count = shard_set->size();
@@ -1283,7 +1277,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    mget_resp[sid] = OpJsonMGet(ParseJsonPath(path, &ec), t, shard);
+    mget_resp[sid] = OpJsonMGet(*ParseJsonPath(path), t, shard);
     return OpStatus::OK;
   };
 
@@ -1325,14 +1319,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
   if (!search_value) {
@@ -1487,14 +1474,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpArrPop(t->GetOpArgs(shard), key, path, index);
@@ -1562,14 +1542,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpObjKeys(t->GetOpArgs(shard), key, std::move(expression));
@@ -1680,14 +1653,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpType(t->GetOpArgs(shard), key, std::move(expression));
@@ -1716,14 +1682,7 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpArrLen(t->GetOpArgs(shard), key, std::move(expression));
@@ -1743,14 +1702,7 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpObjLen(t->GetOpArgs(shard), key, std::move(expression));
@@ -1770,14 +1722,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  error_code ec;
-  JsonExpression expression = ParseJsonPath(path, &ec);
-
-  if (ec) {
-    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-    cntx->SendError(kSyntaxErr);
-    return;
-  }
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key, std::move(expression));
@@ -1822,12 +1767,13 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     string_view expr_str = parser.Next();
 
     if (expr_str != ".") {
-      error_code ec;
-      expr = ParseJsonPath(expr_str, &ec);
-      if (ec) {
-        LOG(WARNING) << "path '" << expr_str << "': Invalid JSONPath syntax: " << ec.message();
+      io::Result<JsonExpression> res = ParseJsonPath(expr_str);
+      if (!res) {
+        LOG(WARNING) << "path '" << expr_str
+                     << "': Invalid JSONPath syntax: " << res.error().message();
         return cntx->SendError(kSyntaxErr);
       }
+      expr.emplace(std::move(*res));
     }
 
     expressions.emplace_back(expr_str, std::move(expr));
