@@ -101,6 +101,8 @@ struct ConnectionState {
   struct ScriptInfo {
     size_t UsedMemory() const;
 
+    absl::flat_hash_set<std::string_view> keys;  // declared keys
+
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
