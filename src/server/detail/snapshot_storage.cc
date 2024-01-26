@@ -235,46 +235,47 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
   auto [bucket_name, prefix] = *bucket_path;
 
   util::fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-  return proactor->Await([&]() -> io::Result<std::string, GenericError> {
-    LOG(INFO) << "Load snapshot: Searching for snapshot in S3 path: " << kS3Prefix << bucket_name
-              << "/" << prefix;
+  return proactor->Await(
+      [&, bucket_name = bucket_name, prefix = prefix]() -> io::Result<std::string, GenericError> {
+        LOG(INFO) << "Load snapshot: Searching for snapshot in S3 path: " << kS3Prefix
+                  << bucket_name << "/" << prefix;
 
-    // Create a regex to match the object keys, substituting the timestamp
-    // and adding an extension if needed.
-    fs::path fl_path{prefix};
-    fl_path.append(dbfilename);
-    SubstituteFilenamePlaceholders(&fl_path,
-                                   {.ts = "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
-                                    .year = "([0-9]{4})",
-                                    .month = "([0-9]{2})",
-                                    .day = "([0-9]{2})"});
-    if (!fl_path.has_extension()) {
-      fl_path += "(-summary.dfs|.rdb)";
-    }
-    const std::regex re(fl_path.string());
+        // Create a regex to match the object keys, substituting the timestamp
+        // and adding an extension if needed.
+        fs::path fl_path{prefix};
+        fl_path.append(dbfilename);
+        SubstituteFilenamePlaceholders(
+            &fl_path, {.ts = "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
+                       .year = "([0-9]{4})",
+                       .month = "([0-9]{2})",
+                       .day = "([0-9]{2})"});
+        if (!fl_path.has_extension()) {
+          fl_path += "(-summary.dfs|.rdb)";
+        }
+        const std::regex re(fl_path.string());
 
-    // Sort the keys in reverse so the first. Since the timestamp format
-    // has lexicographic order, the matching snapshot file will be the latest
-    // snapshot.
-    io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
-    if (!keys) {
-      return nonstd::make_unexpected(keys.error());
-    }
+        // Sort the keys in reverse so the first. Since the timestamp format
+        // has lexicographic order, the matching snapshot file will be the latest
+        // snapshot.
+        io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
+        if (!keys) {
+          return nonstd::make_unexpected(keys.error());
+        }
 
-    std::sort(std::rbegin(*keys), std::rend(*keys), [](const SnapStat& l, const SnapStat& r) {
-      return l.last_modified < r.last_modified;
-    });
+        std::sort(std::rbegin(*keys), std::rend(*keys), [](const SnapStat& l, const SnapStat& r) {
+          return l.last_modified < r.last_modified;
+        });
 
-    for (const SnapStat& key : *keys) {
-      std::smatch m;
-      if (std::regex_match(key.name, m, re)) {
-        return std::string(kS3Prefix) + bucket_name + "/" + key.name;
-      }
-    }
+        for (const SnapStat& key : *keys) {
+          std::smatch m;
+          if (std::regex_match(key.name, m, re)) {
+            return std::string(kS3Prefix) + bucket_name + "/" + key.name;
+          }
+        }
 
-    return nonstd::make_unexpected(GenericError(
-        std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
-  });
+        return nonstd::make_unexpected(GenericError(
+            std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
+      });
 }
 
 io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPaths(

@@ -10,7 +10,7 @@
 namespace dfly {
 
 class Service;
-class TransactionData;
+struct TransactionData;
 class MultiShardExecution;
 
 // ClusterShardMigration manage data receiving in slots migration process.

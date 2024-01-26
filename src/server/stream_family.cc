@@ -1164,6 +1164,7 @@ struct FindGroupResult {
   streamCG* cg = nullptr;
   DbSlice::AutoUpdater post_updater;
 };
+
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
@@ -3345,8 +3346,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXTrim}.HFUNC(XTrim)
             << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, acl::kXGroupHelp}.SetHandler(
                    XGroupHelp)
-            << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXAdd}.HFUNC(XAck)
-            << CI{"XAUTOCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XAutoClaim);
+            << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXAck}.HFUNC(XAck)
+            << CI{"XAUTOCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXAutoClaim}.HFUNC(XAutoClaim);
 }
 
 }  // namespace dfly

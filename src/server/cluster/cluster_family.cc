@@ -762,7 +762,7 @@ uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_
                                                 std::vector<ClusterConfig::SlotRange> slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
-  auto err_handler = [this, sync_id](const GenericError& err) {
+  auto err_handler = [](const GenericError& err) {
     LOG(INFO) << "Slot migration error: " << err.Format();
 
     // Todo add error processing, stop migration process
@@ -816,7 +816,7 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
   std::lock_guard lck(migration_mu_);
   auto migration_it =
       std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-                   [sync_id](const auto& el) { return el->GetSyncId() == sync_id; });
+                   [sync_id = sync_id](const auto& el) { return el->GetSyncId() == sync_id; });
 
   if (migration_it == incoming_migrations_jobs_.end()) {
     LOG(WARNING) << "Couldn't find migration id";

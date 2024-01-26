@@ -1832,7 +1832,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   if (CanRunSingleShardMulti(sid, *params, *tx)) {
     // If script runs on a single shard, we run it remotely to save hops.
-    interpreter->SetRedisFunc([cntx, tx, this](Interpreter::CallArgs args) {
+    interpreter->SetRedisFunc([cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
       args.async = false;
       CallFromScript(cntx, args);
