@@ -959,8 +959,7 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
-  bool prev_armed = sd.is_armed.exchange(false, memory_order_relaxed);
-  DCHECK(prev_armed);
+  CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
 
   // Calling the callback in somewhat safe way
   RunnableResult result;
