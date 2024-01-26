@@ -1164,6 +1164,7 @@ struct FindGroupResult {
   streamCG* cg = nullptr;
   DbSlice::AutoUpdater post_updater;
 };
+
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
@@ -1178,7 +1179,7 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
   res.cg = streamLookupCG(res.s, shard->tmp_str1);
   res.post_updater = std::move(res_it->post_updater);
 
-  return std::move(res);
+  return res;
 }
 
 constexpr uint8_t kClaimForce = 1 << 0;
