@@ -889,8 +889,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
-OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
-                           CmdArgList args, Transaction* trans) {
+OpStatus CheckKeysDeclared(const CommandId* cid, CmdArgList args, Transaction* trans) {
   Transaction::MultiMode multi_mode = trans->GetMultiMode();
 
   // We either scheduled on all shards or re-schedule for each operation,
@@ -902,17 +901,19 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   if (!key_index_res)
     return key_index_res.status();
 
+  const auto& locked_keys = trans->GetMultiKeys();
+
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     string_view key = KeyLockArgs::GetLockKey(ArgS(args, i));
-    if (!eval_info.keys.contains(key)) {
+    if (!locked_keys.contains(key)) {
       VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
   if (key_index.bonus &&
-      !eval_info.keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
+      !locked_keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
     return OpStatus::KEY_NOTFOUND;
 
   return OpStatus::OK;
@@ -1025,8 +1026,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   }
 
   if (under_script && cid->IsTransactional()) {
-    OpStatus status =
-        CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
+    OpStatus status = CheckKeysDeclared(cid, tail_args, dfly_cntx.transaction);
 
     if (status == OpStatus::KEY_NOTFOUND)
       return ErrorReply{"script tried accessing undeclared key"};
@@ -1714,7 +1714,7 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
       trans->StartMultiGlobal(dbid);
       return true;
     case Transaction::LOCK_AHEAD:
-      trans->StartMultiLockedAhead(dbid, keys);
+      trans->StartMultiLockedAhead(dbid, CmdArgVec{keys.begin(), keys.end()});
       return true;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
@@ -1797,7 +1797,6 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
-  sinfo->keys.reserve(eval_args.keys.size());
 
   optional<ShardId> sid;
 
@@ -1805,8 +1804,6 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
     slot_checker.Add(key);
-    sinfo->keys.insert(KeyLockArgs::GetLockKey(key));
-
     ShardId cur_sid = Shard(key, shard_count());
     if (i == 0) {
       sid = cur_sid;
@@ -1985,14 +1982,12 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
 // Return true if transaction was scheduled, false if scheduling was not required.
 void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
                     Transaction::MultiMode multi_mode) {
-  CmdArgVec tmp_keys;
   switch (multi_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       break;
     case Transaction::LOCK_AHEAD:
-      tmp_keys = CollectAllKeys(exec_info);
-      trans->StartMultiLockedAhead(dbid, CmdArgList{tmp_keys});
+      trans->StartMultiLockedAhead(dbid, CollectAllKeys(exec_info));
       break;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();

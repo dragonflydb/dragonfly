@@ -233,7 +233,7 @@ class Transaction {
   void StartMultiGlobal(DbIndex dbid);
 
   // Start multi in LOCK_AHEAD mode with given keys.
-  void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys);
+  void StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
@@ -344,8 +344,8 @@ class Transaction {
 
   void Refurbish();
 
-  // Get keys multi transaction was initialized with
-  absl::Span<const std::string> GetMultiKeys() const;
+  // Get keys multi transaction was initialized with, normalized and unique
+  const absl::flat_hash_set<std::string_view>& GetMultiKeys() const;
 
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
@@ -398,9 +398,11 @@ class Transaction {
   struct MultiData {
     MultiRole role;
     MultiMode mode;
-
     std::optional<IntentLock::Mode> lock_mode;
-    std::vector<std::string> keys;  // Unique keys (locks) used for scheduling and initialization
+
+    // Unique normalized keys used for scheduling the multi transaction.
+    std::vector<std::string> frozen_keys;
+    absl::flat_hash_set<std::string_view> frozen_keys_set;  // point to frozen_keys
 
     // Set if the multi command is concluding to avoid ambiguity with COORD_CONCLUDING
     bool concluding = false;
@@ -454,8 +456,8 @@ class Transaction {
   void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
 
   // Multi transactions unlock asynchronously, so they need to keep a copy of all they keys.
-  // Return "laundered" subspan with unique keys and pointers with same lifetime as transaction.
-  CmdArgList CopyMultiKeys(CmdArgList keys);
+  // "Launder" keys by filtering uniques and replacing pointers with same lifetime as transaction.
+  void CopyMultiKeys(CmdArgVec* keys);
 
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();

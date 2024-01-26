@@ -204,25 +204,27 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
   CHECK_EQ(args_.size(), num_args);
 }
 
-CmdArgList Transaction::CopyMultiKeys(CmdArgList keys) {
+void Transaction::CopyMultiKeys(CmdArgVec* keys) {
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
-  DCHECK_GT(keys.size(), 0u);
+  DCHECK_GT(keys->size(), 0u);
 
-  // Store all unique keys in multi data
-  absl::flat_hash_set<std::string_view> seen_keys;
-  for (MutableSlice key : keys) {
-    auto lock_key = KeyLockArgs::GetLockKey(facade::ToSV(key));
-    if (seen_keys.insert(lock_key).second) {
-      multi_->keys.emplace_back(lock_key);
-    }
+  auto& m_keys = multi_->frozen_keys;
+  auto& m_keys_set = multi_->frozen_keys_set;
+
+  // Reserve enough space, so pointers from frozen_keys_set are not invalidated
+  m_keys.reserve(keys->size());
+
+  for (MutableSlice key : *keys) {
+    string_view key_s = KeyLockArgs::GetLockKey(facade::ToSV(key));
+    // Insert copied string view, not original. This is why "try insert" is not allowed
+    if (!m_keys_set.contains(key_s))
+      m_keys_set.insert(m_keys.emplace_back(key_s));
   }
 
-  // Replace first 0..n with pointers to stored keys
-  size_t i = 0;
-  for (string& stored_key : multi_->keys)
-    keys[i++] = {stored_key.data(), stored_key.size()};
-
-  return keys.subspan(0, multi_->keys.size());
+  // Copy mutable pointers into keys
+  keys->clear();
+  for (string& key : m_keys)
+    keys->emplace_back(key.data(), key.size());
 }
 
 void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
@@ -310,7 +312,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   // Initialize shard data based on distributed arguments.
   InitShardData(shard_index, key_index.num_args(), needs_reverse_mapping);
 
-  DCHECK(!multi_ || multi_->mode != LOCK_AHEAD || !multi_->keys.empty());
+  DCHECK(!multi_ || multi_->mode != LOCK_AHEAD || !multi_->frozen_keys.empty());
 
   DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
 
@@ -412,7 +414,7 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   ScheduleInternal();
 }
 
-void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
+void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
 
   DCHECK(multi_);
@@ -421,11 +423,14 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
   multi_->mode = LOCK_AHEAD;
   multi_->lock_mode = LockMode();
 
-  keys = CopyMultiKeys(keys);
-  InitBase(dbid, keys);
+  CopyMultiKeys(&keys);  // Filter uniques and normalize
+
+  InitBase(dbid, absl::MakeSpan(keys));
   InitByKeys(KeyIndex::Range(0, keys.size()));
 
   ScheduleInternal();
+
+  full_args_ = {nullptr, 0};  // Was pointer to temporary
 }
 
 void Transaction::StartMultiNonAtomic() {
@@ -799,8 +804,10 @@ void Transaction::UnlockMulti() {
   if (multi_->mode == NON_ATOMIC)
     return;
 
+  multi_->frozen_keys_set.clear();
+
   auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
-  for (string& key : multi_->keys) {
+  for (string& key : multi_->frozen_keys) {
     ShardId sid = Shard(key, sharded_keys->size());
     (*sharded_keys)[sid].emplace_back(std::move(key));
   }
@@ -960,9 +967,9 @@ void Transaction::Refurbish() {
   cb_ptr_ = nullptr;
 }
 
-absl::Span<const std::string> Transaction::GetMultiKeys() const {
+const absl::flat_hash_set<std::string_view>& Transaction::GetMultiKeys() const {
   DCHECK(multi_);
-  return multi_->keys;
+  return multi_->frozen_keys_set;
 }
 
 void Transaction::EnableShard(ShardId sid) {
