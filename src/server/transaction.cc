@@ -205,10 +205,10 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
 }
 
 CmdArgList Transaction::CopyMultiKeys(CmdArgList keys) {
-  DCHECK(multi_->mode == LOCK_AHEAD);
+  DCHECK_EQ(multi_->mode, LOCK_AHEAD);
   DCHECK_GT(keys.size(), 0u);
 
-  // Store all unqiue keys in multi data
+  // Store all unique keys in multi data
   absl::flat_hash_set<std::string_view> seen_keys;
   for (MutableSlice key : keys) {
     auto lock_key = KeyLockArgs::GetLockKey(facade::ToSV(key));

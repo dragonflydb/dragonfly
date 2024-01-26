@@ -167,23 +167,26 @@ class RoundRobinSharder {
 
 bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
   bool has_contended_locks = false;
-  auto record = [table, &has_contended_locks](string_view key) {
+  auto check = [table](string_view key) {
     auto it = table->trans_locks.find(key);
     DCHECK(it != table->trans_locks.end());
-    has_contended_locks |= it->second.IsContended();
+    return it->second.IsContended();
   };
 
   if (trx->IsMulti()) {
     auto keys = trx->GetMultiKeys();
     for (string_view key : keys) {
-      if (Shard(key, shard_set->size()) == shard_id)
-        record(key);
+      if (Shard(key, shard_set->size()) == shard_id) {
+        if (has_contended_locks |= check(key))
+          break;
+      }
     }
   } else {
     KeyLockArgs lock_args = trx->GetLockArgs(shard_id);
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
       string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      record(s);
+      if (has_contended_locks |= check(s))
+        break;
     }
   }
   return has_contended_locks;
