@@ -1143,13 +1143,17 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
 
 }  // namespace
 
-#define PARSE_PATH_ARG(path)                                                \
-  io::Result<JsonExpression> expression = ParseJsonPath(path);              \
-  while (!expression) {                                                     \
-    VLOG(1) << "Invalid JSONPath syntax: " << expression.error().message(); \
-    cntx->SendError(kSyntaxErr);                                            \
-    return;                                                                 \
-  }
+// GCC extension of returning a value of multiple statements. The last statement is returned.
+#define PARSE_PATH_ARG(path)                                                   \
+  ({                                                                           \
+    io::Result<JsonExpression> expr_result = ParseJsonPath(path);              \
+    if (!expr_result) {                                                        \
+      VLOG(1) << "Invalid JSONPath syntax: " << expr_result.error().message(); \
+      cntx->SendError(kSyntaxErr);                                             \
+      return;                                                                  \
+    }                                                                          \
+    std::move(*expr_result);                                                   \
+  })
 
 void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
@@ -1197,10 +1201,10 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
     path = ArgS(args, 1);
   }
 
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpResp(t->GetOpArgs(shard), key, std::move(*expression));
+    return OpResp(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
@@ -1245,10 +1249,10 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 
   string_view key = ArgS(args, 1);
   string_view path = ArgS(args, 2);
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return func(t->GetOpArgs(shard), key, std::move(*expression));
+    return func(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
@@ -1265,7 +1269,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
 
   string_view path = ArgS(args, args.size() - 1);
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   Transaction* transaction = cntx->transaction;
   unsigned shard_count = shard_set->size();
@@ -1315,7 +1319,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
   if (!search_value) {
@@ -1347,7 +1351,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrIndex(t->GetOpArgs(shard), key, std::move(*expression), *search_value, start_index,
+    return OpArrIndex(t->GetOpArgs(shard), key, std::move(expression), *search_value, start_index,
                       end_index);
   };
 
@@ -1538,10 +1542,10 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpObjKeys(t->GetOpArgs(shard), key, std::move(*expression));
+    return OpObjKeys(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
@@ -1649,10 +1653,10 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpType(t->GetOpArgs(shard), key, std::move(*expression));
+    return OpType(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
@@ -1678,10 +1682,10 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpArrLen(t->GetOpArgs(shard), key, std::move(*expression));
+    return OpArrLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
@@ -1698,10 +1702,10 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpObjLen(t->GetOpArgs(shard), key, std::move(*expression));
+    return OpObjLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;
@@ -1718,10 +1722,10 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  PARSE_PATH_ARG(path);
+  JsonExpression expression = PARSE_PATH_ARG(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrLen(t->GetOpArgs(shard), key, std::move(*expression));
+    return OpStrLen(t->GetOpArgs(shard), key, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;

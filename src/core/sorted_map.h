@@ -268,7 +268,6 @@ class SortedMap {
   };
 
   std::variant<RdImpl, DfImpl> impl_;
-  PMR_NS::memory_resource* mr_res_;
 };
 
 // Used by CompactObject.
