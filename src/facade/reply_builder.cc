@@ -13,6 +13,7 @@
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "facade/error.h"
+#include "util/fibers/proactor_base.h"
 
 using namespace std;
 using absl::StrAppend;
@@ -68,15 +69,6 @@ void SinkReplyBuilder::ResetThreadLocalStats() {
 }
 
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
-  int64_t before = absl::GetCurrentTimeNanos();
-  ReplyStats::SendStatsType stats_type = ReplyStats::SendStatsType::kRegular;
-
-  auto cleanup = absl::MakeCleanup([&]() {
-    int64_t after = absl::GetCurrentTimeNanos();
-    tl_facade_stats->reply_stats.send_stats[stats_type].count++;
-    tl_facade_stats->reply_stats.send_stats[stats_type].total_duration += (after - before) / 1'000;
-  });
-
   has_replied_ = true;
   DCHECK(sink_);
   constexpr size_t kMaxBatchSize = 1024;
@@ -88,8 +80,6 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
 
   // Allow batching with up to kMaxBatchSize of data.
   if ((should_batch_ || should_aggregate_) && (batch_.size() + bsize < kMaxBatchSize)) {
-    stats_type = ReplyStats::SendStatsType::kBatch;
-
     batch_.reserve(batch_.size() + bsize);
     for (unsigned i = 0; i < len; ++i) {
       std::string_view src((char*)v[i].iov_base, v[i].iov_len);
@@ -100,6 +90,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
     return;
   }
 
+  int64_t before_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   error_code ec;
   send_active_ = true;
   tl_facade_stats->reply_stats.io_write_cnt++;
@@ -121,6 +112,10 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
     batch_.clear();
   }
   send_active_ = false;
+  int64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  tl_facade_stats->reply_stats.send_stats.count++;
+  tl_facade_stats->reply_stats.send_stats.total_duration += (after_ns - before_ns) / 1'000;
+
   if (ec) {
     DVLOG(1) << "Error writing to stream: " << ec.message();
     ec_ = ec;

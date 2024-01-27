@@ -60,12 +60,6 @@ struct ConnectionStats {
 };
 
 struct ReplyStats {
-  enum SendStatsType {
-    kRegular,   // Send() operations that are written to sockets
-    kBatch,     // Send() operations that are internally batched to a buffer
-    kNumTypes,  // Number of types, do not use directly
-  };
-
   struct SendStats {
     int64_t count = 0;
     int64_t total_duration = 0;
@@ -79,7 +73,8 @@ struct ReplyStats {
     }
   };
 
-  SendStats send_stats[SendStatsType::kNumTypes];
+  // Send() operations that are written to sockets
+  SendStats send_stats;
 
   size_t io_write_cnt = 0;
   size_t io_write_bytes = 0;
