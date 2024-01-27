@@ -430,7 +430,7 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys) {
 
   ScheduleInternal();
 
-  full_args_ = {nullptr, 0};  // Was pointer to temporary
+  full_args_ = {nullptr, 0};  // InitBase set it to temporary keys, now we reset it.
 }
 
 void Transaction::StartMultiNonAtomic() {
