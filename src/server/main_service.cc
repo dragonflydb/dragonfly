@@ -902,17 +902,21 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   if (!key_index_res)
     return key_index_res.status();
 
+  // TODO: Switch to transaction internal locked keys once single hop multi transactions are merged
+  // const auto& locked_keys = trans->GetMultiKeys();
+  const auto& locked_keys = eval_info.keys;
+
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     string_view key = KeyLockArgs::GetLockKey(ArgS(args, i));
-    if (!eval_info.keys.contains(key)) {
+    if (!locked_keys.contains(key)) {
       VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
   if (key_index.bonus &&
-      !eval_info.keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
+      !locked_keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
     return OpStatus::KEY_NOTFOUND;
 
   return OpStatus::OK;
@@ -1714,7 +1718,7 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
       trans->StartMultiGlobal(dbid);
       return true;
     case Transaction::LOCK_AHEAD:
-      trans->StartMultiLockedAhead(dbid, keys);
+      trans->StartMultiLockedAhead(dbid, CmdArgVec{keys.begin(), keys.end()});
       return true;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
@@ -1985,14 +1989,12 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
 // Return true if transaction was scheduled, false if scheduling was not required.
 void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
                     Transaction::MultiMode multi_mode) {
-  CmdArgVec tmp_keys;
   switch (multi_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       break;
     case Transaction::LOCK_AHEAD:
-      tmp_keys = CollectAllKeys(exec_info);
-      trans->StartMultiLockedAhead(dbid, CmdArgList{tmp_keys});
+      trans->StartMultiLockedAhead(dbid, CollectAllKeys(exec_info));
       break;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();

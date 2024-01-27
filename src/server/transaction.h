@@ -233,7 +233,7 @@ class Transaction {
   void StartMultiGlobal(DbIndex dbid);
 
   // Start multi in LOCK_AHEAD mode with given keys.
-  void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys);
+  void StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
@@ -344,7 +344,8 @@ class Transaction {
 
   void Refurbish();
 
-  void IterateMultiLocks(ShardId sid, std::function<void(const std::string&)> cb) const;
+  // Get keys multi transaction was initialized with, normalized and unique
+  const absl::flat_hash_set<std::string_view>& GetMultiKeys() const;
 
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
@@ -397,9 +398,11 @@ class Transaction {
   struct MultiData {
     MultiRole role;
     MultiMode mode;
-
     std::optional<IntentLock::Mode> lock_mode;
-    absl::flat_hash_set<std::string> locks;
+
+    // Unique normalized keys used for scheduling the multi transaction.
+    std::vector<std::string> frozen_keys;
+    absl::flat_hash_set<std::string_view> frozen_keys_set;  // point to frozen_keys
 
     // Set if the multi command is concluding to avoid ambiguity with COORD_CONCLUDING
     bool concluding = false;
@@ -449,11 +452,12 @@ class Transaction {
   void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
                      bool rev_mapping);
 
-  // Init multi. Record locks if needed.
-  void RecordMultiLocks(const KeyIndex& keys);
-
   // Store all key index keys in args_. Used only for single shard initialization.
   void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
+
+  // Multi transactions unlock asynchronously, so they need to keep a copy of all they keys.
+  // "Launder" keys by filtering uniques and replacing pointers with same lifetime as transaction.
+  void LaunderKeyStorage(CmdArgVec* keys);
 
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();

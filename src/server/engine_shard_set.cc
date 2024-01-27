@@ -166,31 +166,27 @@ class RoundRobinSharder {
 };
 
 bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
-  bool has_contended_locks = false;
+  auto is_contended = [table](string_view key) {
+    auto it = table->trans_locks.find(key);
+    DCHECK(it != table->trans_locks.end());
+    return it->second.IsContended();
+  };
 
   if (trx->IsMulti()) {
-    trx->IterateMultiLocks(shard_id, [&](const string& key) {
-      auto it = table->trans_locks.find(key);
-      DCHECK(it != table->trans_locks.end());
-      if (it->second.IsContended()) {
-        has_contended_locks = true;
-      }
-    });
+    auto keys = trx->GetMultiKeys();
+    for (string_view key : keys) {
+      if (Shard(key, shard_set->size()) == shard_id && is_contended(key))
+        return true;
+    }
   } else {
     KeyLockArgs lock_args = trx->GetLockArgs(shard_id);
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      auto it = table->trans_locks.find(s);
-      DCHECK(it != table->trans_locks.end());
-      if (it != table->trans_locks.end()) {
-        if (it->second.IsContended()) {
-          has_contended_locks = true;
-          break;
-        }
-      }
+      if (is_contended(KeyLockArgs::GetLockKey(lock_args.args[i])))
+        return true;
     }
   }
-  return has_contended_locks;
+
+  return false;
 }
 
 thread_local string RoundRobinSharder::round_robin_prefix_;
