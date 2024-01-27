@@ -959,7 +959,7 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   DCHECK_EQ(0u, txid_);
 
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
-  DCHECK_EQ(0, sd.local_mask & (KEYLOCK_ACQUIRED | OUT_OF_ORDER));
+  DCHECK_EQ(0, sd.local_mask & OUT_OF_ORDER);
 
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
@@ -1054,40 +1054,40 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
 
-  bool unlocked_keys =
-      shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode);
-  bool quick_run = unlocked_keys;
+  bool shard_unlocked = shard->shard_lock()->Check(mode);
+  bool keys_unlocked = shard->db_slice().Acquire(mode, lock_args);
+  bool quick_run = shard_unlocked && keys_unlocked;
+  bool continue_scheduling = !quick_run;
+
+  sd.local_mask |= KEYLOCK_ACQUIRED;
 
   // Fast path. If none of the keys are locked, we can run briefly atomically on the thread
   // without acquiring them at all.
   if (quick_run) {
-    // TBD add acquire lock here
     auto result = RunQuickie(shard);
     local_result_ = result.status;
 
     if (result.flags & RunnableResult::AVOID_CONCLUDING) {
-      // If we want to run again, we have to actually acquire keys, but keep ourselves disarmed
+      // If we want to run again, we have to actually schedule this transaction
       DCHECK_EQ(sd.is_armed, false);
-      unlocked_keys = false;
+      continue_scheduling = true;
     } else {
       LogAutoJournalOnShard(shard, result);
+      shard->db_slice().Release(mode, lock_args);
+      sd.local_mask &= ~KEYLOCK_ACQUIRED;
     }
   }
 
   // Slow path. Some of the keys are locked, so we schedule on the transaction queue.
-  if (!unlocked_keys) {
+  if (continue_scheduling) {
     coordinator_state_ |= COORD_SCHED;                  // safe because single shard
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);  // -
     sd.pq_pos = shard->txq()->Insert(this);
 
-    DCHECK_EQ(sd.local_mask & KEYLOCK_ACQUIRED, 0);
-    shard->db_slice().Acquire(mode, lock_args);
-    sd.local_mask |= KEYLOCK_ACQUIRED;
-
     DVLOG(1) << "Rescheduling " << DebugId() << " into TxQueue of size " << shard->txq()->size();
 
-    // If there are blocked transactons waiting for this tx keys, we will add this transaction
-    // to the tx-queue (these keys will be contended). This will happen even if the queue was empty.
+    // If there are blocked transactons waiting for these tx keys, we add this transaction
+    // to the tx-queue (these keys will be contended). This happen even if the queue is empty.
     // In that case we must poll the queue, because there will be no other callback trigerring the
     // queue before us.
     shard->PollExecution("schedule_unique", nullptr);
