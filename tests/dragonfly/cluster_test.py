@@ -5,7 +5,7 @@ import redis
 from redis import asyncio as aioredis
 import asyncio
 
-from .instance import DflyInstanceFactory
+from .instance import DflyInstanceFactory, DflyInstance
 from .utility import *
 from .replication_test import check_all_replicas_finished
 
@@ -945,3 +945,131 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
     await c_nodes_admin[0].close()
     await c_nodes_admin[1].close()
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class NodeInfo:
+    instance: DflyInstance
+    client: aioredis.Redis
+    admin_client: aioredis.Redis
+    slots: list
+    next_slots: list
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_seeder_factory):
+    node_count = 3
+    instances = [
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        for i in range(node_count)
+    ]
+    df_local_factory.start_all(instances)
+
+    nodes = [
+        NodeInfo(
+            instance=instance,
+            client=instance.client(),
+            admin_client=instance.admin_client(),
+            slots=[],
+            next_slots=[],
+        )
+        for instance in instances
+    ]
+
+    async def generate_config():
+        return [
+            {
+                "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
+                "master": {
+                    "id": await get_node_id(node.admin_client),
+                    "ip": "localhost",
+                    "port": node.instance.port,
+                },
+                "replicas": [],
+            }
+            for node in nodes
+        ]
+
+    # Generate equally sized ranges and distribute by nodes
+    step = 1000
+    for slot_range in [(s, min(s + step - 1, 16383)) for s in range(0, 16383, step)]:
+        nodes[random.randint(0, node_count - 1)].slots.append(slot_range)
+
+    # Push config to all nodes
+    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
+
+    # Fill instances with some data
+    seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Generate migration plan
+    for node_idx, node in enumerate(nodes):
+        random.shuffle(node.slots)
+
+        # Decide on number of outgoing slot ranges
+        outgoing = [[] for _ in range(node_count)]
+        num_outgoing = random.randint(0, len(node.slots))
+
+        # Distribute first 0..num_outgoing
+        for slot_range in node.slots[:num_outgoing]:
+            dest_idx = random.randint(0, node_count - 1)
+            while dest_idx == node_idx:
+                dest_idx = random.randint(0, node_count - 1)
+            outgoing[dest_idx].append(slot_range)
+
+        for dest_idx, dest_slots in enumerate(outgoing):
+            if len(dest_slots) == 0:
+                continue
+
+            print(node, "migrates to", dest_idx, "slots", dest_slots)
+            await nodes[dest_idx].admin_client.execute_command(
+                "DFLYCLUSTER",
+                "START-SLOT-MIGRATION",
+                "127.0.0.1",
+                node.instance.admin_port,
+                *itertools.chain(*dest_slots),
+            )
+
+            nodes[dest_idx].next_slots.extend(dest_slots)
+
+        keeping = node.slots[num_outgoing:]
+        node.next_slots.extend(keeping)
+
+    # Busy loop for migrations to finish - all in stable state
+    iterations = 0
+    while True:
+        for node in nodes:
+            states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
+            print(states)
+            if not all(s.endswith("STABLE_SYNC") for s in states):
+                break
+        else:
+            break
+
+        iterations += 1
+        assert iterations < 100
+
+        await asyncio.sleep(0.1)
+
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
+    # Generate capture
+    capture = await seeder.capture()
+
+    # Transfer nodes
+    for node in nodes:
+        node.slots = node.next_slots
+        node.new_slots = []
+
+    # Push new config
+    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
+
+    # Compare capture
+    assert await seeder.compare(capture, nodes[0].instance.port)
