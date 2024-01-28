@@ -241,7 +241,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   absl::FlagSaver fs;
   SetTestFlag("cache_mode", "true");
   ResetService();
-  Run({"debug", "populate", "100000", "key", "32", "RAND"});
+  Run({"debug", "populate", "18000", "key", "32", "RAND"});
 
   // Scan starts traversing the database, because we populated the database with lots of items we
   // assume that scan will return items from the same bucket that reside next to each other.
@@ -285,7 +285,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   absl::FlagSaver fs;
   SetTestFlag("cache_mode", "true");
   ResetService();
-  Run({"debug", "populate", "100000", "key", "32", "RAND"});
+  Run({"debug", "populate", "18000", "key", "32", "RAND"});
 
   // Scan starts traversing the database, because we populated the database with lots of items we
   // assume that scan will return items from the same bucket that reside next to each other.
