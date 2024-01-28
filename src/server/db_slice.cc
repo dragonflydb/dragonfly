@@ -328,7 +328,6 @@ void DbSlice::AutoUpdater::Run() {
   if (fields_.action == DestructorAction::kDoNothing) {
     return;
   }
-  // TBD add logic to update iterator if needed as we can now preempt in cb
 
   // Check that AutoUpdater does not run after a key was removed.
   // If this CHECK() failed for you, it probably means that you deleted a key while having an auto
@@ -336,16 +335,24 @@ void DbSlice::AutoUpdater::Run() {
   DCHECK(IsValid(fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key)))
       << "Key was removed before PostUpdate() - this is a bug!";
 
-  // Make sure that the DB has not changed in size since this object was created.
-  // Adding or removing elements from the DB may invalidate iterators.
-  CHECK_EQ(fields_.db_size, fields_.db_slice->DbSize(fields_.db_ind))
-      << "Attempting to run post-update after DB was modified";
-
-  CHECK_EQ(fields_.deletion_count, fields_.db_slice->deletion_count_)
-      << "Attempting to run post-update after a deletion was issued";
-
   DCHECK(fields_.action == DestructorAction::kRun);
   CHECK_NE(fields_.db_slice, nullptr);
+
+  if (EngineShardSet::IsTieringEnabled()) {
+    // When triering is enabled we can preempt on write to disk, therefor it can be invalidated
+    // untill we run the post updated.
+    if (!fields_.it.IsOccupied() || fields_.it->first != fields_.key) {
+      fields_.it = fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key);
+    }
+  } else {
+    // Make sure that the DB has not changed in size since this object was created.
+    // Adding or removing elements from the DB may invalidate iterators.
+    CHECK_EQ(fields_.db_size, fields_.db_slice->DbSize(fields_.db_ind))
+        << "Attempting to run post-update after DB was modified";
+
+    CHECK_EQ(fields_.deletion_count, fields_.db_slice->deletion_count_)
+        << "Attempting to run post-update after a deletion was issued";
+  }
 
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.it, fields_.key, fields_.orig_heap_size);
   Cancel();  // Reset to not run again
