@@ -362,9 +362,6 @@ class Transaction {
     unsigned cnt[2] = {0, 0};
   };
 
-  // owned std::string because callbacks its used in run fully async and can outlive the entries.
-  using KeyList = std::vector<std::string>;
-
   struct alignas(64) PerShardData {
     PerShardData(PerShardData&&) noexcept {
     }
@@ -489,7 +486,7 @@ class Transaction {
   // Run callback inline as part of multi stub.
   OpStatus RunSquashedMultiCb(RunnableType cb);
 
-  void UnlockMultiShardCb(const KeyList& sharded_keys, EngineShard* shard,
+  void UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys, EngineShard* shard,
                           uint32_t shard_journals_cnt);
 
   // In a multi-command transaction, we determine the number of shard journals that we wrote entries
@@ -563,8 +560,10 @@ class Transaction {
   // Never access directly with index, always use SidToId.
   absl::InlinedVector<PerShardData, 4> shard_data_;  // length = shard_count
 
-  // Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
-  absl::InlinedVector<std::string_view, 4> args_;
+  // Stores keys/values of the transaction partitioned by shards.
+  // We need values as well since we reorder keys, and we need to know what value corresponds
+  // to what key.
+  absl::InlinedVector<std::string_view, 4> kv_args_;
 
   // Stores the full undivided command.
   CmdArgList full_args_;

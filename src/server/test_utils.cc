@@ -311,7 +311,7 @@ unsigned BaseFamilyTest::NumLocked() {
       if (db == nullptr) {
         continue;
       }
-      count += db->trans_locks.size();
+      count += db->trans_locks.Size();
     }
   });
   return count;
