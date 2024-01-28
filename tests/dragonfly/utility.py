@@ -3,6 +3,7 @@ import logging
 import sys
 import asyncio
 from redis import asyncio as aioredis
+from redis.crc import key_slot
 import redis
 import random
 import string
@@ -12,6 +13,7 @@ import difflib
 import json
 import subprocess
 import os
+import typing
 from enum import Enum
 
 
@@ -300,23 +302,26 @@ class CommandGenerator:
 
 class DataCapture:
     """
-    Captured state of single database.
+    Captured values of a sorted list of keys for multiple databases.
     """
+
+    entries: list[list[str]]
 
     def __init__(self, entries):
         self.entries = entries
 
-    def compare(self, other):
-        if self.entries == other.entries:
-            return True
+    def compare(self, other: "DataCapture"):
+        for db_entries, other_db_entries in zip(self.entries, other.entries):
+            if db_entries != other_db_entries:
+                self._print_diff(db_entries, other_db_entries)
+                return False
+        return True
 
-        self._print_diff(other)
-        return False
-
-    def _print_diff(self, other):
+    @staticmethod
+    def _print_diff(first, second):
         eprint("=== DIFF ===")
         printed = 0
-        diff = difflib.ndiff(self.entries, other.entries)
+        diff = difflib.ndiff(first, second)
         for line in diff:
             if line.startswith(" "):
                 continue
@@ -326,6 +331,27 @@ class DataCapture:
                 break
             printed += 1
         eprint("=== END DIFF ===")
+
+
+class BySlotsDataCapture:
+    """
+    List of DataCaptures partitioned by slots.
+    """
+
+    entries: list[tuple[int, int, DataCapture]]
+
+    def __init__(self, entries):
+        self.entries = entries
+
+    def get_ranges(self) -> list[tuple[int, int]]:
+        return [(slot_s, slot_e) for slot_s, slot_e, _ in self.entries]
+
+    def compare(self, other):
+        for capture, other_capture in zip(self.entries, other.entries):
+            if not capture[2].compare(other_capture[2]):
+                eprint(f"=== SLOTS ===\n{capture[0]}-{capture[1]}\n=== END SLOTS ===")
+                return False
+        return True
 
 
 class DflySeeder:
@@ -415,41 +441,74 @@ class DflySeeder:
         """Reset internal state. Needs to be called after flush or restart"""
         self.gen.reset()
 
-    async def capture(self, port=None):
-        """Create DataCapture for all dbs"""
+    async def capture(
+        self,
+        port=None,
+        slot_ranges=None,
+        key_data=None,
+    ) -> typing.Union[DataCapture, BySlotsDataCapture]:
+        """Create DataCapture for all dbs. Creates BySlotsDataCapture if a list of slot ranges is passed"""
+
+        # If the slots are set, partition all keys by the slot ranges and call basic capture() recursively for each range
+        if slot_ranges is not None:
+            assert key_data is None
+            key_data = [(key_slot(k), (k, t)) for (k, t) in self.gen.keys_and_types()]
+            key_data.sort(key=lambda e: -e[0])  # Sort by slots desending
+
+            partitioned = []
+            for range_start, range_end in slot_ranges:
+                range_keys = []
+                while len(key_data) > 0 and key_data[-1][0] <= range_end:
+                    _, key = key_data.pop()
+                    range_keys.append(key)
+                partitioned.append((range_start, range_end, range_keys))
+
+            return BySlotsDataCapture(
+                await asyncio.gather(
+                    *(
+                        (start, end, self.capture(port=port, slot_ranges=None, key_data=keys))
+                        for (start, end, keys) in partitioned
+                    )
+                )
+            )
 
         if port is None:
             port = self.port
+
         logging.debug(f"Starting capture from {port=}")
-        keys = sorted(list(self.gen.keys_and_types()))
+        if key_data is None:
+            key_data = sorted(list(self.gen.keys_and_types()))
 
-        captures = await asyncio.gather(
-            *(self._capture_db(port=port, target_db=db, keys=keys) for db in range(self.dbcount))
+        return DataCapture(
+            await asyncio.gather(
+                *(
+                    self._capture_db(port=port, target_db=db, keys=key_data)
+                    for db in range(self.dbcount)
+                )
+            )
         )
-        return captures
 
-    async def compare(self, initial_captures, port=6379):
+    async def compare(self, initial_capture, port=6379):
         """Compare data capture with all dbs of instance and return True if all dbs are correct"""
         print(f"comparing capture to {port}")
-        target_captures = await self.capture(port=port)
+        if isinstance(initial_capture, BySlotsDataCapture):
+            target_capture = await self.capture(port=port, slot_ranges=initial_capture.get_ranges())
+        else:
+            target_capture = await self.capture(port=port)
 
-        for db, target_capture, initial_capture in zip(
-            range(self.dbcount), target_captures, initial_captures
-        ):
-            print(f"comparing capture to {port}, db: {db}")
-            if not initial_capture.compare(target_capture):
-                eprint(f">>> Inconsistent data on port {port}, db {db}")
-                return False
+        if not initial_capture.compare(target_capture):
+            eprint(f"=== PORT ===\n{port}\n=== END PORT ===")
+            return False
         return True
 
     def target(self, key_cnt):
         self.gen.key_cnt_target = key_cnt
 
-    async def _capture_db(self, port, target_db, keys):
-        client = aioredis.Redis(port=port, db=target_db)
-        capture = DataCapture(await self._capture_entries(client, keys))
-        await client.connection_pool.disconnect()
-        return capture
+    def _make_client(self, **kwargs):
+        if self.cluster_mode:
+            return aioredis.RedisCluster(host="localhost", **kwargs)
+        else:
+            return aioredis.Redis(**kwargs)
 
     async def _generator_task(self, queues, target_ops=None, target_deviation=None):
         cpu_time = 0
@@ -506,10 +565,7 @@ class DflySeeder:
         return submitted
 
     async def _executor_task(self, db, queue):
-        if self.cluster_mode:
-            client = aioredis.RedisCluster(host="localhost", port=self.port, db=db)
-        else:
-            client = aioredis.Redis(port=self.port, db=db)
+        client = self._make_client(port=self.port, db=db)
 
         while True:
             tx_data = await queue.get()
@@ -529,6 +585,7 @@ class DflySeeder:
             except Exception as e:
                 raise SystemExit(e)
             queue.task_done()
+
         await client.close()
         if not self.cluster_mode:
             await client.connection_pool.disconnect()
@@ -542,20 +599,8 @@ class DflySeeder:
         ValueType.JSON: lambda pipe, k: pipe.execute_command("JSON.GET", k, "$"),
     }
 
-    CAPTURE_EXTRACTORS = {
-        ValueType.STRING: lambda res, tostr: (tostr(res),),
-        ValueType.LIST: lambda res, tostr: (tostr(s) for s in res),
-        ValueType.SET: lambda res, tostr: sorted(tostr(s) for s in res),
-        ValueType.HSET: lambda res, tostr: sorted(
-            tostr(k) + "=" + tostr(v) for k, v in res.items()
-        ),
-        ValueType.ZSET: lambda res, tostr: (tostr(s) + "-" + str(f) for (s, f) in res),
-        ValueType.JSON: lambda res, tostr: (tostr(res),),
-    }
-
-    async def _capture_entries(self, client, keys):
-        def tostr(b):
-            return b.decode("utf-8") if isinstance(b, bytes) else str(b)
+    async def _capture_db(self, port, target_db, keys) -> list[str]:
+        client = self._make_client(port=port, db=target_db, decode_responses=True)
 
         entries = []
         for group in chunked(self.gen.batch_size * 2, keys):
@@ -565,9 +610,14 @@ class DflySeeder:
 
             results = await pipe.execute()
             for (k, t), res in zip(group, results):
-                out = f"{t.name} k{k}: " + " ".join(self.CAPTURE_EXTRACTORS[t](res, tostr))
-                entries.append(out)
+                # Sort set or hash items to not account for order in comparisons
+                if t == ValueType.SET:
+                    res = sorted(res)
+                elif t == ValueType.HSET:
+                    res = sorted(res.items())
+                entries.append(f"{t.name} k{k}: {str(res)}")
 
+        await client.connection_pool.disconnect()
         return entries
 
 
