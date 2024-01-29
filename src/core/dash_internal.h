@@ -459,6 +459,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Cb  accepts (const Iterator&).
   template <typename Cb> void TraverseAll(Cb&& cb) const;
 
+  // Traverses over Segment's bucket bid and calls cb(Iterator& it)
+  // for each slot in the bucket. The iteration goes over a physical bucket.
+  template <typename Cb> void TraverseBucket(uint8_t bid, Cb&& cb);
+
   // Used in test.
   unsigned NumProbingBuckets() const {
     unsigned res = 0;
@@ -1572,6 +1576,15 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
   }
 
   return result;
+}
+
+template <typename Key, typename Value, typename Policy>
+template <typename Cb>
+void Segment<Key, Value, Policy>::TraverseBucket(uint8_t bid, Cb&& cb) {
+  assert(bid < kTotalBuckets);
+
+  const Bucket& b = bucket_[bid];
+  b.ForEachSlot([&](auto* bucket, uint8_t slot, bool probe) { cb(Iterator{bid, slot}); });
 }
 
 template <typename Key, typename Value, typename Policy>
