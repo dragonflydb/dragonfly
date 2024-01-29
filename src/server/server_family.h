@@ -15,6 +15,7 @@
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
 #include "server/server_state.h"
+#include "util/fibers/fiberqueue_threadpool.h"
 
 void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
                 std::string_view sub_cmd);
@@ -294,7 +295,7 @@ class ServerFamily {
   bool save_on_shutdown_{true};
 
   Done schedule_done_;
-  std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
+  std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
   mutable Mutex peak_stats_mu_;

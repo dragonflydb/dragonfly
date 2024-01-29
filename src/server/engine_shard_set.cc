@@ -345,20 +345,16 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen),
+    : queue_(1, kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       db_slice_(pb->GetPoolIndex(), GetFlag(FLAGS_cache_mode), this) {
-  fiber_q_ = MakeFiber([this, index = pb->GetPoolIndex()] {
-    ThisFiber::SetName(absl::StrCat("shard_queue", index));
-    queue_.Run();
-  });
-
   tmp_str1 = sdsempty();
 
   db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
   // start the defragmented task here
   defrag_task_ = pb->AddOnIdleTask([this]() { return this->DefragTask(); });
+  queue_.Start(absl::StrCat("shard_queue_", db_slice_.shard_id()));
 }
 
 EngineShard::~EngineShard() {
@@ -367,7 +363,6 @@ EngineShard::~EngineShard() {
 
 void EngineShard::Shutdown() {
   queue_.Shutdown();
-  fiber_q_.Join();
 
   if (tiered_storage_) {
     tiered_storage_->Shutdown();
