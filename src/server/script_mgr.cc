@@ -290,6 +290,7 @@ void ScriptMgr::FlushAllScript() {
   ServerState* ss = ServerState::tlocal();
   auto interpreter = ss->BorrowInterpreter();
   interpreter->ResetStack();
+  ss->ReturnInterpreter(interpreter);
 }
 
 vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
