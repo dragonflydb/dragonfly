@@ -41,7 +41,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 80u);
+  static_assert(sizeof(ReplyStats) == 64u);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 
@@ -49,9 +49,7 @@ ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
     err_count[k_v.first] += k_v.second;
   }
 
-  for (unsigned i = 0; i < kNumTypes; ++i) {
-    send_stats[i] += o.send_stats[i];
-  }
+  send_stats += o.send_stats;
 
   return *this;
 }
