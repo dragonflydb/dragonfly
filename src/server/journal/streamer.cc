@@ -99,12 +99,6 @@ void RestoreStreamer::Cancel() {
   JournalStreamer::Cancel();
 }
 
-RestoreStreamer::~RestoreStreamer() {
-  fiber_cancellation_.Cancel();
-  snapshot_fb_.JoinIfNeeded();
-  db_slice_->UnregisterOnChange(snapshot_version_);
-}
-
 bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
   if (!item.slot.has_value()) {
     return false;
@@ -122,11 +116,10 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
 }
 
 void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  DCHECK_LT(it.GetVersion(), snapshot_version_);
-  it.SetVersion(snapshot_version_);
-
   bool is_data_present = false;
-  {
+
+  if (it.GetVersion() < snapshot_version_) {
+    it.SetVersion(snapshot_version_);
     FiberAtomicGuard fg;  // Can't switch fibers because that could invalidate iterator
     string key_buffer;    // we can reuse it
     for (; !it.is_done(); ++it) {
@@ -157,9 +150,7 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    if (bit->GetVersion() < snapshot_version_) {
-      WriteBucket(*bit);
-    }
+    WriteBucket(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
