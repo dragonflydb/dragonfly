@@ -118,6 +118,7 @@ class CompactObj {
     ASCII2_ENC_BIT = 0x10,
     IO_PENDING = 0x20,
     STICKY = 0x40,
+    SIEVE = 0x80,
   };
 
   static constexpr uint8_t kEncMask = ASCII1_ENC_BIT | ASCII2_ENC_BIT;
@@ -213,6 +214,18 @@ class CompactObj {
       mask_ |= FLAG_BIT;
     } else {
       mask_ &= ~FLAG_BIT;
+    }
+  }
+
+  bool HasTouched() const {
+    return mask_ & SIEVE;
+  }
+
+  void SetTouched(bool e) {
+    if (e) {
+      mask_ |= SIEVE;
+    } else {
+      mask_ &= ~SIEVE;
     }
   }
 

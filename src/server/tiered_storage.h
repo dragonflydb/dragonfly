@@ -28,15 +28,18 @@ class TieredStorage {
 
   PrimeIterator Load(DbIndex db_index, PrimeIterator it, std::string_view key);
 
-  // Schedules unloading of the item, pointed by the iterator.
-  std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it, std::string_view key);
-
   void CancelIo(DbIndex db_index, PrimeIterator it);
 
-  static bool EligibleForOffload(std::string_view val) {
-    return val.size() >= kMinBlobLen;
+  static bool EligibleForOffload(size_t size) {
+    return size >= kMinBlobLen;
   }
 
+  // Schedules offloadin of the item, pointed by the iterator, this function can preempt.
+  std::error_code ScheduleOffloadWithThrottle(DbIndex db_index, PrimeIterator it,
+                                              std::string_view key);
+
+  // Schedules offloadin of the item, pointed by the iterator.
+  std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it);
   void Free(PrimeIterator it, DbTableStats* stats);
 
   void Shutdown();
@@ -51,6 +54,8 @@ class TieredStorage {
 
   std::error_code Read(size_t offset, size_t len, char* dest);
 
+  bool AllowWrites() const;
+
  private:
   class InflightWriteRequest;
 
@@ -58,8 +63,14 @@ class TieredStorage {
 
   // Returns a pair consisting of an bool denoting whether we can write to disk, and updated
   // iterator as this function can yield. 'it' should not be used after the call to this function.
-  std::pair<bool, PrimeIterator> CanScheduleOffload(DbIndex db_index, PrimeIterator it,
-                                                    std::string_view key);
+  std::pair<bool, PrimeIterator> ThrottleWrites(DbIndex db_index, PrimeIterator it,
+                                                std::string_view key);
+
+  // Schedules unloading of the item, pointed by the iterator.
+  std::error_code ScheduleOffloadInternal(DbIndex db_index, PrimeIterator it);
+
+  bool PrepareForOffload(DbIndex db_index, PrimeIterator it);
+  void CancelOffload(DbIndex db_index, PrimeIterator it);
 
   bool FlushPending(DbIndex db_index, unsigned bin_index);
 

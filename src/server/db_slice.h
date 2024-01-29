@@ -364,6 +364,8 @@ class DbSlice {
   // Deletes some amount of possible expired items.
   DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
   void FreeMemWithEvictionStep(DbIndex db_indx, size_t increase_goal_bytes);
+  void ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes);
+  bool CanBeExternalized(PrimeIterator it);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
