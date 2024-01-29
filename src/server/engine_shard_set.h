@@ -278,7 +278,10 @@ class EngineShardSet {
     return uint32_t(shard_queue_.size());
   }
 
-  static bool IsTieringEnabled();
+  bool IsTieringEnabled() {
+    return is_tiering_enabled_;
+  }
+
   util::ProactorPool* pool() {
     return pp_;
   }
@@ -341,6 +344,7 @@ class EngineShardSet {
 
   util::ProactorPool* pp_;
   std::vector<FiberQueue*> shard_queue_;
+  bool is_tiering_enabled_;
 };
 
 template <typename U, typename P>

@@ -873,7 +873,7 @@ void ServerFamily::SnapshotScheduling() {
   if (!cron_expr) {
     return;
   }
-  if (EngineShardSet::IsTieringEnabled()) {
+  if (shard_set->IsTieringEnabled()) {
     LOG(ERROR) << "Snapshot not allowed when using tiering.  Exiting..";
     exit(1);
   }
@@ -1298,7 +1298,7 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
                                   bool ignore_state) {
-  if (EngineShardSet::IsTieringEnabled()) {
+  if (shard_set->IsTieringEnabled()) {
     return GenericError{make_error_code(errc::operation_not_permitted),
                         StrCat("Can not save database in tiering mode")};
   }

@@ -192,7 +192,6 @@ thread_local vector<ShardId> RoundRobinSharder::round_robin_shards_tl_cache_;
 vector<ShardId> RoundRobinSharder::round_robin_shards_;
 ShardId RoundRobinSharder::next_shard_;
 Mutex RoundRobinSharder::mutex_;
-bool is_tiering_enabled = false;
 
 }  // namespace
 
@@ -837,7 +836,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
                  << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
       exit(1);
     }
-    is_tiering_enabled = true;
+    is_tiering_enabled_ = true;
     LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
   }
 
@@ -846,10 +845,6 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
       InitThreadLocal(pb, update_db_time, max_shard_file_size);
     }
   });
-}
-
-bool EngineShardSet::IsTieringEnabled() {
-  return is_tiering_enabled;
 }
 
 void EngineShardSet::Shutdown() {

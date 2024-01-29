@@ -338,9 +338,9 @@ void DbSlice::AutoUpdater::Run() {
   DCHECK(fields_.action == DestructorAction::kRun);
   CHECK_NE(fields_.db_slice, nullptr);
 
-  if (EngineShardSet::IsTieringEnabled()) {
-    // When triering is enabled we can preempt on write to disk, therefor it can be invalidated
-    // untill we run the post updated.
+  if (shard_set->IsTieringEnabled()) {
+    // When triering is enabled we can preempt on write to disk, therefore it can be invalidated
+    // until we run the post updated.
     if (!fields_.it.IsOccupied() || fields_.it->first != fields_.key) {
       fields_.it = fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key);
     }
