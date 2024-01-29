@@ -99,12 +99,6 @@ void RestoreStreamer::Cancel() {
   JournalStreamer::Cancel();
 }
 
-RestoreStreamer::~RestoreStreamer() {
-  fiber_cancellation_.Cancel();
-  snapshot_fb_.JoinIfNeeded();
-  db_slice_->UnregisterOnChange(snapshot_version_);
-}
-
 bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
   if (!item.slot.has_value()) {
     return false;
@@ -122,7 +116,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
 }
 
 void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  DCHECK_LT(it.GetVersion(), snapshot_version_);
+  DCHECK_LE(it.GetVersion(), snapshot_version_);
   it.SetVersion(snapshot_version_);
 
   bool is_data_present = false;

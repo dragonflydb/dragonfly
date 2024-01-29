@@ -12,13 +12,14 @@ namespace dfly {
 class OutgoingMigration::SliceSlotMigration {
  public:
   SliceSlotMigration(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal,
-                     Context* cntx)
+                     Context* cntx, io::Sink* dest)
       : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
-  }
-
-  void Start(io::Sink* dest) {
     streamer_.Start(dest);
     state_ = MigrationState::C_FULL_SYNC;
+  }
+
+  ~SliceSlotMigration() {
+    streamer_.Cancel();
   }
 
   MigrationState GetState() const {
@@ -52,8 +53,7 @@ void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Jou
 
   std::lock_guard lck(flows_mu_);
   slot_migrations_[shard_id] =
-      std::make_unique<SliceSlotMigration>(slice, std::move(sset), sync_id, journal, &cntx_);
-  slot_migrations_[shard_id]->Start(dest);
+      std::make_unique<SliceSlotMigration>(slice, std::move(sset), sync_id, journal, &cntx_, dest);
 }
 
 MigrationState OutgoingMigration::GetState() const {
