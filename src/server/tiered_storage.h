@@ -34,6 +34,8 @@ class TieredStorage {
     return size >= kMinBlobLen;
   }
 
+  static bool CanExternalizeEntry(PrimeIterator it);
+
   // Schedules offloadin of the item, pointed by the iterator, this function can preempt.
   std::error_code ScheduleOffloadWithThrottle(DbIndex db_index, PrimeIterator it,
                                               std::string_view key);
