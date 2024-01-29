@@ -762,4 +762,9 @@ void TieredStorage::InitiateGrow(size_t grow_size) {
   CHECK(!ec) << "TBD";  // TODO
 }
 
+bool TieredStorage::CanExternalizeEntry(PrimeIterator it) {
+  return it->first.ObjType() == OBJ_STRING && !it->second.HasIoPending() &&
+         !it->second.IsExternal() && EligibleForOffload(it->second.Size());
+}
+
 }  // namespace dfly

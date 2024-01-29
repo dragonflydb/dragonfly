@@ -1200,11 +1200,6 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
          db_arr_[db_ind]->prime.GetSegmentCount();
 }
 
-bool DbSlice::CanBeExternalized(PrimeIterator it) {
-  return it->first.ObjType() == OBJ_STRING && !it->second.HasIoPending() &&
-         !it->second.IsExternal() && TieredStorage::EligibleForOffload(it->second.Size());
-}
-
 void DbSlice::ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes) {
   VLOG(1) << "ScheduleForOffloadStep increase_goal_bytes:"
           << strings::HumanReadableNumBytes(increase_goal_bytes);
@@ -1219,7 +1214,7 @@ void DbSlice::ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes
     // TBD check we did not lock it for future transaction
 
     if (increase_goal_bytes > offloaded_bytes && !(it->first.HasTouched()) &&
-        CanBeExternalized(it)) {
+        TieredStorage::CanExternalizeEntry(it)) {
       shard_owner()->tiered_storage()->ScheduleOffload(db_indx, it);
       if (it->second.HasIoPending()) {
         offloaded_bytes += it->second.Size();
