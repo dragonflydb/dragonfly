@@ -57,17 +57,17 @@ class RestoreStreamer : public JournalStreamer {
                   Context* cntx);
 
   void Start(io::Sink* dest) override;
+  // Cancel() must be called if Start() is called
   void Cancel() override;
 
   bool IsSnapshotFinished() const {
     return snapshot_finished_;
   }
 
-  ~RestoreStreamer();
-
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
+  bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
   void WriteBucket(PrimeTable::bucket_iterator it);

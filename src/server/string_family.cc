@@ -520,24 +520,6 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
     if (it.is_done())
       continue;
 
-    // If keys contain the same key several time,
-    // then with cache_mode=true we may have a "data race":
-    //   The first Find(key) will return the iterator after it bumped it up,
-    //   the second Find(key) above will also return the iterator but it will
-    //   bump up the key again, and the first iterator will be invalidated.
-    // TODO: to understand better the dynamics of this scenario and to fix it.
-    if (it->first != keys[i]) {
-      LOG(WARNING) << "Inconcistent key(" << i << "), expected " << keys[i] << " but found "
-                   << it->first.ToString();
-      string key_arr;
-      for (unsigned j = 0; j < keys.size(); ++j) {
-        absl::StrAppend(&key_arr, keys[j], ",");
-      }
-      key_arr.pop_back();
-      LOG(WARNING) << "The keys requested are: [" << key_arr << "]";
-      it = db_slice.GetDBTable(t->GetDbContext().db_index)->prime.Find(keys[i]);
-      CHECK(!it.is_done());
-    }
     auto& resp = response.resp_arr[i].emplace();
 
     size_t size = CopyValueToBuffer(it->second, next);

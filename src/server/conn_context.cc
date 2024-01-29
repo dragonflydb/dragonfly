@@ -234,7 +234,7 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
-  return dfly::HeapSize(keys);
+  return dfly::HeapSize(keys) + async_cmds_heap_mem;
 }
 
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {

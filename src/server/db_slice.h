@@ -405,8 +405,7 @@ class DbSlice {
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // Releases a single key. `key` must have been normalized by GetLockKey().
-  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
-                         unsigned count);
+  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key);
 
  private:
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
@@ -482,7 +481,7 @@ class DbSlice {
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
-  mutable absl::flat_hash_set<CompactObjectView> bumped_items_;
+  mutable absl::flat_hash_set<CompactObjectView> fetched_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;

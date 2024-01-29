@@ -166,31 +166,25 @@ class RoundRobinSharder {
 };
 
 bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
-  bool has_contended_locks = false;
+  auto is_contended = [table](string_view key) {
+    return table->trans_locks.Find(key)->IsContended();
+  };
 
   if (trx->IsMulti()) {
-    trx->IterateMultiLocks(shard_id, [&](const string& key) {
-      auto it = table->trans_locks.find(key);
-      DCHECK(it != table->trans_locks.end());
-      if (it->second.IsContended()) {
-        has_contended_locks = true;
-      }
-    });
+    auto keys = trx->GetMultiKeys();
+    for (string_view key : keys) {
+      if (Shard(key, shard_set->size()) == shard_id && is_contended(key))
+        return true;
+    }
   } else {
     KeyLockArgs lock_args = trx->GetLockArgs(shard_id);
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      auto it = table->trans_locks.find(s);
-      DCHECK(it != table->trans_locks.end());
-      if (it != table->trans_locks.end()) {
-        if (it->second.IsContended()) {
-          has_contended_locks = true;
-          break;
-        }
-      }
+      if (is_contended(KeyLockArgs::GetLockKey(lock_args.args[i])))
+        return true;
     }
   }
-  return has_contended_locks;
+
+  return false;
 }
 
 thread_local string RoundRobinSharder::round_robin_prefix_;
@@ -351,20 +345,16 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen),
+    : queue_(1, kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       db_slice_(pb->GetPoolIndex(), GetFlag(FLAGS_cache_mode), this) {
-  fiber_q_ = MakeFiber([this, index = pb->GetPoolIndex()] {
-    ThisFiber::SetName(absl::StrCat("shard_queue", index));
-    queue_.Run();
-  });
-
   tmp_str1 = sdsempty();
 
   db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
   // start the defragmented task here
   defrag_task_ = pb->AddOnIdleTask([this]() { return this->DefragTask(); });
+  queue_.Start(absl::StrCat("shard_queue_", db_slice_.shard_id()));
 }
 
 EngineShard::~EngineShard() {
@@ -373,7 +363,6 @@ EngineShard::~EngineShard() {
 
 void EngineShard::Shutdown() {
   queue_.Shutdown();
-  fiber_q_.Join();
 
   if (tiered_storage_) {
     tiered_storage_->Shutdown();
@@ -775,13 +764,13 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
     if (table == nullptr)
       continue;
 
-    info.total_locks += table->trans_locks.size();
-    for (const auto& k_v : table->trans_locks) {
-      if (k_v.second.IsContended()) {
+    info.total_locks += table->trans_locks.Size();
+    for (const auto& [key, lock] : table->trans_locks) {
+      if (lock.IsContended()) {
         info.contended_locks++;
-        if (k_v.second.ContentionScore() > info.max_contention_score) {
-          info.max_contention_score = k_v.second.ContentionScore();
-          info.max_contention_lock_name = k_v.first;
+        if (lock.ContentionScore() > info.max_contention_score) {
+          info.max_contention_score = lock.ContentionScore();
+          info.max_contention_lock_name = string_view{key};
         }
       }
     }

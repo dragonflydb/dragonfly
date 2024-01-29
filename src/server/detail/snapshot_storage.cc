@@ -25,6 +25,8 @@
 namespace dfly {
 namespace detail {
 
+using namespace util;
+
 std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_view path) {
   std::string_view clean = absl::StripPrefix(path, kS3Prefix);
 
@@ -42,14 +44,14 @@ std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_vie
 const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
 #endif
 
-FileSnapshotStorage::FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool)
+FileSnapshotStorage::FileSnapshotStorage(fb2::FiberQueueThreadPool* fq_threadpool)
     : fq_threadpool_{fq_threadpool} {
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::OpenWriteFile(
     const std::string& path) {
   if (fq_threadpool_) {  // EPOLL
-    auto res = util::OpenFiberWriteFile(path, fq_threadpool_);
+    auto res = OpenFiberWriteFile(path, fq_threadpool_);
     if (!res) {
       return nonstd::make_unexpected(GenericError(res.error(), "Couldn't open file for writing"));
     }
@@ -57,7 +59,7 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::Ope
     return std::pair(*res, FileType::FILE);
   } else {
 #ifdef __linux__
-    auto res = util::fb2::OpenLinux(path, kRdbWriteFlags, 0666);
+    auto res = fb2::OpenLinux(path, kRdbWriteFlags, 0666);
     if (!res) {
       return nonstd::make_unexpected(GenericError(
           res.error(),
@@ -78,12 +80,12 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::Ope
 io::ReadonlyFileOrError FileSnapshotStorage::OpenReadFile(const std::string& path) {
 #ifdef __linux__
   if (fq_threadpool_) {
-    return util::OpenFiberReadFile(path, fq_threadpool_);
+    return OpenFiberReadFile(path, fq_threadpool_);
   } else {
-    return util::fb2::OpenRead(path);
+    return fb2::OpenRead(path);
   }
 #else
-  return util::OpenFiberReadFile(path, fq_threadpool_);
+  return OpenFiberReadFile(path, fq_threadpool_);
 #endif
 }
 
@@ -186,29 +188,29 @@ AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool htt
       s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::ForceNever;
     }
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider =
-        std::make_shared<util::aws::CredentialsProviderChain>();
+        std::make_shared<aws::CredentialsProviderChain>();
     // Pass a custom endpoint. If empty uses the S3 endpoint.
     std::shared_ptr<Aws::S3::S3EndpointProviderBase> endpoint_provider =
-        std::make_shared<util::aws::S3EndpointProvider>(endpoint, https);
+        std::make_shared<aws::S3EndpointProvider>(endpoint, https);
     s3_ = std::make_shared<Aws::S3::S3Client>(credentials_provider, endpoint_provider, s3_conf);
   });
 }
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  util::fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
   return proactor->Await([&]() -> io::Result<std::pair<io::Sink*, uint8_t>, GenericError> {
     std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(path);
     if (!bucket_path) {
       return nonstd::make_unexpected(GenericError("Invalid S3 path"));
     }
     auto [bucket, key] = *bucket_path;
-    io::Result<util::aws::S3WriteFile> file = util::aws::S3WriteFile::Open(bucket, key, s3_);
+    io::Result<aws::S3WriteFile> file = aws::S3WriteFile::Open(bucket, key, s3_);
     if (!file) {
       return nonstd::make_unexpected(GenericError(file.error(), "Failed to open write file"));
     }
 
-    util::aws::S3WriteFile* f = new util::aws::S3WriteFile(std::move(*file));
+    aws::S3WriteFile* f = new aws::S3WriteFile(std::move(*file));
     return std::pair<io::Sink*, uint8_t>(f, FileType::CLOUD);
   });
 }
@@ -219,7 +221,7 @@ io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& pa
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
   }
   auto [bucket, key] = *bucket_path;
-  return new util::aws::S3ReadFile(bucket, key, s3_);
+  return new aws::S3ReadFile(bucket, key, s3_);
 }
 
 io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string_view dir,
@@ -234,47 +236,48 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
   }
   auto [bucket_name, prefix] = *bucket_path;
 
-  util::fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-  return proactor->Await([&]() -> io::Result<std::string, GenericError> {
-    LOG(INFO) << "Load snapshot: Searching for snapshot in S3 path: " << kS3Prefix << bucket_name
-              << "/" << prefix;
+  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+  return proactor->Await(
+      [&, bucket_name = bucket_name, prefix = prefix]() -> io::Result<std::string, GenericError> {
+        LOG(INFO) << "Load snapshot: Searching for snapshot in S3 path: " << kS3Prefix
+                  << bucket_name << "/" << prefix;
 
-    // Create a regex to match the object keys, substituting the timestamp
-    // and adding an extension if needed.
-    fs::path fl_path{prefix};
-    fl_path.append(dbfilename);
-    SubstituteFilenamePlaceholders(&fl_path,
-                                   {.ts = "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
-                                    .year = "([0-9]{4})",
-                                    .month = "([0-9]{2})",
-                                    .day = "([0-9]{2})"});
-    if (!fl_path.has_extension()) {
-      fl_path += "(-summary.dfs|.rdb)";
-    }
-    const std::regex re(fl_path.string());
+        // Create a regex to match the object keys, substituting the timestamp
+        // and adding an extension if needed.
+        fs::path fl_path{prefix};
+        fl_path.append(dbfilename);
+        SubstituteFilenamePlaceholders(
+            &fl_path, {.ts = "([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})",
+                       .year = "([0-9]{4})",
+                       .month = "([0-9]{2})",
+                       .day = "([0-9]{2})"});
+        if (!fl_path.has_extension()) {
+          fl_path += "(-summary.dfs|.rdb)";
+        }
+        const std::regex re(fl_path.string());
 
-    // Sort the keys in reverse so the first. Since the timestamp format
-    // has lexicographic order, the matching snapshot file will be the latest
-    // snapshot.
-    io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
-    if (!keys) {
-      return nonstd::make_unexpected(keys.error());
-    }
+        // Sort the keys in reverse so the first. Since the timestamp format
+        // has lexicographic order, the matching snapshot file will be the latest
+        // snapshot.
+        io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
+        if (!keys) {
+          return nonstd::make_unexpected(keys.error());
+        }
 
-    std::sort(std::rbegin(*keys), std::rend(*keys), [](const SnapStat& l, const SnapStat& r) {
-      return l.last_modified < r.last_modified;
-    });
+        std::sort(std::rbegin(*keys), std::rend(*keys), [](const SnapStat& l, const SnapStat& r) {
+          return l.last_modified < r.last_modified;
+        });
 
-    for (const SnapStat& key : *keys) {
-      std::smatch m;
-      if (std::regex_match(key.name, m, re)) {
-        return std::string(kS3Prefix) + bucket_name + "/" + key.name;
-      }
-    }
+        for (const SnapStat& key : *keys) {
+          std::smatch m;
+          if (std::regex_match(key.name, m, re)) {
+            return std::string(kS3Prefix) + bucket_name + "/" + key.name;
+          }
+        }
 
-    return nonstd::make_unexpected(GenericError(
-        std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
-  });
+        return nonstd::make_unexpected(GenericError(
+            std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
+      });
 }
 
 io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPaths(
@@ -286,7 +289,7 @@ io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPat
 
   // Find snapshot shard files if we're loading DFS.
   if (absl::EndsWith(load_path, "summary.dfs")) {
-    util::fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+    fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
     return proactor->Await([&]() -> io::Result<std::vector<std::string>, GenericError> {
       std::vector<std::string> paths{{load_path}};
 

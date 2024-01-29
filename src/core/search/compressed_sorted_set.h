@@ -92,7 +92,7 @@ class CompressedSortedSet {
 
  private:
   uint32_t size_{0};
-  IntType head_value_{0};
+
   std::optional<IntType> tail_value_{};
   std::vector<uint8_t, PMR_NS::polymorphic_allocator<uint8_t>> diffs_;
 };

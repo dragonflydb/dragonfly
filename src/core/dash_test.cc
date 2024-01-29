@@ -78,7 +78,7 @@ struct UInt64Policy : public BasicDashPolicy {
 };
 
 struct RelaxedBumpPolicy {
-  bool CanBumpDown(uint64_t key) const {
+  bool CanBump(uint64_t key) const {
     return true;
   }
 };
@@ -396,7 +396,7 @@ TEST_F(DashTest, BumpUp) {
 
 TEST_F(DashTest, BumpPolicy) {
   struct RestrictedBumpPolicy {
-    bool CanBumpDown(uint64_t key) const {
+    bool CanBump(uint64_t key) const {
       return false;
     }
   };

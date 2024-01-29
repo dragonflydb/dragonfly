@@ -117,16 +117,16 @@ class PrimeEvictionPolicy {
 
 class PrimeBumpPolicy {
  public:
-  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& bumped_items)
-      : bumped_items_(bumped_items) {
+  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& fetched_items)
+      : fetched_items_(fetched_items) {
   }
-  // returns true if key can be made less important for eviction (opposite of bump up)
-  bool CanBumpDown(const CompactObj& obj) const {
-    return !obj.IsSticky() && !bumped_items_.contains(obj);
+  // returns true if we can change the object location in dash table.
+  bool CanBump(const CompactObj& obj) const {
+    return !obj.IsSticky() && !fetched_items_.contains(obj);
   }
 
  private:
-  const absl::flat_hash_set<CompactObjectView>& bumped_items_;
+  const absl::flat_hash_set<CompactObjectView>& fetched_items_;
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
@@ -191,7 +191,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     string tmp;
     string_view key = last_slot_it->first.GetSlice(&tmp);
     // do not evict locked keys
-    if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+    if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
       return 0;
 
     // log the evicted keys to journal.
@@ -497,9 +497,12 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
-    res.it = db.prime.BumpUp(res.it, PrimeBumpPolicy{bumped_items_});
-    ++events_.bumpups;
-    bumped_items_.insert(res.it->first.AsRef());
+    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{fetched_items_});
+    if (bump_it != res.it) {  // the item was bumped
+      res.it = bump_it;
+      ++events_.bumpups;
+    }
+    fetched_items_.insert(res.it->first.AsRef());
   }
 
   db.top_keys.Touch(key);
@@ -673,7 +676,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     DbContext cntx{db_ind, GetCurrentTimeMs()};
     doc_del_cb_(key, cntx, it->second);
   }
-  bumped_items_.erase(it->first.AsRef());
+  fetched_items_.erase(it->first.AsRef());
   PerformDeletion(it, db.get());
   deletion_count_++;
 
@@ -729,12 +732,12 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     flush_db_arr[index] = std::move(db);
 
     CreateDb(index);
-    db_arr_[index]->trans_locks.swap(flush_db_arr[index]->trans_locks);
+    std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
     if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
       tiered->CancelAllIos(index);
     }
   }
-  CHECK(bumped_items_.empty());
+  CHECK(fetched_items_.empty());
   auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
     for (auto& db_ptr : flush_db_arr) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
@@ -936,7 +939,7 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
 }
 
 bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  if (lock_args.args.empty()) {
+  if (lock_args.args.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return true;
   }
   DCHECK_GT(lock_args.key_step, 0u);
@@ -946,7 +949,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
-    lock_acquired = lt[key].Acquire(mode);
+    lock_acquired = lt.Acquire(key, mode);
     uniq_keys_ = {key};  // needed only for tests.
   } else {
     uniq_keys_.clear();
@@ -954,8 +957,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
       string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
-        bool res = lt[s].Acquire(mode);
-        lock_acquired &= res;
+        lock_acquired &= lt.Acquire(s, mode);
       }
     }
   }
@@ -966,41 +968,31 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   return lock_acquired;
 }
 
-void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
-                                unsigned count) {
+void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key) {
   DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));
-  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
+  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " "
+           << " for " << key;
 
   auto& lt = db_arr_[db_index]->trans_locks;
-  auto it = lt.find(KeyLockArgs::GetLockKey(key));
-  CHECK(it != lt.end()) << key;
-  it->second.Release(mode, count);
-  if (it->second.IsFree()) {
-    lt.erase(it);
-  }
+  lt.Release(KeyLockArgs::GetLockKey(key), mode);
 }
 
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  if (lock_args.args.empty()) {
+  if (lock_args.args.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return;
   }
 
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
     string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
-    ReleaseNormalized(mode, lock_args.db_index, key, 1);
+    ReleaseNormalized(mode, lock_args.db_index, key);
   } else {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
       if (uniq_keys_.insert(s).second) {
-        auto it = lt.find(s);
-        CHECK(it != lt.end());
-        it->second.Release(mode);
-        if (it->second.IsFree()) {
-          lt.erase(it);
-        }
+        lt.Release(s, mode);
       }
     }
   }
@@ -1018,11 +1010,9 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) co
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    auto s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-    auto it = lt.find(s);
-    if (it != lt.end() && !it->second.Check(mode)) {
+    string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+    if (auto lock = lt.Find(s); lock && !lock->Check(mode))
       return false;
-    }
   }
   return true;
 }
@@ -1247,7 +1237,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
           // check if the key is locked by looking up transaction table.
           auto& lt = db_table->trans_locks;
           string_view key = evict_it->first.GetSlice(&tmp);
-          if (lt.find(KeyLockArgs::GetLockKey(key)) != lt.end())
+          if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
             continue;
 
           if (auto journal = owner_->journal(); journal) {
@@ -1536,7 +1526,7 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
 void DbSlice::OnCbFinish() {
   // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
   // btw what do we do with inline?
-  bumped_items_.clear();
+  fetched_items_.clear();
 }
 
 }  // namespace dfly

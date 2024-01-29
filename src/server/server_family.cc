@@ -215,7 +215,6 @@ using namespace util;
 using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
-using SendStatsType = facade::ReplyStats::SendStatsType;
 
 namespace {
 
@@ -689,7 +688,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
-    fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
+    fq_threadpool_.reset(new fb2::FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
@@ -1051,35 +1050,11 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("net_output_bytes_total", "", m.facade_stats.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
-    string send_latency_metrics;
-    constexpr string_view kReplyLatency = "reply_duration_seconds";
-    AppendMetricHeader(kReplyLatency, "Reply latency per type", MetricType::COUNTER,
-                       &send_latency_metrics);
-
-    string send_count_metrics;
-    constexpr string_view kReplyCount = "reply_total";
-    AppendMetricHeader(kReplyCount, "Reply count per type", MetricType::COUNTER,
-                       &send_count_metrics);
-
-    for (unsigned i = 0; i < SendStatsType::kNumTypes; ++i) {
-      auto& stats = m.facade_stats.reply_stats.send_stats[i];
-      string_view type;
-      switch (SendStatsType(i)) {
-        case SendStatsType::kRegular:
-          type = "regular";
-          break;
-        case SendStatsType::kBatch:
-          type = "batch";
-          break;
-        case SendStatsType::kNumTypes:
-          type = "other";
-          break;
-      }
-
-      AppendMetricValue(kReplyLatency, double(stats.total_duration) * 1e-6, {"type"}, {type},
-                        &send_latency_metrics);
-      AppendMetricValue(kReplyCount, stats.count, {"type"}, {type}, &send_count_metrics);
-    }
+    AppendMetricWithoutLabels("reply_duration_seconds", "",
+                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-6,
+                              MetricType::COUNTER, &resp->body());
+    AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
+                              MetricType::COUNTER, &resp->body());
 
     // Tiered metrics.
     if (m.disk_stats.read_total > 0) {
@@ -1089,8 +1064,6 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                                 double(m.disk_stats.read_delay_usec) * 1e-6, MetricType::COUNTER,
                                 &resp->body());
     }
-    absl::StrAppend(&resp->body(), send_latency_metrics);
-    absl::StrAppend(&resp->body(), send_count_metrics);
   }
 
   // DB stats
@@ -1642,9 +1615,7 @@ void ServerFamily::ResetStat() {
 
     tl_facade_stats->reply_stats.io_write_bytes = 0;
     tl_facade_stats->reply_stats.io_write_cnt = 0;
-    for (auto& send_stat : tl_facade_stats->reply_stats.send_stats) {
-      send_stat = {};
-    }
+    tl_facade_stats->reply_stats.send_stats = {};
 
     service_.mutable_registry()->ResetCallStats(index);
   });
@@ -1878,11 +1849,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("reply_count", reply_stats.send_stats[SendStatsType::kRegular].count);
-    append("reply_latency_usec", reply_stats.send_stats[SendStatsType::kRegular].total_duration);
-    append("reply_batch_count", reply_stats.send_stats[SendStatsType::kBatch].count);
-    append("reply_batch_latency_usec",
-           reply_stats.send_stats[SendStatsType::kBatch].total_duration);
+    append("reply_count", reply_stats.send_stats.count);
+    append("reply_latency_usec", reply_stats.send_stats.total_duration);
   }
 
   if (should_enter("TIERED", true)) {

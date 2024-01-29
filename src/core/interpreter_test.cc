@@ -458,4 +458,18 @@ TEST_F(InterpreterTest, AsyncReplacement) {
   }
 }
 
+TEST_F(InterpreterTest, ReplicateCommands) {
+  EXPECT_TRUE(Execute("return redis.replicate_commands()"));
+  EXPECT_EQ("i(1)", ser_.res);
+  EXPECT_TRUE(Execute("redis.replicate_commands()"));
+  EXPECT_EQ("nil", ser_.res);
+}
+
+TEST_F(InterpreterTest, Log) {
+  EXPECT_TRUE(Execute(R"(redis.log('nonsense', 'nonsense'))"));
+  EXPECT_EQ("nil", ser_.res);
+  EXPECT_TRUE(Execute(R"(redis.log(redis.LOG_WARNING, 'warn'))"));
+  EXPECT_EQ("nil", ser_.res);
+}
+
 }  // namespace dfly

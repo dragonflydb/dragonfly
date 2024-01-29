@@ -53,7 +53,7 @@ class SnapshotStorage {
 
 class FileSnapshotStorage : public SnapshotStorage {
  public:
-  FileSnapshotStorage(FiberQueueThreadPool* fq_threadpool);
+  FileSnapshotStorage(util::fb2::FiberQueueThreadPool* fq_threadpool);
 
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
       const std::string& path) override;
