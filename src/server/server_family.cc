@@ -688,7 +688,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
-    fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
+    fq_threadpool_.reset(new fb2::FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
