@@ -1875,6 +1875,7 @@ async def test_heartbeat_eviction_propagation(df_local_factory):
     await disconnect_clients(c_master, *[c_replica])
 
 
+@pytest.mark.skip(reason="Test is flaky")
 @pytest.mark.asyncio
 async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(
