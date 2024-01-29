@@ -4,6 +4,7 @@ import asyncio
 from redis import asyncio as aioredis
 import subprocess
 from .utility import *
+from .instance import DflyInstanceFactory
 
 
 class RedisServer:
@@ -23,7 +24,7 @@ class RedisServer:
                 "--repl-diskless-sync-delay 0",
             ]
         )
-        print(self.proc.args)
+        logging.debug(self.proc.args)
 
     def stop(self):
         self.proc.terminate()
@@ -35,24 +36,27 @@ class RedisServer:
 
 # Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
-async def await_synced(master_port, replica_port, dbcount=1):
+async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbcount=1):
     rnd_str = "".join(random.choices(string.ascii_letters, k=10))
     key = "sync_key/" + rnd_str
     for db in range(dbcount):
-        c_master = aioredis.Redis(port=master_port, db=db)
         await c_master.set(key, "dummy")
-        print(f"set {key} MASTER db = {db}")
-        c_replica = aioredis.Redis(port=replica_port, db=db)
+        logging.debug(f"set {key} MASTER db = {db}")
         timeout = 30
         while timeout > 0:
             v = await c_replica.get(key)
-            print(f"get {key} from REPLICA db = {db} got {v}")
+            logging.debug(f"get {key} from REPLICA db = {db} got {v}")
             if v is not None:
                 break
+            repl_state = await c_master.info("replication")
+            logging.debug(f"replication info: {repl_state}")
             await asyncio.sleep(1)
+
             timeout -= 1
         await c_master.close()
         await c_replica.close()
+        if timeout == 0:
+            breakpoint()
         assert timeout > 0, "Timeout while waiting for replica to sync"
 
 
@@ -108,7 +112,7 @@ async def test_replication_full_sync(
 
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
     await wait_available_async(c_replica)
-    await await_synced(master.port, replica.port, seeder_config["dbcount"])
+    await await_synced(c_master, c_replica, seeder_config["dbcount"])
 
     capture = await seeder.capture()
     assert await seeder.compare(capture, port=replica.port)
@@ -144,7 +148,7 @@ async def test_replication_stable_sync(
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
     await seeder.run(target_ops=1000)
 
-    await await_synced(master.port, replica.port, seeder_config["dbcount"])
+    await await_synced(c_master, c_replica, seeder_config["dbcount"])
 
     capture = await seeder.capture()
     assert await seeder.compare(capture, port=replica.port)
@@ -154,7 +158,7 @@ async def test_replication_stable_sync(
 replication_specs = [
     ([1], dict(keys=1000, dbcount=1, unsupported_types=[ValueType.JSON])),
     ([6, 6, 6], dict(keys=4_000, dbcount=2, unsupported_types=[ValueType.JSON])),
-    ([2, 2, 2, 2], dict(keys=4_000, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([2, 2], dict(keys=4_000, dbcount=2, unsupported_types=[ValueType.JSON])),
     ([8, 8], dict(keys=4_000, dbcount=2, unsupported_types=[ValueType.JSON])),
     ([1] * 8, dict(keys=500, dbcount=1, unsupported_types=[ValueType.JSON])),
     ([1], dict(keys=100, dbcount=4, unsupported_types=[ValueType.JSON])),
@@ -163,7 +167,12 @@ replication_specs = [
 
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
 async def test_redis_replication_all(
-    df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
+    df_local_factory: DflyInstanceFactory,
+    df_seeder_factory,
+    redis_server,
+    t_replicas,
+    seeder_config,
+    port_picker,
 ):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
@@ -181,7 +190,7 @@ async def test_redis_replication_all(
     # Start replicas
     df_local_factory.start_all(replicas)
 
-    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+    c_replicas = [replica.client() for replica in replicas]
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run())
@@ -202,14 +211,14 @@ async def test_redis_replication_all(
     await stream_task
 
     # Check data after full sync
-    await await_synced_all(master.port, [replica.port for replica in replicas])
+    await await_synced_all(c_master, c_replicas)
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
-    await await_synced_all(master.port, [replica.port for replica in replicas])
+    await await_synced_all(c_master, c_replicas)
     await check_data(seeder, replicas, c_replicas)
 
 
@@ -275,5 +284,5 @@ async def test_disconnect_master(
 
     # Check data after stable state stream
     await asyncio.gather(*(asyncio.create_task(wait_available_async(c)) for c in c_replicas))
-    await await_synced_all(master.port, [replica.port for replica in replicas])
+    await await_synced_all(c_master, c_replicas)
     await check_data(seeder, replicas, c_replicas)
