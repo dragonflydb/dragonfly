@@ -1428,6 +1428,9 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     // from_it would be invalid. Therefore, UpdateExpire does not invalidate any iterators,
     // therefore we can delete 'from_it'.
     db_slice.UpdateExpire(op_args.db_cntx.db_index, to_res.it, exp_ts);
+    to_res.it->first.SetSticky(sticky);
+    to_res.post_updater.Run();
+
     from_res.post_updater.Run();
     CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
   } else {
@@ -1439,9 +1442,8 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     auto op_result = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
+    to_res.it->first.SetSticky(sticky);
   }
-
-  to_res.it->first.SetSticky(sticky);
 
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
     es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, to_key);
