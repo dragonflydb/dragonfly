@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "allocation_tracker.h"
+#include "core/allocation_tracker.h"
 
 #include "absl/random/random.h"
 #include "base/logging.h"
@@ -58,6 +58,7 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
     return;
   }
 
+  // Prevent endless recursion, in case logging allocates memory
   inside_process_new = true;
   double random = absl::Uniform(g_bitgen, 0.0, 1.0);
   for (const auto& band : tracking_) {

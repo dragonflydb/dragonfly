@@ -15,8 +15,12 @@
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/numbers.h"
 
+#ifdef DFLY_ENABLE_MEMORY_TRACKING
 #define INJECT_ALLOCATION_TRACKER
-#include "server/allocation_tracker.h"
+#include "core/allocation_tracker.h"
+#else
+#include <mimalloc-new-delete.h>
+#endif
 
 #ifdef __linux__
 #include <liburing.h>
