@@ -124,8 +124,7 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
 void ScriptMgr::FlushCmd(CmdArgList args, ConnectionContext* cntx) {
   FlushAllScript();
 
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendSimpleString("OK");
+  return cntx->SendOk();
 }
 
 void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
