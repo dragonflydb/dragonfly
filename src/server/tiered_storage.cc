@@ -409,16 +409,14 @@ PrimeIterator TieredStorage::Load(DbIndex db_index, PrimeIterator it, string_vie
   auto ec = Read(offset, size, res.data());
   CHECK(!ec) << "TBD";
 
-  // Read will preempt, check if iterator still points to our entry
-  PrimeTable* pt = db_slice_.GetTables(db_index).first;
-  if (!it.IsOccupied() || it->first != key) {
-    it = pt->Find(key);
-    if (it.is_done()) {
-      // Entry was remove from db while reading from disk. (background expire task)
-      return it;
-    }
-    entry = &it->second;
+  // Read will preempt, update iterator if needed.
+  DbTable* table = db_slice_.GetDBTable(db_index);
+  it = table->Launder(it, key);
+  if (it.is_done()) {
+    // Entry was remove from db while reading from disk. (background expire task)
+    return it;
   }
+  entry = &it->second;
 
   if (!entry->IsExternal()) {
     // Because 2 reads can happen at the same time, then if the other read
