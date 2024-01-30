@@ -404,7 +404,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterStartSlotMigration(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
     return DflyClusterSlotMigrationStatus(args, cntx);
-  } else if (sub_cmd == "SLOT-MIGRATION_FINALIZE") {
+  } else if (sub_cmd == "SLOT-MIGRATION-FINALIZE") {
     return DflyClusterMigrationFinalize(args, cntx);
   }
 

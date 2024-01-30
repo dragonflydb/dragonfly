@@ -897,7 +897,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     ):
         await asyncio.sleep(0.05)
 
-    res = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION_FINALIZE", "1")
+    res = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", "1")
     assert "OK" == res
 
     await push_config(
