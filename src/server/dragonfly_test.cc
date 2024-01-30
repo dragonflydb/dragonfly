@@ -260,18 +260,22 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   auto resp = Run({"script", "load", "return 5"});
   EXPECT_THAT(resp, ArgType(RespExpr::STRING));
   string sha{ToSV(resp.GetBuf())};
-
+  resp = Run({"evalsha", sha, "0"});
+  EXPECT_THAT(5, resp.GetInt());
   resp = Run({"script", "exists", sha});
   EXPECT_THAT(1, resp.GetInt());
 
   resp = Run({"script", "flush"});
   resp = Run({"script", "exists", sha});
   EXPECT_THAT(0, resp.GetInt());
+  resp = Run({"evalsha", sha, "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"script", "load", "return 5"});
   EXPECT_THAT(resp, ArgType(RespExpr::STRING));
   sha = string{ToSV(resp.GetBuf())};
-
+  resp = Run({"evalsha", sha, "0"});
+  EXPECT_THAT(5, resp.GetInt());
   resp = Run({"script", "exists", sha});
   EXPECT_THAT(1, resp.GetInt());
 }
