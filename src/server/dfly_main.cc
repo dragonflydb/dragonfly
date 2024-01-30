@@ -3,13 +3,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "absl/cleanup/cleanup.h"
-#include "absl/container/inlined_vector.h"
-#include "absl/strings/numbers.h"
-#ifdef NDEBUG
-#include <mimalloc-new-delete.h>
-#endif
-
 #include <absl/flags/parse.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
@@ -17,6 +10,17 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
+
+#include "absl/cleanup/cleanup.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/strings/numbers.h"
+
+#ifdef DFLY_ENABLE_MEMORY_TRACKING
+#define INJECT_ALLOCATION_TRACKER
+#include "core/allocation_tracker.h"
+#else
+#include <mimalloc-new-delete.h>
+#endif
 
 #ifdef __linux__
 #include <liburing.h>
