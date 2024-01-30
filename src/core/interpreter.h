@@ -149,6 +149,8 @@ class InterpreterManager {
 
   void Return(Interpreter*);
 
+  void Reset();
+
  private:
   EventCount waker_;
   std::vector<Interpreter*> available_;

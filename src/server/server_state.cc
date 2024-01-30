@@ -181,6 +181,10 @@ void ServerState::ReturnInterpreter(Interpreter* ir) {
   interpreter_mgr_.Return(ir);
 }
 
+void ServerState::ResetInterpreter() {
+  interpreter_mgr_.Reset();
+}
+
 ServerState* ServerState::SafeTLocal() {
   // https://stackoverflow.com/a/75622732
   asm volatile("");

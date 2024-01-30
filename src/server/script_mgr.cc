@@ -287,10 +287,10 @@ void ScriptMgr::FlushAllScript() {
   lock_guard lk{mu_};
   db_.clear();
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  interpreter->ResetStack();
-  ss->ReturnInterpreter(interpreter);
+  shard_set->pool()->Await([](auto index, auto* pb) {
+    ServerState* ss = ServerState::tlocal();
+    ss->ResetInterpreter();
+  });
 }
 
 vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
