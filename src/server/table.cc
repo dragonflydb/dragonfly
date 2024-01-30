@@ -116,4 +116,11 @@ void DbTable::Clear() {
   stats = DbTableStats{};
 }
 
+PrimeIterator DbTable::Launder(PrimeIterator it, std::string_view key) {
+  if (!it.IsOccupied() || it->first != key) {
+    it = prime.Find(key);
+  }
+  return it;
+}
+
 }  // namespace dfly

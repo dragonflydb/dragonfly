@@ -341,9 +341,7 @@ void DbSlice::AutoUpdater::Run() {
   if (shard_set->IsTieringEnabled()) {
     // When triering is enabled we can preempt on write to disk, therefore it can be invalidated
     // until we run the post updated.
-    if (!fields_.it.IsOccupied() || fields_.it->first != fields_.key) {
-      fields_.it = fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key);
-    }
+    fields_.it = fields_.db_slice->db_arr_[fields_.db_ind]->Launder(fields_.it, fields_.key);
   } else {
     // Make sure that the DB has not changed in size since this object was created.
     // Adding or removing elements from the DB may invalidate iterators.
