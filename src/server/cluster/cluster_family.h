@@ -51,7 +51,8 @@ class ClusterFamily {
 
  private:  // Slots migration section
   void DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx);
-  void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+  void DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+  void DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
@@ -69,6 +70,8 @@ class ClusterFamily {
   void DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx);
 
   void DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx);
+
+  void DflyMigrateFinalize(CmdArgList args, ConnectionContext* cntx);
 
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,

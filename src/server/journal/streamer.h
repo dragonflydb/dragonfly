@@ -60,6 +60,8 @@ class RestoreStreamer : public JournalStreamer {
   // Cancel() must be called if Start() is called
   void Cancel() override;
 
+  void SendFinalize();
+
   bool IsSnapshotFinished() const {
     return snapshot_finished_;
   }

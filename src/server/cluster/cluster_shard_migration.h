@@ -31,6 +31,14 @@ class ClusterShardMigration : public ProtocolClient {
     return is_stable_sync_.load();
   }
 
+  void SetFinalized() {
+    is_finalized_.store(true);
+  }
+
+  bool IsFinalized() {
+    return is_stable_sync_.load();
+  }
+
  private:
   void FullSyncShardFb(Context* cntx);
   void JoinFlow();
@@ -45,6 +53,7 @@ class ClusterShardMigration : public ProtocolClient {
   std::unique_ptr<JournalExecutor> executor_;
   Fiber sync_fb_;
   std::atomic_bool is_stable_sync_ = false;
+  std::atomic_bool is_finalized_ = false;
 };
 
 }  // namespace dfly

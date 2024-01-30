@@ -92,6 +92,13 @@ void RestoreStreamer::Start(io::Sink* dest) {
   });
 }
 
+void RestoreStreamer::SendFinalize() {
+  VLOG(2) << "DFLYMIGRATE FINALIZE for " << sync_id_ << " : " << db_slice_->shard_id();
+  WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FINALIZE", absl::StrCat(sync_id_),
+                                                 absl::StrCat(db_slice_->shard_id())}));
+  NotifyWritten(true);
+}
+
 void RestoreStreamer::Cancel() {
   fiber_cancellation_.Cancel();
   snapshot_fb_.JoinIfNeeded();

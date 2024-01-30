@@ -113,6 +113,16 @@ void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
   }
 }
 
+void ClusterSlotMigration::SetFinalizedForFlow(uint32_t flow) {
+  DCHECK(shard_flows_.size() > flow);
+  shard_flows_[flow]->SetFinalized();
+}
+
+bool ClusterSlotMigration::IsFinalized() const {
+  return std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                     [](const auto& el) { return el->IsFinalized(); });
+}
+
 void ClusterSlotMigration::Stop() {
   for (auto& flow : shard_flows_) {
     flow->Cancel();

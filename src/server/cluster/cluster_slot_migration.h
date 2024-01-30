@@ -35,7 +35,11 @@ class ClusterSlotMigration : ProtocolClient {
     return state_;
   }
 
+  bool IsFinalized() const;
+
   void SetStableSyncForFlow(uint32_t flow);
+  void SetFinalizedForFlow(uint32_t flow);
+
   void Stop();
 
  private:

@@ -787,7 +787,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     res = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "5200", "5259"
     )
-    assert "OK" == res
+    assert 1 == res
 
     while (
         await c_nodes_admin[1].execute_command(
@@ -887,7 +887,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     res = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "3000", "9000"
     )
-    assert "OK" == res
+    assert 1 == res
 
     while (
         await c_nodes_admin[1].execute_command(
@@ -896,6 +896,9 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
         != "STABLE_SYNC"
     ):
         await asyncio.sleep(0.05)
+
+    res = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION_FINALIZE", "1")
+    assert "OK" == res
 
     await push_config(
         config.replace("LAST_SLOT_CUTOFF", "2999").replace("NEXT_SLOT_CUTOFF", "3000"),

@@ -403,7 +403,9 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "START-SLOT-MIGRATION") {
     return DflyClusterStartSlotMigration(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
-    return DflySlotMigrationStatus(args, cntx);
+    return DflyClusterSlotMigrationStatus(args, cntx);
+  } else if (sub_cmd == "SLOT-MIGRATION_FINALIZE") {
+    return DflyClusterMigrationFinalize(args, cntx);
   }
 
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -629,7 +631,7 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
   }
   node->Start(cntx);
 
-  return cntx->SendOk();
+  return cntx->SendLong(node->GetSyncId());
 }
 
 static std::string_view state_to_str(MigrationState state) {
@@ -647,7 +649,7 @@ static std::string_view state_to_str(MigrationState state) {
   return "UNDEFINED_STATE"sv;
 }
 
-void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
+void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
@@ -689,6 +691,37 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   return rb->SendSimpleString(state_to_str(MigrationState::C_NO_STATE));
 }
 
+void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  auto sync_id = parser.Next<uint32_t>();
+
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
+  }
+
+  auto migration_it = outgoing_migration_jobs_.find(sync_id);
+  if (migration_it == outgoing_migration_jobs_.end()) {
+    return cntx->SendError(absl::StrCat("finalize invalid session id ", sync_id));
+  }
+
+  shard_set->pool()->AwaitFiberOnAll([migration_it](auto*) {
+    if (const auto* shard = EngineShard::tlocal(); shard)
+      migration_it->second->Finalize(shard->shard_id());
+  });
+
+  // TODO do next after ACK
+  util::ThisFiber::SleepFor(500ms);
+
+  shard_set->pool()->AwaitFiberOnAll([migration_it](auto*) {
+    if (const auto* shard = EngineShard::tlocal(); shard)
+      migration_it->second->Cancel(shard->shard_id());
+  });
+
+  outgoing_migration_jobs_.erase(migration_it);
+
+  return cntx->SendOk();
+}
+
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -699,6 +732,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
     DflyMigrateFlow(args, cntx);
   } else if (sub_cmd == "FULL-SYNC-CUT") {
     DflyMigrateFullSyncCut(args, cntx);
+  } else if (sub_cmd == "FINALIZE") {
+    DflyMigrateFinalize(args, cntx);
   } else {
     cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -793,6 +828,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kIdNotFound);
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
+  server_family_->journal()->StartInThread();
 
   cntx->SendOk();
 
@@ -825,8 +861,36 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
 
   (*migration_it)->SetStableSyncForFlow(shard_id);
   if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
-    (*migration_it)->Stop();
     LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
+  }
+
+  cntx->SendOk();
+}
+
+void ClusterFamily::DflyMigrateFinalize(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
+
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
+  }
+
+  VLOG(1) << "Finalize flow sync_id: " << sync_id << " shard_id: " << shard_id;
+
+  std::lock_guard lck(migration_mu_);
+  auto migration_it =
+      std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
+                   [sync_id = sync_id](const auto& el) { return el->GetSyncId() == sync_id; });
+
+  if (migration_it == incoming_migrations_jobs_.end()) {
+    LOG(WARNING) << "Couldn't find migration id";
+    return cntx->SendError(kIdNotFound);
+  }
+
+  (*migration_it)->SetFinalizedForFlow(shard_id);
+  if ((*migration_it)->IsFinalized()) {
+    (*migration_it)->Stop();
+    LOG(INFO) << "Migration " << sync_id << " is finalized";
   }
 
   cntx->SendOk();
