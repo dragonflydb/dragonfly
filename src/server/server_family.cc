@@ -1858,6 +1858,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("TIERED", true)) {
     append("tiered_entries", total.tiered_entries);
     append("tiered_bytes", total.tiered_size);
+    append("tiered_bytes_human", HumanReadableNumBytes(total.tiered_size));
     append("tiered_reads", m.disk_stats.read_total);
     append("tiered_read_latency_usec", m.disk_stats.read_delay_usec);
     append("tiered_writes", m.tiered_stats.tiered_writes);
