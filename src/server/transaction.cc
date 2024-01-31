@@ -1053,11 +1053,8 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 }
 
 bool Transaction::IsArmedInShard(ShardId sid) const {
-  if (sid >= shard_data_.size())  // For multi transactions shard_data_ spans all shards.
-    sid = 0;
-
   // Barrier has acquire semantics
-  return run_barrier_.Active() && (shard_data_[sid].local_mask & ARMED);
+  return run_barrier_.Active() && (shard_data_[SidToId(sid)].local_mask & ARMED);
 }
 
 bool Transaction::IsActive(ShardId sid) const {
@@ -1074,8 +1071,6 @@ bool Transaction::IsActive(ShardId sid) const {
 
 uint16_t Transaction::GetLocalMask(ShardId sid) const {
   DCHECK(IsActive(sid));
-  // Think about this again?
-  // DCHECK(IsArmedInShard(sid) || (coordinator_state_ & COORD_BLOCKED));
   return shard_data_[SidToId(sid)].local_mask;
 }
 

@@ -352,8 +352,6 @@ class Transaction {
   };
 
   struct alignas(64) PerShardData {
-    PerShardData() = default;
-
     uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
     uint32_t arg_count = 0;
 
@@ -367,7 +365,7 @@ class Transaction {
     uint16_t wake_key_pos = UINT16_MAX;
 
     // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
-    char pad[48];
+    char pad[64 - 4 * sizeof(uint32_t)];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
