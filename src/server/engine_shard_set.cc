@@ -39,7 +39,7 @@ ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "default: 0");
 
 ABSL_FLAG(float, tiered_offload_threshold, 0.5,
-          "The ration of used/max memory above which we run offloading values to disk");
+          "The ratio of used/max memory above which we start offloading values to disk");
 
 ABSL_FLAG(uint32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "

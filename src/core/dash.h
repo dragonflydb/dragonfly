@@ -241,7 +241,9 @@ class DashTable : public detail::DashTableBase {
   template <typename Cb> void TraverseBucket(const_iterator it, Cb&& cb);
 
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
-  // segment by segment over phisical backets.
+  // segment by segment over physical backets.
+  // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
+  // when formal full coverage is not critically important.
   template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb);
 
   // Discards slots information.
