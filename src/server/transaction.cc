@@ -307,8 +307,10 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     unique_shard_cnt_ = 1;
     if (is_stub)  // stub transactions don't migrate
       DCHECK_EQ(unique_shard_id_, Shard(kv_args_.front(), shard_set->size()));
-    else
+    else {
+      unique_slot_checker_.Add(kv_args_.front());
       unique_shard_id_ = Shard(kv_args_.front(), shard_set->size());
+    }
 
     // Multi transactions that execute commands on their own (not stubs) can't shrink the backing
     // array, as it still might be read by leftover callbacks.
