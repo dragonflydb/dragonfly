@@ -319,6 +319,9 @@ void MemoryCmd::Usage(std::string_view key) {
 // MEMORY TRACK GET
 // - Returns an array with all active tracking
 //
+// MEMORY TRACK ADDRESS <address>
+// - Returns whether <address> is known to be allocated internally by any of the backing heaps
+//
 // This command is not documented in `MEMORY HELP` because it's meant to be used internally.
 void MemoryCmd::Track(CmdArgList args) {
 #ifndef DFLY_ENABLE_MEMORY_TRACKING
@@ -387,6 +390,27 @@ void MemoryCmd::Track(CmdArgList args) {
           absl::StrCat(range.lower_bound, ",", range.upper_bound, ",", range.sample_odds));
     }
     return;
+  }
+
+  if (sub_cmd == "ADDRESS") {
+    string_view ptr_str = parser.Next();
+    if (parser.HasError()) {
+      return cntx_->SendError(parser.Error()->MakeReply());
+    }
+
+    size_t ptr = 0;
+    if (!absl::SimpleHexAtoi(ptr_str, &ptr)) {
+      return cntx_->SendError("Address must be hex number");
+    }
+
+    atomic_bool found;
+    shard_set->pool()->Await([&](unsigned index, auto*) {
+      if (mi_heap_check_owned(mi_heap_get_backing(), (void*)ptr)) {
+        found.store(true);
+      }
+    });
+
+    return cntx_->SendSimpleString(found.load() ? "FOUND" : "NOT-FOUND");
   }
 
   return cntx_->SendError(kSyntaxErrType);
