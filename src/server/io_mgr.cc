@@ -34,7 +34,30 @@ constexpr inline size_t alignup(size_t num, size_t align) {
 }  // namespace
 
 IoMgr::IoMgr() {
-  flags_val = 0;
+  flags_val_ = 0;
+
+  Proactor* proactor = (Proactor*)ProactorBase::me();
+  CHECK_NOTNULL(proactor);
+
+  constexpr size_t kNumPages = 2048;
+  void* ptr = nullptr;
+  size_t size = kNumPages * 4096;
+  CHECK_EQ(0, posix_memalign(&ptr, 4096, size));
+  reg_buf_ = (uint8_t*)ptr;
+  iovec vecs[1];
+  vecs[0].iov_base = ptr;
+  vecs[0].iov_len = size;
+  CHECK_EQ(0, proactor->RegisterBuffers(vecs, 1));
+  page_mask_.resize(kNumPages, false);
+}
+
+IoMgr::~IoMgr() {
+  if (reg_buf_) {
+    Proactor* proactor = (Proactor*)ProactorBase::me();
+    CHECK_NOTNULL(proactor);
+    CHECK_EQ(0, proactor->UnregisterBuffers());
+    free(reg_buf_);
+  }
 }
 
 constexpr size_t kInitialSize = 1UL << 28;  // 256MB
@@ -114,9 +137,21 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
   if (absl::GetFlag(FLAGS_backing_file_direct)) {
     size_t read_offs = offset & ~4095ULL;
     size_t end_range = alignup(offset + dest.size(), 4096);
-    size_t space_needed = end_range - read_offs;
-    DCHECK_EQ(0u, space_needed % 4096);
+    size_t io_len = end_range - read_offs;
+    CHECK_EQ(io_len, 4096u) << "TODO";
+    auto it = std::find(page_mask_.begin(), page_mask_.end(), false);
+    CHECK(it != page_mask_.end()) << "TODO";
+    size_t page_index = it - page_mask_.begin();
 
+    io::MutableBytes direct(reg_buf_ + page_index * 4096, 4096);
+    *it = true;
+    error_code ec = backing_file_->ReadFixed(direct, read_offs, 0);
+    *it = false;
+    if (ec) {
+      return ec;
+    }
+    memcpy(dest.data(), direct.data() + (offset - read_offs), dest.size());
+#if 0
     uint8_t* space = (uint8_t*)mi_malloc_aligned(space_needed, 4096);
     iovec v{.iov_base = space, .iov_len = space_needed};
     uint64_t from_ts = ProactorBase::GetMonotonicTimeNs();
@@ -130,9 +165,8 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
       mi_free(space);
       return ec;
     }
-
-    memcpy(dest.data(), space + offset - read_offs, dest.size());
     mi_free_size_aligned(space, space_needed, 4096);
+#endif
     return ec;
   }
 
@@ -147,7 +181,7 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
 }
 
 void IoMgr::Shutdown() {
-  while (flags_val) {
+  while (flags_val_) {
     ThisFiber::SleepFor(200us);  // TODO: hacky for now.
   }
 }
