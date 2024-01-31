@@ -895,4 +895,11 @@ void InterpreterManager::Return(Interpreter* ir) {
   waker_.notify();
 }
 
+void InterpreterManager::Reset() {
+  waker_.await([this]() { return available_.size() == storage_.size(); });
+
+  available_.clear();
+  storage_.clear();
+}
+
 }  // namespace dfly

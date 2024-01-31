@@ -181,6 +181,8 @@ class ServerState {  // public struct - to allow initialization.
   // Return interpreter to internal manager to be re-used.
   void ReturnInterpreter(Interpreter*);
 
+  void ResetInterpreter();
+
   // Returns sum of all requests in the last 6 seconds
   // (not including the current one).
   uint32_t MovingSum6() const {
