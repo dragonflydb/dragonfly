@@ -162,8 +162,7 @@ class Transaction {
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
-    EXPIRED_Q = 1 << 6,         // Whether it timed out and should be dropped
-    UNLOCK_MULTI = 1 << 7,      // Whether this shard executed UnlockMultiShardCb
+    UNLOCK_MULTI = 1 << 6,      // Whether this shard executed UnlockMultiShardCb
   };
 
  public:
@@ -412,8 +411,7 @@ class Transaction {
   enum CoordinatorState : uint8_t {
     COORD_SCHED = 1,
     COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
-    COORD_BLOCKED = 1 << 2,
-    COORD_CANCELLED = 1 << 3,
+    COORD_CANCELLED = 1 << 2,
   };
 
   // Auxiliary structure used during initialization
@@ -440,6 +438,25 @@ class Transaction {
     uint32_t DEBUG_Count() const;  // Get current counter value
    private:
     std::atomic_uint32_t count_{0};
+    EventCount ec_{};
+  };
+
+  // "Single claim - single modification" barrier. Multiple threads might try to claim it, only one
+  // will succeed and will be allowed to modify the barrier until it releases it.
+  class SingleClaimBarrier {
+   public:
+    bool IsClaimed() const;  // Return if barrier was claimed, only for peeking
+    bool TryClaim();         // Return if the barrier was claimed successfully
+    void Release();          // Release barrier after it was claimed
+
+    // Wait for barrier until time_point, indefinitely if time_point::max() was passed.
+    // Expiration plays by the same rules as all other threads, it will try to claim the barrier or
+    // wait for an ongoing modification to release.
+    std::cv_status Wait(time_point);
+
+   private:
+    std::atomic_bool claimed_{false};
+    std::atomic_bool released_{false};
     EventCount ec_{};
   };
 
@@ -592,8 +609,8 @@ class Transaction {
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
   UniqueSlotChecker unique_slot_checker_;
 
-  std::atomic_uint32_t wakeup_requested_{0};  // incremented when blocking transaction gets notified
-  EventCount blocking_ec_;                    // to wait for wakeup_requested > 0 (or cancelled)
+  // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
+  SingleClaimBarrier blocking_barrier_{};
 
   // Transaction coordinator state, written and read by coordinator thread.
   uint8_t coordinator_state_ = 0;

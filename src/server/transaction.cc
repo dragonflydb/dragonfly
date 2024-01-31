@@ -116,6 +116,40 @@ uint32_t Transaction::PhasedBarrier::DEBUG_Count() const {
   return count_.load(memory_order_relaxed);
 }
 
+bool Transaction::SingleClaimBarrier::IsClaimed() const {
+  return claimed_.load(memory_order_relaxed);
+}
+
+bool Transaction::SingleClaimBarrier::TryClaim() {
+  return !claimed_.exchange(true, memory_order_relaxed);  // false means first means success
+}
+
+void Transaction::SingleClaimBarrier::Release() {
+  DCHECK(claimed_.load(memory_order_relaxed));
+  released_.store(true, memory_order_relaxed);
+  ec_.notify();  // release
+}
+
+cv_status Transaction::SingleClaimBarrier::Wait(time_point tp) {
+  auto cb = [this] { return released_.load(memory_order_acquire); };
+
+  if (tp != time_point::max()) {
+    cv_status status = ec_.await_until(cb, tp);
+
+    if (status == cv_status::no_timeout)  // We finished without a timeout due to a release
+      return cv_status::no_timeout;
+
+    if (!TryClaim())  // If we can't claim the barrier after a timeout, someone is modifying us
+      return Wait(time_point::max());  // wait for the modification to finish
+
+    Release();  // Purely a formal release
+    return cv_status::timeout;
+  }
+
+  ec_.await(cb);
+  return cv_status::no_timeout;
+}
+
 /**
  * @brief Construct a new Transaction:: Transaction object
  *
@@ -1211,13 +1245,6 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
 
   Execute(std::move(cb), true);
 
-  coordinator_state_ |= COORD_BLOCKED;
-
-  auto wake_cb = [this] {
-    return (coordinator_state_ & COORD_CANCELLED) ||
-           wakeup_requested_.load(memory_order_relaxed) > 0;
-  };
-
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
 
@@ -1228,12 +1255,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
     DVLOG(1) << "WaitOnWatch TimeWait for " << ms << " ms " << DebugId();
   }
 
-  cv_status status = cv_status::no_timeout;
-  if (tp == time_point::max()) {
-    blocking_ec_.await(std::move(wake_cb));
-  } else {
-    status = blocking_ec_.await_until(std::move(wake_cb), tp);
-  }
+  cv_status status = blocking_barrier_.Wait(tp);
 
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
 
@@ -1249,7 +1271,6 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
   if (result != OpStatus::OK)
     ExpireBlocking(wkeys_provider);
 
-  coordinator_state_ &= ~COORD_BLOCKED;
   return result;
 }
 
@@ -1277,7 +1298,6 @@ void Transaction::ExpireShardCb(ArgSlice wkeys, EngineShard* shard) {
 
   unsigned sd_idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[sd_idx];
-  sd.local_mask |= EXPIRED_Q;
   sd.local_mask &= ~KEYLOCK_ACQUIRED;
 
   shard->blocking_controller()->FinalizeWatched(wkeys, this);
@@ -1357,40 +1377,31 @@ bool Transaction::IsGlobal() const {
 // Returns true if the transacton has changed its state from suspended to awakened,
 // false, otherwise.
 bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view key) {
-  unsigned idx = SidToId(sid);
-  auto& sd = shard_data_[idx];
-  unsigned local_mask = sd.local_mask;
-
-  if (local_mask & Transaction::EXPIRED_Q) {
-    return false;
-  }
-
   // Wake a transaction only once on the first notify.
   // We don't care about preserving the strict order with multiple operations running on blocking
   // keys in parallel, because the internal order is not observable from outside either way.
-  if (wakeup_requested_.fetch_add(1, memory_order_relaxed) > 0)
+  if (!blocking_barrier_.TryClaim())
     return false;
 
-  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask << " by commited_id "
-           << committed_txid;
+  auto& sd = shard_data_[SidToId(sid)];
 
-  // local_mask could be awaked (i.e. not suspended) if the transaction has been
-  // awakened by another key or awakened by the same key multiple times.
-  if (local_mask & SUSPENDED_Q) {
-    DCHECK_EQ(0u, local_mask & AWAKED_Q);
+  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << sd.local_mask
+           << " by commited_id " << committed_txid;
 
-    sd.local_mask &= ~SUSPENDED_Q;
-    sd.local_mask |= AWAKED_Q;
+  // We're the first and only to wake this transaction, expect the shard to be suspended
+  CHECK(sd.local_mask & SUSPENDED_Q);
+  CHECK_EQ(sd.local_mask & AWAKED_Q, 0);
 
-    // Find index of awakened key.
-    auto args = GetShardArgs(sid);
-    auto it =
-        find_if(args.begin(), args.end(), [key](auto arg) { return facade::ToSV(arg) == key; });
-    DCHECK(it != args.end());
-    sd.wake_key_pos = it - args.begin();
-  }
+  sd.local_mask &= ~SUSPENDED_Q;
+  sd.local_mask |= AWAKED_Q;
 
-  blocking_ec_.notify();
+  // Find index of awakened key.
+  auto args = GetShardArgs(sid);
+  auto it = find_if(args.begin(), args.end(), [key](auto arg) { return facade::ToSV(arg) == key; });
+  DCHECK(it != args.end());
+  sd.wake_key_pos = it - args.begin();
+
+  blocking_barrier_.Release();
   return true;
 }
 
@@ -1470,7 +1481,10 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
 }
 
 void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
-  if ((coordinator_state_ & COORD_BLOCKED) == 0)
+  // We're on the owning thread of this transaction, so we can safely access it's data below.
+  // We still need to claim the blocking barrier, but as this function is often called blindly, we
+  // want to check first if it makes sense to even proceed.
+  if (blocking_barrier_.IsClaimed())
     return;
 
   OpStatus status = OpStatus::CANCELLED;
@@ -1486,9 +1500,13 @@ void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
   if (status == OpStatus::OK)
     return;
 
+  // Check if someone else is about to wake us up
+  if (!blocking_barrier_.TryClaim())
+    return;
+
   coordinator_state_ |= COORD_CANCELLED;
   local_result_ = status;
-  blocking_ec_.notify();
+  blocking_barrier_.Release();
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
