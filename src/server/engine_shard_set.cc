@@ -629,8 +629,12 @@ void EngineShard::Heartbeat() {
       db_slice_.FreeMemWithEvictionStep(i, eviction_redline - db_slice_.memory_budget());
     }
 
-    if (tiered_storage_ && UsedMemory() > tiering_redline) {
-      db_slice_.ScheduleForOffloadStep(i, UsedMemory() - tiering_redline);
+    if (tiered_storage_) {
+      size_t offload_bytes = 0;
+      if (UsedMemory() > tiering_redline) {
+        offload_bytes = UsedMemory() - tiering_redline;
+      }
+      db_slice_.ScheduleForOffloadStep(i, offload_bytes);
     }
   }
 
