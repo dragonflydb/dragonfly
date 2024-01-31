@@ -1213,7 +1213,8 @@ void DbSlice::ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes
   auto cb = [&](PrimeIterator it) {
     // TBD check we did not lock it for future transaction
 
-    if (increase_goal_bytes > offloaded_bytes && !(it->first.HasTouched()) &&
+    // If the item is cold (not touched) and can be externalized, schedule it for offload.
+    if (increase_goal_bytes > offloaded_bytes && !(it->first.WasTouched()) &&
         TieredStorage::CanExternalizeEntry(it)) {
       shard_owner()->tiered_storage()->ScheduleOffload(db_indx, it);
       if (it->second.HasIoPending()) {
