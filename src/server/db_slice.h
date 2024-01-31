@@ -51,6 +51,10 @@ struct SliceEvents {
   size_t misses = 0;
   size_t mutations = 0;
 
+  // ram hit/miss when tiering is enabled
+  size_t ram_hits = 0;
+  size_t ram_misses = 0;
+
   // how many insertions were rejected due to OOM.
   size_t insertion_rejections = 0;
 

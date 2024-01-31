@@ -1884,6 +1884,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
+    append("ram_hits", m.events.ram_hits);
+    append("ram_misses", m.events.ram_misses);
   }
 
   if (should_enter("TIERED", true)) {
