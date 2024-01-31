@@ -156,11 +156,12 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,  // Set on all active shards.
+    ACTIVE = 1,      // Whether its active on this shard (to schedule or execute hops)
+    ARMED = 1 << 1,  // Whether its armed (the hop was prepared)
     OUT_OF_ORDER =
-        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED is not set.
+        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
-    SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
+    SUSPENDED_Q = 1 << 4,       // Whether it suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
     UNLOCK_MULTI = 1 << 6,      // Whether this shard executed UnlockMultiShardCb
   };
@@ -251,23 +252,15 @@ class Transaction {
   // Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  // Returns true if the transaction spans this shard_id.
-  bool IsActive(ShardId shard_id) const;
-
   // Returns true if the transaction is waiting for shard callbacks and the shard is armed.
   // Safe to read transaction state (and update shard local) until following RunInShard() finishes.
-  bool IsArmedInShard(ShardId sid) const {
-    if (sid >= shard_data_.size())  // For multi transactions shard_data_ spans all shards.
-      sid = 0;
+  bool IsArmedInShard(ShardId sid) const;
 
-    // Barrier has acquire semantics
-    return run_barrier_.Active() && shard_data_[sid].is_armed.load(std::memory_order_relaxed);
-  }
+  // Returns if the transaction spans this shard. Safe only when the transaction is armed.
+  bool IsActive(ShardId sid) const;
 
-  // Called from engine set shard threads.
-  uint16_t GetLocalMask(ShardId sid) const {
-    return shard_data_[SidToId(sid)].local_mask;
-  }
+  // Returns the state mask on this shard. Safe only when the transaction is armed (or blocked).
+  uint16_t GetLocalMask(ShardId sid) const;
 
   uint32_t GetLocalTxqPos(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;
@@ -359,30 +352,22 @@ class Transaction {
   };
 
   struct alignas(64) PerShardData {
-    PerShardData(PerShardData&&) noexcept {
-    }
-
     PerShardData() = default;
 
-    // this is the only variable that is accessed by both shard and coordinator threads.
-    std::atomic_bool is_armed{false};
-
-    // We pad with some memory so that atomic loads won't cause false sharing between threads.
-    char pad[46];  // to make sure PerShardData is 64 bytes and takes full cacheline.
-
-    uint32_t arg_start = 0;  // Indices into args_ array.
+    uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
     uint32_t arg_count = 0;
 
-    // Needed to rollback inconsistent schedulings or remove OOO transactions from
-    // tx queue.
+    // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
     uint32_t pq_pos = TxQueue::kEnd;
 
-    // Accessed within shard thread.
-    // Bitmask of LocalMask enums.
+    // State of shard - bitmask with LocalState flags
     uint16_t local_mask = 0;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;
+
+    // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
+    char pad[48];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
