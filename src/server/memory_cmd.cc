@@ -341,7 +341,7 @@ void MemoryCmd::Track(CmdArgList args) {
       return cntx_->SendError(parser.Error()->MakeReply());
     }
 
-    atomic_bool error;
+    atomic_bool error{false};
     shard_set->pool()->Await([&](unsigned index, auto*) {
       if (!AllocationTracker::Get().Add(
               {.lower_bound = lower_bound, .upper_bound = upper_bound, .sample_odds = odds})) {
@@ -362,7 +362,7 @@ void MemoryCmd::Track(CmdArgList args) {
       return cntx_->SendError(parser.Error()->MakeReply());
     }
 
-    atomic_bool error;
+    atomic_bool error{false};
     shard_set->pool()->Await([&](unsigned index, auto*) {
       if (!AllocationTracker::Get().Remove(lower_bound, upper_bound)) {
         error.store(true);
@@ -403,7 +403,7 @@ void MemoryCmd::Track(CmdArgList args) {
       return cntx_->SendError("Address must be hex number");
     }
 
-    atomic_bool found;
+    atomic_bool found{false};
     shard_set->pool()->Await([&](unsigned index, auto*) {
       if (mi_heap_check_owned(mi_heap_get_backing(), (void*)ptr)) {
         found.store(true);
