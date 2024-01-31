@@ -268,8 +268,7 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   resp = Run({"script", "flush"});
   resp = Run({"script", "exists", sha});
   EXPECT_THAT(0, resp.GetInt());
-  resp = Run({"evalsha", sha, "0"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("NOSCRIPT No matching script. Please use EVAL."));
 
   resp = Run({"script", "load", "return 5"});
   EXPECT_THAT(resp, ArgType(RespExpr::STRING));
