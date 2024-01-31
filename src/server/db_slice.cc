@@ -230,7 +230,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 96, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 112, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -244,6 +244,8 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(mutations);
   ADD(insertion_rejections);
   ADD(update);
+  ADD(ram_hits);
+  ADD(ram_misses);
 
   return *this;
 }
@@ -473,15 +475,19 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
 
   if (TieredStorage* tiered = shard_owner()->tiered_storage();
       tiered && load_mode == LoadExternalMode::kLoad) {
-    if (res.it->second.HasIoPending()) {
-      tiered->CancelIo(cntx.db_index, res.it);
-    } else if (res.it->second.IsExternal()) {
+    if (res.it->second.IsExternal()) {
       // Load reads data from disk therefore we will preempt in this function.
       // We will update the iterator if it changed during the preemption
       res.it = tiered->Load(cntx.db_index, res.it, key);
       if (!IsValid(res.it)) {
         return OpStatus::KEY_NOTFOUND;
       }
+      events_.ram_misses++;
+    } else {
+      if (res.it->second.HasIoPending()) {
+        tiered->CancelIo(cntx.db_index, res.it);
+      }
+      events_.ram_hits++;
     }
     res.it->first.SetTouched(true);
   }

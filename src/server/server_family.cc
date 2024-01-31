@@ -1851,6 +1851,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
+    append("ram_hits", m.events.ram_hits);
+    append("ram_misses", m.events.ram_misses);
   }
 
   if (should_enter("TIERED", true)) {
