@@ -54,7 +54,7 @@ class BlockingController {
 
   using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
 
-  void NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm, const DbContext& context);
+  void NotifyWatchQueue(std::string_view key, WatchQueue* wqm, const DbContext& context);
 
   // void NotifyConvergence(Transaction* tx);
 
