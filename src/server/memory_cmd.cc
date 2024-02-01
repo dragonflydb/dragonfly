@@ -101,6 +101,24 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Show memory usage of a key.",
         "DECOMMIT",
         "    Force decommit the memory freed by the server back to OS.",
+        "TRACK",
+        "    Allow tracking of memory allocation via `new` and `delete` based on input criteria.",
+        "    USE WITH CAUTIOUS! This command is designed for Dragonfly developers.",
+        "    ADD <lower-bound> <upper-bound> <sample-odds>",
+        "        Sets up tracking memory allocations in the (inclusive) range [lower, upper]",
+        "        sample-odds indicates how many of the allocations will be logged, there 0 means "
+        "none, 1 means all, and everything in between is linear",
+        "        There could be at most 4 tracking placed in parallel",
+        "    REMOVE <lower-bound> <upper-bound>",
+        "        Removes all memory tracking added which match bounds",
+        "        Could remove 0, 1 or more",
+        "    CLEAR",
+        "        Removes all memory tracking",
+        "    GET",
+        "        Returns an array with all active tracking",
+        "    ADDRESS <address>",
+        "        Returns whether <address> is known to be allocated internally by any of the "
+        "backing heaps",
     };
     auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
     return rb->SendSimpleStrArr(help_arr);
@@ -301,28 +319,6 @@ void MemoryCmd::Usage(std::string_view key) {
   rb->SendLong(memory_usage);
 }
 
-// Allow tracking of memory allocation via `new` and `delete` based on input criteria.
-//
-// MEMORY TRACK ADD <lower-bound> <upper-bound> <sample-odds>
-// - Sets up tracking memory allocations in the (inclusive) range [lower, upper]
-// - sample-odds indicates how many of the allocations will be logged, there 0 means none, 1 means
-//   all, and everything in between is linear
-// - There could be at most 4 tracking placed in parallel
-//
-// MEMORY TRACK REMOVE <lower-bound> <upper-bound>
-// - Removes all memory tracking added which match bounds
-// - Could remove 0, 1 or more
-//
-// MEMORY TRACK CLEAR
-// - Removes all memory tracking
-//
-// MEMORY TRACK GET
-// - Returns an array with all active tracking
-//
-// MEMORY TRACK ADDRESS <address>
-// - Returns whether <address> is known to be allocated internally by any of the backing heaps
-//
-// This command is not documented in `MEMORY HELP` because it's meant to be used internally.
 void MemoryCmd::Track(CmdArgList args) {
 #ifndef DFLY_ENABLE_MEMORY_TRACKING
   return cntx_->SendError("MEMORY TRACK must be enabled at build time.");
