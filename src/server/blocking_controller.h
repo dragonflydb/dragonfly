@@ -28,10 +28,8 @@ class BlockingController {
     return awakened_transactions_;
   }
 
-  void FinalizeWatched(KeyLockArgs lock_args, Transaction* tx);
-
-  // A mirror reflection but with ArgSlice. Yeah, I know....
   void FinalizeWatched(ArgSlice args, Transaction* tx);
+
   // go over potential wakened keys, verify them and activate watch queues.
   void NotifyPending();
 
