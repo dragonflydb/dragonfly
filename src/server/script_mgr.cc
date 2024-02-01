@@ -199,7 +199,7 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   for (const auto& k_v : result) {
     rb->StartArray(2);
     rb->SendBulkString(k_v.first);
-    rb->SendBulkString(k_v.second.ToString());
+    rb->SendVerbatimString(k_v.second.ToString());
   }
 }
 

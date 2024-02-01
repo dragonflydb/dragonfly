@@ -173,13 +173,13 @@ void Transaction::InitGlobal() {
   EnableAllShards();
 }
 
-void Transaction::BuildShardIndex(const KeyIndex& key_index, bool rev_mapping,
-                                  std::vector<PerShardCache>* out) {
+void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShardCache>* out) {
   auto args = full_args_;
 
   auto& shard_index = *out;
 
-  auto add = [this, rev_mapping, &shard_index](uint32_t sid, uint32_t i) {
+  auto add = [this, rev_mapping = key_index.has_reverse_mapping, &shard_index](uint32_t sid,
+                                                                               uint32_t i) {
     string_view val = ArgS(full_args_, i);
     shard_index[sid].args.push_back(val);
     if (rev_mapping)
@@ -266,7 +266,7 @@ void Transaction::LaunderKeyStorage(CmdArgVec* keys) {
     keys->emplace_back(key.data(), key.size());
 }
 
-void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
+void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
   DCHECK(!key_index.bonus);
   DCHECK(key_index.step == 1u || key_index.step == 2u);
 
@@ -277,7 +277,7 @@ void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
       kv_args_.push_back(ArgS(full_args_, ++j));
   }
 
-  if (rev_mapping) {
+  if (key_index.has_reverse_mapping) {
     reverse_index_.resize(kv_args_.size());
     for (unsigned j = 0; j < reverse_index_.size(); ++j) {
       reverse_index_[j] = j + key_index.start;
@@ -293,8 +293,6 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
 
   DCHECK_LT(key_index.start, full_args_.size());
 
-  bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
-
   // Stub transactions always operate only on single shard.
   bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
 
@@ -302,7 +300,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     DCHECK(!IsActiveMulti() || multi_->mode == NON_ATOMIC);
 
     // We don't have to split the arguments by shards, so we can copy them directly.
-    StoreKeysInArgs(key_index, needs_reverse_mapping);
+    StoreKeysInArgs(key_index);
 
     unique_shard_cnt_ = 1;
     if (is_stub)  // stub transactions don't migrate
@@ -328,10 +326,10 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
 
   // Distribute all the arguments by shards.
-  BuildShardIndex(key_index, needs_reverse_mapping, &shard_index);
+  BuildShardIndex(key_index, &shard_index);
 
   // Initialize shard data based on distributed arguments.
-  InitShardData(shard_index, key_index.num_args(), needs_reverse_mapping);
+  InitShardData(shard_index, key_index.num_args(), key_index.has_reverse_mapping);
 
   DCHECK(!multi_ || multi_->mode != LOCK_AHEAD || !multi_->frozen_keys.empty());
 
@@ -353,7 +351,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 
   // Validation. Check reverse mapping was built correctly.
-  if (needs_reverse_mapping) {
+  if (key_index.has_reverse_mapping) {
     for (size_t i = 0; i < kv_args_.size(); ++i) {
       DCHECK_EQ(kv_args_[i], ArgS(full_args_, reverse_index_[i])) << full_args_;
     }
@@ -515,7 +513,8 @@ void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdA
   EnableShard(sid);
   OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
   CHECK(key_index);
-  StoreKeysInArgs(*key_index, false);
+  DCHECK(!key_index->has_reverse_mapping);
+  StoreKeysInArgs(*key_index);
 }
 
 // Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
@@ -1195,6 +1194,8 @@ ArgSlice Transaction::GetShardArgs(ShardId sid) const {
 // from local index back to original arg index skipping the command.
 // i.e. returns (first_key_pos -1) or bigger.
 size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
+  DCHECK_LT(arg_index, reverse_index_.size());
+
   if (unique_shard_cnt_ == 1)
     return reverse_index_[arg_index];
 
@@ -1495,12 +1496,16 @@ void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
-  if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
-    return KeyIndex::Empty();
-
   KeyIndex key_index;
 
+  if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
+    return key_index;
+
   int num_custom_keys = -1;
+
+  if (cid->opt_mask() & CO::REVERSE_MAPPING) {
+    key_index.has_reverse_mapping = true;
+  }
 
   if (cid->opt_mask() & CO::VARIADIC_KEYS) {
     // ZUNION/INTER <num_keys> <key1> [<key2> ...]
