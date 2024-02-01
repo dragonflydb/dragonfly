@@ -23,16 +23,15 @@ StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mo
     : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
   for (auto args : args) {
-    total_size += args.size() + 1;  // +1 for null terminator
+    total_size += args.size();
   }
+
   buffer_.resize(total_size);
   char* next = buffer_.data();
   for (unsigned i = 0; i < args.size(); i++) {
-    if (args[i].size() > 0) {
+    if (args[i].size() > 0)
       memcpy(next, args[i].data(), args[i].size());
-      next += args[i].size();
-    }
-    *(next++) = '\0';
+    next += args[i].size();
     sizes_[i] = args[i].size();
   }
 }
@@ -52,7 +51,7 @@ void StoredCmd::Fill(CmdArgList args) {
   unsigned offset = 0;
   for (unsigned i = 0; i < sizes_.size(); i++) {
     args[i] = MutableSlice{buffer_.data() + offset, sizes_[i]};
-    offset += sizes_[i] + 1;  // +1 for null terminator
+    offset += sizes_[i];
   }
 }
 
