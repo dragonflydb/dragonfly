@@ -71,13 +71,13 @@ struct KeyIndex {
   // if index is non-zero then adds another key index (usually 0).
   // relevant for for commands like ZUNIONSTORE/ZINTERSTORE for destination key.
   std::optional<uint16_t> bonus{};
+  bool has_reverse_mapping = false;
 
-  static KeyIndex Empty() {
-    return KeyIndex{0, 0, 0, std::nullopt};
+  KeyIndex(unsigned s = 0, unsigned e = 0, unsigned step = 0) : start(s), end(e), step(step) {
   }
 
   static KeyIndex Range(unsigned start, unsigned end, unsigned step = 1) {
-    return KeyIndex{start, end, step, std::nullopt};
+    return KeyIndex{start, end, step};
   }
 
   bool HasSingleKey() const {

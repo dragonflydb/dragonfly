@@ -457,14 +457,14 @@ class Transaction {
   void EnableAllShards();
 
   // Build shard index by distributing the arguments by shards based on the key index.
-  void BuildShardIndex(const KeyIndex& keys, bool rev_mapping, std::vector<PerShardCache>* out);
+  void BuildShardIndex(const KeyIndex& keys, std::vector<PerShardCache>* out);
 
   // Init shard data from shard index.
   void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
                      bool rev_mapping);
 
   // Store all key index keys in args_. Used only for single shard initialization.
-  void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
+  void StoreKeysInArgs(const KeyIndex& key_index);
 
   // Multi transactions unlock asynchronously, so they need to keep a copy of all they keys.
   // "Launder" keys by filtering uniques and replacing pointers with same lifetime as transaction.
