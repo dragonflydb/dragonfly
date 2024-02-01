@@ -49,13 +49,12 @@ void MultiShardExecution::CancelAllBlockingEntities() {
 
 bool TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
+  opcode = entry.opcode;
 
   switch (entry.opcode) {
     case journal::Op::PING:
-      is_ping = true;
       return true;
     case journal::Op::FIN:
-      is_finalize = true;
       return true;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:

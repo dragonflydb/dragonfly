@@ -137,7 +137,6 @@ void ClusterSlotMigration::MainMigrationFb() {
 
   if (IsFinalized()) {
     state_ = MigrationState::C_FINISHED;
-    Stop();
   }
 }
 

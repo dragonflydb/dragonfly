@@ -74,16 +74,14 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
 
     TouchIoTime();
 
-    if (!tx_data->is_ping) {
-      if (tx_data->is_finalize) {
-        VLOG(2) << "Flow " << source_shard_id_ << " is finalized";
-        is_finalized_ = true;
-        break;
-      } else {
-        ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
-      }
-    } else {
+    if (tx_data->opcode == journal::Op::FIN) {
+      VLOG(2) << "Flow " << source_shard_id_ << " is finalized";
+      is_finalized_ = true;
+      break;
+    } else if (tx_data->opcode == journal::Op::PING) {
       // TODO check about ping logic
+    } else {
+      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
     }
   }
 }
