@@ -1486,11 +1486,11 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
         "RESETSTAT",
         "    Reset statistics reported by the INFO command.",
         "HELP",
-        "    Prints this help."};
+        "    Prints this help.",
+    };
 
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendSimpleStrArr(help_arr);
-    return;
+    return rb->SendSimpleStrArr(help_arr);
   }
 
   if (sub_cmd == "SET") {
