@@ -178,7 +178,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},

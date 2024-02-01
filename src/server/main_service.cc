@@ -1847,9 +1847,9 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     sinfo->async_cmds_heap_limit = 0;  // disable async commands
 
     tx->MultiBecomeSquasher();
+    tx->ReportWritesSquashedMulti([tx](auto sid) { return sid == tx->GetUniqueShard(); });
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
-      boost::intrusive_ptr<Transaction> stub_tx =
-          new Transaction{tx, tx->GetUniqueShard(), tx->GetUniqueSlotId()};
+      boost::intrusive_ptr<Transaction> stub_tx = new Transaction{tx, tx->GetUniqueShard()};
 
       cntx->conn_state.squashing_info = {cntx, tx};
       cntx->transaction = stub_tx.get();

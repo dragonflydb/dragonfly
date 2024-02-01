@@ -546,11 +546,18 @@ TEST_F(MultiTest, MultiSingleHop) {
     for (unsigned i = 0; i < 100; i++) {
       Run({"multi"});
       Run({"rpush", "a", "bar"});
+      Run({"rpush", "a", "baz"});
       Run({"exec"});
     }
   });
-
   fb0.Join();
+
+  // Check list consistency
+  auto res = Run({"lrange", "a", "0", "-1"});
+  auto list = res.GetVec();
+  for (size_t i = 0; i < 200; i++)
+    EXPECT_EQ(list[i], i % 2 == 0 ? "bar" : "baz");
+
   auto metrics = GetMetrics();
 
   int mode = absl::GetFlag(FLAGS_multi_exec_mode);
