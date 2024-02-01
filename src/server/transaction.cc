@@ -124,21 +124,21 @@ uint32_t Transaction::PhasedBarrier::DEBUG_Count() const {
   return count_.load(memory_order_relaxed);
 }
 
-bool Transaction::SingleClaimBarrier::IsClaimed() const {
+bool Transaction::BatonBarrierrier::IsClaimed() const {
   return claimed_.load(memory_order_relaxed);
 }
 
-bool Transaction::SingleClaimBarrier::TryClaim() {
+bool Transaction::BatonBarrierrier::TryClaim() {
   return !claimed_.exchange(true, memory_order_relaxed);  // false means first means success
 }
 
-void Transaction::SingleClaimBarrier::Close() {
+void Transaction::BatonBarrierrier::Close() {
   DCHECK(claimed_.load(memory_order_relaxed));
   closed_.store(true, memory_order_relaxed);
   ec_.notify();  // release
 }
 
-cv_status Transaction::SingleClaimBarrier::Wait(time_point tp) {
+cv_status Transaction::BatonBarrierrier::Wait(time_point tp) {
   auto cb = [this] { return closed_.load(memory_order_acquire); };
 
   if (tp != time_point::max()) {
