@@ -1476,6 +1476,23 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
+  if (sub_cmd == "HELP") {
+    string_view help_arr[] = {
+        "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "GET <pattern>",
+        "    Return parameters matching the glob-like <pattern> and their values.",
+        "SET <directive> <value>",
+        "    Set the configuration <directive> to <value>.",
+        "RESETSTAT",
+        "    Reset statistics reported by the INFO command.",
+        "HELP",
+        "    Prints this help.",
+    };
+
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendSimpleStrArr(help_arr);
+  }
+
   if (sub_cmd == "SET") {
     if (args.size() != 3) {
       return cntx->SendError(WrongNumArgsError("config|set"));
