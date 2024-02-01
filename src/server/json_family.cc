@@ -7,6 +7,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
+#include <flatbuffers/flexbuffers.h>
+#include <flatbuffers/idl.h>
 
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
@@ -24,10 +26,12 @@
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
+#include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 
 ABSL_FLAG(bool, jsonpathv2, false, "If true uses Dragonfly jsonpath implementation.");
+ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 
 namespace dfly {
 
@@ -1125,10 +1129,23 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    if (SetJson(op_args, key, std::move(parsed_json.value())) == OpStatus::OUT_OF_MEMORY) {
-      return OpStatus::OUT_OF_MEMORY;
-    }
+    if (absl::GetFlag(FLAGS_experimental_flat_json)) {
+      flatbuffers::Parser parser;
+      flexbuffers::Builder fbb;
+      string tmp(json_str);
+      CHECK_EQ(json_str.size(), strlen(tmp.c_str()));
 
+      parser.ParseFlexBuffer(tmp.c_str(), nullptr, &fbb);
+      fbb.Finish();
+      const auto& buffer = fbb.GetBuffer();
+      string_view buf_view{reinterpret_cast<const char*>(buffer.data()), buffer.size()};
+      SetCmd scmd(op_args, false);
+      scmd.Set(SetCmd::SetParams{}, key, buf_view);
+    } else {
+      if (SetJson(op_args, key, std::move(parsed_json.value())) == OpStatus::OUT_OF_MEMORY) {
+        return OpStatus::OUT_OF_MEMORY;
+      }
+    }
     return true;
   }
 
