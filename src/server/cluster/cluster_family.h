@@ -75,7 +75,8 @@ class ClusterFamily {
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
 
-  void RemoveFinishedMigrations();
+  void RemoveFinishedIncomingMigrations();
+  void RemoveOutgoingMigration(uint32_t sync_id);
 
   // store info about migration and create unique session id
   uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
