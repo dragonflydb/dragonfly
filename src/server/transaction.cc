@@ -634,7 +634,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     //    of the queue and notify the next one.
     if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
-        bcontroller->FinalizeWatched(largs, this);
+        CHECK_EQ(largs.key_step, 1u);
+        bcontroller->FinalizeWatched(largs.args, this);
       }
 
       // Wake only if no tx queue head is currently running
