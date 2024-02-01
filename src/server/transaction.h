@@ -442,21 +442,21 @@ class Transaction {
   };
 
   // "Single claim - single modification" barrier. Multiple threads might try to claim it, only one
-  // will succeed and will be allowed to modify the barrier until it releases it.
+  // will succeed and will be allowed to modify the guarded object until it closes the barrier.
+  // A closed barrier can't be claimed again or re-used in any way.
   class SingleClaimBarrier {
    public:
-    bool IsClaimed() const;  // Return if barrier was claimed, only for peeking
+    bool IsClaimed() const;  // Return if barrier is claimed, only for peeking
     bool TryClaim();         // Return if the barrier was claimed successfully
-    void Release();          // Release barrier after it was claimed
+    void Close();            // Close barrier after it was claimed
 
-    // Wait for barrier until time_point, indefinitely if time_point::max() was passed.
-    // Expiration plays by the same rules as all other threads, it will try to claim the barrier or
-    // wait for an ongoing modification to release.
+    // Wait for barrier until time_point, or indefinitely if time_point::max() was passed.
+    // After Wait returns, the barrier is guaranteed to be closed, including expiration.
     std::cv_status Wait(time_point);
 
    private:
     std::atomic_bool claimed_{false};
-    std::atomic_bool released_{false};
+    std::atomic_bool closed_{false};
     EventCount ec_{};
   };
 
@@ -501,6 +501,7 @@ class Transaction {
   // Optimized version of RunInShard for single shard uncontended cases.
   RunnableResult RunQuickie(EngineShard* shard);
 
+  // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier
   void ExecuteAsync();
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
