@@ -99,11 +99,8 @@ bool BlockingController::DbWatchTable::UnwatchTx(string_view key, Transaction* t
   }
 
   if (wq->items.empty()) {
-    VLOG(1) << "queue_map.erase";
-    if (awakened_keys.erase(wq_it->first)) {
-      LOG(DFATAL) << "reproduced " << wq_it->first;
-    }
-
+    DVLOG(1) << "queue_map.erase";
+    awakened_keys.erase(wq_it->first);
     queue_map.erase(wq_it);
   }
   return res;
