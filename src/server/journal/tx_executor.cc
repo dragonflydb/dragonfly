@@ -49,10 +49,12 @@ void MultiShardExecution::CancelAllBlockingEntities() {
 
 bool TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
+  opcode = entry.opcode;
 
   switch (entry.opcode) {
     case journal::Op::PING:
-      is_ping = true;
+      return true;
+    case journal::Op::FIN:
       return true;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
@@ -112,7 +114,7 @@ std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* read
     // Check if journal command can be executed right away.
     // Expiration checks lock on master, so it never conflicts with running multi transactions.
     if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
-        res->opcode == journal::Op::PING)
+        res->opcode == journal::Op::PING || res->opcode == journal::Op::FIN)
       return TransactionData::FromSingle(std::move(res.value()));
 
     // Otherwise, continue building multi command.

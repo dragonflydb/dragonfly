@@ -113,6 +113,11 @@ void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
   }
 }
 
+bool ClusterSlotMigration::IsFinalized() const {
+  return std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                     [](const auto& el) { return el->IsFinalized(); });
+}
+
 void ClusterSlotMigration::Stop() {
   for (auto& flow : shard_flows_) {
     flow->Cancel();
@@ -129,6 +134,10 @@ void ClusterSlotMigration::MainMigrationFb() {
     LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
                  << ec.message();
   }
+
+  if (IsFinalized()) {
+    state_ = MigrationState::C_FINISHED;
+  }
 }
 
 std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
@@ -136,6 +145,13 @@ std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
   for (unsigned i = 0; i < source_shards_num_; ++i) {
     shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_, &service_));
   }
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    for (auto& flow : shard_flows_) {
+      flow->JoinFlow();
+    }
+  };
 
   // Switch to new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) mutable {

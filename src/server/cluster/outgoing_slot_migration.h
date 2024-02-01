@@ -15,7 +15,7 @@ class Journal;
 
 class DbSlice;
 
-// Whole slots migration process information
+// Whole outgoing slots migration manager
 class OutgoingMigration {
  public:
   OutgoingMigration() = default;
@@ -24,6 +24,9 @@ class OutgoingMigration {
                     std::vector<ClusterConfig::SlotRange> slots, Context::ErrHandler err_handler);
 
   void StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal, io::Sink* dest);
+
+  void Finalize(uint32_t shard_id);
+  void Cancel(uint32_t shard_id);
 
   MigrationState GetState() const;
 
@@ -35,6 +38,7 @@ class OutgoingMigration {
   };
 
  private:
+  MigrationState GetStateImpl() const;
   // SliceSlotMigration manages state and data transfering for the corresponding shard
   class SliceSlotMigration;
 

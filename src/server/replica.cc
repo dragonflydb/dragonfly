@@ -803,7 +803,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
 
-    if (!tx_data->is_ping) {
+    if (tx_data->opcode != journal::Op::PING) {
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));
       } else {

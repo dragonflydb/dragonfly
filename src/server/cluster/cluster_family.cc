@@ -403,7 +403,9 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "START-SLOT-MIGRATION") {
     return DflyClusterStartSlotMigration(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
-    return DflySlotMigrationStatus(args, cntx);
+    return DflyClusterSlotMigrationStatus(args, cntx);
+  } else if (sub_cmd == "SLOT-MIGRATION-FINALIZE") {
+    return DflyClusterMigrationFinalize(args, cntx);
   }
 
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -531,6 +533,9 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     tracker.TrackOnThread();
   };
 
+  // TODO think about another place for it
+  RemoveFinishedIncomingMigrations();
+
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
   DCHECK(tl_cluster_config != nullptr);
 
@@ -629,7 +634,7 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
   }
   node->Start(cntx);
 
-  return cntx->SendOk();
+  return cntx->SendLong(node->GetSyncId());
 }
 
 static std::string_view state_to_str(MigrationState state) {
@@ -642,12 +647,14 @@ static std::string_view state_to_str(MigrationState state) {
       return "FULL_SYNC"sv;
     case MigrationState::C_STABLE_SYNC:
       return "STABLE_SYNC"sv;
+    case MigrationState::C_FINISHED:
+      return "FINISHED"sv;
   }
   DCHECK(false) << "Unknown State value " << static_cast<underlying_type_t<MigrationState>>(state);
   return "UNDEFINED_STATE"sv;
 }
 
-void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
+void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
@@ -689,6 +696,40 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   return rb->SendSimpleString(state_to_str(MigrationState::C_NO_STATE));
 }
 
+void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  auto sync_id = parser.Next<uint32_t>();
+
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
+  }
+
+  auto migration = GetOutgoingMigration(sync_id);
+  if (!migration)
+    return cntx->SendError(kIdNotFound);
+
+  if (migration->GetState() != MigrationState::C_STABLE_SYNC) {
+    return cntx->SendError("Migration process is not in STABLE_SYNC state");
+  }
+
+  shard_set->pool()->AwaitFiberOnAll([migration](auto*) {
+    if (const auto* shard = EngineShard::tlocal(); shard)
+      migration->Finalize(shard->shard_id());
+  });
+
+  // TODO do next after ACK
+  util::ThisFiber::SleepFor(500ms);
+
+  shard_set->pool()->AwaitFiberOnAll([migration](auto*) {
+    if (const auto* shard = EngineShard::tlocal(); shard)
+      migration->Cancel(shard->shard_id());
+  });
+
+  RemoveOutgoingMigration(sync_id);
+
+  return cntx->SendOk();
+}
+
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -716,6 +757,19 @@ ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t 
       .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port,
                                                       &server_family_->service(), std::move(slots)))
       .get();
+}
+
+void ClusterFamily::RemoveFinishedIncomingMigrations() {
+  lock_guard lk(migration_mu_);
+  auto removed_items_it =
+      std::remove_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
+                     [](const auto& m) { return m->GetState() == MigrationState::C_FINISHED; });
+  incoming_migrations_jobs_.erase(removed_items_it, incoming_migrations_jobs_.end());
+}
+
+void ClusterFamily::RemoveOutgoingMigration(uint32_t sync_id) {
+  lock_guard lk(migration_mu_);
+  outgoing_migration_jobs_.erase(sync_id);
 }
 
 void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
@@ -793,6 +847,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kIdNotFound);
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
+  server_family_->journal()->StartInThread();
 
   cntx->SendOk();
 
@@ -825,7 +880,6 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
 
   (*migration_it)->SetStableSyncForFlow(shard_id);
   if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
-    (*migration_it)->Stop();
     LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
   }
 

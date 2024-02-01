@@ -787,7 +787,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     res = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "5200", "5259"
     )
-    assert "OK" == res
+    assert 1 == res
 
     while (
         await c_nodes_admin[1].execute_command(
@@ -862,12 +862,9 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    assert await c_nodes[0].set("KEY0", "value")
-    assert await c_nodes[0].set("KEY1", "value")
     assert await c_nodes[1].set("KEY2", "value")
     assert await c_nodes[1].set("KEY3", "value")
-    assert await c_nodes[0].set("KEY4", "value")
-    assert await c_nodes[0].set("KEY5", "value")
+
     assert await c_nodes[1].set("KEY6", "value")
     assert await c_nodes[1].set("KEY7", "value")
     assert await c_nodes[0].set("KEY8", "value")
@@ -882,18 +879,40 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[0].set("KEY17", "value")
     assert await c_nodes[1].set("KEY18", "value")
     assert await c_nodes[1].set("KEY19", "value")
-    assert await c_nodes[0].execute_command("DBSIZE") == 10
 
     res = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "3000", "9000"
     )
-    assert "OK" == res
+    assert 1 == res
+
+    assert await c_nodes[0].set("KEY0", "value")
+    assert await c_nodes[0].set("KEY1", "value")
 
     while (
         await c_nodes_admin[1].execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
         )
         != "STABLE_SYNC"
+    ):
+        await asyncio.sleep(0.05)
+
+    assert await c_nodes[0].set("KEY4", "value")
+    assert await c_nodes[0].set("KEY5", "value")
+    assert await c_nodes[0].execute_command("DBSIZE") == 10
+
+    # TODO remove when we add slot blocking
+    await asyncio.sleep(0.5)
+
+    res = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", "1")
+    assert "OK" == res
+
+    await asyncio.sleep(0.5)
+
+    while (
+        await c_nodes_admin[1].execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
+        )
+        != "FINISHED"
     ):
         await asyncio.sleep(0.05)
 
