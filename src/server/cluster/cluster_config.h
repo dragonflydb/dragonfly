@@ -23,7 +23,13 @@ using SlotId = uint16_t;
 using SlotSet = absl::flat_hash_set<SlotId>;
 
 // MigrationState constants are ordered in state changing order
-enum class MigrationState : uint8_t { C_NO_STATE, C_CONNECTING, C_FULL_SYNC, C_STABLE_SYNC };
+enum class MigrationState : uint8_t {
+  C_NO_STATE,
+  C_CONNECTING,
+  C_FULL_SYNC,
+  C_STABLE_SYNC,
+  C_FINISHED
+};
 
 class ClusterConfig {
  public:

@@ -52,6 +52,7 @@ struct TransactionData {
   absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
   uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
   bool is_ping = false;           // For Op::PING entries.
+  bool is_finalize = false;
 };
 
 // Utility for reading TransactionData from a journal reader.

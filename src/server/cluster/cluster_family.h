@@ -71,11 +71,11 @@ class ClusterFamily {
 
   void DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx);
 
-  void DflyMigrateFinalize(CmdArgList args, ConnectionContext* cntx);
-
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
+
+  void RemoveFinishedMigrations();
 
   // store info about migration and create unique session id
   uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,

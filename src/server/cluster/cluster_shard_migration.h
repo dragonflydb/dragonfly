@@ -31,17 +31,14 @@ class ClusterShardMigration : public ProtocolClient {
     return is_stable_sync_.load();
   }
 
-  void SetFinalized() {
-    is_finalized_.store(true);
+  bool IsFinalized() {
+    return is_finalized_;
   }
 
-  bool IsFinalized() {
-    return is_stable_sync_.load();
-  }
+  void JoinFlow();
 
  private:
   void FullSyncShardFb(Context* cntx);
-  void JoinFlow();
 
   void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
   void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx);
@@ -53,7 +50,7 @@ class ClusterShardMigration : public ProtocolClient {
   std::unique_ptr<JournalExecutor> executor_;
   Fiber sync_fb_;
   std::atomic_bool is_stable_sync_ = false;
-  std::atomic_bool is_finalized_ = false;
+  bool is_finalized_ = false;
 };
 
 }  // namespace dfly

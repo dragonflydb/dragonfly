@@ -35,10 +35,7 @@ class ClusterSlotMigration : ProtocolClient {
     return state_;
   }
 
-  bool IsFinalized() const;
-
   void SetStableSyncForFlow(uint32_t flow);
-  void SetFinalizedForFlow(uint32_t flow);
 
   void Stop();
 
@@ -48,6 +45,9 @@ class ClusterSlotMigration : ProtocolClient {
   void MainMigrationFb();
   // Creates flows, one per shard on the source node and manage migration process
   std::error_code InitiateSlotsMigration();
+
+  // should be called after we finish all flows
+  bool IsFinalized() const;
 
  private:
   Service& service_;

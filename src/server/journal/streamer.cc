@@ -94,8 +94,10 @@ void RestoreStreamer::Start(io::Sink* dest) {
 
 void RestoreStreamer::SendFinalize() {
   VLOG(2) << "DFLYMIGRATE FINALIZE for " << sync_id_ << " : " << db_slice_->shard_id();
-  WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FINALIZE", absl::StrCat(sync_id_),
-                                                 absl::StrCat(db_slice_->shard_id())}));
+  journal::Entry entry(journal::Op::FIN, 0 /*db_id*/, 0 /*slot_id*/);
+
+  JournalWriter writer{this};
+  writer.Write(entry);
   NotifyWritten(true);
 }
 
