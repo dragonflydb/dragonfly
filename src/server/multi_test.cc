@@ -151,15 +151,21 @@ TEST_F(MultiTest, MultiEmpty) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
   resp = Run({"exec"});
-
-  ASSERT_THAT(resp, ArrLen(0));
-  ASSERT_FALSE(service_->IsShardSetLocked());
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_FALSE(service_->IsShardSetLocked());
 
   Run({"multi"});
   ASSERT_EQ(Run({"ping", "foo"}), "QUEUED");
   resp = Run({"exec"});
-  // one cell arrays are promoted to respexpr.
   EXPECT_EQ(resp, "foo");
+
+  Run({"multi"});
+  Run({"set", "a", ""});
+  resp = Run({"exec"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"get", "a"});
+  EXPECT_EQ(resp, "");
 }
 
 TEST_F(MultiTest, MultiSeq) {
