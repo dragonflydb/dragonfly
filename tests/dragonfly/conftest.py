@@ -19,9 +19,10 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from .instance import DflyInstance, DflyParams, DflyInstanceFactory
 from . import PortPicker, dfly_args
-from .utility import DflySeederFactory, gen_ca_cert, gen_certificate
+from .utility.instance import DflyInstance, DflyParams, DflyInstanceFactory
+from .utility.seeder import DflySeederFactory
+from .utility.utility import gen_ca_cert, gen_certificate
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 

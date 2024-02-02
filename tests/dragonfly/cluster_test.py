@@ -1,12 +1,13 @@
 import pytest
+import asyncio
+import logging
 import re
 import json
 import redis
 from redis import asyncio as aioredis
-import asyncio
 
-from .instance import DflyInstanceFactory
-from .utility import *
+from .utility.instance import DflyInstanceFactory
+from .utility.seeder import DflySeeder, DflySeederFactory
 from .replication_test import check_all_replicas_finished
 
 from . import dfly_args

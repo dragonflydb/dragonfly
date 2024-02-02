@@ -2,7 +2,6 @@ import pytest
 import asyncio
 import redis
 from redis import asyncio as aioredis
-from pathlib import Path
 
 from . import dfly_args
 

@@ -2,7 +2,7 @@ import pytest
 import redis
 
 from . import dfly_args
-from .utility import *
+from .utility.utility import *
 
 
 def test_quit(connection):

@@ -1,4 +1,3 @@
-import time
 import pytest
 import os
 import glob
@@ -9,7 +8,8 @@ import boto3
 import logging
 
 from . import dfly_args
-from .utility import DflySeeder, wait_available_async
+from .utility.seeder import DflySeederFactory
+from .utility.utility import wait_available_async
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 

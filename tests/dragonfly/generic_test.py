@@ -5,8 +5,8 @@ import asyncio
 from redis import asyncio as aioredis
 
 from . import dfly_multi_test_args, dfly_args
-from .instance import DflyStartException
-from .utility import batch_fill_data, gen_test_data, EnvironCntx
+from .utility.instance import DflyStartException
+from .utility.utility import batch_fill_data, gen_test_data, EnvironCntx
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})

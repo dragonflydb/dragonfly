@@ -3,8 +3,8 @@ import pytest
 import asyncio
 from redis import asyncio as aioredis
 import subprocess
-from .utility import *
-from .instance import DflyInstanceFactory
+from .utility.utility import *
+from .utility.instance import DflyInstanceFactory
 
 
 class RedisServer:

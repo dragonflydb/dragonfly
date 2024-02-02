@@ -3,8 +3,8 @@ Test compatibility with the redis-py client search module.
 Search correctness should be ensured with unit tests.
 """
 import pytest
+import redis
 from redis import asyncio as aioredis
-from .utility import *
 from . import dfly_args
 import copy
 

@@ -4,12 +4,14 @@ import re
 import pytest
 import asyncio
 from redis import asyncio as aioredis
-from .utility import *
-from .instance import DflyInstanceFactory, DflyInstance
-from . import dfly_args
 import pymemcache
 import logging
+from .utility.utility import *
 from .utility.proxy import Proxy
+from .utility.seeder import DflySeederFactory
+from .utility.instance import DflyInstanceFactory, DflyInstance
+from . import dfly_args
+
 
 ADMIN_PORT = 1211
 

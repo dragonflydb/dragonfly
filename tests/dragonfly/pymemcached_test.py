@@ -1,8 +1,7 @@
-import pytest
+import socket
 import pymemcache
 from . import dfly_args
-from .instance import DflyInstance
-import socket
+from .utility.instance import DflyInstance
 
 
 @dfly_args({"memcached_port": 11211})
