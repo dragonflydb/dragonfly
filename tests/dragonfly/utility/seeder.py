@@ -9,8 +9,9 @@ import itertools
 import time
 import difflib
 import json
+import importlib.resources
 from enum import Enum
-from .utility import eprint
+from .utility import eprint, chunked
 
 
 class SizeChange(Enum):
@@ -251,14 +252,39 @@ class CommandGenerator:
 
 
 class DataCapture:
+    def compare(self, other):
+        pass
+
+
+class HashDataCapture(DataCapture):
     """
-    Captured state of single database.
+    Simplified data capture that computes only hashes with lua scripts
+    """
+
+    def __init__(self, hashes):
+        self.hashes = hashes
+
+    def compare(self, other):
+        if self.hashes == other.hashes:
+            return True
+
+        eprint("=== DIFF ===")
+        eprint(self.hashes)
+        eprint(other.hashes)
+        eprint("=== END DIFF ===")
+        return False
+
+
+class FullDataCapture(DataCapture):
+    """
+    Captured state of single database, stores all values as a list of strings, directly comparable.
     """
 
     def __init__(self, entries):
         self.entries = entries
 
     def compare(self, other):
+        assert isinstance(other, FullDataCapture)
         if self.entries == other.entries:
             return True
 
@@ -372,13 +398,36 @@ class DflySeeder:
 
         if port is None:
             port = self.port
-        logging.debug(f"Starting capture from {port=}")
-        keys = sorted(list(self.gen.keys_and_types()))
 
-        captures = await asyncio.gather(
-            *(self._capture_db(port=port, target_db=db, keys=keys) for db in range(self.dbcount))
-        )
-        return captures
+        can_use_hasher = False
+
+        time_start = time.time()
+        logging.debug(f"Starting capture from {port=}")
+
+        if can_use_hasher:
+            script_file = (
+                importlib.resources.files(__package__) / "scripts" / "capture-hash-compute.lua"
+            )
+            with script_file.open("rt") as f:
+                script = f.read()
+
+            capture = await asyncio.gather(
+                *(
+                    self._capture_db_hash(port=port, target_db=db, script=script)
+                    for db in range(self.dbcount)
+                )
+            )
+        else:
+            keys = sorted(list(self.gen.keys_and_types()))
+            capture = await asyncio.gather(
+                *(
+                    self._capture_db(port=port, target_db=db, keys=keys)
+                    for db in range(self.dbcount)
+                )
+            )
+
+        logging.debug(f"Capture took: {time.time() - time_start}")
+        return capture
 
     async def compare(self, initial_captures, port=6379):
         """Compare data capture with all dbs of instance and return True if all dbs are correct"""
@@ -388,7 +437,6 @@ class DflySeeder:
         for db, target_capture, initial_capture in zip(
             range(self.dbcount), target_captures, initial_captures
         ):
-            print(f"comparing capture to {port}, db: {db}")
             if not initial_capture.compare(target_capture):
                 eprint(f">>> Inconsistent data on port {port}, db {db}")
                 return False
@@ -399,9 +447,14 @@ class DflySeeder:
 
     async def _capture_db(self, port, target_db, keys):
         client = aioredis.Redis(port=port, db=target_db)
-        capture = DataCapture(await self._capture_entries(client, keys))
+        capture = FullDataCapture(await self._capture_entries(client, keys))
         await client.connection_pool.disconnect()
         return capture
+
+    async def _capture_db_hash(self, port, target_db, script):
+        types = ["string", "list", "hash", "set", "zset", "json"]
+        client = aioredis.Redis(port=port, db=target_db)
+        return HashDataCapture(await asyncio.gather(*(client.eval(script, 0, t) for t in types)))
 
     async def _generator_task(self, queues, target_ops=None, target_deviation=None):
         cpu_time = 0

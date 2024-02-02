@@ -4,11 +4,13 @@
 
 #include "core/interpreter.h"
 
+#include <absl/base/casts.h>
 #include <absl/container/fixed_array.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/clock.h>
 #include <mimalloc.h>
 #include <openssl/evp.h>
+#include <xxhash.h>
 
 #include <cstring>
 #include <optional>
@@ -16,6 +18,7 @@
 #include <set>
 
 #include "core/interpreter_polyfill.h"
+#include "core/overloaded.h"
 
 extern "C" {
 #include <lauxlib.h>
@@ -323,6 +326,41 @@ int RedisSha1Command(lua_State* lua) {
   return 1;
 }
 
+int DragonflyHashCommand(lua_State* lua) {
+  int argc = lua_gettop(lua);
+  if (argc != 2) {
+    lua_pushstring(lua, "wrong number of arguments");
+    return lua_error(lua);
+  }
+
+  XXH64_hash_t hash = absl::bit_cast<XXH64_hash_t>(lua_tointeger(lua, 1));
+  auto update_hash = [&hash](string_view sv) { hash = XXH64(sv.data(), sv.length(), hash); };
+
+  auto digest_value = [&hash, &update_hash, lua](int pos) {
+    if (int type = lua_type(lua, pos); type == LUA_TSTRING) {
+      const char* str = lua_tostring(lua, pos);
+      update_hash(string_view{str, strlen(str)});
+    } else {
+      CHECK_EQ(type, LUA_TNUMBER) << "Only strings and integers can be hashed";
+      update_hash(to_string(lua_tointeger(lua, pos)));
+    }
+  };
+
+  if (lua_type(lua, 2) == LUA_TTABLE) {
+    lua_pushnil(lua);
+    while (lua_next(lua, 2) != 0) {
+      digest_value(-2);  // key, included for correct hashing
+      digest_value(-1);  // value
+      lua_pop(lua, 1);
+    }
+  } else {
+    digest_value(2);
+  }
+
+  lua_pushinteger(lua, absl::bit_cast<lua_Integer>(hash));
+  return 1;
+}
+
 /* Returns a table with a single field 'field' set to the string value
  * passed as argument. This helper function is handy when returning
  * a Redis Protocol error or status reply from Lua:
@@ -386,6 +424,17 @@ Interpreter::Interpreter() {
   void** ptr = static_cast<void**>(lua_getextraspace(lua_));
   *ptr = this;
   // SaveOnRegistry(lua_, kInstanceKey, this);
+
+  /* Register the dragonfly commands table and fields */
+  lua_newtable(lua_);
+
+  lua_pushstring(lua_, "ihash");
+  lua_pushcfunction(lua_, DragonflyHashCommand);
+  lua_settable(lua_, -3);
+
+  /* Finally set the table as 'dragonfly' global var. */
+  lua_setglobal(lua_, "dragonfly");
+  CHECK(lua_checkstack(lua_, 64));
 
   /* Register the redis commands table and fields */
   lua_newtable(lua_);
