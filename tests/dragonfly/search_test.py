@@ -4,11 +4,13 @@ Search correctness should be ensured with unit tests.
 """
 import pytest
 import redis
+import json
 from redis import asyncio as aioredis
-from . import dfly_args
 import copy
-
 import numpy as np
+
+from . import dfly_args
+from .utility.utility import wait_available_async
 
 from redis.commands.search.query import Query
 from redis.commands.search.field import TextField, NumericField, TagField, VectorField

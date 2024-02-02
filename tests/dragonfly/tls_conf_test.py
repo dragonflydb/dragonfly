@@ -1,7 +1,8 @@
 import pytest
 import redis
-from .utility import *
-from .instance import DflyStartException
+import os
+from .utility.utility import gen_ca_cert, gen_certificate
+from .utility.instance import DflyStartException
 
 
 async def test_tls_no_auth(df_factory, with_tls_server_args):

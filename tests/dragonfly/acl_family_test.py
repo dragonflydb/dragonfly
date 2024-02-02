@@ -1,8 +1,8 @@
 import pytest
 import redis
 from redis import asyncio as aioredis
-from .instance import DflyInstanceFactory
-from .utility import disconnect_clients
+from .utility.instance import DflyInstanceFactory
+from .utility.utility import disconnect_clients
 import tempfile
 import asyncio
 import os

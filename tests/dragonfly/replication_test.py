@@ -3,6 +3,8 @@ from itertools import chain, repeat
 import re
 import pytest
 import asyncio
+import redis
+import string
 from redis import asyncio as aioredis
 import pymemcache
 import logging

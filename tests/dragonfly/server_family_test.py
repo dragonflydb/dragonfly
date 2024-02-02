@@ -1,6 +1,6 @@
 import pytest
 import redis
-
+import logging
 from . import dfly_args
 from .utility.utility import *
 

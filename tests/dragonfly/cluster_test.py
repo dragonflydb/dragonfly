@@ -4,8 +4,10 @@ import logging
 import re
 import json
 import redis
+import random
 from redis import asyncio as aioredis
 
+from .utility.utility import wait_available_async
 from .utility.instance import DflyInstanceFactory
 from .utility.seeder import DflySeeder, DflySeederFactory
 from .replication_test import check_all_replicas_finished

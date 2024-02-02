@@ -2,7 +2,7 @@ import pytest
 import redis
 from redis.asyncio import Redis as RedisClient
 from .utility import *
-from .instance import DflyStartException
+from .utility.instance import DflyStartException
 
 
 async def test_maxclients(df_factory):

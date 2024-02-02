@@ -1,6 +1,5 @@
 #!lua flags=disable-atomicity
 --[[
-
 Script for quickly computing single 64bit hash for keys of types specified in ARGV[].
 Keys of every type are sorted lexicographically to ensure consistent order.
 ]]--

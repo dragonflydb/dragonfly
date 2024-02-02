@@ -9,7 +9,7 @@ import pymemcache
 from dataclasses import dataclass
 
 from . import dfly_args
-from .instance import DflyInstance
+from .utility.instance import DflyInstance
 
 BASE_PORT = 1111
 
