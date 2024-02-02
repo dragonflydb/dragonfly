@@ -9,7 +9,7 @@ from .instance import DflyInstanceFactory, DflyInstance
 from . import dfly_args
 import pymemcache
 import logging
-from .proxy import Proxy
+from .utility.proxy import Proxy
 
 ADMIN_PORT = 1211
 
