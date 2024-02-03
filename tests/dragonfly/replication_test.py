@@ -769,6 +769,39 @@ async def test_expiry(df_local_factory: DflyInstanceFactory, n_keys=1000):
     assert all(v is None for v in res)
 
 
+@dfly_args({"proactor_threads": 4})
+async def test_simple_scripts(df_local_factory: DflyInstanceFactory):
+    master = df_local_factory.create()
+    replicas = [df_local_factory.create() for _ in range(2)]
+    df_local_factory.start_all([master] + replicas)
+
+    c_replicas = [replica.client() for replica in replicas]
+    c_master = master.client()
+
+    # Connect replicas and wait for sync to finish
+    for c_replica in c_replicas:
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Generate some scripts and run them
+    keys = ["a", "b", "c"]
+    for i in range(len(keys) + 1):
+        script = ""
+        subkeys = keys[:i]
+        for key in subkeys:
+            script += f"redis.call('INCR', '{key}')"
+            script += f"redis.call('INCR', '{key}')"
+
+        print("sb", subkeys)
+        await c_master.eval(script, len(subkeys), *subkeys)
+
+    # Wait for replicas
+    await check_all_replicas_finished([c_replica], c_master)
+
+    for c_replica in c_replicas:
+        assert (await c_replica.mget(keys)) == ["6", "4", "2"]
+
+
 """
 Test script replication.
 

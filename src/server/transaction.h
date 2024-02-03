@@ -343,6 +343,8 @@ class Transaction {
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::string_view>& GetMultiKeys() const;
 
+  void FIX_ConcludeJournalExec();
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
