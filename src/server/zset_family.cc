@@ -1338,6 +1338,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return rb->SendError(kWrongTypeErr);
+    case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     default:
