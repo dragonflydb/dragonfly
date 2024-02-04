@@ -784,7 +784,7 @@ async def test_simple_scripts(df_local_factory: DflyInstanceFactory):
     await check_all_replicas_finished([c_replica], c_master)
 
     # Generate some scripts and run them
-    keys = ["a", "b", "c"]
+    keys = ["a", "b", "c", "d", "e"]
     for i in range(len(keys) + 1):
         script = ""
         subkeys = keys[:i]
@@ -792,14 +792,13 @@ async def test_simple_scripts(df_local_factory: DflyInstanceFactory):
             script += f"redis.call('INCR', '{key}')"
             script += f"redis.call('INCR', '{key}')"
 
-        print("sb", subkeys)
         await c_master.eval(script, len(subkeys), *subkeys)
 
     # Wait for replicas
     await check_all_replicas_finished([c_replica], c_master)
 
     for c_replica in c_replicas:
-        assert (await c_replica.mget(keys)) == ["6", "4", "2"]
+        assert (await c_replica.mget(keys)) == ["10", "8", "6", "4", "2"]
 
 
 """
