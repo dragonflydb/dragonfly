@@ -53,4 +53,5 @@ jobs:
         if: success()
 
   lint-test-chart:
-    uses: ./.github/actions/lint-test-chart
+    - name: lint test chart
+      uses: ./.github/actions/lint-test-chart
