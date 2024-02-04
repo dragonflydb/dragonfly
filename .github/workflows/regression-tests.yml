@@ -53,6 +53,6 @@ jobs:
         if: success()
 
   lint-test-chart:
-    - name: lint test chart
-      runs-on: ubuntu-latest
-      uses: ./.github/actions/lint-test-chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/lint-test-chart
