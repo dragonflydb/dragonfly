@@ -974,7 +974,7 @@ void Transaction::FIX_ConcludeJournalExec() {
 
   if (auto journal = EngineShard::tlocal()->journal(); journal != nullptr) {
     journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, 1,
-                         unique_slot_checker_.GetUniqueSlotId(), {}, true);
+                         unique_slot_checker_.GetUniqueSlotId(), {}, false);
   }
 }
 
