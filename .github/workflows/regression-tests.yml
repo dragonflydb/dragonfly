@@ -49,10 +49,8 @@ jobs:
           name: logs
           path: /tmp/dragonfly.*
 
-      - name: Lint test chart
-        if: success()
-
   lint-test-chart:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v3
       - uses: ./.github/actions/lint-test-chart
