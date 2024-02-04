@@ -353,6 +353,9 @@ class Transaction {
 
   void IterateMultiLocks(ShardId sid, std::function<void(const std::string&)> cb) const;
 
+  // Send journal EXEC opcode after a series of MULTI commands on the currently active shard
+  void FIX_ConcludeJournalExec();
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {

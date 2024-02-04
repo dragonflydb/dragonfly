@@ -1203,7 +1203,7 @@ auto DflyShardReplica::TransactionReader::NextTxData(JournalReader* reader, Cont
 
     // Otherwise, continue building multi command.
     DCHECK(res->opcode == journal::Op::MULTI_COMMAND || res->opcode == journal::Op::EXEC);
-    DCHECK(res->txid > 0);
+    DCHECK(res->txid > 0 || res->shard_cnt == 1);
 
     auto txid = res->txid;
     auto& txdata = current_[txid];
