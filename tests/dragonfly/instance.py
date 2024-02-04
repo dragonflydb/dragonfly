@@ -318,7 +318,6 @@ class DflyInstanceFactory:
     def create(self, existing_port=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
-        args.setdefault("use_zset_tree", None)
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1"
         args.setdefault("vmodule", vmod)
 

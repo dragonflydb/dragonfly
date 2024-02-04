@@ -30,41 +30,9 @@ void InitRedisTables() {
 }
 
 // These functions are moved here from server.c
-int htNeedsResize(dict* dict) {
-  long long size, used;
-
-  size = dictSlots(dict);
-  used = dictSize(dict);
-  return (size > DICT_HT_INITIAL_SIZE && (used * 100 / size < HASHTABLE_MIN_FILL));
-}
 
 uint64_t dictSdsHash(const void* key) {
   return dictGenHashFunction((unsigned char*)key, sdslen((char*)key));
-}
-
-// MurmurHash64A for 8 bytes blob.
-uint64_t dictPtrHash(const void* key) {
-  const uint64_t m = 0xc6a4a7935bd1e995ULL;
-  const int r = 47;
-  uint64_t h = 120577 ^ (8 * m);
-  uint64_t data;
-  memcpy(&data, key, 8);
-  uint64_t k = data;
-  k *= m;
-  k ^= k >> r;
-  k *= m;
-  h ^= k;
-  h *= m;
-
-  h ^= h >> r;
-  h *= m;
-  h ^= h >> r;
-
-  return h;
-}
-
-int dictPtrKeyCompare(dict* privdata, const void* key1, const void* key2) {
-  return key1 == key2;
 }
 
 int dictSdsKeyCompare(dict* d, const void* key1, const void* key2) {
@@ -123,17 +91,6 @@ dictType setDictType = {
     NULL,              /* val dup */
     dictSdsKeyCompare, /* key compare */
     dictSdsDestructor, /* key destructor */
-    NULL,              /* val destructor */
-    NULL               /* allow to expand */
-};
-
-/* Sorted sets hash (note: a skiplist is used in addition to the hash table) */
-dictType zsetDictType = {
-    dictSdsHash,       /* hash function */
-    NULL,              /* key dup */
-    NULL,              /* val dup */
-    dictSdsKeyCompare, /* key compare */
-    NULL,              /* Note: SDS string shared & freed by skiplist */
     NULL,              /* val destructor */
     NULL               /* allow to expand */
 };
