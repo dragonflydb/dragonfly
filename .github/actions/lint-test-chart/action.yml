@@ -18,6 +18,7 @@ runs:
           check-latest: true
 
       - name: Chart Rendering Tests
+        shell: bash
         run: |
           go test -v ./contrib/charts/dragonfly/...
 
@@ -26,6 +27,7 @@ runs:
 
       - name: Run chart-testing (list-changed)
         id: list-changed
+        shell: bash
         run: |
           changed=$(ct list-changed --config .ct.yaml)
           if [[ -n "$changed" ]]; then
@@ -33,6 +35,7 @@ runs:
           fi
 
       - name: Run chart-testing (lint)
+        shell: bash
         run: |
           ct \
             lint \
@@ -45,10 +48,12 @@ runs:
 
       - if: steps.list-changed.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         name: Getting cluster ready
+        shell: bash
         run: |
           kubectl label nodes chart-testing-control-plane key/node-kind=high-memory
 
       - name: Run chart-testing (install)
+        shell: bash
         run: |
           ct \
             install \
