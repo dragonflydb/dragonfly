@@ -343,6 +343,9 @@ class Transaction {
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::string_view>& GetMultiKeys() const;
 
+  // Send journal EXEC opcode after a series of MULTI commands on the currently active shard
+  void FIX_ConcludeJournalExec();
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {

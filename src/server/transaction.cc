@@ -188,7 +188,9 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optio
     // Use squashing mechanism for inline execution of single-shard EVAL
     multi_->mode = LOCK_AHEAD;
   }
+
   multi_->role = SQUASHED_STUB;
+  multi_->shard_journal_write.resize(1);
 
   time_now_ms_ = parent->time_now_ms_;
 
@@ -966,6 +968,16 @@ const absl::flat_hash_set<std::string_view>& Transaction::GetMultiKeys() const {
   return multi_->frozen_keys_set;
 }
 
+void Transaction::FIX_ConcludeJournalExec() {
+  if (!multi_->shard_journal_write.front())
+    return;
+
+  if (auto journal = EngineShard::tlocal()->journal(); journal != nullptr) {
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, 1,
+                         unique_slot_checker_.GetUniqueSlotId(), {}, false);
+  }
+}
+
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
@@ -1464,8 +1476,13 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
                                     bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
-  if (multi_ && multi_->role != SQUASHED_STUB)
-    multi_->shard_journal_write[shard->shard_id()] = true;
+
+  if (multi_) {
+    if (multi_->role != SQUASHED_STUB)
+      multi_->shard_journal_write[shard->shard_id()] = true;
+    else
+      multi_->shard_journal_write[0] = true;
+  }
 
   bool is_multi = multi_commands || IsAtomicMulti();
 
@@ -1486,9 +1503,8 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
 
 void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
   // We're on the owning thread of this transaction, so we can safely access it's data below.
-  // We still need to claim the blocking barrier, but as this function is often called blindly, we
-  // want to check first if it makes sense to even proceed.
-  if (blocking_barrier_.IsClaimed())
+  // First, check if it makes sense to proceed.
+  if (blocking_barrier_.IsClaimed() || cid_ == nullptr || (cid_->opt_mask() & CO::BLOCKING) == 0)
     return;
 
   OpStatus status = OpStatus::CANCELLED;
