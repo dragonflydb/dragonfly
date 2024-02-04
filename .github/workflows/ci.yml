@@ -150,4 +150,5 @@ jobs:
 
   lint-test-chart:
     - name: lint test chart
+      runs-on: ubuntu-latest
       uses: ./.github/actions/lint-test-chart
