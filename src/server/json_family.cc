@@ -1155,6 +1155,50 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     std::move(*expr_result);                                                   \
   })
 
+void JsonFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
+  vector<string_view> keys;
+  vector<string_view> paths;
+  vector<string_view> json_strs;
+  if (args.size() % 3 != 0) {
+    cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), facade::kSyntaxErrType);
+    return;
+  }
+
+  for (size_t i = 0; i < args.size(); i += 3) {
+    keys.emplace_back(ArgS(args, i));
+    paths.emplace_back(ArgS(args, i + 1));
+    json_strs.emplace_back(ArgS(args, i + 2));
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpResult<bool> res;
+    for (size_t i = 0; i < keys.size(); i += 3) {
+      string_view key = keys[i];
+      string_view path = paths[i + 1];
+      string_view json_str = paths[i + 2];
+      res = OpSet(t->GetOpArgs(shard), key, path, json_str, false, false);
+      if (!res) {
+        return res;
+      }
+    }
+    return res;
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<bool> result = trans->ScheduleSingleHopT(std::move(cb));
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (result) {
+    if (*result) {
+      rb->SendSimpleString("OK");
+    } else {
+      rb->SendNull();
+    }
+  } else {
+    rb->SendError(result.status());
+  }
+}
+
 void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
@@ -1839,6 +1883,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -3, 2, 2, acl::JSON}.HFUNC(Debug);
   *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp);
   *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set);
+  *registry << CI{"JSON.MSET", CO::WRITE | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::JSON}.HFUNC(MSet);
 }
 
 }  // namespace dfly

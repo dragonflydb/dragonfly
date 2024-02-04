@@ -1050,4 +1050,30 @@ TEST_F(JsonFamilyTest, Set) {
   EXPECT_EQ(resp, R"([{"a":2,"b":8,"c":[1,2,3]}])");
 }
 
+TEST_F(JsonFamilyTest, MSet) {
+  string json1 = R"(
+    {"abc":1}
+  )";
+
+  string json2 = R"(
+    {"def":{"num1":16,"num2":32}}
+  )";
+
+  string json3 = R"(
+    {"def":{"num3":64},"ghi":{"num3":128}}}
+  )";
+
+  auto resp = Run({"JSON.MSET", "json1", "$", json1, "json2", "$", json2, "json3", "$", json3});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json1", "$"});
+  EXPECT_EQ(resp, R"({"abc":1})");
+
+  resp = Run({"JSON.GET", "json2", "$"});
+  EXPECT_EQ(resp, R"({"def":{"num1":16,"num2":32}})");
+
+  resp = Run({"JSON.GET", "json3", "$"});
+  EXPECT_EQ(resp, R"({"def":{"num3":64},"ghi":{"num3":128}}})");
+}
+
 }  // namespace dfly
