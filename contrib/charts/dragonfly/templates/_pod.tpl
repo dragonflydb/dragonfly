@@ -91,7 +91,13 @@ containers:
     {{- include "dragonfly.volumemounts" . | trim | nindent 4 }}
     {{- if .Values.passwordFromSecret.enable }}
     env:
+    {{- $appVersion := .Chart.AppVersion }}
+    {{- $imageTag := .Values.image.tag | default $appVersion }}
+    {{- if semverCompare ">=14.0.0" $imageTag }}
       - name: DFLY_PASSWORD
+    {{- else }}
+      - name: DFLY_requirepass
+    {{- end }}
         valueFrom:
           secretKeyRef:
             name: {{ .Values.passwordFromSecret.existingSecret.name }}
