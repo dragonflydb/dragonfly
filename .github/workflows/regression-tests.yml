@@ -48,3 +48,9 @@ jobs:
         with:
           name: logs
           path: /tmp/dragonfly.*
+
+      - name: Lint test chart
+        if: success()
+
+  lint-test-chart:
+    uses: ./.github/actions/lint-test-chart
