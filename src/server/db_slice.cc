@@ -329,6 +329,7 @@ void DbSlice::AutoUpdater::Run() {
   }
   // TBD add logic to update iterator if needed as we can now preempt in cb
 
+  fields_.it = fields_.db_slice->db_arr_[fields_.db_ind]->Launder(fields_.it, fields_.key);
   // Check that AutoUpdater does not run after a key was removed.
   // If this CHECK() failed for you, it probably means that you deleted a key while having an auto
   // updater in scope. You'll probably want to call Run() (or Cancel() - but be careful).
@@ -337,10 +338,10 @@ void DbSlice::AutoUpdater::Run() {
 
   // Make sure that the DB has not changed in size since this object was created.
   // Adding or removing elements from the DB may invalidate iterators.
-  CHECK_EQ(fields_.db_size, fields_.db_slice->DbSize(fields_.db_ind))
+  DCHECK_EQ(fields_.db_size, fields_.db_slice->DbSize(fields_.db_ind))
       << "Attempting to run post-update after DB was modified";
 
-  CHECK_EQ(fields_.deletion_count, fields_.db_slice->deletion_count_)
+  DCHECK_EQ(fields_.deletion_count, fields_.db_slice->deletion_count_)
       << "Attempting to run post-update after a deletion was issued";
 
   DCHECK(fields_.action == DestructorAction::kRun);
