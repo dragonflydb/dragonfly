@@ -1503,9 +1503,8 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
 
 void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
   // We're on the owning thread of this transaction, so we can safely access it's data below.
-  // We still need to claim the blocking barrier, but as this function is often called blindly, we
-  // want to check first if it makes sense to even proceed.
-  if (blocking_barrier_.IsClaimed())
+  // First, check if it makes sense to proceed.
+  if (blocking_barrier_.IsClaimed() || (cid_->opt_mask() & CO::BLOCKING) == 0)
     return;
 
   OpStatus status = OpStatus::CANCELLED;
