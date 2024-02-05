@@ -47,4 +47,4 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: logs
-          path: /tmp/dragonfly.*
+          path: /tmp/failed/dragonfly.*

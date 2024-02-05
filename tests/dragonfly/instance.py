@@ -145,9 +145,11 @@ class DflyInstance:
         self.log_files = self.get_logs_from_psutil()
         id = next(uid_iterator)
         logging.info(f"Starting instance with id {id} and port {self._port}")
-        logging.info(f"Log files are: ")
+
+        last_log_file = open("/tmp/last_test_log_files.txt", "w")
+
         for log in self.log_files:
-            logging.info(f"🪵🪵🪵🪵🪵🪵 {log} 🪵🪵🪵🪵🪵🪵")
+            last_log_file.write(log + "\n")
 
         # Remove first 6 lines - our default header with log locations (as it carries no useful information)
         # Next, replace log-level + date with port and colored arrow
