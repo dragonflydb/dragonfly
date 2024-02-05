@@ -123,6 +123,9 @@ async def test_cluster_slots_in_replicas(df_local_factory):
         ip="127.0.0.1", port=master.port, answer=res[0], rep_ip="127.0.0.1", rep_port=replica.port
     )
 
+    await c_master.close()
+    await c_replica.close()
+
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 async def test_cluster_info(async_client):
@@ -299,6 +302,11 @@ async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFact
     assert (await c_nodes[0].get("KEY0")) == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 0
 
+    for node in c_nodes:
+        await node.close()
+    for node in c_nodes_admin:
+        await node.close()
+
 
 # Tests that master commands to the replica are applied regardless of slot ownership
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -408,6 +416,11 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
         assert await c_master.execute_command("dbsize") == 0
         assert await c_replica.execute_command("dbsize") == 0
 
+        await c_master.close()
+        await c_master_admin.close()
+        await c_replica.close()
+        await c_replica_admin.close()
+
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_flush_slots_after_config_change(df_local_factory: DflyInstanceFactory):
@@ -515,6 +528,11 @@ async def test_cluster_flush_slots_after_config_change(df_local_factory: DflyIns
     assert await c_master.execute_command("dbsize") == (100_000 - slot_0_size)
     assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
 
+    await c_master.close()
+    await c_master_admin.close()
+    await c_replica.close()
+    await c_replica_admin.close()
+
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "admin_port": 30001})
 async def test_cluster_blocking_command(df_server):
@@ -558,6 +576,9 @@ async def test_cluster_blocking_command(df_server):
     with pytest.raises(aioredis.ResponseError) as e_info:
         await v2
     assert "MOVED" in str(e_info.value)
+
+    await c_master.close()
+    await c_master_admin.close()
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -742,6 +763,14 @@ async def test_cluster_native_client(
 
     await test_random_keys()
     await client.close()
+    for node in c_masters:
+        await node.close()
+    for node in c_masters_admin:
+        await node.close()
+    for node in c_replicas:
+        await node.close()
+    for node in c_replicas_admin:
+        await node.close()
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -823,8 +852,10 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    await c_nodes_admin[0].close()
-    await c_nodes_admin[1].close()
+    for node in c_nodes:
+        await node.close()
+    for node in c_nodes_admin:
+        await node.close()
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -943,5 +974,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[1].get("KEY19") == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 17
 
-    await c_nodes_admin[0].close()
-    await c_nodes_admin[1].close()
+    for node in c_nodes:
+        await node.close()
+    for node in c_nodes_admin:
+        await node.close()
