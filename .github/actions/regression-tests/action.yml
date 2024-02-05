@@ -38,8 +38,15 @@ runs:
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
         timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
-        if [[ $code -ne 0 ]]; then
+
+        # timeout returns 124 if we exceeded the timeout duration
+        if [[ $code -eq 124 ]]; then
           echo "TIMEDOUT=1">> "$GITHUB_OUTPUT";
+          exit 1
+        fi
+
+        # when a test fails in pytest it returns 1 but there are other return codes as well so we just check if the code is non zero
+        if [[ $code -ne 0 ]]; then
           exit 1
         fi
 
@@ -57,8 +64,15 @@ runs:
           timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report \
             --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO \
             --df alsologtostderr $1 $2 || code=$?
-          if [[ $code -ne 0 ]]; then
+
+          # timeout returns 124 if we exceeded the timeout duration
+          if [[ $code -eq 124 ]]; then
             echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # when a test fails in pytest it returns 1 but there are other return codes as well so we just check if the code is non zero
+          if [[ $code -ne 0 ]]; then
             exit 1
           fi
         }
@@ -73,11 +87,11 @@ runs:
         TIMEDOUT_STEP_1: ${{ steps.first.outputs.TIMEDOUT }}
         TIMEDOUT_STEP_2: ${{ steps.second.outputs.TIMEDOUT }}
       run: |
-        if [[ "${{ env.TIMEDOUT_STEP_1 }}" -eq 1 ]] || [[ "${{ env.TIMEDOUT_STEP_2 }}" -eq 1 ]]; then
           echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout 🪵🪵🪵🪵🪵🪵\n\n"
           ls -t /tmp/dragonfly*log*INFO* | head -n 1 | xargs cat
           echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout end 🪵🪵🪵🪵🪵🪵\n\n"
 
+        if [[ "${{ env.TIMEDOUT_STEP_1 }}" -eq 1 ]] || [[ "${{ env.TIMEDOUT_STEP_2 }}" -eq 1 ]]; then
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
