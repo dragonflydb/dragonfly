@@ -148,61 +148,10 @@ typedef struct {
     quicklistEntry entry; /* Entry in quicklist */
 } listTypeEntry;
 
-setTypeIterator *setTypeInitIterator(robj *subject);
-void setTypeReleaseIterator(setTypeIterator *si);
-int setTypeNext(setTypeIterator *si, sds *sdsele, int64_t *llele);
-sds setTypeNextObject(setTypeIterator *si);
-
-
-
-/* hash set interface */
-
-
-/* Hash data type */
-#define HASH_SET_TAKE_FIELD (1<<0)
-#define HASH_SET_TAKE_VALUE (1<<1)
-#define HASH_SET_COPY 0
-
-void hashTypeConvert(robj *o, int enc);
-void hashTypeTryConversion(robj *subject, robj **argv, int start, int end);
-int hashTypeExists(robj *o, sds key);
-int hashTypeDelete(robj *o, sds key);
-unsigned long hashTypeLength(const robj *o);
-hashTypeIterator *hashTypeInitIterator(robj *subject);
-void hashTypeReleaseIterator(hashTypeIterator *hi);
-int hashTypeNext(hashTypeIterator *hi);
-void hashTypeCurrentFromListpack(hashTypeIterator *hi, int what,
-                                 unsigned char **vstr,
-                                 unsigned int *vlen,
-                                 long long *vll);
-sds hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what);
-void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr, unsigned int *vlen, long long *vll);
-sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
-int hashTypeGetValue(robj *o, sds field, unsigned char **vstr, unsigned int *vlen, long long *vll);
-robj *hashTypeGetValueObject(robj *o, sds field);
-robj *hashTypeDup(robj *o);
-int hashTypeGetFromListpack(robj *o, sds field,
-                            unsigned char **vstr,
-                            unsigned int *vlen,
-                            long long *vll);
 const char *strEncoding(int encoding);
-
-/* Macro used to initialize a Redis object allocated on the stack.
- * Note that this macro is taken near the structure definition to make sure
- * we'll update it when the structure is changed, to avoid bugs like
- * bug #85 introduced exactly in this way. */
-#define initStaticStringObject(_var,_ptr) do { \
-    _var.refcount = OBJ_STATIC_REFCOUNT; \
-    _var.type = OBJ_STRING; \
-    _var.encoding = OBJ_ENCODING_RAW; \
-    _var.ptr = _ptr; \
-} while(0)
 
 
 #define serverAssertWithInfo(x, y, z) serverAssert(z)
-
-#define PROTO_SHARED_SELECT_CMDS 10
-#define OBJ_SHARED_BULKHDR_LEN 32
 
 
 #endif

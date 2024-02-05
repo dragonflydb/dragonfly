@@ -16,6 +16,12 @@
 
 namespace facade {
 
+#ifdef __SANITIZE_ADDRESS__
+constexpr size_t kSanitizerOverhead = 24u;
+#else
+constexpr size_t kSanitizerOverhead = 0u;
+#endif
+
 enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
 
 using MutableSlice = absl::Span<char>;
