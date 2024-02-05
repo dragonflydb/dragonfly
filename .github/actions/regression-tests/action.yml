@@ -87,9 +87,9 @@ runs:
         TIMEDOUT_STEP_1: ${{ steps.first.outputs.TIMEDOUT }}
         TIMEDOUT_STEP_2: ${{ steps.second.outputs.TIMEDOUT }}
       run: |
-          echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout 🪵🪵🪵🪵🪵🪵\n\n"
-          ls -t /tmp/dragonfly*log*INFO* | head -n 1 | xargs cat
-          echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout end 🪵🪵🪵🪵🪵🪵\n\n"
+        echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout 🪵🪵🪵🪵🪵🪵\n\n"
+        ls -t /tmp/dragonfly*log*INFO* | head -n 1 | xargs cat
+        echo "🪵🪵🪵🪵🪵🪵 Latest log before timeout end 🪵🪵🪵🪵🪵🪵\n\n"
 
         if [[ "${{ env.TIMEDOUT_STEP_1 }}" -eq 1 ]] || [[ "${{ env.TIMEDOUT_STEP_2 }}" -eq 1 ]]; then
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
