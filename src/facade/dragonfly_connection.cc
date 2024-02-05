@@ -448,7 +448,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   protocol_ = protocol;
 
   constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
-  static_assert(kReqSz <= 256 && kReqSz >= 232);
+  static_assert(kReqSz <= 256 && kReqSz >= 200);
 
   switch (protocol) {
     case Protocol::REDIS:

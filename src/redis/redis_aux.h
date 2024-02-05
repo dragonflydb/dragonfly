@@ -36,13 +36,7 @@
 
 #define CONFIG_RUN_ID_SIZE 40U
 
-#define EVPOOL_CACHED_SDS_SIZE 255
-#define EVPOOL_SIZE 16
-
-int htNeedsResize(dict* dict);  // moved from server.cc
-
 /* Hash table types */
-extern dictType zsetDictType;
 extern dictType setDictType;
 extern dictType hashDictType;
 
@@ -58,12 +52,6 @@ extern dictType hashDictType;
  *
  * Empty entries have the key pointer set to NULL. */
 
-struct evictionPoolEntry {
-  unsigned long long idle; /* Object idle time (inverse frequency for LFU) */
-  sds key;                 /* Key name. */
-  sds cached;              /* Cached SDS object for key name. */
-  int dbid;                /* Key DB number. */
-};
 
 uint64_t dictSdsHash(const void* key);
 int dictSdsKeyCompare(dict* privdata, const void* key1, const void* key2);
