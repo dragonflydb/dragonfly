@@ -41,7 +41,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 64u);
+  static_assert(sizeof(ReplyStats) == 64u + kSanitizerOverhead);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 

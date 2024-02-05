@@ -49,7 +49,7 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_CACHE_SIZE: 6G
       SCCACHE_ERROR_LOG: /tmp/sccache_log.txt
-      SCCACHE_LOG: debug
+      # SCCACHE_LOG: debug
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -128,12 +128,6 @@ jobs:
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v3
-        with:
-          name: unit_logs
-          path: /tmp/*INFO*
       - name: Run regression tests
         if: matrix.container == 'ubuntu-dev:20'
         uses: ./.github/actions/regression-tests
@@ -142,11 +136,12 @@ jobs:
           run-only-on-ubuntu-latest: true
           build-folder-name: build
           filter: "not slow"
-      - name: Upload cache log
+      - name: Upload logs on failure
+        if: failure()
         uses: actions/upload-artifact@v3
         with:
-          name: sccache_log.txt
-          path: /tmp/sccache_log.txt
+          name: unit_logs
+          path: /tmp/*INFO*
 
   lint-test-chart:
     runs-on: ubuntu-latest
