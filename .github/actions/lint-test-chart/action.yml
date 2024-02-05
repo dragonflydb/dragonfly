@@ -42,12 +42,10 @@ runs:
             --config .ct.yaml \
             ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
 
-      - if: steps.list-changed.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
-        name: Create kind cluster
+      - name: Create kind cluster
         uses: helm/kind-action@v1.8.0
 
-      - if: steps.list-changed.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
-        name: Getting cluster ready
+      - name: Getting cluster ready
         shell: bash
         run: |
           kubectl label nodes chart-testing-control-plane key/node-kind=high-memory
