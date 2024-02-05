@@ -23,6 +23,7 @@ class IoMgr {
   using GrowCb = std::function<void(int)>;
 
   IoMgr();
+  ~IoMgr();
 
   // blocks until all the pending requests are finished.
   void Shutdown();
@@ -55,8 +56,11 @@ class IoMgr {
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   size_t sz_ = 0;
 
+  uint8_t* reg_buf_ = nullptr;
+  std::vector<bool> page_mask_;
+
   union {
-    uint8_t flags_val;
+    uint8_t flags_val_;
     struct {
       uint8_t grow_progress : 1;
     } flags;

@@ -345,7 +345,7 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(1, kQueueLen),
+    : queue_(2, kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       db_slice_(pb->GetPoolIndex(), GetFlag(FLAGS_cache_mode), this) {
