@@ -11,7 +11,6 @@ from . import dfly_args
 
 @pytest.mark.asyncio
 async def test_acl_setuser(async_client):
-    assert False
     await async_client.execute_command("ACL SETUSER kostas")
     result = await async_client.execute_command("ACL LIST")
     assert 2 == len(result)
