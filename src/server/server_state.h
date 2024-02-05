@@ -175,7 +175,8 @@ class ServerState {  // public struct - to allow initialization.
 
   bool AllowInlineScheduling() const;
 
-  // Borrow interpreter from internal manager. Return int with ReturnInterpreter.
+  // Borrow interpreter from interpreter pool, return it with ReturnInterpreter.
+  // Will block if no interpreters are aviable. Use with caution!
   Interpreter* BorrowInterpreter();
 
   // Return interpreter to internal manager to be re-used.
