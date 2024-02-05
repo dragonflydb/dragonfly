@@ -395,43 +395,6 @@ TEST_F(CompactObjectTest, Hash) {
   EXPECT_EQ(1, cobj_.Size());
 }
 
-#if 0
-TEST_F(CompactObjectTest, FlatSet) {
-  size_t allocated1, resident1, active1;
-  size_t allocated2, resident2, active2;
-
-  zmalloc_get_allocator_info(&allocated1, &active1, &resident1);
-  dict* d = dictCreate(&setDictType);
-  constexpr size_t kTestSize = 2000;
-
-  for (size_t i = 0; i < kTestSize; ++i) {
-    sds key = sdsnew("key:000000000000");
-    key = sdscatfmt(key, "%U", i);
-    dictEntry* de = dictAddRaw(d, key, NULL);
-    de->v.val = NULL;
-  }
-
-  zmalloc_get_allocator_info(&allocated2, &active2, &resident2);
-  size_t dict_used = allocated2 - allocated1;
-  dictRelease(d);
-
-  zmalloc_get_allocator_info(&allocated2, &active2, &resident2);
-  EXPECT_EQ(allocated2, allocated1);
-
-  MiMemoryResource mr(mi_heap_get_backing());
-
-  FlatSet fs(&mr);
-  for (size_t i = 0; i < kTestSize; ++i) {
-    string s = absl::StrCat("key:000000000000", i);
-    fs.Add(s);
-  }
-  zmalloc_get_allocator_info(&allocated2, &active2, &resident2);
-  size_t fs_used = allocated2 - allocated1;
-  LOG(INFO) << "dict used: " << dict_used << " fs used: " << fs_used;
-  EXPECT_LT(fs_used + 8 * kTestSize, dict_used);
-}
-#endif
-
 TEST_F(CompactObjectTest, StreamObj) {
   robj* stream_obj = createStreamObject();
   stream* sm = (stream*)stream_obj->ptr;
@@ -577,14 +540,15 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
   ASSERT_TRUE(json_array.has_value());
   cobj_.SetJson(std::move(json_array.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type
-  auto f = [](const std::string& /*path*/, JsonType& book) {
+  auto f = [](const auto& /*path*/, JsonType& book) {
     if (book.at("category") == "memoir" && !book.contains("price")) {
       book.try_emplace("price", 140.0);
     }
   };
   JsonType* json = cobj_.GetJson();
   ASSERT_TRUE(json != nullptr);
-  jsonpath::json_replace(*json, "$.books[*]", f);
+  auto allocator_set = jsoncons::combine_allocators(json->get_allocator());
+  jsonpath::json_replace(allocator_set, *json, "$.books[*]"sv, f);
 
   // Check whether we've changed the entry for json in place
   // we should have prices only for memoir books

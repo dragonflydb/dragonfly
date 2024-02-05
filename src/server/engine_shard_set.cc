@@ -166,31 +166,25 @@ class RoundRobinSharder {
 };
 
 bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
-  bool has_contended_locks = false;
+  auto is_contended = [table](string_view key) {
+    return table->trans_locks.Find(key)->IsContended();
+  };
 
   if (trx->IsMulti()) {
-    trx->IterateMultiLocks(shard_id, [&](const string& key) {
-      auto it = table->trans_locks.find(key);
-      DCHECK(it != table->trans_locks.end());
-      if (it->second.IsContended()) {
-        has_contended_locks = true;
-      }
-    });
+    auto keys = trx->GetMultiKeys();
+    for (string_view key : keys) {
+      if (Shard(key, shard_set->size()) == shard_id && is_contended(key))
+        return true;
+    }
   } else {
     KeyLockArgs lock_args = trx->GetLockArgs(shard_id);
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      auto it = table->trans_locks.find(s);
-      DCHECK(it != table->trans_locks.end());
-      if (it != table->trans_locks.end()) {
-        if (it->second.IsContended()) {
-          has_contended_locks = true;
-          break;
-        }
-      }
+      if (is_contended(KeyLockArgs::GetLockKey(lock_args.args[i])))
+        return true;
     }
   }
-  return has_contended_locks;
+
+  return false;
 }
 
 thread_local string RoundRobinSharder::round_robin_prefix_;
@@ -208,12 +202,13 @@ EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 32);
+  static_assert(sizeof(Stats) == 40);
 
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
   defrag_task_invocation_total += o.defrag_task_invocation_total;
   poll_execution_total += o.poll_execution_total;
+  tx_ooo_total += o.tx_ooo_total;
 
   return *this;
 }
@@ -350,20 +345,16 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen),
+    : queue_(1, kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       db_slice_(pb->GetPoolIndex(), GetFlag(FLAGS_cache_mode), this) {
-  fiber_q_ = MakeFiber([this, index = pb->GetPoolIndex()] {
-    ThisFiber::SetName(absl::StrCat("shard_queue", index));
-    queue_.Run();
-  });
-
   tmp_str1 = sdsempty();
 
   db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
   // start the defragmented task here
   defrag_task_ = pb->AddOnIdleTask([this]() { return this->DefragTask(); });
+  queue_.Start(absl::StrCat("shard_queue_", db_slice_.shard_id()));
 }
 
 EngineShard::~EngineShard() {
@@ -372,7 +363,6 @@ EngineShard::~EngineShard() {
 
 void EngineShard::Shutdown() {
   queue_.Shutdown();
-  fiber_q_.Join();
 
   if (tiered_storage_) {
     tiered_storage_->Shutdown();
@@ -456,20 +446,32 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
-  uint16_t trans_mask = trans ? trans->GetLocalMask(sid) : 0;
-  if (trans_mask & Transaction::AWAKED_Q) {
-    CHECK(continuation_trans_ == nullptr)
-        << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
-        << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs " << trans_mask;
+  // Check if the caller was handled by a previous poll.
+  if (trans && !trans->IsArmedInShard(sid))
+    return;
 
-    bool keep = trans->RunInShard(this, false);
-    if (keep) {
+  auto local_mask = trans ? trans->GetLocalMask(sid) : 0;  // safe only when trans is armed
+
+  // Blocked transactions are executed immediately after waking up
+  if (local_mask & Transaction::AWAKED_Q) {
+    CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
+        << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
+        << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs "
+        << trans->GetLocalMask(sid);
+
+    // Commands like BRPOPLPUSH don't conclude immediately
+    if (trans->RunInShard(this, false)) {
+      continuation_trans_ = trans;
       return;
     }
+
+    trans = nullptr;  // Avoid handling the caller below
+    continuation_trans_ = nullptr;
   }
 
   string dbg_id;
 
+  // Check the currently running transaction, we have to handle it first until it concludes
   if (continuation_trans_) {
     if (trans == continuation_trans_)
       trans = nullptr;
@@ -478,7 +480,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       if (VLOG_IS_ON(1)) {
         dbg_id = continuation_trans_->DebugId();
       }
+
       bool to_keep = continuation_trans_->RunInShard(this, false);
+
       DVLOG(1) << "RunContTrans: " << dbg_id << " keep: " << to_keep;
       if (!to_keep) {
         // if this holds, we can remove this check altogether.
@@ -488,44 +492,36 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
   }
 
+  // Progress on the transaction queue if no transaction is running currently.
   Transaction* head = nullptr;
   if (continuation_trans_ == nullptr) {
     while (!txq_.Empty()) {
-      // we must check every iteration so that if the current transaction awakens
-      // another transaction, the loop won't proceed further and will break, because we must run
-      // the notified transaction before all other transactions in the queue can proceed.
-      bool has_awaked_trans = blocking_controller_ && blocking_controller_->HasAwakedTransaction();
-      if (has_awaked_trans)
+      // Break if there are any awakened transactions, as we must give way to them
+      // before continuing to handle regular transactions from the queue.
+      if (blocking_controller_ && blocking_controller_->HasAwakedTransaction())
         break;
 
-      auto val = txq_.Front();
-      head = absl::get<Transaction*>(val);
+      head = get<Transaction*>(txq_.Front());
 
-      // The fact that Tx is in the queue, already means that coordinator fiber will not progress,
-      // hence here it's enough to test for run_count and check local_mask.
       bool is_armed = head->IsArmedInShard(sid);
       VLOG(2) << "Considering head " << head->DebugId() << " isarmed: " << is_armed;
 
+      // If the transaction isn't armed yet, it will be handled by a successive poll
       if (!is_armed)
         break;
 
-      // It could be that head is processed and unblocks multi-hop transaction .
-      // The transaction will schedule again and will arm another callback.
-      // Then we will reach invalid state by running trans after this loop,
-      // which is not what we want.
-      // This function should not process 2 different callbacks for the same transaction.
-      // Hence we make sure to reset trans if it has been processed via tx-queue.
+      // Avoid processing the caller transaction below if we found it in the queue,
+      // because it most likely won't have enough time to arm itself again.
       if (head == trans)
         trans = nullptr;
+
       TxId txid = head->txid();
 
-      // committed_txid_ is strictly increasing when processed via TxQueue.
-      DCHECK_LT(committed_txid_, txid);
-
-      // We update committed_txid_ before calling RunInShard() to avoid cases where
-      // a transaction stalls the execution with IO while another fiber queries this shard for
-      // committed_txid_ (for example during the scheduling).
+      // Update commited_txid before running, because RunInShard might block on i/o.
+      // This way scheduling transactions won't see an understated value.
+      DCHECK_LT(committed_txid_, txid);  //  strictly increasing when processed via txq
       committed_txid_ = txid;
+
       if (VLOG_IS_ON(2)) {
         dbg_id = head->DebugId();
       }
@@ -544,26 +540,36 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DVLOG(1) << "Skipped TxQueue " << continuation_trans_;
   }
 
-  // we need to run trans if it's OOO or when trans is blocked in this shard.
-  bool should_run = trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q);
+  // Either the poll had no caller or it was handled above
+  if (trans == nullptr)
+    return;
 
-  // It may be that there are other transactions that touch those keys but they necessary ordered
-  // after trans in the queue, hence it's safe to run trans out of order.
-  if (trans && should_run) {
+  // If the pointer is valid, we didn't handle it above, so trans is still armed
+  DCHECK(trans->IsArmedInShard(sid));
+
+  // OOO means no transaction before us in the txq accesses our keys, so we can run earlier
+  bool is_ooo = local_mask & Transaction::OUT_OF_ORDER;
+
+  // Still suspended shards need to run just to finalize and unregister, so we can run anytime
+  bool is_suspended = local_mask & Transaction::SUSPENDED_Q;
+  DCHECK_EQ(local_mask & Transaction::AWAKED_Q, 0);
+
+  if (is_ooo || is_suspended) {
     DCHECK(trans != head);
 
     dbg_id.clear();
-
     if (VLOG_IS_ON(1)) {
       dbg_id = trans->DebugId();
     }
 
-    bool txq_ooo = trans_mask & Transaction::OUT_OF_ORDER;
-    bool keep = trans->RunInShard(this, txq_ooo);
+    bool keep = trans->RunInShard(this, is_ooo);
+    if (is_ooo && !keep) {
+      stats_.tx_ooo_total++;
+    }
 
     // If the transaction concluded, it must remove itself from the tx queue.
     // Otherwise it is required to stay there to keep the relative order.
-    if (txq_ooo && !trans->IsMulti())
+    if (is_ooo && !trans->IsMulti())
       DCHECK_EQ(keep, trans->GetLocalTxqPos(sid) != TxQueue::kEnd);
 
     DLOG_IF(INFO, !dbg_id.empty()) << "Eager run " << sid << ", " << dbg_id << ", keep " << keep;
@@ -758,13 +764,13 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
     if (table == nullptr)
       continue;
 
-    info.total_locks += table->trans_locks.size();
-    for (const auto& k_v : table->trans_locks) {
-      if (k_v.second.IsContended()) {
+    info.total_locks += table->trans_locks.Size();
+    for (const auto& [key, lock] : table->trans_locks) {
+      if (lock.IsContended()) {
         info.contended_locks++;
-        if (k_v.second.ContentionScore() > info.max_contention_score) {
-          info.max_contention_score = k_v.second.ContentionScore();
-          info.max_contention_lock_name = k_v.first;
+        if (lock.ContentionScore() > info.max_contention_score) {
+          info.max_contention_score = lock.ContentionScore();
+          info.max_contention_lock_name = string_view{key};
         }
       }
     }
@@ -825,6 +831,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
                  << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
       exit(1);
     }
+    is_tiering_enabled_ = true;
     LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
   }
 
@@ -858,11 +865,8 @@ void EngineShardSet::TEST_EnableCacheMode() {
 }
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  if (ClusterConfig::IsEnabledOrEmulated()) {
-    string_view v_hash_tag = ClusterConfig::KeyTag(v);
-    if (v_hash_tag.size() != v.size()) {
-      v = v_hash_tag;
-    }
+  if (ClusterConfig::IsShardedByTag()) {
+    v = ClusterConfig::KeyTag(v);
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);

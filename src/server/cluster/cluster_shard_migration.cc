@@ -4,10 +4,13 @@
 #include "server/cluster/cluster_shard_migration.h"
 
 #include <absl/flags/flag.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
 #include "server/error.h"
+#include "server/journal/serializer.h"
+#include "server/journal/tx_executor.h"
 
 ABSL_DECLARE_FLAG(int, source_connect_timeout_ms);
 
@@ -19,8 +22,9 @@ using namespace util;
 using absl::GetFlag;
 
 ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t shard_id,
-                                             uint32_t sync_id)
+                                             uint32_t sync_id, Service* service)
     : ProtocolClient(server_context), source_shard_id_(shard_id), sync_id_(sync_id) {
+  executor_ = std::make_unique<JournalExecutor>(service);
 }
 
 ClusterShardMigration::~ClusterShardMigration() {
@@ -57,16 +61,44 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
-  uint8_t ok_buf[4];
-  ps.ReadAtLeast(io::MutableBytes{ok_buf, 4}, 4);
+  JournalReader reader{&ps, 0};
+  TransactionReader tx_reader{};
 
-  if (string_view(reinterpret_cast<char*>(ok_buf), 4) != "SYNC") {
-    VLOG(1) << "FullSyncShardFb incorrect data transfer";
-    cntx->ReportError(std::make_error_code(errc::protocol_error),
-                      "Incorrect FullSync data, only for tets");
+  while (!cntx->IsCancelled()) {
+    if (cntx->IsCancelled())
+      break;
+
+    auto tx_data = tx_reader.NextTxData(&reader, cntx);
+    if (!tx_data)
+      break;
+
+    TouchIoTime();
+
+    if (tx_data->opcode == journal::Op::FIN) {
+      VLOG(2) << "Flow " << source_shard_id_ << " is finalized";
+      is_finalized_ = true;
+      break;
+    } else if (tx_data->opcode == journal::Op::PING) {
+      // TODO check about ping logic
+    } else {
+      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+    }
   }
+}
 
-  VLOG(1) << "FullSyncShardFb finished after reading 4 bytes";
+void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
+  if (cntx->IsCancelled()) {
+    return;
+  }
+  CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
+  if (!tx_data.IsGlobalCmd()) {
+    VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
+  } else {
+    // TODO check which global commands should be supported
+    CHECK(false) << "We don't support command: " << ToSV(tx_data.commands.front().cmd_args[0])
+                 << "in cluster migration process.";
+  }
 }
 
 void ClusterShardMigration::Cancel() {

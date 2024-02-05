@@ -1,6 +1,7 @@
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+
 #include "server/cluster/cluster_slot_migration.h"
 
 #include <absl/cleanup/cleanup.h>
@@ -9,6 +10,7 @@
 #include "base/logging.h"
 #include "server/cluster/cluster_shard_migration.h"
 #include "server/error.h"
+#include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 
 ABSL_FLAG(int, source_connect_timeout_ms, 20000,
@@ -35,9 +37,9 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
-ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port,
+ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(move(host_ip), port), slots_(std::move(slots)) {
+    : ProtocolClient(move(host_ip), port), service_(*se), slots_(std::move(slots)) {
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -62,7 +64,7 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
-  state_ = ClusterSlotMigration::C_CONNECTING;
+  state_ = MigrationState::C_CONNECTING;
 
   VLOG(1) << "Greeting";
   ec = Greet();
@@ -98,26 +100,58 @@ error_code ClusterSlotMigration::Greet() {
 
 ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   const auto& ctx = server();
-  return {ctx.host, ctx.port, state_};
+  return {ctx.host, ctx.port};
+}
+
+void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
+  DCHECK(shard_flows_.size() > flow);
+  shard_flows_[flow]->SetStableSync();
+
+  if (std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                  [](const auto& el) { return el->IsStableSync(); })) {
+    state_ = MigrationState::C_STABLE_SYNC;
+  }
+}
+
+bool ClusterSlotMigration::IsFinalized() const {
+  return std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                     [](const auto& el) { return el->IsFinalized(); });
+}
+
+void ClusterSlotMigration::Stop() {
+  for (auto& flow : shard_flows_) {
+    flow->Cancel();
+  }
 }
 
 void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "Main migration fiber started";
 
-  state_ = ClusterSlotMigration::C_FULL_SYNC;
+  state_ = MigrationState::C_FULL_SYNC;
 
   // TODO add reconnection code
   if (auto ec = InitiateSlotsMigration(); ec) {
     LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
                  << ec.message();
   }
+
+  if (IsFinalized()) {
+    state_ = MigrationState::C_FINISHED;
+  }
 }
 
 std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_));
+    shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_, &service_));
   }
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    for (auto& flow : shard_flows_) {
+      flow->JoinFlow();
+    }
+  };
 
   // Switch to new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) mutable {

@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <absl/base/thread_annotations.h>
 #include <absl/container/flat_hash_set.h>
 
 #include <array>
@@ -15,11 +14,22 @@
 
 #include "core/json_object.h"
 #include "src/core/fibers.h"
+#include "src/server/common.h"
 
 namespace dfly {
 
 using SlotId = uint16_t;
+// TODO consider to use bit set or some more compact way to store SlotId
 using SlotSet = absl::flat_hash_set<SlotId>;
+
+// MigrationState constants are ordered in state changing order
+enum class MigrationState : uint8_t {
+  C_NO_STATE,
+  C_CONNECTING,
+  C_FULL_SYNC,
+  C_STABLE_SYNC,
+  C_FINISHED
+};
 
 class ClusterConfig {
  public:
@@ -50,7 +60,14 @@ class ClusterConfig {
   static void Initialize();
   static bool IsEnabled();
   static bool IsEmulated();
-  static bool IsEnabledOrEmulated();
+
+  static bool IsEnabledOrEmulated() {
+    return IsEnabled() || IsEmulated();
+  }
+
+  static bool IsShardedByTag() {
+    return IsEnabledOrEmulated() || KeyLockArgs::IsLockHashTagEnabled();
+  }
 
   // If the key contains the {...} pattern, return only the part between { and }
   static std::string_view KeyTag(std::string_view key);

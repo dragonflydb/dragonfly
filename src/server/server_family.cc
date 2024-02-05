@@ -215,7 +215,6 @@ using namespace util;
 using detail::SaveStagesController;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
-using SendStatsType = facade::ReplyStats::SendStatsType;
 
 namespace {
 
@@ -689,7 +688,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
-    fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
+    fq_threadpool_.reset(new fb2::FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
@@ -873,6 +872,10 @@ void ServerFamily::SnapshotScheduling() {
   if (!cron_expr) {
     return;
   }
+  if (shard_set->IsTieringEnabled()) {
+    LOG(ERROR) << "Snapshot not allowed when using tiering.  Exiting..";
+    exit(1);
+  }
 
   const auto loading_check_interval = std::chrono::seconds(10);
   while (service_.GetGlobalState() == GlobalState::LOADING) {
@@ -1047,38 +1050,20 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("net_output_bytes_total", "", m.facade_stats.reply_stats.io_write_bytes,
                             MetricType::COUNTER, &resp->body());
   {
-    string send_latency_metrics;
-    constexpr string_view kReplyLatency = "reply_duration_seconds";
-    AppendMetricHeader(kReplyLatency, "Reply latency per type", MetricType::COUNTER,
-                       &send_latency_metrics);
+    AppendMetricWithoutLabels("reply_duration_seconds", "",
+                              m.facade_stats.reply_stats.send_stats.total_duration * 1e-6,
+                              MetricType::COUNTER, &resp->body());
+    AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
+                              MetricType::COUNTER, &resp->body());
 
-    string send_count_metrics;
-    constexpr string_view kReplyCount = "reply_total";
-    AppendMetricHeader(kReplyCount, "Reply count per type", MetricType::COUNTER,
-                       &send_count_metrics);
-
-    for (unsigned i = 0; i < SendStatsType::kNumTypes; ++i) {
-      auto& stats = m.facade_stats.reply_stats.send_stats[i];
-      string_view type;
-      switch (SendStatsType(i)) {
-        case SendStatsType::kRegular:
-          type = "regular";
-          break;
-        case SendStatsType::kBatch:
-          type = "batch";
-          break;
-        case SendStatsType::kNumTypes:
-          type = "other";
-          break;
-      }
-
-      AppendMetricValue(kReplyLatency, stats.total_duration / 1'000'000, {"type"}, {type},
-                        &send_latency_metrics);
-      AppendMetricValue(kReplyCount, stats.count, {"type"}, {type}, &send_count_metrics);
+    // Tiered metrics.
+    if (m.disk_stats.read_total > 0) {
+      AppendMetricWithoutLabels("tiered_reads_total", "", m.disk_stats.read_total,
+                                MetricType::COUNTER, &resp->body());
+      AppendMetricWithoutLabels("tiered_reads_latency_seconds", "",
+                                double(m.disk_stats.read_delay_usec) * 1e-6, MetricType::COUNTER,
+                                &resp->body());
     }
-
-    absl::StrAppend(&resp->body(), send_latency_metrics);
-    absl::StrAppend(&resp->body(), send_count_metrics);
   }
 
   // DB stats
@@ -1139,7 +1124,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("fiber_longrun_total", "", m.fiber_longrun_cnt, MetricType::COUNTER,
                             &resp->body());
   double longrun_seconds = m.fiber_longrun_usec * 1e-6;
-  AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
+  AppendMetricWithoutLabels("fiber_longrun_seconds", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
 
@@ -1159,8 +1144,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricHeader("transaction_types_total", "Transaction counts by their types",
                      MetricType::COUNTER, &resp->body());
 
-  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "ooo", "quick",
-                                                         "inline"};
+  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "quick", "inline"};
   for (unsigned type = 0; type < ServerState::NUM_TX_TYPES; ++type) {
     if (tc[type] > 0) {
       AppendMetricValue("transaction_types_total", tc[type], {"type"}, {kTxTypeNames[type]},
@@ -1287,6 +1271,10 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
                                   bool ignore_state) {
+  if (shard_set->IsTieringEnabled()) {
+    return GenericError{make_error_code(errc::operation_not_permitted),
+                        StrCat("Can not save database in tiering mode")};
+  }
   if (!ignore_state) {
     auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
     if (!success) {
@@ -1488,6 +1476,23 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
+  if (sub_cmd == "HELP") {
+    string_view help_arr[] = {
+        "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "GET <pattern>",
+        "    Return parameters matching the glob-like <pattern> and their values.",
+        "SET <directive> <value>",
+        "    Set the configuration <directive> to <value>.",
+        "RESETSTAT",
+        "    Reset statistics reported by the INFO command.",
+        "HELP",
+        "    Prints this help.",
+    };
+
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendSimpleStrArr(help_arr);
+  }
+
   if (sub_cmd == "SET") {
     if (args.size() != 3) {
       return cntx->SendError(WrongNumArgsError("config|set"));
@@ -1627,9 +1632,7 @@ void ServerFamily::ResetStat() {
 
     tl_facade_stats->reply_stats.io_write_bytes = 0;
     tl_facade_stats->reply_stats.io_write_cnt = 0;
-    for (auto& send_stat : tl_facade_stats->reply_stats.send_stats) {
-      send_stat = {};
-    }
+    tl_facade_stats->reply_stats.send_stats = {};
 
     service_.mutable_registry()->ResetCallStats(index);
   });
@@ -1667,8 +1670,11 @@ Metrics ServerFamily::GetMetrics() const {
       MergeDbSliceStats(shard->db_slice().GetStats(), &result);
       result.shard_stats += shard->stats();
 
-      if (shard->tiered_storage())
+      if (shard->tiered_storage()) {
         result.tiered_stats += shard->tiered_storage()->GetStats();
+        result.disk_stats += shard->tiered_storage()->GetDiskStats();
+      }
+
       if (shard->search_indices())
         result.search_stats += shard->search_indices()->GetStats();
 
@@ -1836,6 +1842,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_commands_processed", conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
+    append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("total_net_output_bytes", reply_stats.io_write_bytes);
     append("instantaneous_input_kbps", -1);
@@ -1859,17 +1866,15 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
-    append("reply_count", reply_stats.send_stats[SendStatsType::kRegular].count);
-    append("reply_latency_usec", reply_stats.send_stats[SendStatsType::kRegular].total_duration);
-    append("reply_batch_count", reply_stats.send_stats[SendStatsType::kBatch].count);
-    append("reply_batch_latency_usec",
-           reply_stats.send_stats[SendStatsType::kBatch].total_duration);
+    append("reply_count", reply_stats.send_stats.count);
+    append("reply_latency_usec", reply_stats.send_stats.total_duration);
   }
 
   if (should_enter("TIERED", true)) {
     append("tiered_entries", total.tiered_entries);
     append("tiered_bytes", total.tiered_size);
-    append("tiered_reads", m.tiered_stats.tiered_reads);
+    append("tiered_reads", m.disk_stats.read_total);
+    append("tiered_read_latency_usec", m.disk_stats.read_delay_usec);
     append("tiered_writes", m.tiered_stats.tiered_writes);
     append("tiered_reserved", m.tiered_stats.storage_reserved);
     append("tiered_capacity", m.tiered_stats.storage_capacity);
@@ -1908,8 +1913,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("TRANSACTION", true)) {
     const auto& tc = m.coordinator_stats.tx_type_cnt;
     string val = StrCat("global=", tc[ServerState::GLOBAL], ",normal=", tc[ServerState::NORMAL],
-                        ",ooo=", tc[ServerState::OOO], ",quick=", tc[ServerState::QUICK],
-                        ",inline=", tc[ServerState::INLINE]);
+                        ",quick=", tc[ServerState::QUICK], ",inline=", tc[ServerState::INLINE]);
     append("tx_type_cnt", val);
     val.clear();
     for (unsigned width = 0; width < shard_set->size(); ++width) {
@@ -1922,12 +1926,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       val.pop_back();  // last comma.
       append("tx_width_freq", val);
     }
+    append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
+    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
+    append("tx_queue_len", m.tx_queue_len);
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
     append("eval_squashed_flushes", m.coordinator_stats.eval_squashed_flushes);
-    append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
-    append("tx_queue_len", m.tx_queue_len);
     append("multi_squash_execution_total", m.coordinator_stats.multi_squash_executions);
     append("multi_squash_execution_hop_usec", m.coordinator_stats.multi_squash_exec_hop_usec);
     append("multi_squash_execution_reply_usec", m.coordinator_stats.multi_squash_exec_reply_usec);

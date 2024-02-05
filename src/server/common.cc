@@ -27,8 +27,7 @@ extern "C" {
 #include "strings/human_readable.h"
 
 ABSL_FLAG(bool, lock_on_hashtags, false,
-          "When true, locks are done in the {hashtag} level instead of key level. "
-          "Only use this with --cluster_mode=emulated|yes.");
+          "When true, locks are done in the {hashtag} level instead of key level.");
 
 namespace dfly {
 
@@ -232,10 +231,18 @@ void TriggerJournalWriteToSink() {
 
 #define ADD(x) (x) += o.x
 
-TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 56);
+IoMgrStats& IoMgrStats::operator+=(const IoMgrStats& rhs) {
+  static_assert(sizeof(IoMgrStats) == 16);
 
-  ADD(tiered_reads);
+  read_total += rhs.read_total;
+  read_delay_usec += rhs.read_delay_usec;
+
+  return *this;
+}
+
+TieredStats& TieredStats::operator+=(const TieredStats& o) {
+  static_assert(sizeof(TieredStats) == 48);
+
   ADD(tiered_writes);
   ADD(storage_capacity);
   ADD(storage_reserved);

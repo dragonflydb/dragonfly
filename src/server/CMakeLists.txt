@@ -1,6 +1,11 @@
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
+option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" ON)
+if (DF_ENABLE_MEMORY_TRACKING)
+  target_compile_definitions(dragonfly PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
+endif()
+
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
   # can cause SIGILL.
@@ -17,6 +22,7 @@ endif()
 
 add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             command_registry.cc  cluster/unique_slot_checker.cc
+            journal/tx_executor.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -42,9 +48,13 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
             cluster/cluster_family.cc cluster/cluster_slot_migration.cc
-            cluster/cluster_shard_migration.cc
+            cluster/cluster_shard_migration.cc cluster/outgoing_slot_migration.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)
+
+if (DF_ENABLE_MEMORY_TRACKING)
+  target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
+endif()
 
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
 

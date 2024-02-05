@@ -13,12 +13,12 @@ extern "C" {
 }
 
 #include "base/logging.h"
-#include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 
@@ -616,11 +616,9 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
     }
     add_res = std::move(*res_it);
   } else {
-    try {
-      add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
-    } catch (bad_alloc&) {
-      return OpStatus::OUT_OF_MEMORY;
-    }
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
+    RETURN_ON_BAD_STATUS(op_res);
+    add_res = std::move(*op_res);
   }
 
   robj* stream_obj = nullptr;
@@ -1166,6 +1164,7 @@ struct FindGroupResult {
   streamCG* cg = nullptr;
   DbSlice::AutoUpdater post_updater;
 };
+
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
@@ -3328,6 +3327,7 @@ constexpr uint32_t kXAutoClaim = WRITE | STREAM | FAST;
 void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
+  constexpr auto kReadFlags = CO::READONLY | CO::BLOCKING | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS;
   *registry << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::kXAdd}.HFUNC(XAdd)
             << CI{"XCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
             << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)
@@ -3337,18 +3337,14 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XPENDING", CO::READONLY, -2, 1, 1, acl::kXPending}.HFUNC(XPending)
             << CI{"XRANGE", CO::READONLY, -4, 1, 1, acl::kXRange}.HFUNC(XRange)
             << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, acl::kXRevRange}.HFUNC(XRevRange)
-            << CI{"XREAD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 3, 3,
-                  acl::kXRead}
-                   .HFUNC(XRead)
-            << CI{"XREADGROUP",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -6, 6, 6,
-                  acl::kXReadGroup}
-                   .HFUNC(XReadGroup)
+            << CI{"XREAD", kReadFlags, -3, 3, 3, acl::kXRead}.HFUNC(XRead)
+            << CI{"XREADGROUP", kReadFlags, -6, 6, 6, acl::kXReadGroup}.HFUNC(XReadGroup)
             << CI{"XSETID", CO::WRITE, 3, 1, 1, acl::kXSetId}.HFUNC(XSetId)
             << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXTrim}.HFUNC(XTrim)
             << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, acl::kXGroupHelp}.SetHandler(
                    XGroupHelp)
-            << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXAdd}.HFUNC(XAck)
-            << CI{"XAUTOCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XAutoClaim);
+            << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXAck}.HFUNC(XAck)
+            << CI{"XAUTOCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXAutoClaim}.HFUNC(XAutoClaim);
 }
 
 }  // namespace dfly

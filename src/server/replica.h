@@ -13,6 +13,7 @@
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
 #include "server/common.h"
+#include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
 #include "server/protocol_client.h"
 #include "server/version.h"
@@ -29,23 +30,6 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 class DflyShardReplica;
-
-// Coordinator for multi shard execution.
-struct MultiShardExecution {
-  Mutex map_mu;
-
-  struct TxExecutionSync {
-    Barrier barrier;
-    std::atomic_uint32_t counter;
-    BlockingCounter block;
-
-    explicit TxExecutionSync(uint32_t counter)
-        : barrier(counter), counter(counter), block(counter) {
-    }
-  };
-
-  std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
-};
 
 // The attributes of the master we are connecting to.
 struct MasterContext {
@@ -193,36 +177,6 @@ class DflyShardReplica : public ProtocolClient {
                    Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe);
   ~DflyShardReplica();
 
-  // This class holds the commands of transaction in single shard.
-  // Once all commands were received, the transaction can be executed.
-  struct TransactionData {
-    // Update the data from ParsedEntry and return true if all shard transaction commands were
-    // received.
-    bool AddEntry(journal::ParsedEntry&& entry);
-
-    bool IsGlobalCmd() const;
-
-    static TransactionData FromSingle(journal::ParsedEntry&& entry);
-
-    TxId txid{0};
-    DbIndex dbid{0};
-    uint32_t shard_cnt{0};
-    absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
-    uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
-    bool is_ping = false;           // For Op::PING entries.
-  };
-
-  // Utility for reading TransactionData from a journal reader.
-  // The journal stream can contain interleaved data for multiple multi transactions,
-  // expiries and out of order executed transactions that need to be grouped on the replica side.
-  struct TransactionReader {
-    std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
-
-   private:
-    // Stores ongoing multi transaction data.
-    absl::flat_hash_map<TxId, TransactionData> current_;
-  };
-
   void Cancel();
   void JoinFlow();
 
@@ -246,7 +200,6 @@ class DflyShardReplica : public ProtocolClient {
   void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
   void InsertTxDataToShardResource(TransactionData&& tx_data);
   void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx);
-  bool InsertTxToSharedMap(const TransactionData& tx_data);
 
   uint32_t FlowId() const;
 

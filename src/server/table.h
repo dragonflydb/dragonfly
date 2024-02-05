@@ -16,6 +16,9 @@
 #include "server/detail/table.h"
 #include "server/top_keys.h"
 
+extern "C" {
+#include "redis/redis_aux.h"
+}
 namespace dfly {
 
 using PrimeKey = detail::PrimeKey;
@@ -76,7 +79,47 @@ struct DbTableStats {
   DbTableStats& operator+=(const DbTableStats& o);
 };
 
-using LockTable = absl::flat_hash_map<std::string, IntentLock>;
+// Table for recording locks that uses string_views where possible. LockTable falls back to
+// strings for locks that are used by multiple transactions. Keys used with the lock table
+// should be normalized with GetLockKey
+class LockTable {
+ public:
+  size_t Size() const;
+  std::optional<const IntentLock> Find(std::string_view key) const;
+
+  bool Acquire(std::string_view key, IntentLock::Mode mode);
+  void Release(std::string_view key, IntentLock::Mode mode);
+
+  auto begin() const {
+    return locks_.cbegin();
+  }
+
+  auto end() const {
+    return locks_.cbegin();
+  }
+
+ private:
+  struct Key {
+    operator std::string_view() const {
+      return visit([](const auto& s) -> std::string_view { return s; }, val_);
+    }
+
+    bool operator==(const Key& o) const {
+      return *this == std::string_view(o);
+    }
+
+    friend std::ostream& operator<<(std::ostream& o, const Key& key) {
+      return o << std::string_view(key);
+    }
+
+    // If the key is backed by a string_view, replace it with a string with the same value
+    void MakeOwned() const;
+
+    mutable std::variant<std::string_view, std::string> val_;
+  };
+
+  absl::flat_hash_map<Key, IntentLock> locks_;
+};
 
 // A single Db table that represents a table that can be chosen with "SELECT" command.
 struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_counter> {
@@ -101,6 +144,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   ~DbTable();
 
   void Clear();
+  PrimeIterator Launder(PrimeIterator it, std::string_view key);
 };
 
 // We use reference counting semantics of DbTable when doing snapshotting.

@@ -18,8 +18,8 @@ extern "C" {
 
 //
 #include "core/external_alloc.h"
-#include "core/fibers.h"
 #include "core/mi_memory_resource.h"
+#include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/cluster/cluster_config.h"
 #include "server/db_slice.h"
@@ -41,6 +41,7 @@ class EngineShard {
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
     uint64_t poll_execution_total = 0;
+    uint64_t tx_ooo_total = 0;
     Stats& operator+=(const Stats&);
   };
 
@@ -73,7 +74,7 @@ class EngineShard {
     return &mi_resource_;
   }
 
-  FiberQueue* GetFiberQueue() {
+  TaskQueue* GetFiberQueue() {
     return &queue_;
   }
 
@@ -224,8 +225,7 @@ class EngineShard {
   // return true if we did not complete the shard scan
   bool DoDefrag();
 
-  FiberQueue queue_;
-  Fiber fiber_q_;
+  TaskQueue queue_;
 
   TxQueue txq_;
   MiMemoryResource mi_resource_;
@@ -277,6 +277,9 @@ class EngineShardSet {
     return uint32_t(shard_queue_.size());
   }
 
+  bool IsTieringEnabled() {
+    return is_tiering_enabled_;
+  }
   util::ProactorPool* pool() {
     return pp_;
   }
@@ -338,7 +341,8 @@ class EngineShardSet {
   void InitThreadLocal(util::ProactorBase* pb, bool update_db_time, size_t max_file_size);
 
   util::ProactorPool* pp_;
-  std::vector<FiberQueue*> shard_queue_;
+  std::vector<TaskQueue*> shard_queue_;
+  bool is_tiering_enabled_ = false;
 };
 
 template <typename U, typename P>

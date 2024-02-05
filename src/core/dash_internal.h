@@ -1660,9 +1660,12 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
   uint8_t fp_hash = key_hash & kFpMask;
   assert(fp_hash == from.Fp(slot));
 
+  if (!bp.CanBump(from.key[slot])) {
+    return Iterator{bid, slot};
+  }
   if (bid < kRegularBucketCnt) {
     // non stash case.
-    if (slot > 0 && bp.CanBumpDown(from.key[slot - 1])) {
+    if (slot > 0 && bp.CanBump(from.key[slot - 1])) {
       from.Swap(slot - 1, slot);
       return Iterator{bid, uint8_t(slot - 1)};
     }
@@ -1697,7 +1700,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
 
   // Don't move sticky items back to the stash because they're not evictable
   // TODO: search for first swappable item
-  if (!bp.CanBumpDown(swapb.key[kLastSlot])) {
+  if (!bp.CanBump(swapb.key[kLastSlot])) {
     target.SetStashPtr(stash_pos, fp_hash, &next);
     return Iterator{bid, slot};
   }

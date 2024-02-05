@@ -815,7 +815,7 @@ TEST_F(ListFamilyTest, BLPopUnwakesInScript) {
   });
 
   // Start long running script that intends to wake up blpop
-  auto f2 = pp_->at(2)->LaunchFiber([&]() {
+  auto f2 = pp_->at(2)->LaunchFiber([&] {
     Run("script", {"EVAL", SCRIPT, "5", "a", "b", "c", "d", "l"});
   });
 
@@ -841,7 +841,7 @@ TEST_F(ListFamilyTest, OtherMultiWakesBLpop) {
   )";
 
   // Start BLPOP with infinite timeout
-  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&]() {
+  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     auto resp = Run("blpop", {"BLPOP", "l", "0"});
     // blpop should only be awakened after the script has completed, so the
     // last element added in the script should be returned.
@@ -851,7 +851,7 @@ TEST_F(ListFamilyTest, OtherMultiWakesBLpop) {
 
   // Start long running script that accesses the list, but should wake up blpop only after it
   // finished
-  auto f2 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&]() {
+  auto f2 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
     Run("script", {"EVAL", SCRIPT, "5", "a", "b", "c", "d", "l"});
   });
 
@@ -860,6 +860,30 @@ TEST_F(ListFamilyTest, OtherMultiWakesBLpop) {
 
   f1.Join();
   f2.Join();
+}
+
+TEST_F(ListFamilyTest, ContendExpire) {
+  GTEST_SKIP() << "Skipped due to a bug in helio";
+
+  vector<fb2::Fiber> blpop_fibers;
+  for (unsigned i = 0; i < num_threads_; ++i) {
+    for (unsigned j = 0; j < 30; ++j) {
+      blpop_fibers.emplace_back(pp_->at(i)->LaunchFiber(Launch::post, [&, i, j] {
+        string keys[2] = {"key0", "key1"};
+        thread_local unsigned cur = 0;
+        for (unsigned n = 0; n < 30; n++) {
+          string k = keys[cur];
+          cur ^= 1;
+          Run(StrCat("push", i, "_", j), {"lpush", k, "foo"});
+          Run(StrCat("blpop", i, "_", j), {"blpop", keys[cur], "a", "0.001"});
+        }
+      }));
+    }
+  }
+
+  for (auto& f : blpop_fibers) {
+    f.Join();
+  }
 }
 
 }  // namespace dfly

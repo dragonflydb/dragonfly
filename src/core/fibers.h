@@ -18,8 +18,6 @@ using util::fb2::CondVar;
 using util::fb2::Done;
 using util::fb2::EventCount;
 using util::fb2::Fiber;
-using util::fb2::FiberQueue;
-using util::fb2::FiberQueueThreadPool;
 using util::fb2::Future;
 using util::fb2::Launch;
 using util::fb2::Mutex;

@@ -377,7 +377,6 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const base::PODArray<char>& str);
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
-  void operator()(const JsonType& jt);
 
   std::error_code ec() const {
     return ec_;
@@ -460,10 +459,6 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
     default:
       LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
-}
-
-void RdbLoaderBase::OpaqueObjLoader::operator()(const JsonType& json) {
-  pv_->SetJson(JsonType{json});
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1080,6 +1075,12 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned char* lp = (uint8_t*)zmalloc(bytes);
     std::memcpy(lp, src_lp, bytes);
     pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
+  } else if (rdb_type_ == RDB_TYPE_JSON) {
+    auto json = JsonFromString(blob);
+    if (!json) {
+      ec_ = RdbError(errc::bad_json_string);
+    }
+    pv_->SetJson(std::move(*json));
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
@@ -1400,20 +1401,18 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadStreams();
       break;
     case RDB_TYPE_JSON:
+      iores = ReadJson();
+      break;
     case RDB_TYPE_SET_LISTPACK:
       // We need to deal with protocol versions 9 and older because in these
       // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
       // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
-      if (rdb_version_ < 10 && rdbtype == RDB_TYPE_JSON_OLD) {
+      if (rdb_version_ < 10) {
+        // consider it RDB_TYPE_JSON_OLD
         iores = ReadJson();
-        break;
+      } else {
+        iores = ReadGeneric(rdbtype);
       }
-      if (rdbtype == RDB_TYPE_JSON) {
-        iores = ReadJson();
-        break;
-      }
-
-      iores = ReadGeneric(rdbtype);
       break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
@@ -1829,14 +1828,12 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadJson() -> io::Result<OpaqueObj> {
-  string json_str;
-  SET_OR_UNEXPECT(FetchGenericString(), json_str);
+  RdbVariant dest;
+  error_code ec = ReadStringObj(&dest);
+  if (ec)
+    return make_unexpected(ec);
 
-  auto json = JsonFromString(json_str);
-  if (!json)
-    return Unexpected(errc::bad_json_string);
-
-  return OpaqueObj{std::move(*json), RDB_TYPE_JSON};
+  return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
@@ -2364,17 +2361,18 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
       continue;
 
-    try {
-      auto res = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
-      res.it->first.SetSticky(item->is_sticky);
-      if (!res.is_new) {
-        LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
-      }
-    } catch (const std::bad_alloc&) {
+    auto op_res = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+    if (!op_res) {
       LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
       ec_ = RdbError(errc::out_of_memory);
       stop_early_ = true;
       break;
+    }
+
+    auto& res = *op_res;
+    res.it->first.SetSticky(item->is_sticky);
+    if (!res.is_new) {
+      LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
   }
 

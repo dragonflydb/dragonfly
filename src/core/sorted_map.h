@@ -13,7 +13,6 @@
 #include <vector>
 
 extern "C" {
-#include "redis/dict.h"
 #include "redis/zset.h"
 }
 
@@ -147,66 +146,6 @@ class SortedMap {
   }
 
  private:
-  struct RdImpl {
-    struct dict* dict = nullptr;
-    zskiplist* zsl = nullptr;
-
-    int Add(double score, sds ele, int in_flags, int* out_flags, double* newscore);
-
-    void Init();
-
-    void Free() {
-      dictRelease(dict);
-      zslFree(zsl);
-    }
-
-    bool Insert(double score, sds member);
-
-    bool Delete(sds ele);
-
-    size_t Size() const {
-      return zsl->length;
-    }
-
-    size_t MallocSize() const;
-
-    bool Reserve(size_t sz) {
-      return dictExpand(dict, sz) == DICT_OK;
-    }
-
-    size_t DeleteRangeByRank(unsigned start, unsigned end) {
-      return zslDeleteRangeByRank(zsl, start + 1, end + 1, dict);
-    }
-
-    size_t DeleteRangeByScore(const zrangespec& range) {
-      return zslDeleteRangeByScore(zsl, &range, dict);
-    }
-
-    size_t DeleteRangeByLex(const zlexrangespec& range) {
-      return zslDeleteRangeByLex(zsl, &range, dict);
-    }
-
-    ScoredArray PopTopScores(unsigned count, bool reverse);
-
-    uint8_t* ToListPack() const;
-
-    std::optional<double> GetScore(sds ele) const;
-    std::optional<unsigned> GetRank(sds ele, bool reverse) const;
-
-    ScoredArray GetRange(const zrangespec& r, unsigned offs, unsigned len, bool rev) const;
-    ScoredArray GetLexRange(const zlexrangespec& r, unsigned o, unsigned l, bool rev) const;
-
-    size_t Count(const zrangespec& range) const;
-    size_t LexCount(const zlexrangespec& range) const;
-
-    // Runs cb for each element in the range [start_rank, start_rank + len).
-    // Stops iteration if cb returns false. Returns false in this case.
-    bool Iterate(unsigned start_rank, unsigned len, bool reverse,
-                 absl::FunctionRef<bool(sds, double)> cb) const;
-
-    uint64_t Scan(uint64_t cursor, absl::FunctionRef<void(std::string_view, double)> cb) const;
-  };
-
   struct DfImpl {
     ScoreMap* score_map = nullptr;
     using ScoreSds = void*;
@@ -267,8 +206,8 @@ class SortedMap {
     uint64_t Scan(uint64_t cursor, absl::FunctionRef<void(std::string_view, double)> cb) const;
   };
 
-  std::variant<RdImpl, DfImpl> impl_;
-  PMR_NS::memory_resource* mr_res_;
+  // TODO: remove this variant and get rid of wrapper class
+  std::variant<DfImpl> impl_;
 };
 
 // Used by CompactObject.

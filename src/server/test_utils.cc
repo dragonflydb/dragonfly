@@ -228,7 +228,7 @@ void BaseFamilyTest::ResetService() {
   watchdog_fiber_ = pp_->GetNextProactor()->LaunchFiber([this] {
     ThisFiber::SetName("Watchdog");
 
-    if (!watchdog_done_.WaitFor(120s)) {
+    if (!watchdog_done_.WaitFor(60s)) {
       LOG(ERROR) << "Deadlock detected!!!!";
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       fb2::Mutex m;
@@ -311,7 +311,7 @@ unsigned BaseFamilyTest::NumLocked() {
       if (db == nullptr) {
         continue;
       }
-      count += db->trans_locks.size();
+      count += db->trans_locks.Size();
     }
   });
   return count;

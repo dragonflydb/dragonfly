@@ -151,15 +151,21 @@ TEST_F(MultiTest, MultiEmpty) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
   resp = Run({"exec"});
-
-  ASSERT_THAT(resp, ArrLen(0));
-  ASSERT_FALSE(service_->IsShardSetLocked());
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_FALSE(service_->IsShardSetLocked());
 
   Run({"multi"});
   ASSERT_EQ(Run({"ping", "foo"}), "QUEUED");
   resp = Run({"exec"});
-  // one cell arrays are promoted to respexpr.
   EXPECT_EQ(resp, "foo");
+
+  Run({"multi"});
+  Run({"set", "a", ""});
+  resp = Run({"exec"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"get", "a"});
+  EXPECT_EQ(resp, "");
 }
 
 TEST_F(MultiTest, MultiSeq) {
@@ -233,6 +239,51 @@ TEST_F(MultiTest, MultiConsistent) {
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(MultiTest, MultiConsistent2) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped MultiConsistent2 test because multi_exec_mode is non atomic";
+    return;
+  }
+
+  const int kKeyCount = 50;
+  const int kRuns = 50;
+  const int kJobs = 20;
+
+  vector<string> all_keys(kKeyCount);
+  for (size_t i = 0; i < kKeyCount; i++)
+    all_keys[i] = absl::StrCat("key", i);
+
+  auto cb = [&](string id) {
+    for (size_t r = 0; r < kRuns; r++) {
+      size_t num_keys = (rand() % 5) + 1;
+      set<string_view> keys;
+      for (size_t i = 0; i < num_keys; i++)
+        keys.insert(all_keys[rand() % kKeyCount]);
+
+      Run(id, {"MULTI"});
+      for (auto key : keys)
+        Run(id, {"INCR", key});
+      for (auto key : keys)
+        Run(id, {"DECR", key});
+      auto resp = Run(id, {"EXEC"});
+
+      ASSERT_EQ(resp.GetVec().size(), keys.size() * 2);
+      for (size_t i = 0; i < keys.size(); i++) {
+        EXPECT_EQ(resp.GetVec()[i].GetInt(), optional<int64_t>(1));
+        EXPECT_EQ(resp.GetVec()[i + keys.size()].GetInt(), optional<int64_t>(0));
+      }
+    }
+  };
+
+  vector<Fiber> fbs(kJobs);
+  for (size_t i = 0; i < kJobs; i++) {
+    fbs[i] = pp_->at(i % pp_->size())->LaunchFiber([i, cb]() { cb(absl::StrCat("worker", i)); });
+  }
+
+  for (auto& fb : fbs)
+    fb.Join();
 }
 
 TEST_F(MultiTest, MultiRename) {
@@ -511,9 +562,9 @@ TEST_F(MultiTest, MultiOOO) {
   // OOO works in LOCK_AHEAD mode.
   int mode = absl::GetFlag(FLAGS_multi_exec_mode);
   if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
-    EXPECT_EQ(200, metrics.coordinator_stats.tx_type_cnt[ServerState::OOO]);
+    EXPECT_EQ(200, metrics.shard_stats.tx_ooo_total);
   else
-    EXPECT_EQ(0, metrics.coordinator_stats.tx_type_cnt[ServerState::OOO]);
+    EXPECT_EQ(0, metrics.shard_stats.tx_ooo_total);
 }
 
 // Lua scripts lock their keys ahead and thus can run out of order.

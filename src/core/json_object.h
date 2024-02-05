@@ -4,32 +4,26 @@
 
 #pragma once
 
+#include <jsoncons/json.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <memory>
 #include <optional>
 #include <string_view>
-
-extern "C" {
-#include "redis/redis_aux.h"
-}
-
-// Note about this file - once we have the issue with jsonpath in jsoncons resolved
-// we would add the implementation for the allocator here as well. Right now this
-// file is a little bit empty, but for external "users" such as json_family they
-// should include this when creating JSON object from string that we're getting
-// from the commands.
-namespace jsoncons {
-struct sorted_policy;
-template <typename CharT, typename Policy, typename Allocator> class basic_json;
-}  // namespace jsoncons
 
 namespace dfly {
 
 // This is temporary, there is an issue right now with jsoncons about using jsonpath
 // with custom allocator. once it would resolved, we would change this to use custom allocator
 // that allocate memory from mimalloc
-using JsonType = jsoncons::basic_json<char, jsoncons::sorted_policy, std::allocator<char>>;
+using JsonType = jsoncons::pmr::json;
 
 // Build a json object from string. If the string is not legal json, will return nullopt
 std::optional<JsonType> JsonFromString(std::string_view input);
+
+inline auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
+    -> jsoncons::jsonpath::jsonpath_expression<JsonType> {
+  return jsoncons::jsonpath::make_expression<JsonType, std::allocator<char>>(
+      jsoncons::allocator_set<JsonType::allocator_type, std::allocator<char>>(), path, ec);
+}
 
 }  // namespace dfly

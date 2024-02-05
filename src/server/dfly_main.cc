@@ -3,13 +3,6 @@
 // See LICENSE for licensing terms.
 //
 
-#include "absl/cleanup/cleanup.h"
-#include "absl/container/inlined_vector.h"
-#include "absl/strings/numbers.h"
-#ifdef NDEBUG
-#include <mimalloc-new-delete.h>
-#endif
-
 #include <absl/flags/parse.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
@@ -17,6 +10,17 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
+
+#include "absl/cleanup/cleanup.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/strings/numbers.h"
+
+#ifdef DFLY_ENABLE_MEMORY_TRACKING
+#define INJECT_ALLOCATION_TRACKER
+#include "core/allocation_tracker.h"
+#else
+#include <mimalloc-new-delete.h>
+#endif
 
 #ifdef __linux__
 #include <liburing.h>
@@ -72,6 +76,8 @@ ABSL_FLAG(bool, force_epoll, false,
 
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
+
+ABSL_FLAG(uint16_t, tcp_backlog, 128, "TCP listen(2) backlog parameter.");
 
 using namespace util;
 using namespace facade;
@@ -711,6 +717,7 @@ Usage: dragonfly [FLAGS]
   pool->Run();
 
   AcceptServer acceptor(pool.get());
+  acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
   int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
 

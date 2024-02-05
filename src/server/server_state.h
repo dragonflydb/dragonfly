@@ -93,15 +93,15 @@ class ServerState {  // public struct - to allow initialization.
   void operator=(const ServerState&) = delete;
 
  public:
-  enum TxType { GLOBAL, NORMAL, OOO, QUICK, INLINE, NUM_TX_TYPES };
+  enum TxType { GLOBAL, NORMAL, QUICK, INLINE, NUM_TX_TYPES };
   struct Stats {
     std::array<uint64_t, NUM_TX_TYPES> tx_type_cnt;
+    uint64_t tx_schedule_cancel_cnt = 0;
 
     uint64_t eval_io_coordination_cnt = 0;
     uint64_t eval_shardlocal_coordination_cnt = 0;
     uint64_t eval_squashed_flushes = 0;
 
-    uint64_t tx_schedule_cancel_cnt = 0;
     uint64_t multi_squash_executions = 0;
     uint64_t multi_squash_exec_hop_usec = 0;
     uint64_t multi_squash_exec_reply_usec = 0;
@@ -180,6 +180,8 @@ class ServerState {  // public struct - to allow initialization.
 
   // Return interpreter to internal manager to be re-used.
   void ReturnInterpreter(Interpreter*);
+
+  void ResetInterpreter();
 
   // Returns sum of all requests in the last 6 seconds
   // (not including the current one).

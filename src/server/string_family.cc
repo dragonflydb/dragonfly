@@ -16,8 +16,8 @@ extern "C" {
 #include <cstdint>
 #include <tuple>
 
+#include "base/flags.h"
 #include "base/logging.h"
-#include "redis/util.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -26,6 +26,10 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+
+ABSL_FLAG(bool, tiered_skip_prefetch, false,
+          "If true, does not load offloaded string back to in-memory store during GET command."
+          "For testing/development purposes only.");
 
 namespace dfly {
 
@@ -71,28 +75,25 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     }
   }
 
-  DbSlice::AddOrFindResult res;
+  auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& res = *op_res;
 
-  try {
-    res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
-    string s;
+  string s;
 
-    if (res.is_new) {
+  if (res.is_new) {
+    s.resize(range_len);
+  } else {
+    if (res.it->second.ObjType() != OBJ_STRING)
+      return OpStatus::WRONG_TYPE;
+
+    s = GetString(res.it->second);
+    if (s.size() < range_len)
       s.resize(range_len);
-    } else {
-      if (res.it->second.ObjType() != OBJ_STRING)
-        return OpStatus::WRONG_TYPE;
-
-      s = GetString(res.it->second);
-      if (s.size() < range_len)
-        s.resize(range_len);
-    }
-
-    memcpy(s.data() + start, value.data(), value.size());
-    res.it->second.SetString(s);
-  } catch (const std::bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
   }
+
+  memcpy(s.data() + start, value.data(), value.size());
+  res.it->second.SetString(s);
   return res.it->second.Size();
 }
 
@@ -149,14 +150,9 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
                                bool prepend) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
-  } catch (const std::bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
-  }
-
+  auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& add_res = *op_res;
   if (add_res.is_new) {
     add_res.it->second.SetString(val);
     return val.size();
@@ -219,12 +215,10 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
   auto& db_slice = op_args.shard->db_slice();
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (const std::bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
-  }
+
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& add_res = *op_res;
 
   char buf[128];
 
@@ -277,11 +271,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
     CompactObj cobj;
     cobj.SetInt(incr);
 
-    try {
-      res = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
-    } catch (bad_alloc&) {
-      return OpStatus::OUT_OF_MEMORY;
-    }
+    auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
+    RETURN_ON_BAD_STATUS(op_result);
 
     return incr;
   }
@@ -465,10 +456,9 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
       CompactObj cobj;
       cobj.SetInt(new_tat_ms);
 
-      try {
-        db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
-      } catch (bad_alloc&) {
-        return OpStatus::OUT_OF_MEMORY;
+      auto res = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
+      if (!res) {
+        return res.status();
       }
     }
   }
@@ -504,18 +494,18 @@ class SetResultBuilder {
 
 SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                                       EngineShard* shard) {
-  auto args = t->GetShardArgs(shard->shard_id());
-  DCHECK(!args.empty());
+  auto keys = t->GetShardArgs(shard->shard_id());
+  DCHECK(!keys.empty());
 
   auto& db_slice = shard->db_slice();
 
-  SinkReplyBuilder::MGetResponse response(args.size());
-  absl::InlinedVector<PrimeConstIterator, 32> iters(args.size());
+  SinkReplyBuilder::MGetResponse response(keys.size());
+  absl::InlinedVector<PrimeConstIterator, 32> iters(keys.size());
 
   size_t total_size = 0;
-  for (size_t i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < keys.size(); ++i) {
     OpResult<PrimeConstIterator> it_res =
-        db_slice.FindAndFetchReadOnly(t->GetDbContext(), args[i], OBJ_STRING);
+        db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -525,7 +515,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
-  for (size_t i = 0; i < args.size(); ++i) {
+  for (size_t i = 0; i < keys.size(); ++i) {
     PrimeConstIterator it = iters[i];
     if (it.is_done())
       continue;
@@ -592,12 +582,9 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   // At this point we either need to add missing entry, or we
   // will override an existing one
   // Trying to add a new entry.
-  DbSlice::AddOrFindResult add_res;
-  try {
-    add_res = db_slice.AddOrFind(op_args_.db_cntx, key);  // TODO do we free the space for existing?
-  } catch (bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
-  }
+  auto op_res = db_slice.AddOrFind(op_args_.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& add_res = *op_res;
 
   PrimeIterator it = add_res.it;
   if (!add_res.is_new) {
@@ -626,7 +613,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
       TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards. handle this
-    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
+    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it, key);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -847,11 +834,28 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
     auto op_args = t->GetOpArgs(shard);
     DbSlice& db_slice = op_args.shard->db_slice();
-    auto res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+
+    OpResult<PrimeConstIterator> res;
+
+    // A temporary code that allows running dragonfly without filling up memory store
+    // when reading data from disk.
+    if (TieredStorage* tiered = shard->tiered_storage();
+        tiered && absl::GetFlag(FLAGS_tiered_skip_prefetch)) {
+      res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+      if (res && (*res)->second.IsExternal()) {
+        auto [offset, size] = (*res)->second.GetExternalSlice();
+        string blob(size, '\0');
+        auto ec = tiered->Read(offset, size, blob.data());
+        CHECK(!ec) << "TBD";
+        return blob;
+      }
+    } else {
+      res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+    }
+
     if (!res) {
       return res.status();
     }
-
     return GetString((*res)->second);
   };
 

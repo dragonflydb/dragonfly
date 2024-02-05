@@ -256,6 +256,29 @@ TEST_F(DflyEngineTest, EvalSha) {
   EXPECT_THAT(resp, "c6459b95a0e81df97af6fdd49b1a9e0287a57363");
 }
 
+TEST_F(DflyEngineTest, ScriptFlush) {
+  auto resp = Run({"script", "load", "return 5"});
+  EXPECT_THAT(resp, ArgType(RespExpr::STRING));
+  string sha{ToSV(resp.GetBuf())};
+  resp = Run({"evalsha", sha, "0"});
+  EXPECT_THAT(5, resp.GetInt());
+  resp = Run({"script", "exists", sha});
+  EXPECT_THAT(1, resp.GetInt());
+
+  resp = Run({"script", "flush"});
+  resp = Run({"script", "exists", sha});
+  EXPECT_THAT(0, resp.GetInt());
+  EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("NOSCRIPT No matching script. Please use EVAL."));
+
+  resp = Run({"script", "load", "return 5"});
+  EXPECT_THAT(resp, ArgType(RespExpr::STRING));
+  sha = string{ToSV(resp.GetBuf())};
+  resp = Run({"evalsha", sha, "0"});
+  EXPECT_THAT(5, resp.GetInt());
+  resp = Run({"script", "exists", sha});
+  EXPECT_THAT(1, resp.GetInt());
+}
+
 TEST_F(DflyEngineTest, Hello) {
   auto resp = Run({"hello"});
   ASSERT_THAT(resp, ArrLen(14));
@@ -541,19 +564,19 @@ TEST_F(DflyEngineTest, Bug496) {
         db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
 
     {
-      auto res = db.AddOrFind({}, "key-1");
+      auto res = *db.AddOrFind({}, "key-1");
       EXPECT_TRUE(res.is_new);
       EXPECT_EQ(cb_hits, 1);
     }
 
     {
-      auto res = db.AddOrFind({}, "key-1");
+      auto res = *db.AddOrFind({}, "key-1");
       EXPECT_FALSE(res.is_new);
       EXPECT_EQ(cb_hits, 2);
     }
 
     {
-      auto res = db.AddOrFind({}, "key-2");
+      auto res = *db.AddOrFind({}, "key-2");
       EXPECT_TRUE(res.is_new);
       EXPECT_EQ(cb_hits, 3);
     }

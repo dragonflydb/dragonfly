@@ -28,6 +28,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -193,13 +194,9 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs&
     return db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   }
 
-  DbSlice::AddOrFindResult add_res;
-
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
-  }
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& add_res = *op_res;
 
   PrimeIterator& it = add_res.it;
   PrimeValue& pv = it->second;
@@ -1338,6 +1335,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return rb->SendError(kWrongTypeErr);
+    case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     default:
@@ -3075,8 +3073,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
         geo_ops.sorting = Sorting::kDesc;
       }
     } else if (cur_arg == "COUNT") {
-      if (i + 1 < args.size()) {
-        absl::SimpleAtoi(std::string(ArgS(args, i + 1)), &geo_ops.count);
+      if (i + 1 < args.size() && absl::SimpleAtoi(ArgS(args, i + 1), &geo_ops.count)) {
         i++;
       } else {
         return cntx->SendError(kSyntaxErr);
@@ -3144,8 +3141,7 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
         geo_ops.sorting = Sorting::kDesc;
       }
     } else if (cur_arg == "COUNT") {
-      if (i + 1 < args.size()) {
-        absl::SimpleAtoi(std::string(ArgS(args, i + 1)), &geo_ops.count);
+      if (i + 1 < args.size() && absl::SimpleAtoi(ArgS(args, i + 1), &geo_ops.count)) {
         i++;
       } else {
         return cntx->SendError(kSyntaxErr);
@@ -3249,6 +3245,7 @@ constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
   registry->StartFamily();
+  // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   *registry
       << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
       << CI{"BZPOPMIN",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
@@ -3263,9 +3260,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZINCRBY", CO::FAST | CO::WRITE, 4, 1, 1, acl::kZIncrBy}.HFUNC(ZIncrBy)
       << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, acl::kZInterStore}.HFUNC(ZInterStore)
       << CI{"ZINTER", kStoreMask, -3, 2, 2, acl::kZInter}.HFUNC(ZInter)
-      << CI{"ZINTERCARD",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2,
-            acl::kZInterCard}
-             .HFUNC(ZInterCard)
+      << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZInterCard}.HFUNC(
+             ZInterCard)
       << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, acl::kZLexCount}.HFUNC(ZLexCount)
       << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMax}.HFUNC(ZPopMax)
       << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, acl::kZPopMin}.HFUNC(ZPopMin)

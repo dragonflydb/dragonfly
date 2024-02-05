@@ -121,7 +121,7 @@ void RedisTranslator::OnDouble(double d) {
   ArrayPre();
 
   // Convert to integer when possible to allow converting to string without trailing zeros.
-  if (abs(fractpart) < kConvertEps && intpart < std::numeric_limits<lua_Integer>::max() &&
+  if (abs(fractpart) < kConvertEps && intpart < double(std::numeric_limits<lua_Integer>::max()) &&
       intpart > std::numeric_limits<lua_Integer>::min())
     lua_pushinteger(lua_, static_cast<lua_Integer>(d));
   else
@@ -351,6 +351,20 @@ int RedisStatusReplyCommand(lua_State* lua) {
   return SingleFieldTable(lua, "ok");
 }
 
+// no-op
+int RedisReplicateCommands(lua_State* lua) {
+  lua_pushinteger(lua, 1);
+  // number of results (the number of elements pushed to the lua stack
+  return 1;
+}
+
+int RedisLogCommand(lua_State* lua) {
+  // if the arguments passed to redis.log are incorrect
+  // we still do not log the error. Therefore, even if
+  // for the no-op case we don't need to parse the arguments
+  return 0;
+}
+
 // See https://www.lua.org/manual/5.3/manual.html#lua_Alloc
 void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
   (void)ud;
@@ -406,6 +420,18 @@ Interpreter::Interpreter() {
   lua_settable(lua_, -3);
   lua_pushstring(lua_, "status_reply");
   lua_pushcfunction(lua_, RedisStatusReplyCommand);
+  lua_settable(lua_, -3);
+
+  /* no-op functions */
+
+  /* redis.replicate_commands*/
+  lua_pushstring(lua_, "replicate_commands");
+  lua_pushcfunction(lua_, RedisReplicateCommands);
+  lua_settable(lua_, -3);
+
+  /* redis.log*/
+  lua_pushstring(lua_, "log");
+  lua_pushcfunction(lua_, RedisLogCommand);
   lua_settable(lua_, -3);
 
   /* Finally set the table as 'redis' global var. */
@@ -867,6 +893,13 @@ Interpreter* InterpreterManager::Get() {
 void InterpreterManager::Return(Interpreter* ir) {
   available_.push_back(ir);
   waker_.notify();
+}
+
+void InterpreterManager::Reset() {
+  waker_.await([this]() { return available_.size() == storage_.size(); });
+
+  available_.clear();
+  storage_.clear();
 }
 
 }  // namespace dfly

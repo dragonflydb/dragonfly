@@ -34,7 +34,7 @@ struct SaveStagesInputs {
 
 class RdbSnapshot {
  public:
-  RdbSnapshot(FiberQueueThreadPool* fq_tp, SnapshotStorage* snapshot_storage)
+  RdbSnapshot(util::fb2::FiberQueueThreadPool* fq_tp, SnapshotStorage* snapshot_storage)
       : snapshot_storage_{snapshot_storage} {
   }
 

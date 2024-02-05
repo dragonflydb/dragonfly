@@ -33,6 +33,17 @@ using facade::kWrongTypeErr;
 
 #endif  // RETURN_ON_ERR
 
+#ifndef RETURN_ON_BAD_STATUS
+
+#define RETURN_ON_BAD_STATUS(x) \
+  do {                          \
+    if (!(x)) {                 \
+      return (x).status();      \
+    }                           \
+  } while (0)
+
+#endif  // RETURN_ON_BAD_STATUS
+
 namespace rdb {
 
 enum errc {

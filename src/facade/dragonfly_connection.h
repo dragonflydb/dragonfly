@@ -146,6 +146,10 @@ class Connection : public util::Connection {
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
                  MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
         handle;
+
+    // time when the message was dispatched to the dispatch queue as reported by
+    // ProactorBase::GetMonotonicTimeNs()
+    uint64_t dispatch_ts = 0;
   };
 
   static_assert(sizeof(MessageHandle) <= 80,

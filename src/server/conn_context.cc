@@ -23,14 +23,16 @@ StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mo
     : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
   for (auto args : args) {
-    total_size += args.size() + 1;  // +1 for null terminator
+    total_size += args.size();
   }
+
   buffer_.resize(total_size);
   char* next = buffer_.data();
   for (unsigned i = 0; i < args.size(); i++) {
-    memcpy(next, args[i].data(), args[i].size() + 1);
-    sizes_[i] = args[i].size();
+    if (args[i].size() > 0)
+      memcpy(next, args[i].data(), args[i].size());
     next += args[i].size();
+    sizes_[i] = args[i].size();
   }
 }
 
@@ -234,7 +236,7 @@ size_t ConnectionState::ExecInfo::UsedMemory() const {
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
-  return dfly::HeapSize(keys);
+  return dfly::HeapSize(keys) + async_cmds_heap_mem;
 }
 
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {

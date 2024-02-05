@@ -727,11 +727,6 @@ Service::Service(ProactorPool* pp)
   CHECK(pp);
   CHECK(shard_set == NULL);
 
-  if (KeyLockArgs::IsLockHashTagEnabled() && !ClusterConfig::IsEnabledOrEmulated()) {
-    LOG(ERROR) << "Setting --lock_on_hashtags without --cluster_mode is unsupported";
-    exit(1);
-  }
-
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
   LOG(INFO) << "PRINT STACKTRACES REGISTERED";
   pp_.GetNextProactor()->RegisterSignal({SIGUSR1}, [this](int signal) {
@@ -907,17 +902,21 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   if (!key_index_res)
     return key_index_res.status();
 
+  // TODO: Switch to transaction internal locked keys once single hop multi transactions are merged
+  // const auto& locked_keys = trans->GetMultiKeys();
+  const auto& locked_keys = eval_info.keys;
+
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     string_view key = KeyLockArgs::GetLockKey(ArgS(args, i));
-    if (!eval_info.keys.contains(key)) {
+    if (!locked_keys.contains(key)) {
       VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
   if (key_index.bonus &&
-      !eval_info.keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
+      !locked_keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
     return OpStatus::KEY_NOTFOUND;
 
   return OpStatus::OK;
@@ -1245,10 +1244,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   if (cntx->transaction && !cntx->conn_state.exec_info.IsRunning() &&
       cntx->conn_state.script_info == nullptr) {
-    bool is_ooo = cntx->transaction->IsOOO();
-
     cntx->last_command_debug.clock = cntx->transaction->txid();
-    cntx->last_command_debug.is_ooo = is_ooo;
   }
 
   return true;
@@ -1722,7 +1718,7 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
       trans->StartMultiGlobal(dbid);
       return true;
     case Transaction::LOCK_AHEAD:
-      trans->StartMultiLockedAhead(dbid, keys);
+      trans->StartMultiLockedAhead(dbid, CmdArgVec{keys.begin(), keys.end()});
       return true;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
@@ -1840,7 +1836,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   if (CanRunSingleShardMulti(sid, *params, *tx)) {
     // If script runs on a single shard, we run it remotely to save hops.
-    interpreter->SetRedisFunc([cntx, tx, this](Interpreter::CallArgs args) {
+    interpreter->SetRedisFunc([cntx, this](Interpreter::CallArgs args) {
       // Disable squashing, as we're using the squashing mechanism to run remotely.
       args.async = false;
       CallFromScript(cntx, args);
@@ -1854,6 +1850,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);
+      cntx->transaction->FIX_ConcludeJournalExec();  // flush journal
 
       cntx->transaction = tx;
       return OpStatus::OK;
@@ -1993,14 +1990,12 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
 // Return true if transaction was scheduled, false if scheduling was not required.
 void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
                     Transaction::MultiMode multi_mode) {
-  CmdArgVec tmp_keys;
   switch (multi_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       break;
     case Transaction::LOCK_AHEAD:
-      tmp_keys = CollectAllKeys(exec_info);
-      trans->StartMultiLockedAhead(dbid, CmdArgList{tmp_keys});
+      trans->StartMultiLockedAhead(dbid, CollectAllKeys(exec_info));
       break;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();

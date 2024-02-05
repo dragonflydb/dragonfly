@@ -227,18 +227,18 @@ class DbSlice {
     AddOrFindResult& operator=(ItAndUpdater&& o);
   };
 
-  AddOrFindResult AddOrFind(const Context& cntx, std::string_view key) noexcept(false);
-  AddOrFindResult AddOrFindAndFetch(const Context& cntx, std::string_view key) noexcept(false);
+  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
+  OpResult<AddOrFindResult> AddOrFindAndFetch(const Context& cntx, std::string_view key);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
-  AddOrFindResult AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
-                              uint64_t expire_at_ms) noexcept(false);
+  OpResult<AddOrFindResult> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
+                                        uint64_t expire_at_ms);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
-  // throws: bad_alloc is insertion could not happen due to out of memory.
-  ItAndUpdater AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
-                      uint64_t expire_at_ms) noexcept(false);
+  // Returns OpStatus::OUT_OF_MEMORY if bad_alloc is thrown
+  OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
+                                uint64_t expire_at_ms);
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
@@ -405,15 +405,15 @@ class DbSlice {
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // Releases a single key. `key` must have been normalized by GetLockKey().
-  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key,
-                         unsigned count);
+  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key);
 
  private:
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
 
-  AddOrFindResult AddOrUpdateInternal(const Context& cntx, std::string_view key, PrimeValue obj,
-                                      uint64_t expire_at_ms, bool force_update) noexcept(false);
+  OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
+                                                PrimeValue obj, uint64_t expire_at_ms,
+                                                bool force_update);
 
   void FlushSlotsFb(const SlotSet& slot_ids);
   void FlushDbIndexes(const std::vector<DbIndex>& indexes);
@@ -444,8 +444,8 @@ class DbSlice {
   OpResult<ItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                   std::optional<unsigned> req_obj_type, UpdateStatsMode stats_mode,
                                   LoadExternalMode load_mode);
-  AddOrFindResult AddOrFindInternal(const Context& cntx, std::string_view key,
-                                    LoadExternalMode load_mode) noexcept(false);
+  OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key,
+                                              LoadExternalMode load_mode);
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type,
                                              LoadExternalMode load_mode);
@@ -481,7 +481,7 @@ class DbSlice {
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
-  mutable absl::flat_hash_set<CompactObjectView> bumped_items_;
+  mutable absl::flat_hash_set<CompactObjectView> fetched_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;

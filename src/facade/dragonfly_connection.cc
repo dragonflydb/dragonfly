@@ -409,11 +409,10 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
 }
 
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
-  ++stats->pipelined_cmd_cnt;
-
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
+
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
 }
@@ -449,7 +448,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   protocol_ = protocol;
 
   constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
-  static_assert(kReqSz <= 256 && kReqSz >= 232);
+  static_assert(kReqSz <= 256 && kReqSz >= 200);
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -1268,7 +1267,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       cc_->async_dispatch = true;
       std::visit(dispatch_op, msg.handle);
       cc_->async_dispatch = false;
-
       RecycleMessage(std::move(msg));
     }
 
@@ -1428,6 +1426,7 @@ void Connection::SendAsync(MessageHandle msg) {
   stats_->dispatch_queue_entries++;
   stats_->dispatch_queue_bytes += used_mem;
 
+  msg.dispatch_ts = ProactorBase::GetMonotonicTimeNs();
   if (msg.IsPubMsg()) {
     queue_backpressure_->subscriber_bytes.fetch_add(used_mem, memory_order_relaxed);
     stats_->dispatch_queue_subscriber_bytes += used_mem;
@@ -1465,6 +1464,9 @@ void Connection::RecycleMessage(MessageHandle msg) {
 
   // Retain pipeline message in pool.
   if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
+    ++stats_->pipelined_cmd_cnt;
+    stats_->pipelined_cmd_latency += (ProactorBase::GetMonotonicTimeNs() - msg.dispatch_ts) / 1000;
+
     pending_pipeline_cmd_cnt_--;
     if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
       stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();

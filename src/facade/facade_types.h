@@ -16,6 +16,12 @@
 
 namespace facade {
 
+#ifdef __SANITIZE_ADDRESS__
+constexpr size_t kSanitizerOverhead = 24u;
+#else
+constexpr size_t kSanitizerOverhead = 0u;
+#endif
+
 enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
 
 using MutableSlice = absl::Span<char>;
@@ -49,7 +55,7 @@ struct ConnectionStats {
 
   uint64_t command_cnt = 0;
   uint64_t pipelined_cmd_cnt = 0;
-
+  uint64_t pipelined_cmd_latency = 0;  // in microseconds
   uint64_t conn_received_cnt = 0;
 
   uint32_t num_conns = 0;
@@ -60,12 +66,6 @@ struct ConnectionStats {
 };
 
 struct ReplyStats {
-  enum SendStatsType {
-    kRegular,   // Send() operations that are written to sockets
-    kBatch,     // Send() operations that are internally batched to a buffer
-    kNumTypes,  // Number of types, do not use directly
-  };
-
   struct SendStats {
     int64_t count = 0;
     int64_t total_duration = 0;
@@ -79,7 +79,8 @@ struct ReplyStats {
     }
   };
 
-  SendStats send_stats[SendStatsType::kNumTypes];
+  // Send() operations that are written to sockets
+  SendStats send_stats;
 
   size_t io_write_cnt = 0;
   size_t io_write_bytes = 0;

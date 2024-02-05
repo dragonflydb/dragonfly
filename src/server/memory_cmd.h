@@ -18,7 +18,9 @@ class MemoryCmd {
 
  private:
   void Stats();
+  void MallocStats(CmdArgList args);
   void Usage(std::string_view key);
+  void Track(CmdArgList args);
 
   ConnectionContext* cntx_;
   ServerFamily* owner_;

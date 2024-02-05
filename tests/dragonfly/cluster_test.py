@@ -561,7 +561,10 @@ async def test_cluster_blocking_command(df_server):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_native_client(df_local_factory: DflyInstanceFactory):
+async def test_cluster_native_client(
+    df_local_factory: DflyInstanceFactory,
+    df_seeder_factory: DflySeederFactory,
+):
     # Start and configure cluster with 3 masters and 3 replicas
     masters = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
@@ -646,6 +649,9 @@ async def test_cluster_native_client(df_local_factory: DflyInstanceFactory):
       ]
     """
     await push_config(config, c_masters_admin + c_replicas_admin)
+
+    seeder = df_seeder_factory.create(port=masters[0].port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
 
     client = aioredis.RedisCluster(decode_responses=True, host="localhost", port=masters[0].port)
 
@@ -756,31 +762,13 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     config = f"""
       [
         {{
-          "slot_ranges": [
-            {{
-              "start": 0,
-              "end": LAST_SLOT_CUTOFF
-            }}
-          ],
-          "master": {{
-            "id": "{node_ids[0]}",
-            "ip": "localhost",
-            "port": {nodes[0].port}
-          }},
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
           "replicas": []
         }},
         {{
-          "slot_ranges": [
-            {{
-              "start": NEXT_SLOT_CUTOFF,
-              "end": 16383
-            }}
-          ],
-          "master": {{
-            "id": "{node_ids[1]}",
-            "ip": "localhost",
-            "port": {nodes[1].port}
-          }},
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
           "replicas": []
         }}
       ]
@@ -799,22 +787,23 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     res = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "5200", "5259"
     )
-    assert "OK" == res
+    assert 1 == res
 
-    await asyncio.sleep(0.5)
-
-    status = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-    )
-    assert "FULL_SYNC" == status
+    while (
+        await c_nodes_admin[1].execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
+        )
+        != "STABLE_SYNC"
+    ):
+        await asyncio.sleep(0.05)
 
     status = await c_nodes_admin[0].execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[1].port)
     )
-    assert "FULL_SYNC" == status
+    assert "STABLE_SYNC" == status
 
     status = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-    assert ["out 127.0.0.1:30002 FULL_SYNC"] == status
+    assert ["out 127.0.0.1:30002 STABLE_SYNC"] == status
 
     try:
         await c_nodes_admin[1].execute_command(
@@ -828,6 +817,131 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         assert False, "Should not be able to start slot migration"
     except redis.exceptions.ResponseError as e:
         assert e.args[0] == "Can't start the migration, another one is in progress"
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes_admin,
+    )
+
+    await c_nodes_admin[0].close()
+    await c_nodes_admin[1].close()
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
+    # Check data migration from one node to another
+    nodes = [
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        for i in range(2)
+    ]
+
+    df_local_factory.start_all(nodes)
+
+    c_nodes = [node.client() for node in nodes]
+    c_nodes_admin = [node.admin_client() for node in nodes]
+
+    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes_admin))
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
+          "replicas": []
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "9000").replace("NEXT_SLOT_CUTOFF", "9001"),
+        c_nodes_admin,
+    )
+
+    assert await c_nodes[1].set("KEY2", "value")
+    assert await c_nodes[1].set("KEY3", "value")
+
+    assert await c_nodes[1].set("KEY6", "value")
+    assert await c_nodes[1].set("KEY7", "value")
+    assert await c_nodes[0].set("KEY8", "value")
+    assert await c_nodes[0].set("KEY9", "value")
+    assert await c_nodes[1].set("KEY10", "value")
+    assert await c_nodes[1].set("KEY11", "value")
+    assert await c_nodes[0].set("KEY12", "value")
+    assert await c_nodes[0].set("KEY13", "value")
+    assert await c_nodes[1].set("KEY14", "value")
+    assert await c_nodes[1].set("KEY15", "value")
+    assert await c_nodes[0].set("KEY16", "value")
+    assert await c_nodes[0].set("KEY17", "value")
+    assert await c_nodes[1].set("KEY18", "value")
+    assert await c_nodes[1].set("KEY19", "value")
+
+    res = await c_nodes_admin[1].execute_command(
+        "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "3000", "9000"
+    )
+    assert 1 == res
+
+    assert await c_nodes[0].set("KEY0", "value")
+    assert await c_nodes[0].set("KEY1", "value")
+
+    while (
+        await c_nodes_admin[1].execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
+        )
+        != "STABLE_SYNC"
+    ):
+        await asyncio.sleep(0.05)
+
+    assert await c_nodes[0].set("KEY4", "value")
+    assert await c_nodes[0].set("KEY5", "value")
+    assert await c_nodes[0].execute_command("DBSIZE") == 10
+
+    # TODO remove when we add slot blocking
+    await asyncio.sleep(0.5)
+
+    res = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", "1")
+    assert "OK" == res
+
+    await asyncio.sleep(0.5)
+
+    while (
+        await c_nodes_admin[1].execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
+        )
+        != "FINISHED"
+    ):
+        await asyncio.sleep(0.05)
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "2999").replace("NEXT_SLOT_CUTOFF", "3000"),
+        c_nodes_admin,
+    )
+
+    assert await c_nodes[0].get("KEY0") == "value"
+    assert await c_nodes[1].get("KEY1") == "value"
+    assert await c_nodes[1].get("KEY2") == "value"
+    assert await c_nodes[1].get("KEY3") == "value"
+    assert await c_nodes[0].get("KEY4") == "value"
+    assert await c_nodes[1].get("KEY5") == "value"
+    assert await c_nodes[1].get("KEY6") == "value"
+    assert await c_nodes[1].get("KEY7") == "value"
+    assert await c_nodes[0].get("KEY8") == "value"
+    assert await c_nodes[1].get("KEY9") == "value"
+    assert await c_nodes[1].get("KEY10") == "value"
+    assert await c_nodes[1].get("KEY11") == "value"
+    assert await c_nodes[1].get("KEY12") == "value"
+    assert await c_nodes[1].get("KEY13") == "value"
+    assert await c_nodes[1].get("KEY14") == "value"
+    assert await c_nodes[1].get("KEY15") == "value"
+    assert await c_nodes[1].get("KEY16") == "value"
+    assert await c_nodes[1].get("KEY17") == "value"
+    assert await c_nodes[1].get("KEY18") == "value"
+    assert await c_nodes[1].get("KEY19") == "value"
+    assert await c_nodes[1].execute_command("DBSIZE") == 17
 
     await c_nodes_admin[0].close()
     await c_nodes_admin[1].close()

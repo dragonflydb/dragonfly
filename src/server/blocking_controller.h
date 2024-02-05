@@ -28,10 +28,8 @@ class BlockingController {
     return awakened_transactions_;
   }
 
-  void FinalizeWatched(KeyLockArgs lock_args, Transaction* tx);
-
-  // A mirror reflection but with ArgSlice. Yeah, I know....
   void FinalizeWatched(ArgSlice args, Transaction* tx);
+
   // go over potential wakened keys, verify them and activate watch queues.
   void NotifyPending();
 
@@ -54,7 +52,7 @@ class BlockingController {
 
   using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
 
-  void NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm, const DbContext& context);
+  void NotifyWatchQueue(std::string_view key, WatchQueue* wqm, const DbContext& context);
 
   // void NotifyConvergence(Transaction* tx);
 

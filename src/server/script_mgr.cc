@@ -63,6 +63,8 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "Subcommands are:",
         "EXISTS <sha1> [<sha1> ...]",
         "   Return information about the existence of the scripts in the script cache.",
+        "FLUSH",
+        "   Flush the Lua scripts cache. Very dangerous on replicas.",
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
         "FLAGS <sha> [flags ...]",
@@ -82,6 +84,9 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
 
   if (subcmd == "EXISTS" && args.size() > 1)
     return ExistsCmd(args, cntx);
+
+  if (subcmd == "FLUSH")
+    return FlushCmd(args, cntx);
 
   if (subcmd == "LIST")
     return ListCmd(cntx);
@@ -114,6 +119,12 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
     rb->SendLong(v);
   }
   return;
+}
+
+void ScriptMgr::FlushCmd(CmdArgList args, ConnectionContext* cntx) {
+  FlushAllScript();
+
+  return cntx->SendOk();
 }
 
 void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
@@ -188,7 +199,7 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   for (const auto& k_v : result) {
     rb->StartArray(2);
     rb->SendBulkString(k_v.first);
-    rb->SendBulkString(k_v.second.ToString());
+    rb->SendVerbatimString(k_v.second.ToString());
   }
 }
 
@@ -270,6 +281,16 @@ optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
     return ScriptData{it->second, it->second.body.get(), {}};
 
   return std::nullopt;
+}
+
+void ScriptMgr::FlushAllScript() {
+  lock_guard lk{mu_};
+  db_.clear();
+
+  shard_set->pool()->Await([](auto index, auto* pb) {
+    ServerState* ss = ServerState::tlocal();
+    ss->ResetInterpreter();
+  });
 }
 
 vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {

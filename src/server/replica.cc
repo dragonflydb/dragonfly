@@ -598,14 +598,7 @@ error_code Replica::ConsumeDflyStream() {
       flow->Cancel();
     }
 
-    // Iterate over map and cancel all blocking entities
-    {
-      lock_guard lk{multi_shard_exe_->map_mu};
-      for (auto& tx_data : multi_shard_exe_->tx_sync_execution) {
-        tx_data.second.barrier.Cancel();
-        tx_data.second.block.Cancel();
-      }
-    }
+    multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
@@ -810,7 +803,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
 
-    if (!tx_data->is_ping) {
+    if (tx_data->opcode != journal::Op::PING) {
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));
       } else {
@@ -901,31 +894,16 @@ void DflyShardReplica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Conte
     return;
   }
 
-  bool was_insert = false;
-  if (tx_data.IsGlobalCmd()) {
-    was_insert = InsertTxToSharedMap(tx_data);
-  }
+  bool was_insert = tx_data.IsGlobalCmd() &&
+                    multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
 
   ExecuteTx(std::move(tx_data), was_insert, cntx);
-}
-
-bool DflyShardReplica::InsertTxToSharedMap(const TransactionData& tx_data) {
-  std::unique_lock lk(multi_shard_exe_->map_mu);
-  auto [it, was_insert] =
-      multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
-  lk.unlock();
-
-  VLOG(2) << "txid: " << tx_data.txid << " unique_shard_cnt_: " << tx_data.shard_cnt
-          << " was_insert: " << was_insert;
-  it->second.block.Dec();
-
-  return was_insert;
 }
 
 void DflyShardReplica::InsertTxDataToShardResource(TransactionData&& tx_data) {
   bool was_insert = false;
   if (tx_data.shard_cnt > 1) {
-    was_insert = InsertTxToSharedMap(tx_data);
+    was_insert = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
   }
 
   VLOG(2) << "txid: " << tx_data.txid << " pushed to queue";
@@ -957,12 +935,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
     return;
   }
 
-  VLOG(2) << "Execute txid: " << tx_data.txid;
-  std::unique_lock lk(multi_shard_exe_->map_mu);
-  auto it = multi_shard_exe_->tx_sync_execution.find(tx_data.txid);
-  DCHECK(it != multi_shard_exe_->tx_sync_execution.end());
-  auto& multi_shard_data = it->second;
-  lk.unlock();
+  auto& multi_shard_data = multi_shard_exe_->Find(tx_data.txid);
 
   VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
   // Wait until shards flows got transaction data and inserted to map.
@@ -1004,8 +977,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
   auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
   VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
   if (val == 1) {
-    std::lock_guard lg{multi_shard_exe_->map_mu};
-    multi_shard_exe_->tx_sync_execution.erase(tx_data.txid);
+    multi_shard_exe_->Erase(tx_data.txid);
   }
 }
 
@@ -1129,92 +1101,6 @@ std::vector<uint64_t> Replica::GetReplicaOffset() const {
 
 std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
-}
-
-bool DflyShardReplica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
-  ++journal_rec_count;
-
-  switch (entry.opcode) {
-    case journal::Op::PING:
-      is_ping = true;
-      return true;
-    case journal::Op::EXPIRED:
-    case journal::Op::COMMAND:
-      commands.push_back(std::move(entry.cmd));
-      [[fallthrough]];
-    case journal::Op::EXEC:
-      shard_cnt = entry.shard_cnt;
-      dbid = entry.dbid;
-      txid = entry.txid;
-      return true;
-    case journal::Op::MULTI_COMMAND:
-      commands.push_back(std::move(entry.cmd));
-      dbid = entry.dbid;
-      return false;
-    default:
-      DCHECK(false) << "Unsupported opcode";
-  }
-  return false;
-}
-
-bool DflyShardReplica::TransactionData::IsGlobalCmd() const {
-  if (commands.size() > 1) {
-    return false;
-  }
-
-  auto& command = commands.front();
-  if (command.cmd_args.empty()) {
-    return false;
-  }
-
-  auto& args = command.cmd_args;
-  if (absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHDB"sv) ||
-      absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHALL"sv) ||
-      (absl::EqualsIgnoreCase(ToSV(args[0]), "DFLYCLUSTER"sv) &&
-       absl::EqualsIgnoreCase(ToSV(args[1]), "FLUSHSLOTS"sv))) {
-    return true;
-  }
-
-  return false;
-}
-
-DflyShardReplica::TransactionData DflyShardReplica::TransactionData::FromSingle(
-    journal::ParsedEntry&& entry) {
-  TransactionData data;
-  bool res = data.AddEntry(std::move(entry));
-  DCHECK(res);
-  return data;
-}
-
-auto DflyShardReplica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
-    -> optional<TransactionData> {
-  io::Result<journal::ParsedEntry> res;
-  while (true) {
-    if (res = reader->ReadEntry(); !res) {
-      cntx->ReportError(res.error());
-      return std::nullopt;
-    }
-
-    // Check if journal command can be executed right away.
-    // Expiration checks lock on master, so it never conflicts with running multi transactions.
-    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
-        res->opcode == journal::Op::PING)
-      return TransactionData::FromSingle(std::move(res.value()));
-
-    // Otherwise, continue building multi command.
-    DCHECK(res->opcode == journal::Op::MULTI_COMMAND || res->opcode == journal::Op::EXEC);
-    DCHECK(res->txid > 0);
-
-    auto txid = res->txid;
-    auto& txdata = current_[txid];
-    if (txdata.AddEntry(std::move(res.value()))) {
-      auto out = std::move(txdata);
-      current_.erase(txid);
-      return out;
-    }
-  }
-
-  return std::nullopt;
 }
 
 uint32_t DflyShardReplica::FlowId() const {

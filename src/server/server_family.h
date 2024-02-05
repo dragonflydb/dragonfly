@@ -15,6 +15,7 @@
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
 #include "server/server_state.h"
+#include "util/fibers/fiberqueue_threadpool.h"
 
 void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
                 std::string_view sub_cmd);
@@ -75,6 +76,7 @@ struct Metrics {
 
   facade::FacadeStats facade_stats;  // client stats and buffer sizes
   TieredStats tiered_stats;          // stats for tiered storage
+  IoMgrStats disk_stats;             // disk stats for io_mgr
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;
@@ -293,7 +295,7 @@ class ServerFamily {
   bool save_on_shutdown_{true};
 
   Done schedule_done_;
-  std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
+  std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
   mutable Mutex peak_stats_mu_;

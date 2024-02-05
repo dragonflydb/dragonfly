@@ -282,6 +282,15 @@ TEST_F(GenericFamilyTest, RenameSameName) {
   EXPECT_EQ(Run({"rename", kKey, kKey}), "OK");
 }
 
+TEST_F(GenericFamilyTest, RenameSameShard) {
+  num_threads_ = 1;
+  ResetService();
+
+  ASSERT_EQ(Run({"set", "x", "value"}), "OK");
+  ASSERT_EQ(Run({"set", "y", "value"}), "OK");
+  EXPECT_EQ(Run({"rename", "x", "y"}), "OK");
+}
+
 TEST_F(GenericFamilyTest, Stick) {
   // check stick returns zero on non-existent keys
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));

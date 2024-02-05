@@ -56,6 +56,44 @@ SlotStats& SlotStats::operator+=(const SlotStats& o) {
   return *this;
 }
 
+void LockTable::Key::MakeOwned() const {
+  if (std::holds_alternative<std::string_view>(val_))
+    val_ = std::string{std::get<std::string_view>(val_)};
+}
+
+size_t LockTable::Size() const {
+  return locks_.size();
+}
+
+std::optional<const IntentLock> LockTable::Find(std::string_view key) const {
+  DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
+
+  if (auto it = locks_.find(Key{key}); it != locks_.end())
+    return it->second;
+  return std::nullopt;
+}
+
+bool LockTable::Acquire(std::string_view key, IntentLock::Mode mode) {
+  DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
+
+  auto [it, inserted] = locks_.try_emplace(Key{key});
+  if (!inserted)            // If more than one transaction refers to a key
+    it->first.MakeOwned();  // we must fall back to using a self-contained string
+
+  return it->second.Acquire(mode);
+}
+
+void LockTable::Release(std::string_view key, IntentLock::Mode mode) {
+  DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
+
+  auto it = locks_.find(Key{key});
+  CHECK(it != locks_.end()) << key;
+
+  it->second.Release(mode);
+  if (it->second.IsFree())
+    locks_.erase(it);
+}
+
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr),
@@ -76,6 +114,13 @@ void DbTable::Clear() {
   expire.Clear();
   mcflag.Clear();
   stats = DbTableStats{};
+}
+
+PrimeIterator DbTable::Launder(PrimeIterator it, std::string_view key) {
+  if (!it.IsOccupied() || it->first != key) {
+    it = prime.Find(key);
+  }
+  return it;
 }
 
 }  // namespace dfly
