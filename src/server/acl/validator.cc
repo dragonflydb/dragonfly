@@ -35,8 +35,10 @@ namespace dfly::acl {
 }
 
 // GCC yields a wrong warning about uninitialized optional use
+#ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
     uint32_t acl_cat, const std::vector<uint64_t>& acl_commands, const AclKeys& keys,

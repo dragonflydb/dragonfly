@@ -74,7 +74,7 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
 }
 
 void TestConnection::SendInvalidationMessageAsync(InvalidationMessage msg) {
-  invalidate_messages.push_back(move(msg));
+  invalidate_messages.push_back(std::move(msg));
 }
 
 std::string TestConnection::RemoteEndpointStr() const {
@@ -228,7 +228,7 @@ void BaseFamilyTest::ResetService() {
   watchdog_fiber_ = pp_->GetNextProactor()->LaunchFiber([this] {
     ThisFiber::SetName("Watchdog");
 
-    if (!watchdog_done_.WaitFor(60s)) {
+    if (!watchdog_done_.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected!!!!";
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       fb2::Mutex m;

@@ -248,7 +248,7 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
                                 shared_ptr<DocIndex> index_ptr) {
   auto shard_index = make_unique<ShardDocIndex>(index_ptr);
-  auto [it, _] = indices_.emplace(name, move(shard_index));
+  auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
   // Don't build while loading, shutting down, etc.
   // After loading, indices are rebuilt separately

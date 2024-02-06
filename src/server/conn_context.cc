@@ -37,7 +37,7 @@ StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mo
 }
 
 StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args, facade::ReplyMode mode)
-    : cid_{cid}, buffer_{move(buffer)}, sizes_(args.size()), reply_mode_{mode} {
+    : cid_{cid}, buffer_{std::move(buffer)}, sizes_(args.size()), reply_mode_{mode} {
   for (unsigned i = 0; i < args.size(); i++) {
     // Assume tightly packed list.
     DCHECK(i + 1 == args.size() || args[i].data() + args[i].size() == args[i + 1].data());

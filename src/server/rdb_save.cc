@@ -1286,7 +1286,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
     auto scripts = service->script_mgr()->GetAll();
     script_bodies.reserve(scripts.size());
     for (auto& [sha, data] : scripts)
-      script_bodies.push_back(move(data.body));
+      script_bodies.push_back(std::move(data.body));
   }
 
 #ifndef __APPLE__
