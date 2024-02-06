@@ -859,12 +859,15 @@ Interpreter* InterpreterManager::Get() {
   }
 
   waker_.await([this]() { return available_.size() > 0; });
+
   Interpreter* ir = available_.back();
   available_.pop_back();
   return ir;
 }
 
 void InterpreterManager::Return(Interpreter* ir) {
+  DCHECK_LE(storage_.data(), ir);                    // ensure the pointer
+  DCHECK_GE(storage_.data() + storage_.size(), ir);  // belongs to storage_
   available_.push_back(ir);
   waker_.notify();
 }

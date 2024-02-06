@@ -63,6 +63,8 @@ ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerSta
   this->multi_squash_exec_hop_usec += other.multi_squash_exec_hop_usec;
   this->multi_squash_exec_reply_usec += other.multi_squash_exec_reply_usec;
 
+  this->blocked_on_interpreter += other.blocked_on_interpreter;
+
   if (this->tx_width_freq_arr == nullptr) {
     this->tx_width_freq_arr = new uint64_t[num_shards];
     std::copy_n(other.tx_width_freq_arr, num_shards, this->tx_width_freq_arr);
@@ -174,7 +176,10 @@ bool ServerState::IsPaused() const {
 }
 
 Interpreter* ServerState::BorrowInterpreter() {
-  return interpreter_mgr_.Get();
+  stats.blocked_on_interpreter++;
+  auto* ptr = interpreter_mgr_.Get();
+  stats.blocked_on_interpreter--;
+  return ptr;
 }
 
 void ServerState::ReturnInterpreter(Interpreter* ir) {
