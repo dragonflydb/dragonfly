@@ -41,7 +41,7 @@ using namespace facade;
 using CI = CommandId;
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
-constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
+[[maybe_unused]] constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
 size_t CopyValueToBuffer(const PrimeValue& pv, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);

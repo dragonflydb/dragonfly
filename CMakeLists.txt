@@ -35,12 +35,12 @@ option(DF_USE_SSL "Provide support for SSL connections" ON)
 
 find_package(OpenSSL)
 
-if (SUPPORT_ASAN)
-  # set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address")
+if (SUPPORT_ASAN AND NOT DEFINED ENV{CI})
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address")
 endif()
 
-if (SUPPORT_USAN)
-  # set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=undefined")
+if (SUPPORT_USAN AND NOT DEFINED ENV{CI})
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=undefined")
 endif()
 
 include(third_party)

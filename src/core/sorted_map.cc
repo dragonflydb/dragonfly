@@ -35,14 +35,6 @@ constexpr uint64_t kInfTag = 1ULL << 63;
 constexpr uint64_t kIgnoreDoubleTag = 1ULL << 62;
 constexpr uint64_t kSdsMask = (1ULL << 60) - 1;
 
-inline zskiplistNode* Next(bool reverse, zskiplistNode* ln) {
-  return reverse ? ln->backward : ln->level[0].forward;
-}
-
-inline bool IsUnder(bool reverse, double score, const zrangespec& spec) {
-  return reverse ? zslValueGteMin(score, &spec) : zslValueLteMax(score, &spec);
-}
-
 double GetObjScore(const void* obj) {
   sds s = (sds)obj;
   char* ptr = s + sdslen(s) + 1;

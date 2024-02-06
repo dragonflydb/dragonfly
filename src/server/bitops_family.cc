@@ -594,8 +594,10 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
 }
 
 // GCC yields a wrong warning about uninitialized optional use
+#ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 
 enum class EncodingType { UINT, INT, NILL };
 

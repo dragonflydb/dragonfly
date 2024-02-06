@@ -175,7 +175,11 @@ class ShardDocIndices {
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 };
 
-#ifdef __APPLE__
+#if defined(__APPLE__)
+
+inline ShardDocIndices::ShardDocIndices() : local_mr_{nullptr} {
+}
+
 inline ShardDocIndex* ShardDocIndices::GetIndex(std::string_view name) {
   return nullptr;
 }
@@ -208,6 +212,14 @@ inline size_t ShardDocIndices::GetUsedMemory() const {
 }
 
 inline SearchStats ShardDocIndices::GetStats() const {
+  return {};
+}
+
+inline DocIndexInfo ShardDocIndex::GetInfo() const {
+  return {};
+}
+
+inline std::string DocIndexInfo::BuildRestoreCommand() const {
   return {};
 }
 

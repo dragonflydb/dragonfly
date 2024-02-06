@@ -638,7 +638,7 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
   const int kRounds = 10;
   vector<string> keys = {kKeySid0, kKeySid1, kKeySid2};
 
-  auto push = [this, keys, kRounds]() mutable {
+  auto push = [this, keys]() mutable {
     int i = 0;
     do {
       Run({"multi"});
@@ -648,7 +648,7 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
     } while (next_permutation(keys.begin(), keys.end()) || i++ < kRounds);
   };
 
-  auto pop = [this, keys, kRounds]() mutable {
+  auto pop = [this, keys]() mutable {
     int i = 0;
     do {
       for (int j = keys.size() - 1; j >= 0; j--)

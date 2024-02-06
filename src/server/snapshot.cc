@@ -324,9 +324,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-// OnJournalEntry registers for changes in journal, the journal change function signature is
-// (const journal::Entry& entry, bool await) In snapshot flow we dont use the await argument.
-void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg) {
+void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
   // We ignore EXEC and NOOP entries because we they have no meaning during
   // the LOAD phase on replica.
   if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC)
@@ -334,9 +332,11 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool unused
 
   serializer_->WriteJournalEntry(item.data);
 
-  // This is the only place that flushes in streaming mode
-  // once the iterate buckets fiber finished.
-  PushSerializedToChannel(false);
+  if (await) {
+    // This is the only place that flushes in streaming mode
+    // once the iterate buckets fiber finished.
+    PushSerializedToChannel(false);
+  }
 }
 
 void SliceSnapshot::CloseRecordChannel() {

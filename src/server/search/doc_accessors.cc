@@ -179,11 +179,11 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
     return nullptr;
   }
 
-  JsonPathContainer path_container{move(path_expr)};
-  auto ptr = make_unique<JsonPathContainer>(move(path_container));
+  JsonPathContainer path_container{std::move(path_expr)};
+  auto ptr = make_unique<JsonPathContainer>(std::move(path_container));
 
   JsonPathContainer* path = ptr.get();
-  path_cache_[field] = move(ptr);
+  path_cache_[field] = std::move(ptr);
   return path;
 }
 
