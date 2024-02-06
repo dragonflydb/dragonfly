@@ -784,6 +784,7 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
 
   switch (op_res.status()) {
     case OpStatus::TIMED_OUT:
+    case OpStatus::CANCELLED:
       return rb->SendNull();
       break;
 
