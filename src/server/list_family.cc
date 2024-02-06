@@ -788,6 +788,7 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
   }
 
   switch (op_res.status()) {
+    case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNull();
       break;
@@ -830,6 +831,7 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
   }
 
   switch (op_res.status()) {
+    case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNull();
       break;
