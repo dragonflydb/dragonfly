@@ -31,13 +31,13 @@ async def test_acl_setuser(df_local_factory, df_seeder_factory, type, val_size):
         port=master.port,
         keys=10_000_000,  # Overkill because we stop when we reach min_rss
         val_size=val_size,
+        batch_size=10_000,
         unsupported_types=unsupported_types,
     )
     seed_task = asyncio.create_task(seeder.run(target_deviation=0.1))
     while True:
-        await asyncio.sleep(10)
+        await asyncio.sleep(1)
         rss = (await c_master.info("memory"))["used_memory_rss"]
-        print(f"RSS: {rss}")
         if rss > min_rss:
             seed_task.cancel()
             break
