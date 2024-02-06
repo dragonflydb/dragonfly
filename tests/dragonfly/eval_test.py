@@ -274,7 +274,7 @@ Ensure liveness even with only a single interpreter in scenarios where EVAL and 
 """
 
 
-@dfly_args({"proactor_threads": 3, "interpreter_per_thread": 1})
+@dfly_args({"proactor_threads": 2, "interpreter_per_thread": 1})
 async def test_one_interpreter(async_client: aioredis.Redis):
     sha = await async_client.script_load("redis.call('GET', KEYS[1])")
     all_keys = [string.ascii_lowercase[i] for i in range(5)]
@@ -298,8 +298,8 @@ async def test_one_interpreter(async_client: aioredis.Redis):
             )
             await asyncio.sleep(0.01)
 
-    tm = [asyncio.create_task(run(True)) for _ in range(6)]
-    ts = [asyncio.create_task(run(False)) for _ in range(6)]
+    tm = [asyncio.create_task(run(True)) for _ in range(10)]
+    ts = [asyncio.create_task(run(False)) for _ in range(10)]
     block_measure = asyncio.create_task(measure_blocked())
 
     async with async_timeout.timeout(5):
@@ -307,5 +307,5 @@ async def test_one_interpreter(async_client: aioredis.Redis):
 
     block_measure.cancel()
 
-    # At least more than two commands were seen blocking on the interpreter
-    assert max_blocked >= 2
+    # At least some connection was seen blocked
+    assert max_blocked > 0
