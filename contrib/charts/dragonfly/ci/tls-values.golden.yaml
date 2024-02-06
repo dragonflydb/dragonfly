@@ -123,7 +123,7 @@ spec:
             - mountPath: /etc/dragonfly/tls
               name: tls
           env:
-            - name: DFLY_PASSWORD
+            - name: DFLY_requirepass
               valueFrom:
                 secretKeyRef:
                   name: dfly-password
