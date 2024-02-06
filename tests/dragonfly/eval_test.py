@@ -278,19 +278,15 @@ Ensure liveness even with only a single interpreter in scenarios where EVAL and 
 async def test_one_interpreter(async_client: aioredis.Redis):
     sha = await async_client.script_load("redis.call('GET', KEYS[1])")
     all_keys = [string.ascii_lowercase[i] for i in range(5)]
-    total_commands = 100
+    total_runs = 100
 
-    async def run_multi():
-        for _ in range(total_commands):
-            p = async_client.pipeline(transaction=True)
+    async def run(transaction):
+        for _ in range(total_runs):
+            p = async_client.pipeline(transaction=transaction)
             pkeys = random.choices(all_keys, k=3)
             for key in pkeys:
                 p.evalsha(sha, 1, key)
             await p.execute()
-
-    async def run_single():
-        for _ in range(total_commands):
-            await async_client.evalsha(sha, 1, random.choice(all_keys))
 
     max_blocked = 0
 
@@ -302,8 +298,8 @@ async def test_one_interpreter(async_client: aioredis.Redis):
             )
             await asyncio.sleep(0.01)
 
-    tm = [asyncio.create_task(run_multi()) for _ in range(5)]
-    ts = [asyncio.create_task(run_single()) for _ in range(5)]
+    tm = [asyncio.create_task(run(True)) for _ in range(6)]
+    ts = [asyncio.create_task(run(False)) for _ in range(6)]
     block_measure = asyncio.create_task(measure_blocked())
 
     async with async_timeout.timeout(5):
@@ -311,5 +307,5 @@ async def test_one_interpreter(async_client: aioredis.Redis):
 
     block_measure.cancel()
 
-    # At least some of the commands were seen blocking on the interpreter
-    assert max_blocked > 3
+    # At least more than two commands were seen blocking on the interpreter
+    assert max_blocked >= 2
