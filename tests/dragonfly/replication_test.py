@@ -1993,7 +1993,7 @@ async def test_journal_doesnt_yield_issue_2500(df_local_factory, df_seeder_facto
     await wait_available_async(c_replica)
     await stream_task
 
-    await asyncio.sleep(1.0)
+    await check_all_replicas_finished([c_replica], c_master)
     keys_master = await c_master.execute_command("keys *")
     keys_replica = await c_replica.execute_command("keys *")
     assert set(keys_master) == set(keys_replica)
