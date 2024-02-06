@@ -106,6 +106,8 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t multi_squash_exec_hop_usec = 0;
     uint64_t multi_squash_exec_reply_usec = 0;
 
+    uint64_t blocked_on_interpreter = 0;
+
     // Array of size of number of shards.
     // Each entry is how many transactions we had with this width (unique_shard_cnt).
     uint64_t* tx_width_freq_arr = nullptr;
@@ -175,7 +177,8 @@ class ServerState {  // public struct - to allow initialization.
 
   bool AllowInlineScheduling() const;
 
-  // Borrow interpreter from internal manager. Return int with ReturnInterpreter.
+  // Borrow interpreter from interpreter pool, return it with ReturnInterpreter.
+  // Will block if no interpreters are aviable. Use with caution!
   Interpreter* BorrowInterpreter();
 
   // Return interpreter to internal manager to be re-used.
