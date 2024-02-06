@@ -292,7 +292,24 @@ async def test_one_interpreter(async_client: aioredis.Redis):
         for _ in range(total_commands):
             await async_client.evalsha(sha, 1, random.choice(all_keys))
 
+    max_blocked = 0
+
+    async def measure_blocked():
+        nonlocal max_blocked
+        while True:
+            max_blocked = max(
+                max_blocked, (await async_client.info("STATS"))["blocked_on_interpreter"]
+            )
+            await asyncio.sleep(0.01)
+
     tm = [asyncio.create_task(run_multi()) for _ in range(5)]
     ts = [asyncio.create_task(run_single()) for _ in range(5)]
+    block_measure = asyncio.create_task(measure_blocked())
+
     async with async_timeout.timeout(5):
         await asyncio.gather(*(tm + ts))
+
+    block_measure.cancel()
+
+    # At least some of the commands were seen blocking on the interpreter
+    assert max_blocked > 3

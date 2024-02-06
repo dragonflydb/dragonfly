@@ -885,6 +885,7 @@ Interpreter* InterpreterManager::Get() {
   }
 
   waker_.await([this]() { return available_.size() > 0; });
+
   Interpreter* ir = available_.back();
   available_.pop_back();
   return ir;
