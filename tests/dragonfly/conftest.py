@@ -332,7 +332,7 @@ def copy_failed_logs_and_clean_tmp_folder():
     failed_path = "/tmp/failed"
     path_exists = os.path.exists(failed_path)
     if not path_exists:
-        os.makedirs(path)
+        os.makedirs(failed_path)
 
     last_log_file = open("/tmp/last_test_log_files.txt", "r")
     files = last_log_file.readLines()
