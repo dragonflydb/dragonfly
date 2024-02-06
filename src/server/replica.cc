@@ -809,18 +809,18 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       break;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
-
-    if (!tx_data->is_ping) {
+    if (tx_data->opcode == journal::Op::PING) {
+      force_ping_ = true;
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+    } else if (tx_data->opcode == journal::Op::EXEC) {
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+    } else {
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));
       } else {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
-    } else {
-      force_ping_ = true;
-      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     }
-
     waker_.notify();
   }
 }
@@ -1133,13 +1133,13 @@ std::string Replica::GetSyncId() const {
 
 bool DflyShardReplica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
-
+  opcode = entry.opcode;
   switch (entry.opcode) {
     case journal::Op::PING:
-      is_ping = true;
       return true;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
+    case journal::Op::MULTI_COMMAND:
       commands.push_back(std::move(entry.cmd));
       [[fallthrough]];
     case journal::Op::EXEC:
@@ -1147,10 +1147,6 @@ bool DflyShardReplica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
       dbid = entry.dbid;
       txid = entry.txid;
       return true;
-    case journal::Op::MULTI_COMMAND:
-      commands.push_back(std::move(entry.cmd));
-      dbid = entry.dbid;
-      return false;
     default:
       DCHECK(false) << "Unsupported opcode";
   }
@@ -1194,24 +1190,7 @@ auto DflyShardReplica::TransactionReader::NextTxData(JournalReader* reader, Cont
       cntx->ReportError(res.error());
       return std::nullopt;
     }
-
-    // Check if journal command can be executed right away.
-    // Expiration checks lock on master, so it never conflicts with running multi transactions.
-    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
-        res->opcode == journal::Op::PING)
-      return TransactionData::FromSingle(std::move(res.value()));
-
-    // Otherwise, continue building multi command.
-    DCHECK(res->opcode == journal::Op::MULTI_COMMAND || res->opcode == journal::Op::EXEC);
-    DCHECK(res->txid > 0 || res->shard_cnt == 1);
-
-    auto txid = res->txid;
-    auto& txdata = current_[txid];
-    if (txdata.AddEntry(std::move(res.value()))) {
-      auto out = std::move(txdata);
-      current_.erase(txid);
-      return out;
-    }
+    return TransactionData::FromSingle(std::move(res.value()));
   }
 
   return std::nullopt;
