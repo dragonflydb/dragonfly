@@ -1659,7 +1659,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
 
-    result.coordinator_stats.Add(shard_set->size(), ss->stats);
+    result.coordinator_stats.Add(ss->stats);
 
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
