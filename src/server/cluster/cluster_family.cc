@@ -713,49 +713,25 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
     return cntx->SendError("Migration process is not in STABLE_SYNC state");
   }
 
-  const auto deleted_slots = ToSlotSet(migration->GetSlotRange());
+  // TODO implement blocking on migrated slots only
+  [[maybe_unused]] const auto deleted_slots = ToSlotSet(migration->GetSlotRange());
 
-  shard_set->RunBriefInParallel(
-      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
-  VLOG(2) << "Disable expiration";
+  std::atomic_bool is_block_active = true;
+  auto is_pause_in_progress = [&is_block_active] { return is_block_active.load(); };
+  if (!Pause(server_family_->GetListeners(), cntx->conn(), ClientPause::WRITE,
+             is_pause_in_progress)) {
+    LOG(WARNING) << "Cluster migration finalization time out";
+    return cntx->SendError("Blocking connections time out");
+  }
 
-  server_family_->service().proactor_pool().AwaitFiberOnAll(
-      [&deleted_slots](auto*) { ServerState::tlocal()->SetMigratedSlots(deleted_slots); });
-
-  absl::Cleanup cleanup([this] {
-    server_family_->service().proactor_pool().AwaitFiberOnAll(
-        [](auto*) { ServerState::tlocal()->SetMigratedSlots({}); });
-
-    shard_set->RunBriefInParallel(
-        [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
-    VLOG(2) << "Enable expiration";
-  });
-
-  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
-                          true /* ignore blocked */};
-
-  auto cb = [this, &tracker, &migration, &deleted_slots](util::ProactorBase* pb) {
-    auto blocking_filter = [&deleted_slots](ArgSlice keys) {
-      bool moved = any_of(keys.begin(), keys.end(), [&](auto k) {
-        return deleted_slots.find(ClusterConfig::KeySlot(k)) == deleted_slots.end();
-      });
-      return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
-    };
-
-    server_family_->CancelBlockingOnThread(blocking_filter);
-
+  auto cb = [this, &migration](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
       // TODO add error processing to move back into STABLE_SYNC state
       migration->Finalize(shard->shard_id());
     }
-    tracker.TrackOnThread();
   };
 
-  server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
-
-  if (!tracker.Wait(absl::Seconds(1))) {
-    LOG(WARNING) << "Cluster migration finalization timed out";
-  }
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
   // TODO do next after ACK
   util::ThisFiber::SleepFor(200ms);
@@ -766,6 +742,8 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
     if (const auto* shard = EngineShard::tlocal(); shard)
       migration->Cancel(shard->shard_id());
   });
+
+  is_block_active.store(false);
 
   RemoveOutgoingMigration(sync_id);
 

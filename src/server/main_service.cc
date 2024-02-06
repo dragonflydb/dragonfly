@@ -898,13 +898,10 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
     return ErrorReply{kClusterNotConfigured};
   }
 
-  if (keys_slot.has_value()) {
-    ServerState::tlocal()->AwaitIfMigrationFinalization(*keys_slot);
-    if (!cluster_config->IsMySlot(*keys_slot)) {
-      // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
-      ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);
-      return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
-    }
+  if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
+    // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
+    ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);
+    return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
   }
 
   return nullopt;
@@ -1304,8 +1301,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   };
 
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (dfly::ServerState::tlocal()->IsPaused() ||
-      dfly::ServerState::tlocal()->IsMigrationFinalization())
+  if (dfly::ServerState::tlocal()->IsPaused())
     return 0;
 
   for (auto args : args_list) {

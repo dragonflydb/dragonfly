@@ -424,7 +424,7 @@ void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
   CmdArgParser parser(args);
 
   auto timeout = parser.Next<uint64_t>();
-  enum ClientPause pause_state = ClientPause::ALL;
+  ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
     pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
@@ -432,53 +432,17 @@ void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
     return cntx->SendError(err->MakeReply());
   }
 
-  // Set global pause state and track commands that are running when the pause state is flipped.
-  // Exlude already paused commands from the busy count.
-  DispatchTracker tracker{listeners, cntx->conn(), true /* ignore paused commands */};
-  shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
-    // Commands don't suspend before checking the pause state, so
-    // it's impossible to deadlock on waiting for a command that will be paused.
-    tracker.TrackOnThread();
-    ServerState::tlocal()->SetPauseState(pause_state, true);
-  });
+  const auto timeout_ms = timeout * 1ms;
+  auto is_pause_in_progress = [end_time = chrono::steady_clock::now() + timeout_ms] {
+    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
+           chrono::steady_clock::now() < end_time;
+  };
 
-  // TODO handle blocking commands
-  // Wait for all busy commands to finish running before replying to guarantee
-  // that no more (write) operations will occur.
-  const absl::Duration kDispatchTimeout = absl::Seconds(1);
-  if (!tracker.Wait(kDispatchTimeout)) {
-    LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
-    shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
-      ServerState::tlocal()->SetPauseState(pause_state, false);
-    });
-    return cntx->SendError("Failed to pause all running clients");
+  if (Pause(listeners, cntx->conn(), pause_state, std::move(is_pause_in_progress))) {
+    cntx->SendOk();
+  } else {
+    cntx->SendError("Failed to pause all running clients");
   }
-
-  // We should not expire/evict keys while clients are puased.
-  shard_set->RunBriefInParallel(
-      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
-
-  fb2::Fiber("client_pause", [timeout, pause_state]() mutable {
-    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
-    // ensure this fiber will not left hanging .
-    auto step = 10ms;
-    auto timeout_ms = timeout * 1ms;
-    int64_t steps = timeout_ms.count() / step.count();
-    ServerState& etl = *ServerState::tlocal();
-    do {
-      ThisFiber::SleepFor(step);
-    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
-
-    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-        ServerState::tlocal()->SetPauseState(pause_state, false);
-      });
-      shard_set->RunBriefInParallel(
-          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
-    }
-  }).Detach();
-
-  cntx->SendOk();
 }
 
 void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
@@ -585,6 +549,55 @@ string_view GetRedisMode() {
 }
 
 }  // namespace
+
+bool Pause(absl::Span<facade::Listener* const> listeners, facade::Connection* conn,
+           ClientPause pause_state, std::function<bool()> is_pause_in_progress) {
+  // Set global pause state and track commands that are running when the pause state is flipped.
+  // Exlude already paused commands from the busy count.
+  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */};
+  shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
+    // Commands don't suspend before checking the pause state, so
+    // it's impossible to deadlock on waiting for a command that will be paused.
+    tracker.TrackOnThread();
+    ServerState::tlocal()->SetPauseState(pause_state, true);
+  });
+
+  // TODO handle blocking commands
+  // Wait for all busy commands to finish running before replying to guarantee
+  // that no more (write) operations will occur.
+  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  if (!tracker.Wait(kDispatchTimeout)) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
+    shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
+      ServerState::tlocal()->SetPauseState(pause_state, false);
+    });
+    return false;
+  }
+
+  // We should not expire/evict keys while clients are puased.
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+
+  fb2::Fiber("client_pause", [is_pause_in_progress, pause_state]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
+    // ensure this fiber will not left hanging .
+    constexpr auto step = 10ms;
+    while (is_pause_in_progress()) {
+      ThisFiber::SleepFor(step);
+    }
+
+    ServerState& etl = *ServerState::tlocal();
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      });
+      shard_set->RunBriefInParallel(
+          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    }
+  }).Detach();
+
+  return true;
+}
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);

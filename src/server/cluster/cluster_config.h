@@ -109,7 +109,5 @@ class ClusterConfig {
 };
 
 SlotSet ToSlotSet(const std::vector<ClusterConfig::SlotRange>& slots);
-bool ContainsAllSlots(const SlotSet& sset,
-                      const std::vector<ClusterConfig::SlotRange>& checked_slots);
 
 }  // namespace dfly

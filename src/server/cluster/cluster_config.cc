@@ -355,17 +355,4 @@ SlotSet ToSlotSet(const std::vector<ClusterConfig::SlotRange>& slots) {
   return sset;
 }
 
-bool ContainsAllSlots(const SlotSet& sset,
-                      const std::vector<ClusterConfig::SlotRange>& checked_slots) {
-  bool res = true;
-  for (const auto& slot_range : checked_slots) {
-    for (auto i = slot_range.start; i <= slot_range.end; ++i)
-      if (sset.find(i) == sset.end()) {
-        res = false;
-        break;
-      }
-  }
-  return res;
-}
-
 }  // namespace dfly

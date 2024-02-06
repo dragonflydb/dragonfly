@@ -175,21 +175,6 @@ bool ServerState::IsPaused() const {
   return (client_pauses_[0] + client_pauses_[1]) > 0;
 }
 
-void ServerState::AwaitIfMigrationFinalization(uint16_t id) {
-  if (migrated_slots_.find(id) != migrated_slots_.end())
-    migration_finalization_ec_.await(
-        [this, id] { return migrated_slots_.find(id) == migrated_slots_.end(); });
-}
-
-void ServerState::SetMigratedSlots(SlotSet slots) {
-  migrated_slots_ = std::move(slots);
-  migration_finalization_ec_.notifyAll();
-}
-
-bool ServerState::IsMigrationFinalization() const {
-  return !migrated_slots_.empty();
-}
-
 Interpreter* ServerState::BorrowInterpreter() {
   stats.blocked_on_interpreter++;
   auto* ptr = interpreter_mgr_.Get();
