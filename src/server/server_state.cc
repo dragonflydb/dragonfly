@@ -48,7 +48,7 @@ auto ServerState::Stats::operator=(Stats&& other) -> Stats& {
 }
 
 ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 13 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 14 * 8, "Stats size mismatch");
 
   for (int i = 0; i < NUM_TX_TYPES; ++i) {
     this->tx_type_cnt[i] += other.tx_type_cnt[i];
