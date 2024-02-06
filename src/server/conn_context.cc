@@ -252,6 +252,7 @@ size_t ConnectionContext::UsedMemory() const {
 }
 
 void ConnectionState::ExecInfo::Clear() {
+  DCHECK(!preborrowed_interpreter);  // Must have been released properly
   state = EXEC_INACTIVE;
   body.clear();
   is_write = false;

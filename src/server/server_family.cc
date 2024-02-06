@@ -689,7 +689,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
-    fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
+    fq_threadpool_.reset(new fb2::FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
@@ -1143,7 +1143,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("fiber_longrun_total", "", m.fiber_longrun_cnt, MetricType::COUNTER,
                             &resp->body());
   double longrun_seconds = m.fiber_longrun_usec * 1e-6;
-  AppendMetricWithoutLabels("fiber_longrun_seconds_total", "", longrun_seconds, MetricType::COUNTER,
+  AppendMetricWithoutLabels("fiber_longrun_seconds", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
 
@@ -1495,6 +1495,23 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
+
+  if (sub_cmd == "HELP") {
+    string_view help_arr[] = {
+        "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "GET <pattern>",
+        "    Return parameters matching the glob-like <pattern> and their values.",
+        "SET <directive> <value>",
+        "    Set the configuration <directive> to <value>.",
+        "RESETSTAT",
+        "    Reset statistics reported by the INFO command.",
+        "HELP",
+        "    Prints this help.",
+    };
+
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendSimpleStrArr(help_arr);
+  }
 
   if (sub_cmd == "SET") {
     if (args.size() != 3) {

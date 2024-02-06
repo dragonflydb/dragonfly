@@ -146,9 +146,9 @@ class InterpreterManager {
 
   // Borrow interpreter. Always return it after usage.
   Interpreter* Get();
-
   void Return(Interpreter*);
 
+  // Clear all interpreters, keeps capacity. Waits until all are returned.
  private:
   EventCount waker_;
   std::vector<Interpreter*> available_;
