@@ -891,6 +891,8 @@ Interpreter* InterpreterManager::Get() {
 }
 
 void InterpreterManager::Return(Interpreter* ir) {
+  DCHECK_LE(storage_.data(), ir);                    // ensure the pointer
+  DCHECK_GE(storage_.data() + storage_.size(), ir);  // belongs to storage_
   available_.push_back(ir);
   waker_.notify();
 }
