@@ -94,7 +94,7 @@ class Seeder(SeederBase):
     def change_key_target(self, target: int):
         """Change key target, applied only on succeeding runs"""
 
-        self.key_target = max(target, 10)
+        self.key_target = max(target, 100)  # math breaks with low values
 
     @classmethod
     async def capture(clz, client: aioredis.Redis) -> typing.List[int]:

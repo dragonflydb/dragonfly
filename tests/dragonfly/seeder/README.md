@@ -10,7 +10,7 @@ The seeder tries to maintain a specific number of keys, quickly filling or empty
 # Configure how many keys we want
 s = Seeder(key_target=10_000)
 
-# Fill instance with keys until it's 10k +- 1%\
+# Fill instance with keys until it's 10k +- 1%
 # Will create many new keys with data and reach equilibrium
 await s.run(client, target_deviation=0.01)
 assert abs(client.dbsize() - 10_000) <= 100
@@ -21,7 +21,6 @@ await s.run(client, target_ops=5000)
 # Now we want only 500 keys, issue many deletes
 s.change_key_target(500)
 await s.run(client, target_deviation=0.01)
-
 ```
 
 ### 2. Checking consistency

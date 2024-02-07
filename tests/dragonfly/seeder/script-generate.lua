@@ -47,7 +47,7 @@ end
 
 -- set equilibrium point as key target, see intensity calculations below
 local real_target = key_target
-key_target = key_target / 0.82
+key_target = key_target / 0.956
 
 -- accumulative probabilities: [add, add + delete, modify = 1-( add + delete) ]
 local p_add = 0
@@ -60,6 +60,11 @@ while true do
     -- break if we reached target ops
     if total_ops > 0 and counter > total_ops then
         break
+    end
+
+    if key_target < 100 and min_dev > 0 then
+        print(real_target, key_target, math.abs(#keys - real_target) / real_target)
+        print()
     end
 
     -- break if we reached our target deviation
@@ -88,11 +93,11 @@ while true do
         -- the point where the intensities are equal is the equilibrium point,
         -- based on the formulas it's ~0.82 * key_target
         local i_add = math.max(0, 1 - (#keys / key_target) ^ 16)
-        local i_del = (#keys / key_target) ^ 8
+        local i_del = (#keys / key_target) ^ 16
 
         -- we are only interested in large amounts of modification commands when we are in an
         -- equilibrium, where there are no low intensities
-        local i_mod = math.max(0, 5 * math.min(i_add, i_del) ^ 3)
+        local i_mod = math.max(0, 7 * math.min(i_add, i_del) ^ 3)
 
         -- transform intensities to [0, 1] probability ranges
         local sum = i_add + i_del + i_mod
