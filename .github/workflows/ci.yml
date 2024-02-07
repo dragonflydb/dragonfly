@@ -135,7 +135,7 @@ jobs:
           dfly-executable: dragonfly
           run-only-on-ubuntu-latest: true
           build-folder-name: build
-          filter: ${{ matrix.build-type == 'Release' && '"not slow"' || '"(not slow) and (not opt_only)"' }}
+          filter: ${{ matrix.build-type == 'Release' && 'not slow' || '(not slow) and (not opt_only)' }}
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v3
