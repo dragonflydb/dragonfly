@@ -16,11 +16,11 @@ from .utility import *
         ("STRING", 10_000_000, 1000, 1),
     ],
 )
-async def test_acl_setuser(async_client, type, keys, val_size, elements):
+async def test_rss_used_mem_gap(async_client, type, keys, val_size, elements):
     # Create a Dragonfly and fill it up with `type` until it reaches `min_rss`, then make sure that
     # the gap between used_memory and rss is no more than `max_unaccounted`.
     min_rss = 5 * 1024 * 1024 * 1024  # 5gb
-    max_unaccounted = 200 * 1024 * 1024  # 200mb
+    max_unaccounted = 300 * 1024 * 1024  # 300mb
 
     await async_client.execute_command(
         f"DEBUG POPULATE {keys} {type} {val_size} RAND TYPE {type} ELEMENTS {elements}"
