@@ -18,6 +18,7 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
+#include "server/multi_command_squasher.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
 #include "server/string_family.h"
@@ -125,44 +126,47 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
 void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool random_value,
                      int32_t elements, const PopulateBatch& batch, ServerFamily* sf,
                      ConnectionContext* cntx) {
-  DbContext db_cntx{batch.dbid, 0};
-  OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
-
-  boost::intrusive_ptr<Transaction> local_tx =
-      // new Transaction{cntx->transaction, EngineShard::tlocal()->shard_id(), nullopt};
-      new Transaction{sf->service().mutable_registry()->Find("EXEC")};
-  local_tx->StartMultiNonAtomic();
-  absl::InlinedVector<MutableSlice, 5> args_view;
-  facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx, local_tx.get(), &crb};
-
   absl::InsecureBitGen gen;
+  vector<absl::InlinedVector<string, 5>> args;
+  args.reserve(batch.sz);
+  const CommandId* cid = nullptr;
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = absl::StrCat(prefix, ":", batch.index[i]);
 
-    auto [cid, args] = GeneratePopulateCommand(type, std::move(key), val_size, random_value,
-                                               elements, *sf->service().mutable_registry(), &gen);
+    auto [cid_cur, args_cur] =
+        GeneratePopulateCommand(type, std::move(key), val_size, random_value, elements,
+                                *sf->service().mutable_registry(), &gen);
+    cid = cid_cur;
     if (!cid) {
       LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
       break;
     }
 
-    args_view.clear();
-    for (auto& arg : args) {
-      args_view.push_back(absl::MakeSpan(arg));
-    }
-    auto args_span = absl::MakeSpan(args_view);
-
-    local_tx->MultiSwitchCmd(cid);
-    local_cntx.cid = cid;
-    crb.SetReplyMode(ReplyMode::NONE);
-    local_tx->InitByArgs(local_cntx.conn_state.db_index, args_span);
-
-    sf->service().InvokeCmd(cid, args_span, &local_cntx);
+    args.push_back(args_cur);
   }
 
+  vector<absl::InlinedVector<MutableSlice, 5>> args_slice;
+  args_slice.resize(args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    args_slice[i].reserve(args[i].size());
+    for (size_t j = 0; j < args[i].size(); ++j) {
+      args_slice[i].emplace_back(absl::MakeSpan(args[i][j]));
+    }
+  }
+
+  vector<StoredCmd> cmds;
+  cmds.reserve(args_slice.size());
+  for (auto& arg : args_slice) {
+    cmds.emplace_back(cid, absl::MakeSpan(arg), facade::ReplyMode::NONE);
+  }
+
+  // ERROR: cntx does not contain a transaction
+  boost::intrusive_ptr<Transaction> local_tx =
+      new Transaction{sf->service().mutable_registry()->Find("EXEC")};
+  facade::CapturingReplyBuilder crb;
+  ConnectionContext local_cntx{cntx, local_tx.get(), &crb};
+  MultiCommandSquasher::Execute(absl::MakeSpan(cmds), &local_cntx, &sf->service());
   local_cntx.Inject(nullptr);
-  local_tx->UnlockMulti();
 }
 
 struct ObjHist {
