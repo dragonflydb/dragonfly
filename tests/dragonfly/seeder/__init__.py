@@ -18,6 +18,13 @@ class SeederBase:
     TYPES = ["string"]
 
     @classmethod
+    async def capture(clz, client: aioredis.Redis) -> typing.List[int]:
+        """Generate hash capture for all data stored in instance pointed by client"""
+
+        sha = await client.script_load(clz._load_script("hash"))
+        return await asyncio.gather(*(client.evalsha(sha, 0, data_type) for data_type in clz.TYPES))
+
+    @classmethod
     def _next_id(clz):
         clz.UID_COUNTER += 1
         return clz.UID_COUNTER
@@ -57,7 +64,7 @@ class Seeder(SeederBase):
     units: typing.List[Unit]
 
     def __init__(self, units=10, key_target=10_000, data_size=10):
-        self.uid = SeederBase._next_id()
+        self.uid = Seeder._next_id()
         self.key_target = key_target
         self.data_size = data_size
         self.units = [
@@ -95,13 +102,6 @@ class Seeder(SeederBase):
         """Change key target, applied only on succeeding runs"""
 
         self.key_target = max(target, 100)  # math breaks with low values
-
-    @classmethod
-    async def capture(clz, client: aioredis.Redis) -> typing.List[int]:
-        """Generate hash capture for all data stored in instance pointed by client"""
-
-        sha = await client.script_load(Seeder._load_script("hash"))
-        return await asyncio.gather(*(client.evalsha(sha, 0, data_type) for data_type in clz.TYPES))
 
     @staticmethod
     async def _run_unit(client: aioredis.Redis, sha: str, unit: Unit, using_stopkey, args):
