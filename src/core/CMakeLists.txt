@@ -1,4 +1,6 @@
 add_subdirectory(search)
+add_subdirectory(json)
+
 set(SEARCH_LIB query_parser)
 
 add_library(dfly_core compact_object.cc dragonfly_core.cc extent_tree.cc

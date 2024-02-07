@@ -1335,6 +1335,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return rb->SendError(kWrongTypeErr);
+    case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     default:
@@ -3248,7 +3249,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
   *registry
       << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, acl::kZAdd}.HFUNC(ZAdd)
       << CI{"BZPOPMIN",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
-            acl::kBZPopMax}
+            acl::kBZPopMin}
              .HFUNC(BZPopMin)
       << CI{"BZPOPMAX",    CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2,
             acl::kBZPopMax}
@@ -3267,7 +3268,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, acl::kZRem}.HFUNC(ZRem)
       << CI{"ZRANGE", CO::READONLY, -4, 1, 1, acl::kZRange}.HFUNC(ZRange)
       << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1, acl::kZRandMember}.HFUNC(ZRandMember)
-      << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZRange}.HFUNC(ZRank)
+      << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZRank}.HFUNC(ZRank)
       << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRangeByLex}.HFUNC(ZRangeByLex)
       << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRangeByScore}.HFUNC(ZRangeByScore)
       << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZScore}.HFUNC(ZScore)

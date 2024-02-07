@@ -1,10 +1,8 @@
+option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" ON)
+option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
+
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 cxx_link(dragonfly base dragonfly_lib)
-
-option(DF_ENABLE_MEMORY_TRACKING "Adds memory tracking debugging via MEMORY TRACK command" ON)
-if (DF_ENABLE_MEMORY_TRACKING)
-  target_compile_definitions(dragonfly PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
-endif()
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
@@ -54,11 +52,8 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
+  target_compile_definitions(dragonfly PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
 endif()
-
-cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
-
-option(PRINT_STACKTRACES_ON_SIGNAL "Enables DF to print all fiber stacktraces on SIGUSR1" OFF)
 
 if (PRINT_STACKTRACES_ON_SIGNAL)
   target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
@@ -66,6 +61,7 @@ endif()
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
 
+cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
          TRDP::croncpp)
