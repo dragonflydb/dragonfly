@@ -716,13 +716,20 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
   // TODO implement blocking on migrated slots only
   [[maybe_unused]] const auto deleted_slots = ToSlotSet(migration->GetSlotRange());
 
-  std::atomic_bool is_block_active = true;
-  auto is_pause_in_progress = [&is_block_active] { return is_block_active.load(); };
-  if (!Pause(server_family_->GetListeners(), cntx->conn(), ClientPause::WRITE,
-             is_pause_in_progress)) {
+  bool is_block_active = true;
+  auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
+  auto pause_fb_opt =
+      Pause(server_family_->GetListeners(), cntx->conn(), ClientPause::WRITE, is_pause_in_progress);
+
+  if (!pause_fb_opt) {
     LOG(WARNING) << "Cluster migration finalization time out";
     return cntx->SendError("Blocking connections time out");
   }
+
+  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
+    is_block_active = false;
+    pause_fb_opt->JoinIfNeeded();
+  });
 
   auto cb = [this, &migration](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
@@ -742,8 +749,6 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
     if (const auto* shard = EngineShard::tlocal(); shard)
       migration->Cancel(shard->shard_id());
   });
-
-  is_block_active.store(false);
 
   RemoveOutgoingMigration(sync_id);
 

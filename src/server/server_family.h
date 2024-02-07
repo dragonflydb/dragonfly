@@ -302,7 +302,9 @@ class ServerFamily {
   mutable PeakStats peak_stats_;
 };
 
-bool Pause(absl::Span<facade::Listener* const> listeners, facade::Connection* conn,
-           ClientPause pause_state, std::function<bool()> is_pause_in_progress);
+// Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
+std::optional<util::fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
+                                      facade::Connection* conn, ClientPause pause_state,
+                                      std::function<bool()> is_pause_in_progress);
 
 }  // namespace dfly

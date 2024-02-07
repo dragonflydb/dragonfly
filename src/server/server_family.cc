@@ -438,7 +438,10 @@ void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
            chrono::steady_clock::now() < end_time;
   };
 
-  if (Pause(listeners, cntx->conn(), pause_state, std::move(is_pause_in_progress))) {
+  if (auto pause_fb_opt =
+          Pause(listeners, cntx->conn(), pause_state, std::move(is_pause_in_progress));
+      pause_fb_opt) {
+    pause_fb_opt->Detach();
     cntx->SendOk();
   } else {
     cntx->SendError("Failed to pause all running clients");
@@ -550,8 +553,9 @@ string_view GetRedisMode() {
 
 }  // namespace
 
-bool Pause(absl::Span<facade::Listener* const> listeners, facade::Connection* conn,
-           ClientPause pause_state, std::function<bool()> is_pause_in_progress) {
+std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
+                                facade::Connection* conn, ClientPause pause_state,
+                                std::function<bool()> is_pause_in_progress) {
   // Set global pause state and track commands that are running when the pause state is flipped.
   // Exlude already paused commands from the busy count.
   DispatchTracker tracker{listeners, conn, true /* ignore paused commands */};
@@ -571,14 +575,14 @@ bool Pause(absl::Span<facade::Listener* const> listeners, facade::Connection* co
     shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
       ServerState::tlocal()->SetPauseState(pause_state, false);
     });
-    return false;
+    return std::nullopt;
   }
 
   // We should not expire/evict keys while clients are puased.
   shard_set->RunBriefInParallel(
       [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
 
-  fb2::Fiber("client_pause", [is_pause_in_progress, pause_state]() mutable {
+  return fb2::Fiber("client_pause", [is_pause_in_progress, pause_state]() mutable {
     // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
     // ensure this fiber will not left hanging .
     constexpr auto step = 10ms;
@@ -594,9 +598,7 @@ bool Pause(absl::Span<facade::Listener* const> listeners, facade::Connection* co
       shard_set->RunBriefInParallel(
           [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
     }
-  }).Detach();
-
-  return true;
+  });
 }
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
