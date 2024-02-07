@@ -68,15 +68,35 @@ struct ValueCompressInfo {
   size_t compressed_size = 0;
 };
 
+tuple<CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(std::string key,
+                                                                          size_t val_size,
+                                                                          bool random_value_str) {
+  return {};
+}
+
 void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value_str,
-                     const SetCmd::SetParams& params, const PopulateBatch& batch) {
+                     const PopulateBatch& batch, ServerFamily* sf, ConnectionContext* cntx) {
   DbContext db_cntx{batch.dbid, 0};
   OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
-  SetCmd sg(op_args, false);
+
+  boost::intrusive_ptr<Transaction> local_tx =
+      // new Transaction{cntx->transaction, EngineShard::tlocal()->shard_id(), nullopt};
+      new Transaction{sf->service().mutable_registry()->Find("EXEC")};
+  local_tx->StartMultiNonAtomic();
+  absl::InlinedVector<MutableSlice, 5> args;
+  facade::CapturingReplyBuilder crb;
+  ConnectionContext local_cntx{cntx, local_tx.get(), &crb};
 
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
+    CommandId* cid = sf->service().mutable_registry()->Find("SET");
+    if (!cid) {
+      LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
+      return;
+    }
+
     string key = absl::StrCat(prefix, ":", batch.index[i]);
+
     string val;
 
     if (random_value_str) {
@@ -88,12 +108,20 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value
       }
     }
 
-    auto res = sg.Set(params, key, val);
-    if (!res) {
-      LOG_EVERY_N(WARNING, 10'000) << "Debug populate failed to set value. Status:" << res.status();
-      return;
-    }
+    args.clear();
+    args.push_back(absl::MakeSpan(key));
+    args.push_back(absl::MakeSpan(val));
+
+    local_tx->MultiSwitchCmd(cid);
+    local_cntx.cid = cid;
+    crb.SetReplyMode(ReplyMode::NONE);
+    local_tx->InitByArgs(local_cntx.conn_state.db_index, absl::MakeSpan(args));
+
+    sf->service().InvokeCmd(cid, absl::MakeSpan(args), &local_cntx);
   }
+
+  local_cntx.Inject(nullptr);
+  local_tx->UnlockMulti();
 }
 
 struct ObjHist {
@@ -605,7 +633,6 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   DbIndex db_indx = cntx_->db_index();
   EngineShardSet& ess = *shard_set;
   std::vector<PopulateBatch> ps(ess.size(), PopulateBatch{db_indx});
-  SetCmd::SetParams params;
 
   uint64_t index = from;
   uint64_t to = from + num_of_keys;
@@ -640,9 +667,9 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     ++index;
 
     if (shard_batch.sz == 32) {
-      ess.Add(sid, [=] {
-        DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values, params,
-                        shard_batch);
+      ess.Add(sid, [=, this] {
+        DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values,
+                        shard_batch, &sf_, cntx_);
         if (index % 50 == 0) {
           ThisFiber::Yield();
         }
@@ -654,8 +681,8 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   }
 
   ess.AwaitRunningOnShardQueue([&](EngineShard* shard) {
-    DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values, params,
-                    ps[shard->shard_id()]);
+    DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values,
+                    ps[shard->shard_id()], &sf_, cntx_);
     // Debug populate does not use transaction framework therefore we call OnCbFinish manually
     // after running the callback
     // Note that running debug populate while running flushall/db can cause dcheck fail because the
