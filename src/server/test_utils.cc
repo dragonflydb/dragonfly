@@ -335,6 +335,17 @@ void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double t
   CHECK(IsLocked(db_index, key));
 }
 
+bool BaseFamilyTest::WaitUntilCondition(std::function<bool()> condition_cb,
+                                        std::chrono::milliseconds timeout_ms) {
+  auto step = 50us;
+  auto timeout_micro = chrono::duration_cast<chrono::microseconds>(timeout_ms);
+  int64_t steps = timeout_micro.count() / step.count();
+  do {
+    ThisFiber::SleepFor(step);
+  } while (!condition_cb() && --steps > 0);
+  return condition_cb();
+}
+
 RespExpr BaseFamilyTest::Run(ArgSlice list) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->Run(list); });
