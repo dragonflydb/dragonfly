@@ -68,14 +68,63 @@ struct ValueCompressInfo {
   size_t compressed_size = 0;
 };
 
-tuple<CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(std::string key,
-                                                                          size_t val_size,
-                                                                          bool random_value_str) {
-  return {};
+std::string GenerateValue(size_t val_size, bool random_value, absl::InsecureBitGen* gen) {
+  if (random_value) {
+    return GetRandomHex(*gen, val_size);
+  } else {
+    return string(val_size, 'x');
+  }
 }
 
-void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value_str,
-                     const PopulateBatch& batch, ServerFamily* sf, ConnectionContext* cntx) {
+tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
+    string_view type, std::string key, size_t val_size, bool random_value, uint32_t elements,
+    const CommandRegistry& registry, absl::InsecureBitGen* gen) {
+  absl::InlinedVector<string, 5> args;
+  args.push_back(std::move(key));
+
+  const CommandId* cid = nullptr;
+  if (type == "STRING") {
+    cid = registry.Find("SET");
+    args.push_back(GenerateValue(val_size, random_value, gen));
+  } else if (type == "LIST") {
+    cid = registry.Find("LPUSH");
+    for (uint32_t i = 0; i < elements; ++i) {
+      args.push_back(GenerateValue(val_size, random_value, gen));
+    }
+  } else if (type == "SET") {
+    cid = registry.Find("SADD");
+    for (size_t i = 0; i < elements; ++i) {
+      args.push_back(GenerateValue(val_size, random_value, gen));
+    }
+  } else if (type == "HSET") {
+    cid = registry.Find("HSET");
+    for (size_t i = 0; i < elements; ++i) {
+      args.push_back(GenerateValue(val_size / 2, random_value, gen));
+      args.push_back(GenerateValue(val_size / 2, random_value, gen));
+    }
+  } else if (type == "ZSET") {
+    cid = registry.Find("ZADD");
+    for (size_t i = 0; i < elements; ++i) {
+      args.push_back(absl::StrCat((*gen)() % val_size));
+      args.push_back(GenerateValue(val_size, random_value, gen));
+    }
+  } else if (type == "JSON") {
+    cid = registry.Find("JSON.SET");
+    args.push_back("$");
+
+    string json = "{";
+    for (size_t i = 0; i < elements; ++i) {
+      absl::StrAppend(&json, "\"", i, "\":\"", GenerateValue(val_size, random_value, gen), "\",");
+    }
+    json[json.size() - 1] = '}';  // Replace last ',' with '}'
+    args.push_back(json);
+  }
+  return {cid, args};
+}
+
+void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool random_value,
+                     int32_t elements, const PopulateBatch& batch, ServerFamily* sf,
+                     ConnectionContext* cntx) {
   DbContext db_cntx{batch.dbid, 0};
   OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
 
@@ -83,41 +132,33 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value
       // new Transaction{cntx->transaction, EngineShard::tlocal()->shard_id(), nullopt};
       new Transaction{sf->service().mutable_registry()->Find("EXEC")};
   local_tx->StartMultiNonAtomic();
-  absl::InlinedVector<MutableSlice, 5> args;
+  absl::InlinedVector<MutableSlice, 5> args_view;
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx, local_tx.get(), &crb};
 
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
-    CommandId* cid = sf->service().mutable_registry()->Find("SET");
-    if (!cid) {
-      LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
-      return;
-    }
-
     string key = absl::StrCat(prefix, ":", batch.index[i]);
 
-    string val;
-
-    if (random_value_str) {
-      val = GetRandomHex(gen, val_size);
-    } else {
-      val = absl::StrCat("value:", batch.index[i]);
-      if (val.size() < val_size) {
-        val.resize(val_size, 'x');
-      }
+    auto [cid, args] = GeneratePopulateCommand(type, std::move(key), val_size, random_value,
+                                               elements, *sf->service().mutable_registry(), &gen);
+    if (!cid) {
+      LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
+      break;
     }
 
-    args.clear();
-    args.push_back(absl::MakeSpan(key));
-    args.push_back(absl::MakeSpan(val));
+    args_view.clear();
+    for (auto& arg : args) {
+      args_view.push_back(absl::MakeSpan(arg));
+    }
+    auto args_span = absl::MakeSpan(args_view);
 
     local_tx->MultiSwitchCmd(cid);
     local_cntx.cid = cid;
     crb.SetReplyMode(ReplyMode::NONE);
-    local_tx->InitByArgs(local_cntx.conn_state.db_index, absl::MakeSpan(args));
+    local_tx->InitByArgs(local_cntx.conn_state.db_index, args_span);
 
-    sf->service().InvokeCmd(cid, absl::MakeSpan(args), &local_cntx);
+    sf->service().InvokeCmd(cid, args_span, &local_cntx);
   }
 
   local_cntx.Inject(nullptr);
@@ -526,7 +567,7 @@ void DebugCmd::Load(string_view filename) {
 }
 
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args) {
-  if (args.size() < 2 || args.size() > 8) {
+  if (args.size() < 2) {
     cntx_->SendError(UnknownSubCmd("populate", "DEBUG"));
     return nullopt;
   }
@@ -553,6 +594,22 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
     std::string_view str = ArgS(args, index);
     if (str == "RAND") {
       options.populate_random_values = true;
+    } else if (str == "TYPE") {
+      if (args.size() < index + 2) {
+        cntx_->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      ToUpper(&args[++index]);
+      options.type = ArgS(args, index);
+    } else if (str == "ELEMENTS") {
+      if (args.size() < index + 2) {
+        cntx_->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      if (!absl::SimpleAtoi(ArgS(args, ++index), &options.elements)) {
+        cntx_->SendError(kSyntaxErr);
+        return nullopt;
+      }
     } else if (str == "SLOTS") {
       if (args.size() < index + 3) {
         cntx_->SendError(kSyntaxErr);
@@ -668,8 +725,8 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
 
     if (shard_batch.sz == 32) {
       ess.Add(sid, [=, this] {
-        DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values,
-                        shard_batch, &sf_, cntx_);
+        DoPopulateBatch(options.type, options.prefix, options.val_size,
+                        options.populate_random_values, options.elements, shard_batch, &sf_, cntx_);
         if (index % 50 == 0) {
           ThisFiber::Yield();
         }
@@ -681,8 +738,8 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   }
 
   ess.AwaitRunningOnShardQueue([&](EngineShard* shard) {
-    DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values,
-                    ps[shard->shard_id()], &sf_, cntx_);
+    DoPopulateBatch(options.type, options.prefix, options.val_size, options.populate_random_values,
+                    options.elements, ps[shard->shard_id()], &sf_, cntx_);
     // Debug populate does not use transaction framework therefore we call OnCbFinish manually
     // after running the callback
     // Note that running debug populate while running flushall/db can cause dcheck fail because the
