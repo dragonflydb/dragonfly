@@ -47,11 +47,7 @@ OutgoingMigration::~OutgoingMigration() = default;
 
 void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal,
                                   io::Sink* dest) {
-  SlotSet sset;
-  for (const auto& slot_range : slots_) {
-    for (auto i = slot_range.start; i <= slot_range.end; ++i)
-      sset.insert(i);
-  }
+  SlotSet sset = ToSlotSet(slots_);
 
   const auto shard_id = slice->shard_id();
 
