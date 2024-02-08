@@ -863,8 +863,6 @@ TEST_F(ListFamilyTest, OtherMultiWakesBLpop) {
 }
 
 TEST_F(ListFamilyTest, ContendExpire) {
-  GTEST_SKIP() << "Skipped due to a bug in helio";
-
   vector<fb2::Fiber> blpop_fibers;
   for (unsigned i = 0; i < num_threads_; ++i) {
     for (unsigned j = 0; j < 30; ++j) {
