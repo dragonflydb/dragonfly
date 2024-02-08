@@ -167,6 +167,7 @@ cv_status Transaction::BatonBarrierrier::Wait(time_point tp) {
  * @param cs
  */
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
+  InitTxTime();
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
