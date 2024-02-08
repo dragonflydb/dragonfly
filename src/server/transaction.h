@@ -237,6 +237,8 @@ class Transaction {
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
 
+  void InitTxTime();
+
   // Report which shards had write commands that executed on stub transactions
   // and thus did not mark itself in MultiData::shard_journal_write.
   void ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write);
