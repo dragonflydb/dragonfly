@@ -468,6 +468,8 @@ auto Interpreter::AddFunction(string_view sha, string_view body, string* result)
 }
 
 bool Interpreter::Exists(string_view sha) const {
+  DCHECK(lua_);
+
   if (sha.size() != 40)
     return false;
 
@@ -484,7 +486,7 @@ bool Interpreter::Exists(string_view sha) const {
 }
 
 auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult {
-  DVLOG(1) << "RunFunction " << sha << " " << lua_gettop(lua_);
+  DVLOG(2) << "RunFunction " << sha << " " << lua_gettop(lua_);
 
   DCHECK_EQ(40u, sha.size());
 
@@ -892,17 +894,38 @@ Interpreter* InterpreterManager::Get() {
 }
 
 void InterpreterManager::Return(Interpreter* ir) {
-  DCHECK_LE(storage_.data(), ir);                    // ensure the pointer
-  DCHECK_GE(storage_.data() + storage_.size(), ir);  // belongs to storage_
-  available_.push_back(ir);
-  waker_.notify();
+  if (ir >= storage_.data() && ir < storage_.data() + storage_.size()) {
+    available_.push_back(ir);
+    waker_.notify();
+  } else if (return_untracked_ > 0) {
+    return_untracked_--;
+    if (return_untracked_ == 0) {
+      reset_ec_.notify();
+    }
+  } else {
+    LOG(DFATAL) << "Returning untracked interpreter";
+  }
 }
 
 void InterpreterManager::Reset() {
-  waker_.await([this]() { return available_.size() == storage_.size(); });
+  lock_guard guard{reset_mu_};
+
+  // we perform double buffer swapping with storage and wait for the old interepreters to be
+  // returned.
+  return_untracked_ = storage_.size() - available_.size();
+
+  std::vector<Interpreter> next_storage;
+  next_storage.reserve(storage_.capacity());
+  next_storage.resize(storage_.size());
+  next_storage.swap(storage_);
 
   available_.clear();
-  storage_.clear();
+  for (auto& ir : storage_) {
+    available_.push_back(&ir);
+  }
+
+  reset_ec_.await([this]() { return return_untracked_ == 0; });
+  VLOG(1) << "InterpreterManager::Reset ended";
 }
 
 }  // namespace dfly
