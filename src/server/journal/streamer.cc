@@ -75,7 +75,7 @@ void RestoreStreamer::Start(io::Sink* dest) {
       if (fiber_cancellation_.IsCancelled())
         return;
 
-      cursor = pt->Traverse(cursor, absl::bind_front(&RestoreStreamer::WriteBucket, this));
+      cursor = pt->Traverse(cursor, absl::bind_front(&RestoreStreamer::WriteBucket, this, true));
       ++last_yield;
 
       if (last_yield >= 100) {
@@ -124,7 +124,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.contains(slot_id);
 }
 
-void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+void RestoreStreamer::WriteBucket(bool allow_await, PrimeTable::bucket_iterator it) {
   bool is_data_present = false;
 
   if (it.GetVersion() < snapshot_version_) {
@@ -149,7 +149,7 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   }
 
   if (is_data_present)
-    NotifyWritten(true);
+    NotifyWritten(allow_await);
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -159,12 +159,12 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    WriteBucket(*bit);
+    WriteBucket(false, *bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      WriteBucket(it);
+      WriteBucket(false, it);
     });
   }
 }

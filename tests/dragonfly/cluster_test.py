@@ -952,8 +952,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[1].get("KEY19") == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 17
 
-    await c_nodes_admin[0].close()
-    await c_nodes_admin[1].close()
+    await close_clients(*c_nodes, *c_nodes_admin)
 
 
 from dataclasses import dataclass
@@ -1120,4 +1119,3 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
 
     # Compare capture
     assert await seeder.compare(capture, nodes[0].instance.port)
-    await close_clients(*c_nodes, *c_nodes_admin)
