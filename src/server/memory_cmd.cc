@@ -332,15 +332,16 @@ void MemoryCmd::Track(CmdArgList args) {
   }
 
   if (sub_cmd == "ADD") {
-    auto [lower_bound, upper_bound, odds] = parser.Next<size_t, size_t, double>();
+    AllocationTracker::TrackingInfo tracking_info;
+    std::tie(tracking_info.lower_bound, tracking_info.upper_bound, tracking_info.sample_odds) =
+        parser.Next<size_t, size_t, double>();
     if (parser.HasError()) {
       return cntx_->SendError(parser.Error()->MakeReply());
     }
 
     atomic_bool error{false};
     shard_set->pool()->Await([&](unsigned index, auto*) {
-      if (!AllocationTracker::Get().Add(
-              {.lower_bound = lower_bound, .upper_bound = upper_bound, .sample_odds = odds})) {
+      if (!AllocationTracker::Get().Add(tracking_info)) {
         error.store(true);
       }
     });
@@ -359,8 +360,8 @@ void MemoryCmd::Track(CmdArgList args) {
     }
 
     atomic_bool error{false};
-    shard_set->pool()->Await([&](unsigned index, auto*) {
-      if (!AllocationTracker::Get().Remove(lower_bound, upper_bound)) {
+    shard_set->pool()->Await([&, lo = lower_bound, hi = upper_bound](unsigned index, auto*) {
+      if (!AllocationTracker::Get().Remove(lo, hi)) {
         error.store(true);
       }
     });

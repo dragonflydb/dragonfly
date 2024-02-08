@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json_object.h"
@@ -712,15 +713,39 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
     return cntx->SendError("Migration process is not in STABLE_SYNC state");
   }
 
-  shard_set->pool()->AwaitFiberOnAll([migration](auto*) {
-    if (const auto* shard = EngineShard::tlocal(); shard)
-      migration->Finalize(shard->shard_id());
+  // TODO implement blocking on migrated slots only
+  [[maybe_unused]] const auto deleted_slots = ToSlotSet(migration->GetSlotRange());
+
+  bool is_block_active = true;
+  auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
+  auto pause_fb_opt =
+      Pause(server_family_->GetListeners(), cntx->conn(), ClientPause::WRITE, is_pause_in_progress);
+
+  if (!pause_fb_opt) {
+    LOG(WARNING) << "Cluster migration finalization time out";
+    return cntx->SendError("Blocking connections time out");
+  }
+
+  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
+    is_block_active = false;
+    pause_fb_opt->JoinIfNeeded();
   });
 
-  // TODO do next after ACK
-  util::ThisFiber::SleepFor(500ms);
+  auto cb = [this, &migration](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      // TODO add error processing to move back into STABLE_SYNC state
+      migration->Finalize(shard->shard_id());
+    }
+  };
 
-  shard_set->pool()->AwaitFiberOnAll([migration](auto*) {
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  // TODO do next after ACK
+  util::ThisFiber::SleepFor(200ms);
+
+  shard_set->pool()->AwaitFiberOnAll([&migration, &deleted_slots](auto*) mutable {
+    tl_cluster_config->RemoveSlots(deleted_slots);
+
     if (const auto* shard = EngineShard::tlocal(); shard)
       migration->Cancel(shard->shard_id());
   });

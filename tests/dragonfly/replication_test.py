@@ -769,6 +769,38 @@ async def test_expiry(df_local_factory: DflyInstanceFactory, n_keys=1000):
     assert all(v is None for v in res)
 
 
+@dfly_args({"proactor_threads": 4})
+async def test_simple_scripts(df_local_factory: DflyInstanceFactory):
+    master = df_local_factory.create()
+    replicas = [df_local_factory.create() for _ in range(2)]
+    df_local_factory.start_all([master] + replicas)
+
+    c_replicas = [replica.client() for replica in replicas]
+    c_master = master.client()
+
+    # Connect replicas and wait for sync to finish
+    for c_replica in c_replicas:
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # Generate some scripts and run them
+    keys = ["a", "b", "c", "d", "e"]
+    for i in range(len(keys) + 1):
+        script = ""
+        subkeys = keys[:i]
+        for key in subkeys:
+            script += f"redis.call('INCR', '{key}')"
+            script += f"redis.call('INCR', '{key}')"
+
+        await c_master.eval(script, len(subkeys), *subkeys)
+
+    # Wait for replicas
+    await check_all_replicas_finished([c_replica], c_master)
+
+    for c_replica in c_replicas:
+        assert (await c_replica.mget(keys)) == ["10", "8", "6", "4", "2"]
+
+
 """
 Test script replication.
 
@@ -1909,6 +1941,61 @@ async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_fac
     keys_replica = await c_replica.execute_command("keys k*")
 
     assert len(keys_master) == len(keys_replica)
+    assert set(keys_master) == set(keys_replica)
+
+    await disconnect_clients(c_master, *[c_replica])
+
+
+@pytest.mark.asyncio
+async def test_journal_doesnt_yield_issue_2500(df_local_factory, df_seeder_factory):
+    """
+    Issues many SETEX commands through a Lua script so that no yields are done between them.
+    In parallel, connect a replica, so that these SETEX commands write their custom journal log.
+    This makes sure that no Fiber context switch while inside a shard callback.
+    """
+    master = df_local_factory.create()
+    replica = df_local_factory.create()
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    async def send_setex():
+        script = """
+        local charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+
+        local random_string = function(length)
+            local str = ''
+            for i=1,length do
+                str = str .. charset:sub(math.random(1, #charset))
+            end
+            return str
+        end
+
+        for i = 1, 200 do
+            -- 200 iterations to make sure SliceSnapshot dest queue is full
+            -- 100 bytes string to make sure serializer is big enough
+            redis.call('SETEX', KEYS[1], 1000, random_string(100))
+        end
+        """
+
+        for i in range(10):
+            await asyncio.gather(
+                *[c_master.eval(script, 1, random.randint(0, 1_000)) for j in range(3)]
+            )
+
+    stream_task = asyncio.create_task(send_setex())
+    await asyncio.sleep(0.1)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    assert not stream_task.done(), "Weak testcase. finished sending commands before replication."
+
+    await wait_available_async(c_replica)
+    await stream_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    keys_master = await c_master.execute_command("keys *")
+    keys_replica = await c_replica.execute_command("keys *")
     assert set(keys_master) == set(keys_replica)
 
     await disconnect_clients(c_master, *[c_replica])
