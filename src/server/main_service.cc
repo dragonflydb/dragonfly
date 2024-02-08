@@ -1710,8 +1710,10 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
     return false;
   }
 
-  if (keys.empty() && script_mode == Transaction::LOCK_AHEAD)
+  if (keys.empty() && script_mode == Transaction::LOCK_AHEAD) {
+    trans->InitTxTime();
     return false;
+  }
 
   switch (script_mode) {
     case Transaction::GLOBAL:
@@ -2040,7 +2042,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
         "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
 
   bool scheduled = false;
-  if (*multi_mode != Transaction::NOT_DETERMINED) {
+  if (*multi_mode == Transaction::NOT_DETERMINED) {
+    cntx->transaction->InitTxTime();
+  } else {
     StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, *multi_mode);
     scheduled = true;
   }

@@ -1270,13 +1270,10 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Time(CmdArgList args, ConnectionContext* cntx) {
-  uint64_t now_usec = 0;
+  uint64_t now_usec;
   if (cntx->transaction) {
-    // This will be 0 if run under an unscheduled transaction
     now_usec = cntx->transaction->GetDbContext().time_now_ms * 1000;
-  }
-
-  if (now_usec == 0) {
+  } else {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }
 
