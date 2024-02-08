@@ -234,8 +234,8 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    state_mask_.fetch_and(R_ENABLED);
-    if (state_mask_.load() & R_ENABLED) {  // replication was not stopped.
+    auto state = state_mask_.fetch_and(R_ENABLED);
+    if (state & R_ENABLED) {  // replication was not stopped.
       LOG(WARNING) << "Error stable sync with " << server().Description() << " " << ec << " "
                    << ec.message();
     }
