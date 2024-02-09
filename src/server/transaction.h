@@ -316,7 +316,8 @@ class Transaction {
     return cid_;
   }
 
-  std::string DebugId() const;
+  // Return debug information about a transaction, include shard local info if passed
+  std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
   // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
   // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
@@ -427,7 +428,7 @@ class Transaction {
   // "Single claim - single modification" barrier. Multiple threads might try to claim it, only one
   // will succeed and will be allowed to modify the guarded object until it closes the barrier.
   // A closed barrier can't be claimed again or re-used in any way.
-  class BatonBarrierrier {
+  class BatonBarrier {
    public:
     bool IsClaimed() const;  // Return if barrier is claimed, only for peeking
     bool TryClaim();         // Return if the barrier was claimed successfully
@@ -594,7 +595,7 @@ class Transaction {
   UniqueSlotChecker unique_slot_checker_;
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
-  BatonBarrierrier blocking_barrier_{};
+  BatonBarrier blocking_barrier_{};
 
   // Transaction coordinator state, written and read by coordinator thread.
   uint8_t coordinator_state_ = 0;

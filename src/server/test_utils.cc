@@ -247,9 +247,7 @@ void BaseFamilyTest::ResetService() {
             auto it = head;
             do {
               Transaction* trans = std::get<Transaction*>(es->txq()->At(it));
-              LOG(ERROR) << "Transaction " << trans->DebugId() << " "
-                         << trans->GetLocalMask(es->shard_id()) << " "
-                         << trans->IsArmedInShard(es->shard_id());
+              LOG(ERROR) << "Transaction " << trans->DebugId(es->shard_id());
               it = txq->Next(it);
             } while (it != head);
           }

@@ -124,21 +124,21 @@ uint32_t Transaction::PhasedBarrier::DEBUG_Count() const {
   return count_.load(memory_order_relaxed);
 }
 
-bool Transaction::BatonBarrierrier::IsClaimed() const {
+bool Transaction::BatonBarrier::IsClaimed() const {
   return claimed_.load(memory_order_relaxed);
 }
 
-bool Transaction::BatonBarrierrier::TryClaim() {
+bool Transaction::BatonBarrier::TryClaim() {
   return !claimed_.exchange(true, memory_order_relaxed);  // false means first means success
 }
 
-void Transaction::BatonBarrierrier::Close() {
+void Transaction::BatonBarrier::Close() {
   DCHECK(claimed_.load(memory_order_relaxed));
   closed_.store(true, memory_order_relaxed);
   ec_.notify();  // release
 }
 
-cv_status Transaction::BatonBarrierrier::Wait(time_point tp) {
+cv_status Transaction::BatonBarrier::Wait(time_point tp) {
   auto cb = [this] { return closed_.load(memory_order_acquire); };
 
   if (tp != time_point::max()) {
@@ -540,13 +540,18 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
     multi_->role = DEFAULT;
 }
 
-string Transaction::DebugId() const {
+string Transaction::DebugId(std::optional<ShardId> sid) const {
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
   string res = StrCat(Name(), "@", txid_, "/", unique_shard_cnt_);
   if (multi_) {
     absl::StrAppend(&res, ":", multi_->cmd_seq_num);
   }
-  absl::StrAppend(&res, " (", trans_id(this), ")");
+  absl::StrAppend(&res, " {id=", trans_id(this));
+  if (sid) {
+    absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
+                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
+  }
+  absl::StrAppend(&res, "}");
   return res;
 }
 
@@ -1071,6 +1076,7 @@ bool Transaction::IsActive(ShardId sid) const {
 
 uint16_t Transaction::GetLocalMask(ShardId sid) const {
   DCHECK(IsActive(sid));
+  DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
   return shard_data_[SidToId(sid)].local_mask;
 }
 
