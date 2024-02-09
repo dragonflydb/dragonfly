@@ -5,7 +5,8 @@
 
 
 %{
-  // SECOND SECTION
+  #include <absl/strings/numbers.h>
+  #include "base/logging.h"
 %}
 
 %o bison-cc-namespace="dfly.json" bison-cc-parser="Parser"
@@ -41,6 +42,14 @@
 
 "$"         return Parser::make_ROOT(loc());
 "."         return Parser::make_DOT(loc());
+"["         return Parser::make_LBRACKET(loc());
+"]"         return Parser::make_RBRACKET(loc());
+"*"         return Parser::make_WILDCARD(loc());
+[0-9]{1,9}  {
+              unsigned val;
+              CHECK(absl::SimpleAtoi(str(), &val));
+              return Parser::make_UINT(val, loc());
+            }
 \w[\w_\-]*  return Parser::make_UNQ_STR(str(), loc());
 <<EOF>>     printf("EOF%s\n", matcher().text());
 %%
