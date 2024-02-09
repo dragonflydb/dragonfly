@@ -167,6 +167,7 @@ cv_status Transaction::BatonBarrier::Wait(time_point tp) {
  * @param cs
  */
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
+  InitTxTime();
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
@@ -188,7 +189,9 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optio
     // Use squashing mechanism for inline execution of single-shard EVAL
     multi_->mode = LOCK_AHEAD;
   }
+
   multi_->role = SQUASHED_STUB;
+  multi_->shard_journal_write.resize(1);
 
   time_now_ms_ = parent->time_now_ms_;
 
@@ -500,6 +503,10 @@ void Transaction::StartMultiNonAtomic() {
   multi_->mode = NON_ATOMIC;
 }
 
+void Transaction::InitTxTime() {
+  time_now_ms_ = GetCurrentTimeMs();
+}
+
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_ptr_);
@@ -713,7 +720,7 @@ void Transaction::ScheduleInternal() {
   // Loop until successfully scheduled in all shards.
   while (true) {
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
-    time_now_ms_ = GetCurrentTimeMs();
+    InitTxTime();
 
     atomic_uint32_t schedule_fails = 0;
     auto cb = [this, &schedule_fails](EngineShard* shard) {
@@ -793,8 +800,8 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     DCHECK(IsActive(unique_shard_id_));
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
 
-    time_now_ms_ = GetCurrentTimeMs();
-    shard_data_[SidToId(unique_shard_id_)].local_mask |= ARMED;
+    InitTxTime();
+    shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
 
     // Start new phase, be careful with writes until phase end!
     run_barrier_.Start(1);
@@ -966,6 +973,16 @@ void Transaction::Refurbish() {
 const absl::flat_hash_set<std::string_view>& Transaction::GetMultiKeys() const {
   DCHECK(multi_);
   return multi_->frozen_keys_set;
+}
+
+void Transaction::FIX_ConcludeJournalExec() {
+  if (!multi_->shard_journal_write.front())
+    return;
+
+  if (auto journal = EngineShard::tlocal()->journal(); journal != nullptr) {
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, 1,
+                         unique_slot_checker_.GetUniqueSlotId(), {}, false);
+  }
 }
 
 void Transaction::EnableShard(ShardId sid) {
@@ -1478,8 +1495,13 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
                                     bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
-  if (multi_ && multi_->role != SQUASHED_STUB)
-    multi_->shard_journal_write[shard->shard_id()] = true;
+
+  if (multi_) {
+    if (multi_->role != SQUASHED_STUB)
+      multi_->shard_journal_write[shard->shard_id()] = true;
+    else
+      multi_->shard_journal_write[0] = true;
+  }
 
   bool is_multi = multi_commands || IsAtomicMulti();
 
@@ -1500,9 +1522,8 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
 
 void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
   // We're on the owning thread of this transaction, so we can safely access it's data below.
-  // We still need to claim the blocking barrier, but as this function is often called blindly, we
-  // want to check first if it makes sense to even proceed.
-  if (blocking_barrier_.IsClaimed())
+  // First, check if it makes sense to proceed.
+  if (blocking_barrier_.IsClaimed() || cid_ == nullptr || (cid_->opt_mask() & CO::BLOCKING) == 0)
     return;
 
   OpStatus status = OpStatus::CANCELLED;
