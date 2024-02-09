@@ -26,6 +26,8 @@ class Lexer : public AbstractLexer {
   dfly::json::location loc() {
     return location();
   }
+
+  std::string UnknownTokenMsg() const;
 };
 
 }  // namespace json
