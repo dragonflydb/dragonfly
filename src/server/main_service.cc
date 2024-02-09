@@ -1679,8 +1679,8 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_mgr,
-                                            Interpreter* interpreter) {
+optional<ScriptMgr::ScriptParams> LoadScript(string_view sha, ScriptMgr* script_mgr,
+                                             Interpreter* interpreter) {
   auto ss = ServerState::tlocal();
 
   if (!interpreter->Exists(sha)) {
@@ -1808,7 +1808,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     return cntx->SendError(facade::kScriptNotFound);
   }
 
-  auto params = LoadScipt(eval_args.sha, server_family_.script_mgr(), interpreter);
+  auto params = LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
   if (!params)
     return cntx->SendError(facade::kScriptNotFound);
 
