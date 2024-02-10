@@ -316,11 +316,8 @@ unsigned BaseFamilyTest::NumLocked() {
 }
 
 void BaseFamilyTest::ClearMetrics() {
-  shard_set->pool()->Await([](auto*) {
-    ServerState::Stats stats;
-    stats.tx_width_freq_arr = new uint64_t[shard_set->size()];
-    ServerState::tlocal()->stats = std::move(stats);
-  });
+  shard_set->pool()->Await(
+      [](auto*) { ServerState::tlocal()->stats = ServerState::Stats(shard_set->size()); });
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
