@@ -801,7 +801,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
 
     InitTxTime();
-    shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
+    shard_data_[SidToId(unique_shard_id_)].local_mask |= ARMED;
 
     // Start new phase, be careful with writes until phase end!
     run_barrier_.Start(1);
