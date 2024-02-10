@@ -1059,21 +1059,27 @@ TEST_F(JsonFamilyTest, MSet) {
     {"def":{"num1":16,"num2":32}}
   )";
 
-  string json3 = R"(
-    {"def":{"num3":64},"ghi":{"num3":128}}}
-  )";
-
-  auto resp = Run({"JSON.MSET", "json1", "$", json1, "json2", "$", json2, "json3", "$", json3});
+  auto resp = Run({"JSON.MSET", "json1", "$", json1, "json2", "$", json2});
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "json1", "$"});
-  EXPECT_EQ(resp, R"({"abc":1})");
+  EXPECT_EQ(resp, R"([{"abc":1}])");
 
   resp = Run({"JSON.GET", "json2", "$"});
-  EXPECT_EQ(resp, R"({"def":{"num1":16,"num2":32}})");
+  EXPECT_EQ(resp, R"([{"def":{"num1":16,"num2":32}}])");
 
-  resp = Run({"JSON.GET", "json3", "$"});
-  EXPECT_EQ(resp, R"({"def":{"num3":64},"ghi":{"num3":128}}})");
+  string malformed_json = R"(
+    {"def"}
+  )";
+
+  resp = Run({"JSON.MSET", "json1", "$", json2, "json2", "$", malformed_json});
+  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+
+  resp = Run({"JSON.GET", "json1", "$"});
+  EXPECT_EQ(resp, R"([{"abc":1}])");
+
+  resp = Run({"JSON.GET", "json2", "$"});
+  EXPECT_EQ(resp, R"([{"def":{"num1":16,"num2":32}}])");
 }
 
 }  // namespace dfly

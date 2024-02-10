@@ -1171,16 +1171,73 @@ void JsonFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
+    bool shouldRevert = false;
     OpResult<bool> res;
-    for (size_t i = 0; i < keys.size(); i += 3) {
+    const OpArgs& op_args = t->GetOpArgs(shard);
+    auto& db_slice = op_args.shard->db_slice();
+    stack<pair<string_view, string>> changes;
+    for (size_t i = 0; i < keys.size() && !shouldRevert; i++) {
+      bool key_not_found = false;
       string_view key = keys[i];
-      string_view path = paths[i + 1];
-      string_view json_str = paths[i + 2];
+      string_view path = paths[i];
+      string_view json_str = json_strs[i];
+      {
+        OpResult<PrimeConstIterator> it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+        if (!it_res.ok()) {
+          if (it_res.status() == OpStatus::KEY_NOTFOUND) {
+            key_not_found = true;
+          } else {
+            shouldRevert = true;
+            continue;
+          }
+        } else {
+          // Backup the current data before applying the change.
+          JsonType* json_val = it_res.value()->second.GetJson();
+          string str;
+          error_code ec;
+          json_val->dump(str, {}, ec);
+          if (ec) {
+            shouldRevert = true;
+            continue;
+          }
+          changes.emplace(key, move(str));
+        }
+      }
+
       res = OpSet(t->GetOpArgs(shard), key, path, json_str, false, false);
-      if (!res) {
-        return res;
+      if (!res.ok()) {
+        shouldRevert = true;
+        continue;
+      }
+
+      // The current key should be deleted entirely whether insertion is completed successfully.
+      if (key_not_found) {
+        changes.emplace(key, "");
       }
     }
+
+    if (shouldRevert) {
+      while (!changes.empty()) {
+        auto& change = changes.top();
+        auto fres = db_slice.FindMutable(op_args.db_cntx, change.first);
+        if (!IsValid(fres.it))
+          continue;
+        fres.post_updater.Run();
+        // The current key should be deleted because it didn't exist before this operation.
+        op_args.shard->search_indices()->RemoveDoc(change.first, op_args.db_cntx, fres.it->second);
+        if (change.second.empty()) {
+          db_slice.Del(op_args.db_cntx.db_index, fres.it);
+        } else {
+          optional<JsonType> backup_value = JsonFromString(change.second);
+          if (backup_value) {
+            fres.it->second.SetJson(backup_value);
+            op_args.shard->search_indices()->AddDoc(change.first, op_args.db_cntx, fres.it->second);
+          }
+        }
+        changes.pop();
+      }
+    }
+
     return res;
   };
 
