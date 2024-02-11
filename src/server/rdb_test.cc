@@ -202,6 +202,13 @@ TEST_F(RdbTest, SaveLoadSticky) {
   EXPECT_THAT(Run({"stick", "c"}), IntArg(1));
 }
 
+TEST_F(RdbTest, ReloadSetSmallStringBug) {
+  auto str = absl::StrCat(std::string(32, 'X'));
+  Run({"set", "small_key", str});
+  auto resp = Run({"debug", "reload"});
+  ASSERT_EQ(resp, "OK");
+}
+
 TEST_F(RdbTest, Reload) {
   absl::FlagSaver fs;
 

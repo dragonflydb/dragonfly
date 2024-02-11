@@ -234,9 +234,11 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    LOG(WARNING) << "Error stable sync with " << server().Description() << " " << ec << " "
-                 << ec.message();
-    state_mask_.fetch_and(R_ENABLED);
+    auto state = state_mask_.fetch_and(R_ENABLED);
+    if (state & R_ENABLED) {  // replication was not stopped.
+      LOG(WARNING) << "Error stable sync with " << server().Description() << " " << ec << " "
+                   << ec.message();
+    }
   }
 
   // Wait for unblocking cleanup to finish.

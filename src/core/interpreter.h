@@ -9,7 +9,7 @@
 #include <string_view>
 
 #include "core/core_types.h"
-#include "core/fibers.h"
+#include "util/fibers/synchronization.h"
 
 typedef struct lua_State lua_State;
 
@@ -141,20 +141,23 @@ class InterpreterManager {
     // We pre-allocate the backing storage during initialization and
     // start storing pointers to slots in the available vector.
     storage_.reserve(num);
-    available_.reserve(num);
   }
 
   // Borrow interpreter. Always return it after usage.
   Interpreter* Get();
-
   void Return(Interpreter*);
 
+  // Clear all interpreters, keeps capacity. Waits until all are returned.
   void Reset();
 
  private:
-  EventCount waker_;
+  util::fb2::EventCount waker_, reset_ec_;
   std::vector<Interpreter*> available_;
   std::vector<Interpreter> storage_;
+
+  util::fb2::Mutex reset_mu_;  // Acts as a singleton.
+
+  unsigned return_untracked_ = 0;  // Number of returned interpreters during reset.
 };
 
 }  // namespace dfly

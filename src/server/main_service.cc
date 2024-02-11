@@ -128,20 +128,22 @@ constexpr size_t kMaxThreadSize = 1024;
 
 // Unwatch all keys for a connection and unregister from DbSlices.
 // Used by UNWATCH, DICARD and EXEC.
-void UnwatchAllKeys(ConnectionContext* cntx) {
-  auto& exec_info = cntx->conn_state.exec_info;
-  if (!exec_info.watched_keys.empty()) {
-    auto cb = [&](EngineShard* shard) {
-      shard->db_slice().UnregisterConnectionWatches(&exec_info);
-    };
+void UnwatchAllKeys(ConnectionState::ExecInfo* exec_info) {
+  if (!exec_info->watched_keys.empty()) {
+    auto cb = [&](EngineShard* shard) { shard->db_slice().UnregisterConnectionWatches(exec_info); };
     shard_set->RunBriefInParallel(std::move(cb));
   }
-  exec_info.ClearWatched();
+  exec_info->ClearWatched();
 }
 
 void MultiCleanup(ConnectionContext* cntx) {
-  UnwatchAllKeys(cntx);
-  cntx->conn_state.exec_info.Clear();
+  auto& exec_info = cntx->conn_state.exec_info;
+  if (auto* borrowed = exec_info.preborrowed_interpreter; borrowed) {
+    ServerState::tlocal()->ReturnInterpreter(borrowed);
+    exec_info.preborrowed_interpreter = nullptr;
+  }
+  UnwatchAllKeys(&exec_info);
+  exec_info.Clear();
 }
 
 void DeactivateMonitoring(ConnectionContext* server_ctx) {
@@ -691,13 +693,24 @@ string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned 
   return result;
 }
 
-// Either take the interpreter from the preborrowed multi exec transaction or borrow one.
+// Ensures availability of an interpreter for EVAL-like commands and it's automatic release.
+// If it's part of MULTI, the preborrowed interpreter is returned, otherwise a new is acquired.
 struct BorrowedInterpreter {
   explicit BorrowedInterpreter(ConnectionContext* cntx) {
+    // Ensure squashing ignores EVAL. We can't run on a stub context, because it doesn't have our
+    // preborrowed interpreter (which can't be shared on multiple threads).
+    CHECK(!cntx->conn_state.squashing_info);
+
     if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
-      DCHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
+      // Ensure a preborrowed interpreter is only set for an already running MULTI transaction.
+      CHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
+
       interpreter_ = borrowed;
     } else {
+      // A scheduled transaction occupies a place in the transaction queue and holds locks,
+      // preventing other transactions from progressing. Blocking below can deadlock!
+      CHECK(!cntx->transaction->IsScheduled());
+
       interpreter_ = ServerState::tlocal()->BorrowInterpreter();
       owned_ = true;
     }
@@ -706,6 +719,13 @@ struct BorrowedInterpreter {
   ~BorrowedInterpreter() {
     if (owned_)
       ServerState::tlocal()->ReturnInterpreter(interpreter_);
+  }
+
+  // Give up ownership of the interpreter, it must be returned manually.
+  Interpreter* Release() && {
+    DCHECK(owned_);
+    owned_ = false;
+    return interpreter_;
   }
 
   operator Interpreter*() {
@@ -1538,7 +1558,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
-  UnwatchAllKeys(cntx);
+  UnwatchAllKeys(&cntx->conn_state.exec_info);
   return cntx->SendOk();
 }
 
@@ -1659,8 +1679,8 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_mgr,
-                                            Interpreter* interpreter) {
+optional<ScriptMgr::ScriptParams> LoadScript(string_view sha, ScriptMgr* script_mgr,
+                                             Interpreter* interpreter) {
   auto ss = ServerState::tlocal();
 
   if (!interpreter->Exists(sha)) {
@@ -1788,7 +1808,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     return cntx->SendError(facade::kScriptNotFound);
   }
 
-  auto params = LoadScipt(eval_args.sha, server_family_.script_mgr(), interpreter);
+  auto params = LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
   if (!params)
     return cntx->SendError(facade::kScriptNotFound);
 
@@ -2007,14 +2027,16 @@ void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto& exec_info = cntx->conn_state.exec_info;
 
+  // Clean the context no matter the outcome
   absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
 
-  if (!cntx->conn_state.exec_info.IsCollecting()) {
+  // Check basic invariants
+  if (!exec_info.IsCollecting()) {
     return rb->SendError("EXEC without MULTI");
   }
 
-  auto& exec_info = cntx->conn_state.exec_info;
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
   }
@@ -2028,12 +2050,17 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
-  const CommandId* const exec_cid = cntx->cid;
-  CmdArgVec arg_vec;
+
+  // The transaction can contain scripts, determine their presence ahead to customize logic below.
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
 
-  // We adjust the atomicity level of multi transaction inside StartMultiExec. i.e if multi mode is
-  // lock ahead and we run global script in the transaction then multi mode will be global.
+  // We borrow a single interpreter for all the EVALs inside. Returned by MultiCleanup
+  if (state != ExecEvalState::NONE) {
+    exec_info.preborrowed_interpreter = BorrowedInterpreter(cntx).Release();
+  }
+
+  // Determine according multi mode, not only only flag, but based on presence of global commands
+  // and scripts
   optional<Transaction::MultiMode> multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
   if (!multi_mode)
     return rb->SendError(
@@ -2059,9 +2086,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
-  if (state != ExecEvalState::NONE)
-    exec_info.preborrowed_interpreter = ServerState::tlocal()->BorrowInterpreter();
-
   if (!exec_info.body.empty()) {
     if (GetFlag(FLAGS_track_exec_frequencies)) {
       string descr = CreateExecDescriptor(exec_info.body, cntx->transaction->GetUniqueShardCnt());
@@ -2071,6 +2095,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {
+      CmdArgVec arg_vec;
       for (auto& scmd : exec_info.body) {
         VLOG(2) << "TX CMD " << scmd.Cid()->name() << " " << scmd.NumArgs();
 
@@ -2097,19 +2122,12 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  if (exec_info.preborrowed_interpreter) {
-    // Use SafeTLocal() to avoid accessing the wrong thread local instance
-    ServerState::SafeTLocal()->ReturnInterpreter(exec_info.preborrowed_interpreter);
-    exec_info.preborrowed_interpreter = nullptr;
-  }
-
   if (scheduled) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
 
-  cntx->cid = exec_cid;
-
+  cntx->cid = exec_cid_;
   VLOG(1) << "Exec completed";
 }
 
@@ -2413,7 +2431,7 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
     DCHECK(!conn_state.subscribe_info);
   }
 
-  UnwatchAllKeys(server_cntx);
+  UnwatchAllKeys(&conn_state.exec_info);
 
   DeactivateMonitoring(server_cntx);
 

@@ -2276,7 +2276,7 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "repl-offset") {
     // TODO
   } else if (auxkey == "lua") {
-    LoadScriptFromAux(move(auxval));
+    LoadScriptFromAux(std::move(auxval));
   } else if (auxkey == "redis-ver") {
     VLOG(1) << "Loading RDB produced by version " << auxval;
   } else if (auxkey == "ctime") {

@@ -74,7 +74,7 @@ void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
 }
 
 void TestConnection::SendInvalidationMessageAsync(InvalidationMessage msg) {
-  invalidate_messages.push_back(move(msg));
+  invalidate_messages.push_back(std::move(msg));
 }
 
 std::string TestConnection::RemoteEndpointStr() const {
@@ -228,7 +228,7 @@ void BaseFamilyTest::ResetService() {
   watchdog_fiber_ = pp_->GetNextProactor()->LaunchFiber([this] {
     ThisFiber::SetName("Watchdog");
 
-    if (!watchdog_done_.WaitFor(60s)) {
+    if (!watchdog_done_.WaitFor(20s)) {
       LOG(ERROR) << "Deadlock detected!!!!";
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       fb2::Mutex m;
@@ -247,9 +247,7 @@ void BaseFamilyTest::ResetService() {
             auto it = head;
             do {
               Transaction* trans = std::get<Transaction*>(es->txq()->At(it));
-              LOG(ERROR) << "Transaction " << trans->DebugId() << " "
-                         << trans->GetLocalMask(es->shard_id()) << " "
-                         << trans->IsArmedInShard(es->shard_id());
+              LOG(ERROR) << "Transaction " << trans->DebugId(es->shard_id());
               it = txq->Next(it);
             } while (it != head);
           }
@@ -318,11 +316,8 @@ unsigned BaseFamilyTest::NumLocked() {
 }
 
 void BaseFamilyTest::ClearMetrics() {
-  shard_set->pool()->Await([](auto*) {
-    ServerState::Stats stats;
-    stats.tx_width_freq_arr = new uint64_t[shard_set->size()];
-    ServerState::tlocal()->stats = std::move(stats);
-  });
+  shard_set->pool()->Await(
+      [](auto*) { ServerState::tlocal()->stats = ServerState::Stats(shard_set->size()); });
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {

@@ -3,6 +3,7 @@
 #include <array>
 #include <bitset>
 
+#include "absl/types/span.h"
 #include "base/flit.h"
 #include "base/logging.h"
 
@@ -238,8 +239,17 @@ absl::Span<uint8_t> CompressedSortedSet::WriteVarLen(IntType value, absl::Span<u
 
 std::pair<CompressedSortedSet::IntType, size_t> CompressedSortedSet::ReadVarLen(
     absl::Span<const uint8_t> source) {
-  uint64_t out;
-  size_t read = base::flit::ParseT(source.data(), &out);
+  uint64_t out = 0;
+  size_t read = 0;
+  // We need this because ParseT reads 8 bytes but source can be less than that
+  // due to the encoding and we end up accessing an invalid memory location
+  if (source.size() < 8) {
+    VarintBuffer ranged_source{0};
+    memcpy(&ranged_source, source.data(), source.size());
+    read = base::flit::ParseT(ranged_source.data(), &out);
+  } else {
+    read = base::flit::ParseT(source.data(), &out);
+  }
 
   CHECK_LE(out, numeric_limits<IntType>::max());
   return {out, read};
