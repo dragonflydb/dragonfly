@@ -124,21 +124,21 @@ uint32_t Transaction::PhasedBarrier::DEBUG_Count() const {
   return count_.load(memory_order_relaxed);
 }
 
-bool Transaction::BatonBarrierrier::IsClaimed() const {
+bool Transaction::BatonBarrier::IsClaimed() const {
   return claimed_.load(memory_order_relaxed);
 }
 
-bool Transaction::BatonBarrierrier::TryClaim() {
+bool Transaction::BatonBarrier::TryClaim() {
   return !claimed_.exchange(true, memory_order_relaxed);  // false means first means success
 }
 
-void Transaction::BatonBarrierrier::Close() {
+void Transaction::BatonBarrier::Close() {
   DCHECK(claimed_.load(memory_order_relaxed));
   closed_.store(true, memory_order_relaxed);
   ec_.notify();  // release
 }
 
-cv_status Transaction::BatonBarrierrier::Wait(time_point tp) {
+cv_status Transaction::BatonBarrier::Wait(time_point tp) {
   auto cb = [this] { return closed_.load(memory_order_acquire); };
 
   if (tp != time_point::max()) {
@@ -407,7 +407,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   for (const auto& sd : shard_data_) {
     // sd.local_mask may be non-zero for multi transactions with instant locking.
     // Specifically EVALs may maintain state between calls.
-    DCHECK(!sd.is_armed.load(std::memory_order_relaxed));
+    DCHECK_EQ(sd.local_mask & ARMED, 0);
     if (!multi_) {
       DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
     }
@@ -533,7 +533,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
       DCHECK(IsAtomicMulti());   // Every command determines it's own active shards
       sd.local_mask &= ~ACTIVE;  // so remove ACTIVE flags, but keep KEYLOCK_ACQUIRED
     }
-    DCHECK(!sd.is_armed.load(memory_order_relaxed));
+    DCHECK_EQ(sd.local_mask & ARMED, 0);
   }
 
   if (multi_->mode == NON_ATOMIC) {
@@ -547,13 +547,18 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
     multi_->role = DEFAULT;
 }
 
-string Transaction::DebugId() const {
+string Transaction::DebugId(std::optional<ShardId> sid) const {
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
   string res = StrCat(Name(), "@", txid_, "/", unique_shard_cnt_);
   if (multi_) {
     absl::StrAppend(&res, ":", multi_->cmd_seq_num);
   }
-  absl::StrAppend(&res, " (", trans_id(this), ")");
+  absl::StrAppend(&res, " {id=", trans_id(this));
+  if (sid) {
+    absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
+                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
+  }
+  absl::StrAppend(&res, "}");
   return res;
 }
 
@@ -573,16 +578,13 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(txid_, 0u);
   CHECK(cb_ptr_) << DebugId();
 
-  // Unlike with regular transactions we do not acquire locks upon scheduling
-  // because Scheduling is done before multi-exec batch is executed. Therefore we
-  // lock keys right before the execution of each statement.
-
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
-  CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
-  CHECK_GT(run_barrier_.DEBUG_Count(), 0u);
+  CHECK(sd.local_mask & ARMED);
+  sd.local_mask &= ~ARMED;
 
+  CHECK_GT(run_barrier_.DEBUG_Count(), 0u);
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
@@ -799,7 +801,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
 
     InitTxTime();
-    shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
+    shard_data_[SidToId(unique_shard_id_)].local_mask |= ARMED;
 
     // Start new phase, be careful with writes until phase end!
     run_barrier_.Start(1);
@@ -931,7 +933,7 @@ void Transaction::ExecuteAsync() {
   DCHECK(!IsAtomicMulti() || multi_->lock_mode.has_value());
 
   // Set armed flags on all active shards
-  IterateActiveShards([](auto& sd, auto i) { sd.is_armed.store(true, memory_order_relaxed); });
+  IterateActiveShards([](auto& sd, auto i) { sd.local_mask |= ARMED; });
 
   // Start new phase: release semantics. From here we can be discovered by IsArmedInShard(),
   // and thus picked by a foreign thread's PollExecution(). Careful with writes until phase end!
@@ -1010,7 +1012,8 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
-  CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
+  CHECK(sd.local_mask & ARMED);
+  sd.local_mask &= ~ARMED;
 
   // Calling the callback in somewhat safe way
   RunnableResult result;
@@ -1071,6 +1074,11 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   return res;
 }
 
+bool Transaction::IsArmedInShard(ShardId sid) const {
+  // Barrier has acquire semantics
+  return run_barrier_.Active() && (shard_data_[SidToId(sid)].local_mask & ARMED);
+}
+
 bool Transaction::IsActive(ShardId sid) const {
   // If we have only one shard, we often don't store infromation about all shards, so determine it
   // solely by id
@@ -1081,6 +1089,12 @@ bool Transaction::IsActive(ShardId sid) const {
   }
 
   return shard_data_[SidToId(sid)].local_mask & ACTIVE;
+}
+
+uint16_t Transaction::GetLocalMask(ShardId sid) const {
+  DCHECK(IsActive(sid));
+  DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
+  return shard_data_[SidToId(sid)].local_mask;
 }
 
 // Runs within a engine shard thread.
@@ -1114,7 +1128,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
     if (result.flags & RunnableResult::AVOID_CONCLUDING) {
       // If we want to run again, we have to actually schedule this transaction
-      DCHECK_EQ(sd.is_armed, false);
+      DCHECK_EQ(sd.local_mask & ARMED, 0);
       continue_scheduling = true;
     } else {
       LogAutoJournalOnShard(shard, result);
