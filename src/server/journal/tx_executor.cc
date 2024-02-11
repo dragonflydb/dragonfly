@@ -71,7 +71,6 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
     default:
       DCHECK(false) << "Unsupported opcode";
   }
-  return;
 }
 
 bool TransactionData::IsGlobalCmd() const {

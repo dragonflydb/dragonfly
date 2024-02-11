@@ -810,8 +810,8 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));
       } else {
-        // On no shard sync mode we execute multi commands once they are recived, therefor when
-        // revieving exec opcode we only increase the journal counting.
+        // On no shard sync mode we execute multi commands once they are recieved, therefor when
+        // receiving exec opcode, we only increase the journal counting.
         DCHECK_EQ(tx_data->commands.size(), 0u);
         journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
       }
