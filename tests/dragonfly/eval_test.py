@@ -326,12 +326,16 @@ Reproduces #2569
 async def test_migrate_close_connection(async_client: aioredis.Redis, df_server: DflyInstance):
     sha = await async_client.script_load("return redis.call('GET', KEYS[1])")
 
-    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    async def run():
+        reader, writer = await asyncio.open_connection("localhost", df_server.port)
 
-    # write a EVALSHA that will ask for migration (75% it's on the wrong shard)
-    writer.write((f"EVALSHA {sha} 1 a\r\n").encode())
-    await writer.drain()
+        # write a EVALSHA that will ask for migration (75% it's on the wrong shard)
+        writer.write((f"EVALSHA {sha} 1 a\r\n").encode())
+        await writer.drain()
 
-    # disconnect the client connection
-    writer.close()
-    await writer.wait_closed()
+        # disconnect the client connection
+        writer.close()
+        await writer.wait_closed()
+
+    tasks = [asyncio.create_task(run()) for _ in range(50)]
+    await asyncio.gather(*tasks)
