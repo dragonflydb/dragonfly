@@ -3,7 +3,6 @@ from redis import asyncio as aioredis
 from .utility import *
 
 
-@pytest.mark.asyncio
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",

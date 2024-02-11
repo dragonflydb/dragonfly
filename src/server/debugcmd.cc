@@ -129,9 +129,11 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   boost::intrusive_ptr<Transaction> local_tx =
       new Transaction{sf->service().mutable_registry()->Find("EXEC")};
   local_tx->StartMultiNonAtomic();
+  boost::intrusive_ptr<Transaction> stub_tx =
+      new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
   absl::InlinedVector<MutableSlice, 5> args_view;
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx, local_tx.get(), &crb};
+  ConnectionContext local_cntx{cntx, stub_tx.get(), &crb};
 
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
@@ -150,10 +152,10 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
     }
     auto args_span = absl::MakeSpan(args_view);
 
-    local_tx->MultiSwitchCmd(cid);
+    stub_tx->MultiSwitchCmd(cid);
     local_cntx.cid = cid;
     crb.SetReplyMode(ReplyMode::NONE);
-    local_tx->InitByArgs(local_cntx.conn_state.db_index, args_span);
+    stub_tx->InitByArgs(local_cntx.conn_state.db_index, args_span);
 
     sf->service().InvokeCmd(cid, args_span, &local_cntx);
   }
