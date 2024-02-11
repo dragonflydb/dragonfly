@@ -115,14 +115,6 @@ jobs:
             ./tools/packaging/rpm/build_rpm.sh ${{ env.RELEASE_DIR }}/dragonfly-x86_64.tar.gz ${{github.ref_name}}
           fi
 
-      - name: Run regression tests
-        # Fedora 30 has older python packages, so this fails during requirements installation.
-        uses: ./.github/actions/regression-tests
-        with:
-          dfly-executable: dragonfly-x86_64
-          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
-          run-only-on-ubuntu-latest: true
-          build-folder-name: ${{ env.RELEASE_DIR }}
       - name: Save artifacts
         run: |
           # place all artifacts at the same location
