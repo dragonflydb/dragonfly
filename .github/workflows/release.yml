@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: create-release
     container:
-      image: ghcr.io/romange/${{ matrix.container }}
+      image: ghcr.io/romange/ubuntu-dev:20
     steps:
       - uses: actions/checkout@v3
         with:
