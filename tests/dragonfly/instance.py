@@ -5,7 +5,6 @@ import aiohttp
 import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
-import os
 import re
 import psutil
 import itertools
@@ -163,22 +162,13 @@ class DflyInstance:
         if proc is None:
             return
 
-        # if we have log files, it means that we started a process.
-        # if it died before we could stop it, we should raise an exception
-        if self.log_files:
-            exitcode = proc.poll()
-            if exitcode is not None:
-                if exitcode != 0:
-                    raise Exception(f"Process exited with code {exitcode}")
-                return
-
         logging.debug(f"Stopping instance on {self._port}")
         try:
             if kill:
                 proc.kill()
             else:
                 proc.terminate()
-            proc.communicate(timeout=30)
+            proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
             proc.send_signal(signal.SIGUSR1)
@@ -203,11 +193,9 @@ class DflyInstance:
             self._port = None
 
         all_args = self.format_args(self.args)
-        arg_str = " ".join(all_args)
-        bin_path = os.path.realpath(self.params.path)
-        logging.debug(f"Starting {bin_path} with arguments: {arg_str}")
+        logging.debug(f"Starting instance with arguments {all_args} from {self.params.path}")
 
-        run_cmd = [bin_path, *all_args]
+        run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
 

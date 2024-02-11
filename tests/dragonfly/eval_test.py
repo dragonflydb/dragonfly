@@ -3,11 +3,15 @@ import async_timeout
 from redis import asyncio as aioredis
 import time
 import json
+import logging
 import pytest
 import random
 import itertools
 import random
 import string
+
+from .instance import DflyInstance
+
 from . import dfly_args, dfly_multi_test_args
 
 DJANGO_CACHEOPS_SCRIPT = """
@@ -310,3 +314,24 @@ async def test_one_interpreter(async_client: aioredis.Redis):
     # At least some connection was seen blocked
     # Flaky: release build is too fast and never blocks
     # assert max_blocked > 0
+
+
+"""
+Tests migrate/close interaction for the connection
+Reproduces #2569
+"""
+
+
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 0})
+async def test_migrate_close_connection(async_client: aioredis.Redis, df_server: DflyInstance):
+    sha = await async_client.script_load("return redis.call('GET', KEYS[1])")
+
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+
+    # write a EVALSHA that will ask for migration (75% it's on the wrong shard)
+    writer.write((f"EVALSHA {sha} 1 a\r\n").encode())
+    await writer.drain()
+
+    # disconnect the client connection
+    writer.close()
+    await writer.wait_closed()
