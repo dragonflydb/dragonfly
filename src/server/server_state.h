@@ -5,6 +5,7 @@
 #pragma once
 
 #include <optional>
+#include <valarray>
 #include <vector>
 
 #include "base/histogram.h"
@@ -95,6 +96,15 @@ class ServerState {  // public struct - to allow initialization.
  public:
   enum TxType { GLOBAL, NORMAL, QUICK, INLINE, NUM_TX_TYPES };
   struct Stats {
+    Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
+
+    Stats(Stats&& other) = default;
+    Stats& operator=(Stats&& other) = default;
+    Stats(const Stats&) = delete;
+    Stats& operator=(const Stats& other) = delete;
+
+    Stats& Add(const Stats& other);
+
     std::array<uint64_t, NUM_TX_TYPES> tx_type_cnt;
     uint64_t tx_schedule_cancel_cnt = 0;
 
@@ -108,23 +118,7 @@ class ServerState {  // public struct - to allow initialization.
 
     uint64_t blocked_on_interpreter = 0;
 
-    // Array of size of number of shards.
-    // Each entry is how many transactions we had with this width (unique_shard_cnt).
-    uint64_t* tx_width_freq_arr = nullptr;
-
-    Stats();
-    ~Stats();
-
-    Stats(Stats&& other) {
-      *this = std::move(other);
-    }
-
-    Stats& operator=(Stats&& other);
-
-    Stats& Add(unsigned num_shards, const Stats& other);
-
-    Stats(const Stats&) = delete;
-    Stats& operator=(const Stats&) = delete;
+    std::valarray<uint64_t> tx_width_freq_arr;
   };
 
   // Unsafe version.

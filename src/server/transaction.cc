@@ -167,6 +167,7 @@ cv_status Transaction::BatonBarrierrier::Wait(time_point tp) {
  * @param cs
  */
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
+  InitTxTime();
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
@@ -502,6 +503,10 @@ void Transaction::StartMultiNonAtomic() {
   multi_->mode = NON_ATOMIC;
 }
 
+void Transaction::InitTxTime() {
+  time_now_ms_ = GetCurrentTimeMs();
+}
+
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_ptr_);
@@ -713,7 +718,7 @@ void Transaction::ScheduleInternal() {
   // Loop until successfully scheduled in all shards.
   while (true) {
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
-    time_now_ms_ = GetCurrentTimeMs();
+    InitTxTime();
 
     atomic_uint32_t schedule_fails = 0;
     auto cb = [this, &schedule_fails](EngineShard* shard) {
@@ -793,7 +798,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     DCHECK(IsActive(unique_shard_id_));
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
 
-    time_now_ms_ = GetCurrentTimeMs();
+    InitTxTime();
     shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
 
     // Start new phase, be careful with writes until phase end!

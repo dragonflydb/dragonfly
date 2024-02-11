@@ -45,12 +45,15 @@ using namespace std;
 
 %token
   LBRACKET "["
+  RBRACKET "]"
   ROOT "$"
   DOT  "."
+  WILDCARD "*"
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> UNQ_STR "unq_str"
+%token <std::string> UNQ_STR "unquoted string"
+%token <unsigned>    UINT "integer"
 
 %%
 // Based on the following specification:
@@ -60,14 +63,21 @@ jsonpath: ROOT
         | ROOT relative_location
 
 relative_location: DOT relative_path
+        | LBRACKET bracket_expr RBRACKET
 
-relative_path: identifier
-        | identifier relative_location
+relative_path: identifier opt_relative_location
+        | WILDCARD opt_relative_location
 
-identifier: unquoted_string
+opt_relative_location:
+        | relative_location
+
+identifier: UNQ_STR
          // | single_quoted_string | double_quoted_string
 
-unquoted_string : UNQ_STR
+bracket_expr: WILDCARD
+            | index_expr
+
+index_expr: UINT
 
 %%
 

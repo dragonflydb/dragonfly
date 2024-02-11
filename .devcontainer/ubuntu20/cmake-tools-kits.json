@@ -1,0 +1,10 @@
+[
+  {
+    "name": "GCC x86_64-linux-gnu",
+    "compilers": {
+      "C": "gcc",
+      "CXX": "g++"
+    },
+    "isTrusted": true
+  }
+]
