@@ -73,7 +73,7 @@ class RestoreStreamer : public JournalStreamer {
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
-  void WriteBucket(bool allow_await, PrimeTable::bucket_iterator it);
+  void WriteBucket(PrimeTable::bucket_iterator it, bool allow_await);
   void WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms);
   void WriteCommand(journal::Entry::Payload cmd_payload);
 
