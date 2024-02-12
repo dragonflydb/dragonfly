@@ -401,7 +401,6 @@ class Connection : public util::Connection {
   std::string name_;
 
   unsigned parser_error_ = 0;
-  bool break_cb_engaged_ = false;
 
   BreakerCb breaker_cb_;
   std::unique_ptr<Shutdown> shutdown_cb_;

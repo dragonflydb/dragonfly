@@ -1859,6 +1859,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
+    append("connection_migrations", conn_stats.num_migrations);
     append("total_net_output_bytes", reply_stats.io_write_bytes);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
