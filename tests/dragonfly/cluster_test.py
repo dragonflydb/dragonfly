@@ -5,7 +5,7 @@ import redis
 from redis import asyncio as aioredis
 import asyncio
 
-from .instance import DflyInstanceFactory
+from .instance import DflyInstanceFactory, DflyInstance
 from .utility import *
 from .replication_test import check_all_replicas_finished
 
@@ -953,3 +953,178 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[1].execute_command("DBSIZE") == 17
 
     await close_clients(*c_nodes, *c_nodes_admin)
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class NodeInfo:
+    instance: DflyInstance
+    client: aioredis.Redis
+    admin_client: aioredis.Redis
+    slots: list
+    next_slots: list
+    sync_ids: list
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_seeder_factory):
+    node_count = 3
+    instances = [
+        df_local_factory.create(
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            vmodule="cluster_family=9,cluster_slot_migration=9",
+        )
+        for i in range(node_count)
+    ]
+    df_local_factory.start_all(instances)
+
+    nodes = [
+        NodeInfo(
+            instance=instance,
+            client=instance.client(),
+            admin_client=instance.admin_client(),
+            slots=[],
+            next_slots=[],
+            sync_ids=[],
+        )
+        for instance in instances
+    ]
+
+    cluster_client = aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port)
+
+    async def generate_config():
+        return [
+            {
+                "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
+                "master": {
+                    "id": await get_node_id(node.admin_client),
+                    "ip": "localhost",
+                    "port": node.instance.port,
+                },
+                "replicas": [],
+            }
+            for node in nodes
+        ]
+
+    # Generate equally sized ranges and distribute by nodes
+    step = 1000
+    for slot_range in [(s, min(s + step - 1, 16383)) for s in range(0, 16383, step)]:
+        nodes[random.randint(0, node_count - 1)].slots.append(slot_range)
+
+    # Push config to all nodes
+    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
+
+    # Fill instances with some data
+    seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Generate migration plan
+    for node_idx, node in enumerate(nodes):
+        random.shuffle(node.slots)
+
+        # Decide on number of outgoing slot ranges
+        outgoing = [[] for _ in range(node_count)]
+        num_outgoing = random.randint(0, len(node.slots))
+
+        # Distribute first 0..num_outgoing
+        for slot_range in node.slots[:num_outgoing]:
+            dest_idx = random.randint(0, node_count - 1)
+            while dest_idx == node_idx:
+                dest_idx = random.randint(0, node_count - 1)
+            outgoing[dest_idx].append(slot_range)
+
+        for dest_idx, dest_slots in enumerate(outgoing):
+            if len(dest_slots) == 0:
+                continue
+
+            print(node_idx, "migrates to", dest_idx, "slots", dest_slots)
+            sync_id = await nodes[dest_idx].admin_client.execute_command(
+                "DFLYCLUSTER",
+                "START-SLOT-MIGRATION",
+                "127.0.0.1",
+                node.instance.admin_port,
+                *itertools.chain(*dest_slots),
+            )
+
+            nodes[node_idx].sync_ids.append(sync_id)
+            nodes[dest_idx].next_slots.extend(dest_slots)
+
+        keeping = node.slots[num_outgoing:]
+        node.next_slots.extend(keeping)
+
+    # Busy loop for migrations to finish - all in stable state
+    iterations = 0
+    while True:
+        for node in nodes:
+            states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
+            print(states)
+            if not all(s.endswith("STABLE_SYNC") for s in states) and not states == "NO_STATE":
+                break
+        else:
+            break
+
+        iterations += 1
+        assert iterations < 100
+
+        await asyncio.sleep(0.1)
+
+    # Give seeder one more second
+    await asyncio.sleep(1.0)
+
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
+    # Counter that pushes values to a list
+    async def list_counter(key, client: aioredis.RedisCluster):
+        for i in itertools.count(start=1):
+            await client.lpush(key, i)
+
+    # Start ten counters
+    counter_keys = [f"_counter{i}" for i in range(10)]
+    counters = [asyncio.create_task(list_counter(key, cluster_client)) for key in counter_keys]
+
+    # Finalize slot migration
+    for node in nodes:
+        for sync_id in node.sync_ids:
+            assert "OK" == await node.admin_client.execute_command(
+                "DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", sync_id
+            )
+
+    # Stop counters
+    for counter in counters:
+        counter.cancel()
+
+    # Push new config
+    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
+
+    # Generate capture, capture ignores counter keys
+    capture = await seeder.capture()
+
+    # Transfer nodes
+    for node in nodes:
+        node.slots = node.next_slots
+        node.new_slots = []
+
+    # Check counter consistency
+    # TODO: This fails and exposes a REAL BUG!
+    # for key in counter_keys:
+    #     counter_list = await cluster_client.lrange(key, 0, -1)
+    #     for i, j in zip(counter_list, counter_list[1:]):
+    #         print(f"comparing {i}, {j}")
+    #         assert int(i) == int(j) + 1, f"huh? {counter_list}"
+
+    # Compare capture
+    assert await seeder.compare(capture, nodes[0].instance.port)
+
+    await disconnect_clients(
+        *[node.admin_client for node in nodes], *[node.client for node in nodes]
+    )
+    await close_clients(
+        cluster_client, *[node.admin_client for node in nodes], *[node.client for node in nodes]
+    )

@@ -798,7 +798,7 @@ void ClusterFamily::RemoveOutgoingMigration(uint32_t sync_id) {
 }
 
 void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "Create slot migration config";
+  VLOG(1) << "Create slot migration config " << args;
   CmdArgParser parser{args};
   auto port = parser.Next<uint16_t>();
 
@@ -812,8 +812,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(err->MakeReply());
 
   if (!tl_cluster_config) {
-    cntx->SendError(kClusterNotConfigured);
-    return;
+    return cntx->SendError(kClusterNotConfigured);
   }
 
   for (const auto& migration_range : slots) {
@@ -821,8 +820,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
       if (!tl_cluster_config->IsMySlot(i)) {
         VLOG(1) << "Invalid migration slot " << i << " in range " << migration_range.start << ':'
                 << migration_range.end;
-        cntx->SendError("Invalid slots range");
-        return;
+        return cntx->SendError("Invalid slots range");
       }
     }
   }
@@ -883,6 +881,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx) {
+  CHECK(cntx->slot_migration_id != 0);
   CmdArgParser parser{args};
   auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
 
@@ -894,9 +893,9 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
           << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
 
   std::lock_guard lck(migration_mu_);
-  auto migration_it =
-      std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-                   [sync_id = sync_id](const auto& el) { return el->GetSyncId() == sync_id; });
+  auto migration_it = std::find_if(
+      incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
+      [cntx](const auto& el) { return cntx->slot_migration_id == el->GetLocalSyncId(); });
 
   if (migration_it == incoming_migrations_jobs_.end()) {
     LOG(WARNING) << "Couldn't find migration id";
