@@ -893,11 +893,9 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
           << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
 
   std::lock_guard lck(migration_mu_);
-  auto migration_it =
-      std::find_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-                   [sync_id = sync_id, cntx](const auto& el) {
-                     return cntx->slot_migration_id == el->GetLocalSyncId();
-                   });
+  auto migration_it = std::find_if(
+      incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
+      [cntx](const auto& el) { return cntx->slot_migration_id == el->GetLocalSyncId(); });
 
   if (migration_it == incoming_migrations_jobs_.end()) {
     LOG(WARNING) << "Couldn't find migration id";
