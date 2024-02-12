@@ -79,7 +79,7 @@ class Driver {
     path_.AddSegment(PathSegment(SegmentType::IDENTIFIER, identifier));
   }
 
-  Path Release() {
+  Path TakePath() {
     return std::move(path_);
   }
 

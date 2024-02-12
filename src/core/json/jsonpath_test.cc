@@ -111,7 +111,7 @@ TEST_F(JsonPathTest, Parser) {
   EXPECT_NE(0, Parse("$|foo"));
 
   EXPECT_EQ(0, Parse("$.foo.bar"));
-  Path path = driver_.Release();
+  Path path = driver_.TakePath();
 
   // TODO: to improve the UX with gmock/c++ magic.
   ASSERT_EQ(2, path.size());
