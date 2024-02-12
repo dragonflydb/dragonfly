@@ -285,7 +285,7 @@ class ServerState {  // public struct - to allow initialization.
   // should subscribe to `client_pause_ec_` through `AwaitPauseState` to be
   // notified when the break is over.
   int client_pauses_[2] = {};
-  EventCount client_pause_ec_;
+  util::fb2::EventCount client_pause_ec_;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;

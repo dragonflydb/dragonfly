@@ -807,12 +807,12 @@ struct AggregateLoadResult {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-Future<GenericError> ServerFamily::Load(const std::string& load_path) {
+fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
   auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
-    Promise<GenericError> ec_promise;
+    fb2::Promise<GenericError> ec_promise;
     ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
   }
@@ -856,8 +856,8 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  Promise<GenericError> ec_promise;
-  Future<GenericError> ec_future = ec_promise.get_future();
+  fb2::Promise<GenericError> ec_promise;
+  fb2::Future<GenericError> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
