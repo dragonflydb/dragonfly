@@ -17,7 +17,7 @@ inputs:
     required: true
     type: string
   filter:
-    required: false
+    required: true
     type: string
 
 runs:
