@@ -89,7 +89,7 @@ class ClusterFamily {
   std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
-  uint32_t next_sync_id_ = 1 ABSL_GUARDED_BY(migration_mu_);
+  uint32_t next_sync_id_ ABSL_GUARDED_BY(migration_mu_) = 1;
   // holds all outgoing slots migrations that are currently in progress
   using OutgoingMigrationMap = absl::btree_map<uint32_t, std::shared_ptr<OutgoingMigration>>;
   OutgoingMigrationMap outgoing_migration_jobs_;
