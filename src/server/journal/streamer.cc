@@ -59,6 +59,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id
 }
 
 void RestoreStreamer::Start(io::Sink* dest) {
+  LOG(ERROR) << "XXX Starting streaming sync " << sync_id_;
   VLOG(2) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
@@ -84,6 +85,7 @@ void RestoreStreamer::Start(io::Sink* dest) {
       }
     } while (cursor);
 
+    LOG(ERROR) << "XXX Sending full sync cut for sync_id_ " << sync_id_;
     VLOG(2) << "FULL-SYNC-CUT for " << sync_id_ << " : " << db_slice_->shard_id();
     WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_),
                                                    absl::StrCat(db_slice_->shard_id())}));
@@ -101,7 +103,13 @@ void RestoreStreamer::SendFinalize() {
   NotifyWritten(true);
 }
 
+RestoreStreamer::~RestoreStreamer() {
+  LOG(ERROR) << "XXX d'tor " << snapshot_fb_.IsJoinable();
+  CHECK(!snapshot_fb_.IsJoinable());
+}
+
 void RestoreStreamer::Cancel() {
+  LOG(ERROR) << "XXX cancelling";
   fiber_cancellation_.Cancel();
   snapshot_fb_.JoinIfNeeded();
   db_slice_->UnregisterOnChange(snapshot_version_);

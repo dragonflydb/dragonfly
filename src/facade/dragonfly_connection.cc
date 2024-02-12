@@ -1507,6 +1507,13 @@ std::string Connection::RemoteEndpointAddress() const {
   return re.address().to_string();
 }
 
+uint16_t Connection::RemoteEndpointPort() const {
+  if (socket_->IsUDS())
+    return 0;
+
+  return socket_->RemoteEndpoint().port();
+}
+
 facade::ConnectionContext* Connection::cntx() {
   return cc_.get();
 }

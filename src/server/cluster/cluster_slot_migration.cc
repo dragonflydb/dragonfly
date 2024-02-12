@@ -35,11 +35,14 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
   return partition;
 }
 
+atomic_uint32_t next_local_sync_id{1};
+
 }  // namespace
 
 ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
                                            std::vector<ClusterConfig::SlotRange> slots)
     : ProtocolClient(std::move(host_ip), port), service_(*se), slots_(std::move(slots)) {
+  local_sync_id_ = next_local_sync_id.fetch_add(1);
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -104,11 +107,16 @@ ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
 }
 
 void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
+  LOG(ERROR) << "XXX setting stable sync for flow " << flow;
+  for (const auto& flow : shard_flows_) {  // XXX
+    LOG(ERROR) << "XXX state for flow " << flow->IsStableSync();
+  }  // XXX
   DCHECK(shard_flows_.size() > flow);
   shard_flows_[flow]->SetStableSync();
 
   if (std::all_of(shard_flows_.begin(), shard_flows_.end(),
                   [](const auto& el) { return el->IsStableSync(); })) {
+    LOG(ERROR) << "XXX setting stable sync";
     state_ = MigrationState::C_STABLE_SYNC;
   }
 }
@@ -125,7 +133,7 @@ void ClusterSlotMigration::Stop() {
 }
 
 void ClusterSlotMigration::MainMigrationFb() {
-  VLOG(1) << "Main migration fiber started";
+  VLOG(1) << "Main migration fiber started " << sync_id_;
 
   state_ = MigrationState::C_FULL_SYNC;
 
@@ -143,7 +151,8 @@ void ClusterSlotMigration::MainMigrationFb() {
 std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_, &service_));
+    shard_flows_[i].reset(
+        new ClusterShardMigration(server(), local_sync_id_, i, sync_id_, &service_));
   }
 
   absl::Cleanup cleanup = [this]() {

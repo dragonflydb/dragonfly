@@ -243,6 +243,8 @@ class Connection : public util::Connection {
   virtual std::string RemoteEndpointStr() const;  // virtual because overwritten in test_utils
   std::string RemoteEndpointAddress() const;
 
+  uint16_t RemoteEndpointPort() const;
+
   std::string LocalBindStr() const;
   std::string LocalBindAddress() const;
 

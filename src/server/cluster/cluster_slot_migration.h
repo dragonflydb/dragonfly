@@ -31,6 +31,12 @@ class ClusterSlotMigration : ProtocolClient {
     return sync_id_;
   }
 
+  // Source sync ids can be used by multiple different source Dragonfly servers. This is a unique
+  // identifier.
+  uint32_t GetLocalSyncId() const {
+    return local_sync_id_;
+  }
+
   MigrationState GetState() const {
     return state_;
   }
@@ -56,6 +62,7 @@ class ClusterSlotMigration : ProtocolClient {
   std::vector<ClusterConfig::SlotRange> slots_;
   uint32_t source_shards_num_ = 0;
   uint32_t sync_id_ = 0;
+  uint32_t local_sync_id_ = 0;
   MigrationState state_ = MigrationState::C_NO_STATE;
 
   Fiber sync_fb_;

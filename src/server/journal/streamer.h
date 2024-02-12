@@ -55,6 +55,7 @@ class RestoreStreamer : public JournalStreamer {
  public:
   RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal,
                   Context* cntx);
+  ~RestoreStreamer() override;
 
   void Start(io::Sink* dest) override;
   // Cancel() must be called if Start() is called

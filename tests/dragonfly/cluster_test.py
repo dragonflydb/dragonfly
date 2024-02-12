@@ -972,7 +972,11 @@ class NodeInfo:
 async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_seeder_factory):
     node_count = 3
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        df_local_factory.create(
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            vmodule="cluster_family=9,cluster_slot_migration=9",
+        )
         for i in range(node_count)
     ]
     df_local_factory.start_all(instances)
@@ -1047,7 +1051,7 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
                 *itertools.chain(*dest_slots),
             )
 
-            nodes[dest_idx].sync_ids.append(sync_id)
+            nodes[node_idx].sync_ids.append(sync_id)
             nodes[dest_idx].next_slots.extend(dest_slots)
 
         keeping = node.slots[num_outgoing:]
@@ -1087,18 +1091,17 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
 
     # Finalize slot migration
     for node in nodes:
-        results = await asyncio.gather(
-            *(
-                node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", sync_id)
-                for sync_id in node.sync_ids
+        for sync_id in node.sync_ids:
+            assert "OK" == await node.admin_client.execute_command(
+                "DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", sync_id
             )
-        )
-        assert all(res == "OK" for res in results)
 
     # Stop counters
     for counter in counters:
         counter.cancel()
-        await counter
+
+    # Push new config
+    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 
     # Generate capture, capture ignores counter keys
     capture = await seeder.capture()
@@ -1108,14 +1111,19 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
         node.slots = node.next_slots
         node.new_slots = []
 
-    # Push new config
-    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
-
-    # Check counter consitency
+    # Check counter consistency
     for key in counter_keys:
         counter_list = await cluster_client.lrange(key, 0, -1)
         for i, j in zip(counter_list, counter_list[1:]):
-            assert i + 1 == j
+            print(f"comparing {i}, {j}")
+            assert int(i) == int(j) + 1, f"huh? {counter_list}"
 
     # Compare capture
     assert await seeder.compare(capture, nodes[0].instance.port)
+
+    await disconnect_clients(
+        *[node.admin_client for node in nodes], *[node.client for node in nodes]
+    )
+    await close_clients(
+        cluster_client, *[node.admin_client for node in nodes], *[node.client for node in nodes]
+    )
