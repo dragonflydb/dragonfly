@@ -5,7 +5,6 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
-#include <absl/synchronization/mutex.h>
 
 #include <algorithm>
 #include <shared_mutex>
@@ -13,8 +12,8 @@
 #include <utility>
 #include <vector>
 
-#include "core/fibers.h"
 #include "server/acl/user.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly::acl {
 
@@ -70,12 +69,12 @@ class UserRegistry {
   // Helper class for accessing a user with a ReadLock outside the scope of UserRegistry
   class UserWithWriteLock {
    public:
-    UserWithWriteLock(std::unique_lock<util::SharedMutex> lk, const User& user, bool exists);
+    UserWithWriteLock(std::unique_lock<util::fb2::SharedMutex> lk, const User& user, bool exists);
     const User& user;
     const bool exists;
 
    private:
-    std::unique_lock<util::SharedMutex> registry_lk_;
+    std::unique_lock<util::fb2::SharedMutex> registry_lk_;
   };
 
   UserWithWriteLock MaybeAddAndUpdateWithLock(std::string_view username, User::UpdateRequest req);
@@ -84,18 +83,18 @@ class UserRegistry {
 
  private:
   RegistryType registry_;
-  mutable util::SharedMutex mu_;
+  mutable util::fb2::SharedMutex mu_;
 
   // Helper class for accessing the registry with a ReadLock outside the scope of UserRegistry
   template <template <typename T> typename LockT, typename RegT> class RegistryWithLock {
    public:
-    RegistryWithLock(LockT<util::SharedMutex> lk, RegT reg)
+    RegistryWithLock(LockT<util::fb2::SharedMutex> lk, RegT reg)
         : registry(reg), registry_lk_(std::move(lk)) {
     }
     RegT registry;
 
    private:
-    LockT<util::SharedMutex> registry_lk_;
+    LockT<util::fb2::SharedMutex> registry_lk_;
   };
 };
 

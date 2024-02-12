@@ -427,7 +427,7 @@ class Transaction {
     uint32_t DEBUG_Count() const;  // Get current counter value
    private:
     std::atomic_uint32_t count_{0};
-    EventCount ec_{};
+    util::fb2::EventCount ec_{};
   };
 
   // "Single claim - single modification" barrier. Multiple threads might try to claim it, only one
@@ -446,7 +446,7 @@ class Transaction {
    private:
     std::atomic_bool claimed_{false};
     std::atomic_bool closed_{false};
-    EventCount ec_{};
+    util::fb2::EventCount ec_{};
   };
 
  private:

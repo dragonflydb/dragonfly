@@ -16,9 +16,9 @@ struct JournalReader;
 class MultiShardExecution {
  public:
   struct TxExecutionSync {
-    Barrier barrier;
+    util::fb2::Barrier barrier;
     std::atomic_uint32_t counter;
-    BlockingCounter block;
+    util::fb2::BlockingCounter block;
 
     explicit TxExecutionSync(uint32_t counter)
         : barrier(counter), counter(counter), block(counter) {
