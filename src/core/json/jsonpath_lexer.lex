@@ -17,6 +17,8 @@
 
 // our derived class from AbstractLexer
 %o class="Lexer"
+
+/* nodefault removes default echo rule */
 %o nodefault batch
 %option unicode
 
@@ -51,7 +53,8 @@
               return Parser::make_UINT(val, loc());
             }
 \w[\w_\-]*  return Parser::make_UNQ_STR(str(), loc());
-<<EOF>>     printf("EOF%s\n", matcher().text());
+<<EOF>>     return Parser::make_YYEOF(loc());
+.           throw Parser::syntax_error(loc(), UnknownTokenMsg());
 %%
 
 // Function definitions

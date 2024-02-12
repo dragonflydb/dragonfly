@@ -55,21 +55,23 @@ using namespace std;
 %token <std::string> UNQ_STR "unquoted string"
 %token <unsigned>    UINT "integer"
 
+%nterm <std::string> identifier
+
 %%
 // Based on the following specification:
 // https://danielaparker.github.io/JsonCons.Net/articles/JsonPath/Specification.html
 
-jsonpath: ROOT
-        | ROOT relative_location
+jsonpath: ROOT { /* skip adding root */ } opt_relative_location
+
+opt_relative_location:
+        | relative_location
 
 relative_location: DOT relative_path
         | LBRACKET bracket_expr RBRACKET
 
-relative_path: identifier opt_relative_location
+relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
         | WILDCARD opt_relative_location
 
-opt_relative_location:
-        | relative_location
 
 identifier: UNQ_STR
          // | single_quoted_string | double_quoted_string
@@ -84,5 +86,5 @@ index_expr: UINT
 
 void dfly::json::Parser::error(const location_type& l, const string& m)
 {
-  cerr << l << ": " << m << '\n';
+  driver->Error(l, m);
 }
