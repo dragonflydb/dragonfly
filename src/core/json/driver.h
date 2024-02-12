@@ -6,61 +6,14 @@
 
 #include <memory>
 #include <string>
-#include <vector>
+
+#include "src/core/json/path.h"
 
 namespace dfly {
 namespace json {
 
 class Lexer;
 class location;  // from jsonpath_grammar.hh
-
-enum class SegmentType {
-  IDENTIFIER = 1,  // $.identifier
-  INDEX = 2,       // $.array[0]
-  WILDCARD = 3,    // $.array[*] or $.*
-};
-
-class PathSegment {
- public:
-  PathSegment(SegmentType type, std::string identifier = std::string())
-      : type_(type), identifier_(std::move(identifier)) {
-  }
-
-  SegmentType type() const {
-    return type_;
-  }
-
-  const std::string& identifier() const {
-    return identifier_;
-  }
-
- private:
-  SegmentType type_;
-  std::string identifier_;
-  int index_;
-};
-
-class Path {
- public:
-  void AddSegment(PathSegment segment) {
-    segments_.push_back(std::move(segment));
-  }
-
-  size_t size() const {
-    return segments_.size();
-  }
-
-  const PathSegment& operator[](size_t i) const {
-    return segments_[i];
-  }
-
-  void Clear() {
-    segments_.clear();
-  }
-
- private:
-  std::vector<PathSegment> segments_;
-};
 
 class Driver {
  public:
@@ -76,7 +29,15 @@ class Driver {
   virtual void Error(const location& l, const std::string& msg) = 0;
 
   void AddIdentifier(const std::string& identifier) {
-    path_.AddSegment(PathSegment(SegmentType::IDENTIFIER, identifier));
+    AddSegment(PathSegment(SegmentType::IDENTIFIER, identifier));
+  }
+
+  void AddWildcard() {
+    AddSegment(PathSegment(SegmentType::WILDCARD));
+  }
+
+  void AddSegment(PathSegment segment) {
+    path_.push_back(std::move(segment));
   }
 
   Path TakePath() {

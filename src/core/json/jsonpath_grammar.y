@@ -12,6 +12,7 @@
 
 // Added to header file before parser declaration.
 %code requires {
+  #include "src/core/json/path.h"
   namespace dfly {
   namespace json {
     class Driver;
@@ -56,6 +57,8 @@ using namespace std;
 %token <unsigned>    UINT "integer"
 
 %nterm <std::string> identifier
+%nterm <PathSegment> bracket_expr index_expr
+
 
 %%
 // Based on the following specification:
@@ -67,19 +70,19 @@ opt_relative_location:
         | relative_location
 
 relative_location: DOT relative_path
-        | LBRACKET bracket_expr RBRACKET
+        | LBRACKET bracket_expr RBRACKET { driver->AddSegment($2); }
 
 relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
-        | WILDCARD opt_relative_location
+        | WILDCARD { driver->AddWildcard(); } opt_relative_location
 
 
 identifier: UNQ_STR
          // | single_quoted_string | double_quoted_string
 
-bracket_expr: WILDCARD
-            | index_expr
+bracket_expr: WILDCARD { $$ = PathSegment{SegmentType::WILDCARD}; }
+            | index_expr { $$ = $1; }
 
-index_expr: UINT
+index_expr: UINT { $$ = PathSegment(SegmentType::INDEX, $1); }
 
 %%
 
