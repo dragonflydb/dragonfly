@@ -1,7 +1,12 @@
 name: Version Release
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 env:
   RELEASE_DIR: build-release
@@ -10,8 +15,14 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Print Message
-        run: echo "Release created successfully!"
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          omitBody: true
+          prerelease: true
+          draft: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   build-qemu:
     runs-on: ubuntu-latest
@@ -89,8 +100,16 @@ jobs:
   build-native:
     runs-on: ubuntu-latest
     needs: create-release
+    strategy:
+      matrix:
+        include:
+          # Build with these flags
+          - name: debian
+            container: ubuntu-dev:20
+          - name: rpm
+            container: fedora:30
     container:
-      image: ghcr.io/romange/ubuntu-dev:20
+      image: ghcr.io/romange/${{ matrix.container }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -115,6 +134,16 @@ jobs:
             ./tools/packaging/rpm/build_rpm.sh ${{ env.RELEASE_DIR }}/dragonfly-x86_64.tar.gz ${{github.ref_name}}
           fi
 
+      - name: Run regression tests
+        # Fedora 30 has older python packages, so this fails during requirements installation.
+        if: matrix.container != 'fedora:30'
+        uses: ./.github/actions/regression-tests
+        with:
+          dfly-executable: dragonfly-x86_64
+          gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
+          run-only-on-ubuntu-latest: true
+          build-folder-name: ${{ env.RELEASE_DIR }}
+
       - name: Save artifacts
         run: |
           # place all artifacts at the same location
@@ -131,3 +160,23 @@ jobs:
         with:
           name: dragonfly-amd64
           path: results-artifacts/*
+
+  publish_release:
+    runs-on: ubuntu-latest
+    needs: [build-native, build-qemu]
+    steps:
+      - uses: actions/download-artifact@v3
+        name: Download files
+        with:
+          path: artifacts
+      - name: See all the artifacts
+        run: |
+          ls -lR artifacts/
+      - uses: ncipollo/release-action@v1
+        with:
+          artifacts: "artifacts/dragonfly-*/*"
+          allowUpdates: true
+          draft: true
+          prerelease: true
+          omitNameDuringUpdate: true
+          token: ${{ secrets.GITHUB_TOKEN }}
