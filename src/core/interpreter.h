@@ -17,8 +17,7 @@ namespace dfly {
 
 class ObjectExplorer {
  public:
-  virtual ~ObjectExplorer() {
-  }
+  virtual ~ObjectExplorer() = default;
 
   virtual void OnBool(bool b) = 0;
   virtual void OnString(std::string_view str) = 0;
@@ -113,14 +112,14 @@ class Interpreter {
     redis_func_ = std::forward<U>(u);
   }
 
+  // Invoke command with arguments from lua stack, given options and possibly custom explorer
+  int RedisGenericCommand(bool raise_error, bool async, ObjectExplorer* explorer = nullptr);
+
  private:
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
   bool IsTableSafe() const;
-
-  int RedisGenericCommand(bool raise_error, bool async);
-  int RedisACallErrorsCommand();
 
   static int RedisCallCommand(lua_State* lua);
   static int RedisPCallCommand(lua_State* lua);

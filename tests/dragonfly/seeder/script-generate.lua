@@ -28,13 +28,14 @@ local modfunc = LG_funcs['mod_' .. string.lower(type)]
 local function action_add()
     local key = prefix .. tostring(key_counter)
     key_counter = key_counter + 1
+
+    addfunc(key, keys)
     table.insert(keys, key)
-    addfunc(key, data_size)
 end
 
 local function action_mod()
     local key = keys[math.random(#keys)]
-    modfunc(key, data_size)
+    modfunc(key, keys)
 end
 
 local function action_del()
@@ -60,11 +61,6 @@ while true do
     -- break if we reached target ops
     if total_ops > 0 and counter > total_ops then
         break
-    end
-
-    if key_target < 100 and min_dev > 0 then
-        print(real_target, key_target, math.abs(#keys - real_target) / real_target)
-        print()
     end
 
     -- break if we reached our target deviation

@@ -1,10 +1,12 @@
 import asyncio
 import random
+import logging
 import re
 import typing
 import math
 import redis.asyncio as aioredis
 from dataclasses import dataclass
+import time
 
 try:
     from importlib import resources as impresources
@@ -27,7 +29,16 @@ class SeederBase:
         """Generate hash capture for all data stored in instance pointed by client"""
 
         sha = await client.script_load(clz._load_script("hash"))
-        return await asyncio.gather(*(client.evalsha(sha, 0, data_type) for data_type in clz.TYPES))
+        return await asyncio.gather(
+            *(clz._run_capture(client, sha, data_type) for data_type in clz.TYPES)
+        )
+
+    @staticmethod
+    async def _run_capture(client, sha, data_type):
+        s = time.time()
+        res = await client.evalsha(sha, 0, data_type)
+        logging.debug(f"hash capture of {data_type} took {time.time() - s}")
+        return res
 
     @staticmethod
     def _read_file(fname):
@@ -107,8 +118,7 @@ class Seeder(SeederBase):
         self.units = [
             Seeder.Unit(
                 prefix=f"k-s{self.uid}u{i}-",
-                type="STRING",
-                # type=random.choice(Seeder.TYPES),
+                type=Seeder.TYPES[i % len(Seeder.TYPES)],
                 counter=0,
                 stop_key=f"_s{self.uid}u{i}-stop",
             )
@@ -145,6 +155,8 @@ class Seeder(SeederBase):
     async def _run_unit(client: aioredis.Redis, sha: str, unit: Unit, using_stopkey, args):
         await client.delete(unit.stop_key)
 
+        s = time.time()
+
         args = [
             unit.prefix,
             unit.type,
@@ -153,3 +165,5 @@ class Seeder(SeederBase):
         ] + args
 
         unit.counter = await client.evalsha(sha, 0, *args)
+
+        logging.debug(f"running unit {unit.prefix}/{unit.type} took {time.time() - s}")
