@@ -119,6 +119,15 @@ TEST_F(JsonPathTest, Parser) {
   EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
   EXPECT_EQ("foo", path[0].identifier());
   EXPECT_EQ("bar", path[1].identifier());
+
+  EXPECT_EQ(0, Parse("$.*.bar[1]"));
+  path = driver_.TakePath();
+  ASSERT_EQ(3, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::WILDCARD));
+  EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
+  EXPECT_THAT(path[2], SegType(SegmentType::INDEX));
+  EXPECT_EQ("bar", path[1].identifier());
+  EXPECT_EQ(1, path[2].index());
 }
 
 }  // namespace dfly::json

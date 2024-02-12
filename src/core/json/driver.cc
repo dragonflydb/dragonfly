@@ -20,7 +20,7 @@ Driver::~Driver() {
 void Driver::SetInput(string str) {
   cur_str_ = std::move(str);
   lexer_->in(cur_str_);
-  path_.Clear();
+  path_.clear();
 }
 
 void Driver::ResetScanner() {
