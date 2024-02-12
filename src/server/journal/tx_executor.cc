@@ -12,6 +12,8 @@
 using namespace std;
 using namespace facade;
 
+ABSL_DECLARE_FLAG(bool, enable_multi_shard_sync);
+
 namespace dfly {
 
 bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
@@ -47,32 +49,28 @@ void MultiShardExecution::CancelAllBlockingEntities() {
   }
 }
 
-bool TransactionData::AddEntry(journal::ParsedEntry&& entry) {
+void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
   opcode = entry.opcode;
 
   switch (entry.opcode) {
     case journal::Op::PING:
-      return true;
+      return;
     case journal::Op::FIN:
-      return true;
+      return;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
+    case journal::Op::MULTI_COMMAND:
       commands.push_back(std::move(entry.cmd));
       [[fallthrough]];
     case journal::Op::EXEC:
       shard_cnt = entry.shard_cnt;
       dbid = entry.dbid;
       txid = entry.txid;
-      return true;
-    case journal::Op::MULTI_COMMAND:
-      commands.push_back(std::move(entry.cmd));
-      dbid = entry.dbid;
-      return false;
+      return;
     default:
       DCHECK(false) << "Unsupported opcode";
   }
-  return false;
 }
 
 bool TransactionData::IsGlobalCmd() const {
@@ -98,8 +96,7 @@ bool TransactionData::IsGlobalCmd() const {
 
 TransactionData TransactionData::FromSingle(journal::ParsedEntry&& entry) {
   TransactionData data;
-  bool res = data.AddEntry(std::move(entry));
-  DCHECK(res);
+  data.AddEntry(std::move(entry));
   return data;
 }
 
@@ -114,7 +111,8 @@ std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* read
     // Check if journal command can be executed right away.
     // Expiration checks lock on master, so it never conflicts with running multi transactions.
     if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
-        res->opcode == journal::Op::PING || res->opcode == journal::Op::FIN)
+        res->opcode == journal::Op::PING || res->opcode == journal::Op::FIN ||
+        (res->opcode == journal::Op::MULTI_COMMAND && !accumulate_multi_))
       return TransactionData::FromSingle(std::move(res.value()));
 
     // Otherwise, continue building multi command.
@@ -123,7 +121,9 @@ std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* read
 
     auto txid = res->txid;
     auto& txdata = current_[txid];
-    if (txdata.AddEntry(std::move(res.value()))) {
+    txdata.AddEntry(std::move(res.value()));
+    // accumulate multi until we get exec opcode.
+    if (txdata.opcode == journal::Op::EXEC) {
       auto out = std::move(txdata);
       current_.erase(txid);
       return out;

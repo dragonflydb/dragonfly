@@ -62,7 +62,7 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
   JournalReader reader{&ps, 0};
-  TransactionReader tx_reader{};
+  TransactionReader tx_reader{false};
 
   while (!cntx->IsCancelled()) {
     if (cntx->IsCancelled())
