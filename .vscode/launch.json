@@ -7,9 +7,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/build-dbg/dragonfly",
       "args": [
-        "--alsologtostderr",
-        "--proactor_threads=4",
-        "--cluster_mode=yes"
+        "--alsologtostderr"
       ],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}/build-dbg",

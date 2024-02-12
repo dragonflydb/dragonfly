@@ -31,8 +31,8 @@ class ClusterSlotMigration : ProtocolClient {
     return sync_id_;
   }
 
-  // Source sync ids can be used by multiple different source Dragonfly servers. This is a unique
-  // identifier.
+  // Remote sync ids uniquely identifies a sync *remotely*. However, multiple remote sources can
+  // use the same id, so we need a local id as well.
   uint32_t GetLocalSyncId() const {
     return local_sync_id_;
   }

@@ -4,7 +4,6 @@
 
 #include "server/cluster/outgoing_slot_migration.h"
 
-#include "base/logging.h"
 #include "server/db_slice.h"
 #include "server/journal/streamer.h"
 
@@ -48,7 +47,6 @@ OutgoingMigration::~OutgoingMigration() = default;
 
 void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal,
                                   io::Sink* dest) {
-  LOG(ERROR) << "XXX start outgoing flow " << sync_id;
   SlotSet sset = ToSlotSet(slots_);
 
   const auto shard_id = slice->shard_id();
@@ -63,7 +61,6 @@ void OutgoingMigration::Finalize(uint32_t shard_id) {
 }
 
 void OutgoingMigration::Cancel(uint32_t shard_id) {
-  LOG(ERROR) << "XXX cancelling outgoing migration " << shard_id;
   slot_migrations_[shard_id]->Cancel();
 }
 

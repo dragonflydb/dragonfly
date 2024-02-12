@@ -618,7 +618,6 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
 }
 
 void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx) {
-  LOG(ERROR) << "XXX cluster start slot migration " << args;
   CmdArgParser parser(args);
   auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
   std::vector<SlotRange> slots;
@@ -699,7 +698,6 @@ void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionCo
 }
 
 void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx) {
-  LOG(ERROR) << "XXX finalize migration";
   CmdArgParser parser{args};
   auto sync_id = parser.Next<uint32_t>();
 
@@ -740,9 +738,7 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
     }
   };
 
-  LOG(ERROR) << "XXX awaiting finalize";
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-  LOG(ERROR) << "XXX awaiting finalize - done";
 
   // TODO do next after ACK
   util::ThisFiber::SleepFor(200ms);
@@ -829,7 +825,6 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  LOG(ERROR) << "XXX Proceeding with outgoing migration " << args;
   auto sync_id = CreateOutgoingMigration(cntx, port, std::move(slots));
 
   cntx->conn()->SetName("slot_migration_ctrl");
@@ -844,7 +839,6 @@ uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_
                                                 std::vector<ClusterConfig::SlotRange> slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
-  LOG(ERROR) << "XXX starting sync " << sync_id << " from var " << &next_sync_id_;
   auto err_handler = [](const GenericError& err) {
     LOG(INFO) << "Slot migration error: " << err.Format();
 
@@ -888,19 +882,15 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
 void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx) {
   CHECK(cntx->slot_migration_id != 0);
-  LOG(ERROR) << "XXX full sync cut " << args << " migration id " << cntx->slot_migration_id;
   CmdArgParser parser{args};
   auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
 
   if (auto err = parser.Error(); err) {
-    LOG(ERROR) << "XXX full sync error";
     return cntx->SendError(err->MakeReply());
   }
 
   VLOG(1) << "Full sync cut "
           << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
-  LOG(ERROR) << "XXX Full sync cut "
-             << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
 
   std::lock_guard lck(migration_mu_);
   auto migration_it =

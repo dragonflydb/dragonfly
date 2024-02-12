@@ -184,7 +184,7 @@ class ConnectionContext : public facade::ConnectionContext {
   Transaction* transaction = nullptr;
   const CommandId* cid = nullptr;
   ConnectionState conn_state;
-  uint32_t slot_migration_id = 0;
+  uint32_t slot_migration_id = 0;  // Which slot migration ID belongs to this connection
 
   DbIndex db_index() const {
     return conn_state.db_index;

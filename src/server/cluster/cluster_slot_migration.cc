@@ -107,16 +107,11 @@ ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
 }
 
 void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
-  LOG(ERROR) << "XXX setting stable sync for flow " << flow;
-  for (const auto& flow : shard_flows_) {  // XXX
-    LOG(ERROR) << "XXX state for flow " << flow->IsStableSync();
-  }  // XXX
   DCHECK(shard_flows_.size() > flow);
   shard_flows_[flow]->SetStableSync();
 
   if (std::all_of(shard_flows_.begin(), shard_flows_.end(),
                   [](const auto& el) { return el->IsStableSync(); })) {
-    LOG(ERROR) << "XXX setting stable sync";
     state_ = MigrationState::C_STABLE_SYNC;
   }
 }
