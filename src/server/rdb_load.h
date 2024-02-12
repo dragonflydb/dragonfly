@@ -11,9 +11,9 @@ extern "C" {
 }
 
 #include "base/io_buf.h"
+#include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
 #include "core/json_object.h"
-#include "core/mpsc_intrusive_queue.h"
 #include "io/io.h"
 #include "redis/rdb.h"
 #include "server/common.h"
@@ -263,7 +263,7 @@ class RdbLoader : protected RdbLoaderBase {
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;
 
-  detail::MPSCIntrusiveQueue<Item> item_queue_;
+  base::MPSCIntrusiveQueue<Item> item_queue_;
 };
 
 }  // namespace dfly
