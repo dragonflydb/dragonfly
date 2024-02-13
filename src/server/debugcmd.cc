@@ -97,7 +97,7 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
     for (size_t i = 0; i < elements; ++i) {
       args.push_back(GenerateValue(val_size, random_value, gen));
     }
-  } else if (type == "HSET") {
+  } else if (type == "HASH") {
     cid = registry.Find("HSET");
     for (size_t i = 0; i < elements; ++i) {
       args.push_back(GenerateValue(val_size / 2, random_value, gen));

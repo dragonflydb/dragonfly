@@ -27,7 +27,7 @@ local function process(type)
 end
 
 for _, type in ipairs(requested_types) do
-    process(type)
+    process(string.lower(type))
 end
 
 

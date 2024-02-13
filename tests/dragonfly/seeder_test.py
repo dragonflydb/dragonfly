@@ -4,7 +4,15 @@ import string
 import random
 from redis import asyncio as aioredis
 from . import dfly_args
-from .seeder import Seeder
+from .seeder import Seeder, FixedSeeder
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_fixed_seeder(async_client: aioredis.Redis):
+    s = FixedSeeder(key_target=10_000, data_size=100)
+    await s.run(async_client)
+
+    assert abs(await async_client.dbsize() - 10_000) <= 50
 
 
 @dfly_args({"proactor_threads": 4})
