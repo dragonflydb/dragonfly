@@ -44,6 +44,8 @@ class TieredStorage {
   std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it);
   void Free(PrimeIterator it, DbTableStats* stats);
 
+  void Defrag(DbIndex db_index, PrimeIterator it);
+
   void Shutdown();
 
   TieredStats GetStats() const;
