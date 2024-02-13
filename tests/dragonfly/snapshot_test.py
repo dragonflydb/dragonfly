@@ -23,6 +23,7 @@ def find_main_file(path: Path, pattern):
     return next(iter(glob.glob(str(path) + "/" + pattern)), None)
 
 
+@pytest.mark.opt_only
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @pytest.mark.parametrize(
     "seeder_opts",
@@ -38,8 +39,7 @@ async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opt
     """
     Test consistency over a large variety of data with different sizes
     """
-    seeder = FixedSeeder(**seeder_opts)
-    await seeder.run(async_client)
+    await FixedSeeder(**seeder_opts).run(async_client)
 
     start_capture = await FixedSeeder.capture(async_client)
 
@@ -56,18 +56,16 @@ async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opt
 
 
 @pytest.mark.parametrize("format", FILE_FORMATS)
-@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-consistency"})
-async def test_mutlidb(async_client: aioredis.Redis, format: str):
+@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-multidb"})
+async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
     """
     Test serialization of multiple logical databases
     """
-    seeder = FixedSeeder(key_target=1000)
-
     start_captures = []
     for dbid in range(10):
-        await async_client.select(dbid)
-        await seeder.run(async_client)
-        start_captures.append(await FixedSeeder.capture(async_client))
+        db_client = df_server.client(db=dbid)
+        await FixedSeeder(key_target=1000).run(db_client)
+        start_captures.append(await FixedSeeder.capture(db_client))
 
     # save + flush + load
     await async_client.execute_command("SAVE", format)
@@ -75,12 +73,12 @@ async def test_mutlidb(async_client: aioredis.Redis, format: str):
     await async_client.execute_command(
         "DEBUG",
         "LOAD",
-        "test-consistency.rdb" if format == "RDB" else "test-consistency-summary.dfs",
+        "test-multidb.rdb" if format == "RDB" else "test-multidb-summary.dfs",
     )
 
     for dbid in range(10):
-        await async_client.select(dbid)
-        assert (await FixedSeeder.capture(async_client)) == start_captures[dbid]
+        db_client = df_server.client(db=dbid)
+        assert (await FixedSeeder.capture(db_client)) == start_captures[dbid]
 
 
 @pytest.mark.asyncio
@@ -103,15 +101,14 @@ async def test_dbfilenames(
     if save_type == "rdb":
         df_args["nodf_snapshot_format"] = None
 
-    # We use the seeder just to check we don't loose any files (and thus keys)
-    seeder = FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS)
     start_capture = None
 
     with df_local_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
 
-            await seeder.run(client)
+            # We use the seeder just to check we don't loose any files (and thus keys)
+            await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(client)
             start_capture = await FixedSeeder.capture(client)
 
             await client.execute_command("SAVE " + save_type)
@@ -129,8 +126,7 @@ async def test_dbfilenames(
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
 async def test_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
-    seeder = FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS)
-    await seeder.run(async_client)
+    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     file = None
     with async_timeout.timeout(65):
@@ -138,14 +134,13 @@ async def test_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
             await asyncio.sleep(1)
             file = find_main_file(tmp_path, "test-cron-summary.dfs")
 
-    assert file is not None
+    assert file is not None, os.listdir(tmp_path)
 
 
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron-set"})
 async def test_set_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
-    seeder = FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS)
-    await seeder.run(async_client)
+    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     await async_client.config_set("snapshot_cron", "* * * * *")
 
@@ -153,7 +148,7 @@ async def test_set_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
     with async_timeout.timeout(65):
         while file is None:
             await asyncio.sleep(1)
-            file = find_main_file(tmp_path, "test-cron-summary.dfs")
+            file = find_main_file(tmp_path, "test-cron-set-summary.dfs")
 
     assert file is not None
 
@@ -165,8 +160,7 @@ async def test_shutdown_save_with_rename(df_server):
     """Checks that on shutdown we save snapshot"""
     client = df_server.client()
 
-    seeder = FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS)
-    await seeder.run(client)
+    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(client)
     start_capture = await FixedSeeder.capture(client)
 
     await client.connection_pool.disconnect()
@@ -214,13 +208,12 @@ async def test_info_persistence_field(async_client):
     """Test is_loading field on INFO PERSISTENCE during snapshot loading"""
 
     def extract_is_loading_field(res):
-        matcher = b"loading:"
+        matcher = "loading:"
         start = res.find(matcher)
         pos = start + len(matcher)
         return chr(res[pos])
 
-    seeder = FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS)
-    await seeder.run()
+    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     # Wait for snapshot to finish loading and try INFO PERSISTENCE
     await wait_available_async(async_client)
@@ -238,7 +231,7 @@ async def test_s3_snapshot(self, async_client):
     seeder = FixedSeeder(key_target=10_000)
     await seeder.run(async_client)
 
-    start_capture = await seeder.capture()
+    start_capture = await FixedSeeder.capture()
 
     try:
         # save + flush + load
@@ -275,7 +268,6 @@ async def test_s3_snapshot(self, async_client):
         )
 
 
-@pytest.mark.skip("TODO")
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-shutdown"})
 class TestDflySnapshotOnShutdown:
     SEEDER_ARGS = dict(key_target=10_000)
@@ -295,13 +287,13 @@ class TestDflySnapshotOnShutdown:
 
     async def _delete_all_keys(self, client: aioredis.Redis):
         while True:
-            keys = await client.keys("*")
+            keys = await client.keys()
             if len(keys) == 0:
                 break
             await client.delete(*keys)
 
     @pytest.mark.asyncio
-    async def test_memory_counters(self, async_client):
+    async def test_memory_counters(self, async_client: aioredis.Redis):
         memory_counters = await self._get_info_memory_fields(async_client)
         assert memory_counters == {"object_used_memory": 0}
 
@@ -332,9 +324,10 @@ class TestDflySnapshotOnShutdown:
         await async_client.connection_pool.disconnect()
         df_server.stop()
         df_server.start()
-        async_client = df_server.client()
 
+        async_client = df_server.client()
         await wait_available_async(async_client)
+
         assert await FixedSeeder.capture(async_client) == start_capture
 
         memory_after = await self._get_info_memory_fields(async_client)

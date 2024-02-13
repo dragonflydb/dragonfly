@@ -107,7 +107,8 @@ class Seeder(SeederBase):
         self.units = [
             Seeder.Unit(
                 prefix=f"k-s{self.uid}u{i}-",
-                type=random.choice(Seeder.TYPES),
+                type="STRING",
+                # type=random.choice(Seeder.TYPES),
                 counter=0,
                 stop_key=f"_s{self.uid}u{i}-stop",
             )
