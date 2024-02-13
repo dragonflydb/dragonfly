@@ -579,6 +579,9 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   it->second.SetIoPending(true);
 
   auto cb = [this, req, db_index](int io_res) {
+    if (shutdown_) {
+      return;
+    }
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
 
     absl::Cleanup cleanup = [this, req]() {
