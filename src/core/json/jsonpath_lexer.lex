@@ -43,6 +43,7 @@
 [[:space:]]+     ; // skip white space
 
 "$"         return Parser::make_ROOT(loc());
+".."        return Parser::make_DESCENT(loc());
 "."         return Parser::make_DOT(loc());
 "["         return Parser::make_LBRACKET(loc());
 "]"         return Parser::make_RBRACKET(loc());
