@@ -756,15 +756,23 @@ error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
 }
 
 error_code SerializerBase::SendFullSyncCut() {
-  VLOG(2) << "SendFullSyncCut";
-  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
+  LOG(INFO) << "SendFullSyncCut";
+  auto result = WriteOpcode(RDB_OPCODE_FULLSYNC_END);
+  if (!result) {
+    LOG(INFO) << "GOOD writting RDB_OPCODE";
+  }
+  RETURN_ON_ERR(result);
 
   // RDB_OPCODE_FULLSYNC_END followed by 8 bytes of 0.
   // The reason for this is that some opcodes require to have at least 8 bytes of data
   // in the read buffer when consuming the rdb data, and since RDB_OPCODE_FULLSYNC_END is one of
   // the last opcodes sent to replica, we respect this requirement by sending a blob of 8 bytes.
   uint8_t buf[8] = {0};
-  return WriteRaw(buf);
+  auto res = WriteRaw(buf);
+  if (!res) {
+    LOG(INFO) << "GOOD writting ZEROS";
+  }
+  return res;
 }
 
 std::error_code SerializerBase::WriteOpcode(uint8_t opcode) {
@@ -788,7 +796,7 @@ error_code SerializerBase::FlushToSink(io::Sink* s) {
   if (bytes.empty())
     return error_code{};
 
-  DVLOG(2) << "FlushToSink " << bytes.size() << " bytes";
+  // LOG(INFO) << "FlushToSink " << bytes.size() << " bytes";
 
   // interrupt point.
   RETURN_ON_ERR(s->Write(bytes));
@@ -1386,6 +1394,7 @@ error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
 
   if (save_mode_ == SaveMode::SUMMARY) {
     impl_->serializer()->SendFullSyncCut();
+    LOG(INFO) << "SendFullSyncCut DONE";
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel(cntx->GetCancellation());
@@ -1398,7 +1407,9 @@ error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
     }
   }
 
+  LOG(INFO) << "BEFORE SAVING EPILOG";
   RETURN_ON_ERR(SaveEpilog());
+  LOG(INFO) << "AFTER SAVING EPILOG";
 
   if (freq_map) {
     freq_map->clear();
@@ -1448,16 +1459,29 @@ error_code RdbSaver::SaveEpilog() {
   auto& ser = *impl_->serializer();
 
   /* EOF opcode */
-  RETURN_ON_ERR(ser.WriteOpcode(RDB_OPCODE_EOF));
+  //  LOG(INFO) << "Writting opcode EOF";
+  auto res = ser.WriteOpcode(RDB_OPCODE_EOF);
+  //  if(res) {
+  //    LOG(INFO) << "SaveEpilog e1";
+  //  }
+  RETURN_ON_ERR(res);
 
   /* CRC64 checksum. It will be zero if checksum computation is disabled, the
    * loading code skips the check in this case. */
   chksum = 0;
 
   absl::little_endian::Store64(buf, chksum);
-  RETURN_ON_ERR(ser.WriteRaw(buf));
+  auto res2 = ser.WriteRaw(buf);
+  // if(res2) {
+  //   LOG(INFO) << "SaveEpilog e2";
+  // }
+  RETURN_ON_ERR(res2);
 
-  RETURN_ON_ERR(ser.FlushToSink(impl_->sink()));
+  auto res3 = ser.FlushToSink(impl_->sink());
+  if (res3) {
+    LOG(INFO) << "SaveEpilog e3";
+  }
+  RETURN_ON_ERR(res3);
 
   return impl_->Flush();
 }
