@@ -377,7 +377,6 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   if (shutdown_) {
     return;
   }
-  CHECK(db_arr_[req->db_index()]);
   PerDb* db = db_arr_[req->db_index()];
   auto& bin_record = db->bin_map[req->bin_index()];
   if (io_res < 0) {
