@@ -360,6 +360,8 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
 }
 
 void TieredStorage::Shutdown() {
+  VLOG(1) << "Shutdown TieredStorage";
+  shutdown_ = true;
   io_mgr_.Shutdown();
 }
 
@@ -372,6 +374,9 @@ TieredStats TieredStorage::GetStats() const {
 }
 
 void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
+  if (shutdown_) {
+    return;
+  }
   CHECK(db_arr_[req->db_index()]);
   PerDb* db = db_arr_[req->db_index()];
   auto& bin_record = db->bin_map[req->bin_index()];

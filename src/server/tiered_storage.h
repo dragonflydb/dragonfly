@@ -82,6 +82,7 @@ class TieredStorage {
   TieredStats stats_;
   size_t max_file_size_;
   size_t allocated_size_ = 0;
+  bool shutdown_ = false;
 };
 
 }  // namespace dfly
