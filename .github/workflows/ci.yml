@@ -118,8 +118,8 @@ jobs:
       - name: C++ Unit Tests
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          echo Run tiered_storage_test
-          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,tiered_storage=2 ./tiered_storage_test
+          echo Run ctest -V -L DFLY
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,tiered_storage=2 ctest -V -L DFLY
 
           echo "Running tests with --force_epoll"
 
@@ -137,10 +137,10 @@ jobs:
           echo "Finished running tests with --force_epoll"
 
           echo "Running tests with --cluster_mode=emulated"
-          FLAGS_cluster_mode=emulated ctest -V -L DFLY
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,tiered_storage=2 FLAGS_cluster_mode=emulated ctest -V -L DFLY
 
           echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
-          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ctest -V -L DFLY
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,tiered_storage=2 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ctest -V -L DFLY
 
           ./dragonfly_test
           ./multi_test --multi_exec_mode=1
