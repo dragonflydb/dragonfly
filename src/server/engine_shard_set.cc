@@ -635,6 +635,7 @@ void EngineShard::Heartbeat() {
         offload_bytes = UsedMemory() - tiering_redline;
       }
       db_slice_.ScheduleForOffloadStep(i, offload_bytes);
+      db_slice_.DefragSecondTierStep(i);
     }
   }
 
