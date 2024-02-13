@@ -10,7 +10,7 @@ import boto3
 from . import dfly_args
 from .utility import wait_available_async, chunked
 
-from .seeder import FixedSeeder
+from .seeder import StaticSeeder
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/", "proactor_threads": 4}
 FILE_FORMATS = ["RDB", "DF"]
@@ -39,9 +39,9 @@ async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opt
     """
     Test consistency over a large variety of data with different sizes
     """
-    await FixedSeeder(**seeder_opts).run(async_client)
+    await StaticSeeder(**seeder_opts).run(async_client)
 
-    start_capture = await FixedSeeder.capture(async_client)
+    start_capture = await StaticSeeder.capture(async_client)
 
     # save + flush + load
     await async_client.execute_command("SAVE", format)
@@ -52,7 +52,7 @@ async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opt
         "test-consistency.rdb" if format == "RDB" else "test-consistency-summary.dfs",
     )
 
-    assert (await FixedSeeder.capture(async_client)) == start_capture
+    assert (await StaticSeeder.capture(async_client)) == start_capture
 
 
 @pytest.mark.parametrize("format", FILE_FORMATS)
@@ -64,8 +64,8 @@ async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
     start_captures = []
     for dbid in range(10):
         db_client = df_server.client(db=dbid)
-        await FixedSeeder(key_target=1000).run(db_client)
-        start_captures.append(await FixedSeeder.capture(db_client))
+        await StaticSeeder(key_target=1000).run(db_client)
+        start_captures.append(await StaticSeeder.capture(db_client))
 
     # save + flush + load
     await async_client.execute_command("SAVE", format)
@@ -78,7 +78,7 @@ async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
 
     for dbid in range(10):
         db_client = df_server.client(db=dbid)
-        assert (await FixedSeeder.capture(db_client)) == start_captures[dbid]
+        assert (await StaticSeeder.capture(db_client)) == start_captures[dbid]
 
 
 @pytest.mark.asyncio
@@ -108,8 +108,8 @@ async def test_dbfilenames(
             await wait_available_async(client)
 
             # We use the seeder just to check we don't loose any files (and thus keys)
-            await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(client)
-            start_capture = await FixedSeeder.capture(client)
+            await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(client)
+            start_capture = await StaticSeeder.capture(client)
 
             await client.execute_command("SAVE " + save_type)
 
@@ -120,13 +120,13 @@ async def test_dbfilenames(
     with df_local_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
-            assert await FixedSeeder.capture(client) == start_capture
+            assert await StaticSeeder.capture(client) == start_capture
 
 
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
 async def test_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
-    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
+    await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     file = None
     with async_timeout.timeout(65):
@@ -140,7 +140,7 @@ async def test_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron-set"})
 async def test_set_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
-    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
+    await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     await async_client.config_set("snapshot_cron", "* * * * *")
 
@@ -160,8 +160,8 @@ async def test_shutdown_save_with_rename(df_server):
     """Checks that on shutdown we save snapshot"""
     client = df_server.client()
 
-    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(client)
-    start_capture = await FixedSeeder.capture(client)
+    await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(client)
+    start_capture = await StaticSeeder.capture(client)
 
     await client.connection_pool.disconnect()
     df_server.stop()
@@ -169,7 +169,7 @@ async def test_shutdown_save_with_rename(df_server):
     client = df_server.client()
 
     await wait_available_async(client)
-    assert await FixedSeeder.capture(client) == start_capture
+    assert await StaticSeeder.capture(client) == start_capture
 
     await client.connection_pool.disconnect()
 
@@ -207,18 +207,11 @@ async def test_path_escapes(df_local_factory):
 async def test_info_persistence_field(async_client):
     """Test is_loading field on INFO PERSISTENCE during snapshot loading"""
 
-    def extract_is_loading_field(res):
-        matcher = "loading:"
-        start = res.find(matcher)
-        pos = start + len(matcher)
-        return chr(res[pos])
-
-    await FixedSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
+    await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     # Wait for snapshot to finish loading and try INFO PERSISTENCE
     await wait_available_async(async_client)
-    res = await async_client.execute_command("INFO PERSISTENCE")
-    assert "0" == extract_is_loading_field(res)
+    assert "loading:0" in (await async_client.execute_command("INFO PERSISTENCE"))
 
 
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
@@ -228,10 +221,10 @@ async def test_info_persistence_field(async_client):
 )
 @dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
 async def test_s3_snapshot(self, async_client):
-    seeder = FixedSeeder(key_target=10_000)
+    seeder = StaticSeeder(key_target=10_000)
     await seeder.run(async_client)
 
-    start_capture = await FixedSeeder.capture()
+    start_capture = await StaticSeeder.capture()
 
     try:
         # save + flush + load
@@ -244,7 +237,7 @@ async def test_s3_snapshot(self, async_client):
             + "/snapshot-summary.dfs"
         )
 
-        assert await FixedSeeder.capture(async_client) == start_capture
+        assert await StaticSeeder.capture(async_client) == start_capture
 
     finally:
 
@@ -297,7 +290,7 @@ class TestDflySnapshotOnShutdown:
         memory_counters = await self._get_info_memory_fields(async_client)
         assert memory_counters == {"object_used_memory": 0}
 
-        seeder = FixedSeeder(**self.SEEDER_ARGS)
+        seeder = StaticSeeder(**self.SEEDER_ARGS)
         await seeder.run(async_client)
 
         memory_counters = await self._get_info_memory_fields(async_client)
@@ -315,9 +308,9 @@ class TestDflySnapshotOnShutdown:
         2. Memory counters after loading from snapshot is similar to before creating a snapshot
         3. Memory counters after deleting all keys loaded by snapshot - this validates the memory
            counting when loading from snapshot."""
-        seeder = FixedSeeder(**self.SEEDER_ARGS)
+        seeder = StaticSeeder(**self.SEEDER_ARGS)
         await seeder.run(async_client)
-        start_capture = await FixedSeeder.capture(async_client)
+        start_capture = await StaticSeeder.capture(async_client)
 
         memory_before = await self._get_info_memory_fields(async_client)
 
@@ -328,7 +321,7 @@ class TestDflySnapshotOnShutdown:
         async_client = df_server.client()
         await wait_available_async(async_client)
 
-        assert await FixedSeeder.capture(async_client) == start_capture
+        assert await StaticSeeder.capture(async_client) == start_capture
 
         memory_after = await self._get_info_memory_fields(async_client)
         for counter, value in memory_before.items():

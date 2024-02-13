@@ -2,9 +2,39 @@
 
 Please use the testing frameworks factories to obtain proper seeder instances!
 
-### 1. Filling data
+### 1. Static seeder
 
-The seeder tries to maintain a specific number of keys, quickly filling or emptying the instance to reach the target. Once reached, it will issue also modification commands, trying to maintain an equilibrium with mixed load
+The StaticSeeder is a thin wrapper around `DEBUG POPULATE` with a little bit of fuzziness for collection sizes. It should be preffered for generating "static" data for snapshotting, memory consumption tests, etc.
+
+```python
+s = StaticSeeder(key_target=10_000)
+await s.run(client) # Creates around 10k keys
+```
+
+### 2. Checking consistency
+
+Use `SeederBase.capture()` (accessed via `StaticSeeder` or `Seeder`) to calculate a "state hashes" based on all the data inside an instance. Equal data produces equal hashes (equal hashes don't guarantee equal data but what are the odds...).
+
+```python
+# Fill master with ~10k keys
+s = StaticSeeder(key_target=10_000)
+await seeder.run(master)
+
+# "Replicate" or other operations
+replicate(master, replica)
+
+# Ensure master and replica have same state hashes
+master_hashes, replica_hashes = await asyncio.gather(
+    StaticSeeder.capture(master), # note it's a static method
+    StaticSeeder.capture(replica)
+)
+assert master_hashes == replica_hashes
+```
+
+### 3. Dynamic seeder
+
+Contrary to the static seeder, the normal seeder issues a more complicated mix of commands, supports deleting keys and sending modification traffic.
+The seeder tries to maintain a specific number of keys, quickly filling or emptying the instance to reach the target. Once reached, it will issue a balanced load of all kinds of operations.
 
 ```python
 # Configure how many keys we want
@@ -23,27 +53,7 @@ s.change_key_target(500)
 await s.run(client, target_deviation=0.01)
 ```
 
-### 2. Checking consistency
-
-Use `Seeder.capture()` to calculate a "state hashes" based on all the data inside an instance. Equal data produces equal hashes (equal hashes don't guarantee equal data but what are the odds...).
-
-```python
-# Fill master with 10k (+- 1%) keys
-s = Seeder(key_target=10_000)
-await seeder.run(master, target_deviation=0.01)
-
-# "Replicate" or other operations
-replicate(master, replica)
-
-# Ensure master and replica have same state hashes
-master_hashes, replica_hashes = asyncio.gather(
-    Seeder.capture(master), # note it's a static method
-    Seeder.capture(replica)
-)
-assert master_hashes == replica_hashes
-```
-
-### 3. Working with load
+### 4. Working with load
 
 A seeders `run(client)` can be called without any target. It can only be stopped with
 

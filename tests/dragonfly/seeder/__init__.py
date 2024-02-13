@@ -53,7 +53,7 @@ class SeederBase:
         return script
 
 
-class FixedSeeder(SeederBase):
+class StaticSeeder(SeederBase):
     """Wrapper around DEBUG POPULATE with fuzzy key sizes and a balanced type mix"""
 
     def __init__(self, key_target=10_000, data_size=100, variance=5, samples=10):
