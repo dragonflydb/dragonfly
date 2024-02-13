@@ -355,6 +355,24 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
   stats->tiered_size -= len;
 }
 
+void TieredStorage::Defrag(DbIndex db_index, PrimeIterator it) {
+  PrimeValue& entry = it->second;
+  CHECK(entry.IsExternal());
+  DCHECK_EQ(entry.ObjType(), OBJ_STRING);
+  auto [offset, len] = entry.GetExternalSlice();
+
+  if (offset % kBlockLen > 0) {
+    uint32_t offs_page = offset / kBlockLen;
+    auto refcnt_it = page_refcnt_.find(offs_page);
+    if (refcnt_it->second <= 10) {
+      string tmp;
+      string_view key = it->first.GetSlice(&tmp);
+      Load(db_index, it, key);
+      ScheduleOffload(db_index, it);
+    }
+  }
+}
+
 void TieredStorage::Shutdown() {
   VLOG(1) << "Shutdown TieredStorage";
   shutdown_ = true;
