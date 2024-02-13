@@ -737,3 +737,24 @@ async def test_nested_client_pause(async_client: aioredis.Redis):
     await asyncio.sleep(0.0)
     assert p3.done()
     await p3
+
+
+@pytest.mark.asyncio
+async def test_blocking_command_client_pause(async_client: aioredis.Redis):
+    async def blocking_command():
+        await async_client.execute_command("blpop key 2")
+
+    async def read_command():
+        await async_client.execute_command("get key1")
+
+    blocking = asyncio.create_task(blocking_command())
+    await asyncio.sleep(0.1)
+
+    await async_client.execute_command("client pause 1000")
+
+    read = asyncio.create_task(read_command())
+    assert not read.done()
+
+    await read
+    assert not blocking.done()
+    await blocking

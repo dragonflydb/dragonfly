@@ -561,7 +561,8 @@ std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
                                 std::function<bool()> is_pause_in_progress) {
   // Set global pause state and track commands that are running when the pause state is flipped.
   // Exlude already paused commands from the busy count.
-  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */};
+  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
+                          true /*ignore blocking*/};
   shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.
