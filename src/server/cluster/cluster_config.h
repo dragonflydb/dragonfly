@@ -85,7 +85,10 @@ class ClusterConfig {
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
 
+  // TODO this method should be removed, config shouldn't be modified
   void RemoveSlots(SlotSet slots);
+  // TODO this method should be removed, config shouldn't be modified
+  void AddSlots(SlotSet slots);
 
   // Returns the master configured for `id`.
   Node GetMasterNodeForSlot(SlotId id) const;

@@ -312,8 +312,16 @@ bool ClusterConfig::IsMySlot(std::string_view key) const {
 }
 
 void ClusterConfig::RemoveSlots(SlotSet slots) {
+  // TODO add update ClusterShards for other nodes
   for (const auto s : slots) {
     my_slots_.set(s, false);
+  }
+}
+
+void ClusterConfig::AddSlots(SlotSet slots) {
+  // TODO add update ClusterShards for other nodes
+  for (const auto s : slots) {
+    my_slots_.set(s, true);
   }
 }
 

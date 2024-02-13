@@ -740,18 +740,6 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
 
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
-  // TODO do next after ACK
-  util::ThisFiber::SleepFor(200ms);
-
-  shard_set->pool()->AwaitFiberOnAll([&migration, &deleted_slots](auto*) mutable {
-    tl_cluster_config->RemoveSlots(deleted_slots);
-
-    if (const auto* shard = EngineShard::tlocal(); shard)
-      migration->Cancel(shard->shard_id());
-  });
-
-  RemoveOutgoingMigration(sync_id);
-
   return cntx->SendOk();
 }
 
@@ -765,6 +753,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
     DflyMigrateFlow(args, cntx);
   } else if (sub_cmd == "FULL-SYNC-CUT") {
     DflyMigrateFullSyncCut(args, cntx);
+  } else if (sub_cmd == "ACK") {
+    DflyMigrateAck(args, cntx);
   } else {
     cntx->SendError(facade::UnknownSubCmd(sub_cmd, "DFLYMIGRATE"), facade::kSyntaxErrType);
   }
@@ -779,7 +769,7 @@ ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t 
     }
   }
   return incoming_migrations_jobs_
-      .emplace_back(make_unique<ClusterSlotMigration>(std::string(host_ip), port,
+      .emplace_back(make_unique<ClusterSlotMigration>(this, std::string(host_ip), port,
                                                       &server_family_->service(), std::move(slots)))
       .get();
 }
@@ -906,6 +896,38 @@ void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* c
   if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
     LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
   }
+
+  cntx->SendOk();
+}
+
+void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  auto sync_id = parser.Next<uint32_t>();
+
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
+  }
+
+  auto migration = GetOutgoingMigration(sync_id);
+  if (!migration)
+    return cntx->SendError(kIdNotFound);
+
+  if (migration->GetState() != MigrationState::C_FINISHED) {
+    return cntx->SendError("Migration process is not in C_FINISHED state");
+  }
+
+  // TODO implement blocking on migrated slots only
+  const auto deleted_slots = ToSlotSet(migration->GetSlotRange());
+
+  // TODO it's a bug need to rewrite with mutex or fix tl_cluster_config because it's not thread
+  // local
+  tl_cluster_config->RemoveSlots(deleted_slots);
+  shard_set->pool()->AwaitFiberOnAll([&migration](auto*) mutable {
+    if (const auto* shard = EngineShard::tlocal(); shard)
+      migration->Cancel(shard->shard_id());
+  });
+
+  RemoveOutgoingMigration(sync_id);
 
   cntx->SendOk();
 }

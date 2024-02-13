@@ -9,6 +9,7 @@ namespace dfly {
 class ClusterShardMigration;
 
 class Service;
+class ClusterFamily;
 
 // The main entity on the target side that manage slots migration process
 // Creates initial connection between the target and source node,
@@ -20,7 +21,7 @@ class ClusterSlotMigration : ProtocolClient {
     uint16_t port;
   };
 
-  ClusterSlotMigration(std::string host_ip, uint16_t port, Service* se,
+  ClusterSlotMigration(ClusterFamily* cl_fm, std::string host_ip, uint16_t port, Service* se,
                        std::vector<ClusterConfig::SlotRange> slots);
   ~ClusterSlotMigration();
 
@@ -56,6 +57,7 @@ class ClusterSlotMigration : ProtocolClient {
   bool IsFinalized() const;
 
  private:
+  ClusterFamily* cluster_family_;
   Service& service_;
   Mutex flows_op_mu_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;

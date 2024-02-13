@@ -71,6 +71,8 @@ class ClusterFamily {
 
   void DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx);
 
+  void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
+
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
