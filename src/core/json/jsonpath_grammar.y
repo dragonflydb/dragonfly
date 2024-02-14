@@ -50,6 +50,7 @@ using namespace std;
   ROOT "$"
   DOT  "."
   WILDCARD "*"
+  DESCENT ".."
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
@@ -57,7 +58,7 @@ using namespace std;
 %token <unsigned>    UINT "integer"
 
 %nterm <std::string> identifier
-%nterm <PathSegment> bracket_expr index_expr
+%nterm <PathSegment> bracket_index
 
 
 %%
@@ -70,7 +71,8 @@ opt_relative_location:
         | relative_location
 
 relative_location: DOT relative_path
-        | LBRACKET bracket_expr RBRACKET { driver->AddSegment($2); }
+        | DESCENT { driver->AddSegment(PathSegment{SegmentType::DESCENT}); } relative_path
+        | LBRACKET bracket_index RBRACKET { driver->AddSegment($2); }
 
 relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
         | WILDCARD { driver->AddWildcard(); } opt_relative_location
@@ -79,10 +81,9 @@ relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
 identifier: UNQ_STR
          // | single_quoted_string | double_quoted_string
 
-bracket_expr: WILDCARD { $$ = PathSegment{SegmentType::WILDCARD}; }
-            | index_expr { $$ = $1; }
+bracket_index: WILDCARD { $$ = PathSegment{SegmentType::WILDCARD}; }
+              | UINT { $$ = PathSegment(SegmentType::INDEX, $1); }
 
-index_expr: UINT { $$ = PathSegment(SegmentType::INDEX, $1); }
 
 %%
 

@@ -14,6 +14,7 @@ enum class SegmentType {
   IDENTIFIER = 1,  // $.identifier
   INDEX = 2,       // $.array[0]
   WILDCARD = 3,    // $.array[*] or $.*
+  DESCENT = 4,     // $..identifier
 };
 
 class PathSegment {

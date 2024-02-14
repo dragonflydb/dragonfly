@@ -32,6 +32,9 @@ void PrintTo(SegmentType st, std::ostream* os) {
       case SegmentType::WILDCARD:
         *os << "WILDCARD";
         break;
+      case SegmentType::DESCENT:
+        *os << "DESCENT";
+        break;
     }
   }
   *os << ")";
@@ -103,6 +106,11 @@ TEST_F(JsonPathTest, Scanner) {
 
   SetInput("|");
   NEXT_TOK(YYEOF);
+
+  SetInput("$..*");
+  NEXT_TOK(ROOT);
+  NEXT_TOK(DESCENT);
+  NEXT_TOK(WILDCARD);
 }
 
 TEST_F(JsonPathTest, Parser) {
@@ -128,6 +136,24 @@ TEST_F(JsonPathTest, Parser) {
   EXPECT_THAT(path[2], SegType(SegmentType::INDEX));
   EXPECT_EQ("bar", path[1].identifier());
   EXPECT_EQ(1, path[2].index());
+}
+
+TEST_F(JsonPathTest, Descent) {
+  EXPECT_EQ(0, Parse("$..foo"));
+  Path path = driver_.TakePath();
+  ASSERT_EQ(2, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::DESCENT));
+  EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
+  EXPECT_EQ("foo", path[1].identifier());
+
+  EXPECT_EQ(0, Parse("$..*"));
+  ASSERT_EQ(2, path.size());
+  path = driver_.TakePath();
+  EXPECT_THAT(path[0], SegType(SegmentType::DESCENT));
+  EXPECT_THAT(path[1], SegType(SegmentType::WILDCARD));
+
+  EXPECT_NE(0, Parse("$.."));
+  EXPECT_NE(0, Parse("$...foo"));
 }
 
 }  // namespace dfly::json
