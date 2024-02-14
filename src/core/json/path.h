@@ -8,6 +8,8 @@
 #include <variant>
 #include <vector>
 
+#include "src/core/json_object.h"
+
 namespace dfly::json {
 
 enum class SegmentType {
@@ -47,5 +49,8 @@ class PathSegment {
 };
 
 using Path = std::vector<PathSegment>;
+
+void EvaluatePath(const Path& path, const JsonType& json,
+                  std::function<void(const JsonType&)> callback);
 
 }  // namespace dfly::json

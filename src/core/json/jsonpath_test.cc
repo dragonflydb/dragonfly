@@ -156,4 +156,44 @@ TEST_F(JsonPathTest, Descent) {
   EXPECT_NE(0, Parse("$...foo"));
 }
 
+TEST_F(JsonPathTest, Path) {
+  Path path;
+  JsonType json = JsonFromString(R"({"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "a2": [1]},
+      "v13": 3
+      })")
+                      .value();
+  int called = 0;
+
+  // Empty path
+  EvaluatePath(path, json, [&](const JsonType& val) { ++called; });
+  ASSERT_EQ(0, called);
+
+  path.emplace_back(SegmentType::IDENTIFIER, "v13");
+  EvaluatePath(path, json, [&](const JsonType& val) {
+    ++called;
+    ASSERT_EQ(3, val.as<int>());
+  });
+  ASSERT_EQ(1, called);
+
+  path.clear();
+  path.emplace_back(SegmentType::IDENTIFIER, "v11");
+  path.emplace_back(SegmentType::IDENTIFIER, "f");
+  called = 0;
+  EvaluatePath(path, json, [&](const JsonType& val) {
+    ++called;
+    ASSERT_EQ(1, val.as<int>());
+  });
+  ASSERT_EQ(1, called);
+
+  path.clear();
+  path.emplace_back(SegmentType::WILDCARD);
+  path.emplace_back(SegmentType::IDENTIFIER, "f");
+  called = 0;
+  EvaluatePath(path, json, [&](const JsonType& val) {
+    ++called;
+    ASSERT_TRUE(val.is<int>());
+  });
+  ASSERT_EQ(2, called);
+}
+
 }  // namespace dfly::json
