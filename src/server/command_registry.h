@@ -97,6 +97,8 @@ class CommandId : public facade::CommandId {
 
   bool IsTransactional() const;
 
+  bool IsMultiTransactional() const;
+
   bool IsReadOnly() const {
     return opt_mask_ & CO::READONLY;
   }
