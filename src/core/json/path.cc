@@ -17,6 +17,14 @@ namespace dfly::json {
 
 namespace {
 
+template <typename... Ts> struct Overload : Ts... { using Ts::operator()...; };
+
+template <typename... Ts> Overload(Ts...) -> Overload<Ts...>;
+
+bool ShouldIterateAll(SegmentType type) {
+  return type == SegmentType::WILDCARD;
+}
+
 class Dfs {
  public:
   using Cb = std::function<void(const JsonType&)>;
@@ -46,101 +54,104 @@ class Dfs {
 
   using AdvanceResult = nonstd::expected<const JsonType*, MatchStatus>;
 
-  struct Item {
-    const JsonType* obj;
-    variant<monostate, JsonType::const_object_iterator, JsonType::const_array_iterator> state;
-    Item(const JsonType* o) : obj(o) {
+  class Item {
+   public:
+    Item(const JsonType* o) : obj_(o) {
     }
 
     // Returns the next object to traverse
     // or null if traverse was exhausted or the segment does not match.
     AdvanceResult Advance(const PathSegment& segment);
+
+   private:
+    AdvanceResult Init(const PathSegment& segment);
+
+    const JsonType* obj_;
+    variant<monostate, JsonType::const_object_iterator, JsonType::const_array_iterator> state_;
   };
 
   unsigned matches_ = 0;
 };
 
 auto Dfs::Item::Advance(const PathSegment& segment) -> AdvanceResult {
-  if (std::holds_alternative<monostate>(state)) {
-    // init state
-    switch (segment.type()) {
-      case SegmentType::IDENTIFIER: {
-        if (obj->is_object()) {
-          auto it = obj->find(segment.identifier());
-          if (it != obj->object_range().end()) {
-            state = it;
+  AdvanceResult result = std::visit(  // line break
+      Overload{
+          [&](monostate) { return Init(segment); },  // Init state
+          [&](JsonType::const_object_iterator& it) -> AdvanceResult {
+            if (!ShouldIterateAll(segment.type()))
+              return nullptr;  // exhausted
+
+            ++it;
+            if (it == obj_->object_range().end()) {
+              return nullptr;  // exhausted
+            }
             return &it->value();
-          } else {
-            return nullptr;  // exhausted
-          }
-        }
-        break;
-      }
-      case SegmentType::INDEX: {
-        unsigned index = segment.index();
-        if (obj->is_array()) {
-          if (index >= obj->size()) {
-            return make_unexpected(OUT_OF_BOUNDS);  // exhausted
-          }
-          auto it = obj->array_range().cbegin() + index;
-          state = it;
-          return &*it;
-        }
-        break;
-      }
+          },
+          [&](JsonType::const_array_iterator& it) -> AdvanceResult {
+            if (!ShouldIterateAll(segment.type()))
+              return nullptr;
 
-      case SegmentType::WILDCARD: {
-        if (obj->is_object()) {
-          jsoncons::range rng = obj->object_range();
-          if (rng.cbegin() == rng.cend()) {
-            return nullptr;
-          }
-          auto it = rng.begin();
-          state = it;
+            ++it;
+            if (it == obj_->array_range().end()) {
+              return nullptr;
+            }
+            return &*it;
+          },
+      },
+      state_);
+  return result;
+}
+
+auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
+  switch (segment.type()) {
+    case SegmentType::IDENTIFIER: {
+      if (obj_->is_object()) {
+        auto it = obj_->find(segment.identifier());
+        if (it != obj_->object_range().end()) {
+          state_ = it;
           return &it->value();
+        } else {
+          return nullptr;  // exhausted
         }
-
-        if (obj->is_array()) {
-          jsoncons::range rng = obj->array_range();
-          if (rng.cbegin() == rng.cend()) {
-            return nullptr;
-          }
-          state = rng.cbegin();
-          return &*rng.cbegin();
-        }
-        break;
       }
-    }  // end switch
-
-    return make_unexpected(MISMATCH);
-  }  // end monostate
-
-  // If segment is set to sa single value, we can't advance.
-  if (segment.type() != SegmentType::WILDCARD) {
-    return nullptr;  // exhausted
-  }
-
-  // Advance for WILDCARD.
-  if (std::holds_alternative<JsonType::const_object_iterator>(state)) {
-    auto it = std::get<JsonType::const_object_iterator>(state);
-    ++it;
-    if (it == obj->object_range().end()) {
-      return nullptr;
+      break;
+    }
+    case SegmentType::INDEX: {
+      unsigned index = segment.index();
+      if (obj_->is_array()) {
+        if (index >= obj_->size()) {
+          return make_unexpected(OUT_OF_BOUNDS);
+        }
+        auto it = obj_->array_range().cbegin() + index;
+        state_ = it;
+        return &*it;
+      }
+      break;
     }
 
-    state = it;
-    return &it->value();
-  }
+    case SegmentType::WILDCARD: {
+      if (obj_->is_object()) {
+        jsoncons::range rng = obj_->object_range();
+        if (rng.cbegin() == rng.cend()) {
+          return nullptr;
+        }
+        state_ = rng.begin();
+        return &rng.begin()->value();
+      }
 
-  CHECK(std::holds_alternative<JsonType::const_array_iterator>(state));
-  auto it = std::get<JsonType::const_array_iterator>(state);
-  ++it;
-  if (it == obj->array_range().end()) {
-    return nullptr;
-  }
+      if (obj_->is_array()) {
+        jsoncons::range rng = obj_->array_range();
+        if (rng.cbegin() == rng.cend()) {
+          return nullptr;
+        }
+        state_ = rng.cbegin();
+        return &*rng.cbegin();
+      }
+      break;
+    }
+  }  // end switch
 
-  state = it;
-  return &*it;
+  return make_unexpected(MISMATCH);
 }
 
 void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, const Cb& callback) {
