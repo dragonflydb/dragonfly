@@ -360,6 +360,8 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
 }
 
 void TieredStorage::Shutdown() {
+  VLOG(1) << "Shutdown TieredStorage";
+  shutdown_ = true;
   io_mgr_.Shutdown();
 }
 
@@ -372,6 +374,9 @@ TieredStats TieredStorage::GetStats() const {
 }
 
 void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
+  if (shutdown_) {
+    return;
+  }
   PerDb* db = db_arr_[req->db_index()];
   auto& bin_record = db->bin_map[req->bin_index()];
   if (io_res < 0) {
@@ -574,6 +579,9 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   it->second.SetIoPending(true);
 
   auto cb = [this, req, db_index](int io_res) {
+    if (shutdown_) {
+      return;
+    }
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
 
     absl::Cleanup cleanup = [this, req]() {
