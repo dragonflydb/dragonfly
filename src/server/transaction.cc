@@ -550,8 +550,9 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
 }
 
 void Transaction::MultiUpdateWithParent(const Transaction* parent) {
-  DCHECK(multi_);
-  DCHECK(parent->multi_);  // it might not be a squasher yet, but certainly is multi
+  // Disabled because of single shard lua optimization
+  // DCHECK(multi_);
+  // DCHECK(parent->multi_);  // it might not be a squasher yet, but certainly is multi
   DCHECK_EQ(multi_->role, SQUASHED_STUB);
   txid_ = parent->txid_;
   time_now_ms_ = parent->time_now_ms_;
