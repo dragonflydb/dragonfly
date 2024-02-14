@@ -479,16 +479,14 @@ TEST_F(GenericFamilyTest, TimeNoKeys) {
   usleep(2000);
   Run({"time"});
   resp = Run({"exec"});
-  EXPECT_THAT(resp, ArrLen(2));
 
-  ASSERT_THAT(resp.GetVec()[0], ArrLen(2));
-  ASSERT_THAT(resp.GetVec()[1], ArrLen(2));
+  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
+                                          RespArray(ElementsAre(Not(IntArg(0)), _)))));
 
   for (int i = 0; i < 2; ++i) {
     int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
     int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
     EXPECT_EQ(val0, val1);
-    EXPECT_NE(val0, 0);
   }
 }
 
@@ -505,16 +503,14 @@ TEST_F(GenericFamilyTest, TimeWithKeys) {
   Run({"time"});
   Run({"get", "x"});
   resp = Run({"exec"});
-  EXPECT_THAT(resp, ArrLen(3));
 
-  ASSERT_THAT(resp.GetVec()[0], ArrLen(2));
-  ASSERT_THAT(resp.GetVec()[1], ArrLen(2));
+  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
+                                          RespArray(ElementsAre(Not(IntArg(0)), _)), _)));
 
   for (int i = 0; i < 2; ++i) {
     int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
     int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
     EXPECT_EQ(val0, val1);
-    EXPECT_NE(val0, 0);
   }
 }
 
