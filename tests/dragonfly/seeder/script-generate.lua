@@ -22,8 +22,8 @@ local data_size = tonumber(ARGV[8])
 -- assumes exclusive ownership
 local keys = LU_collect_keys(prefix, type)
 
-local addfunc = LG_funcs['add_' .. type]
-local modfunc = LG_funcs['mod_' .. type]
+local addfunc = LG_funcs['add_' .. string.lower(type)]
+local modfunc = LG_funcs['mod_' .. string.lower(type)]
 
 local function action_add()
     local key = prefix .. tostring(key_counter)

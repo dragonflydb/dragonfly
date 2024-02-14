@@ -25,7 +25,7 @@ from .utility import DflySeederFactory, gen_ca_cert, gen_certificate
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
-DATABASE_INDEX = 1
+DATABASE_INDEX = 0
 
 
 @pytest.fixture(scope="session")
@@ -203,6 +203,7 @@ async def async_client(async_pool):
     client = aioredis.Redis(connection_pool=async_pool)
     await client.client_setname("default-async-fixture")
     await client.flushall()
+    await client.select(DATABASE_INDEX)
     yield client
 
 
