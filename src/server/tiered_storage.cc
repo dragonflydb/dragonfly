@@ -394,7 +394,7 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   }
   delete req;
   --num_active_requests_;
-  if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+  if (IoDeviceUnderloaded()) {
     this->throttle_ec_.notifyAll();
   }
   VLOG_IF(2, num_active_requests_ == 0) << "Finished active requests";
@@ -511,7 +511,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   if (!schedule_offload) {
     return error_code{};
   }
-  if (AllowWrites()) {
+  if (IoDeviceUnderloaded()) {
     return ScheduleOffloadInternal(db_index, it);
   } else {
     CancelOffload(db_index, it);
@@ -619,7 +619,7 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
       mi_free(req->block_ptr);
       delete req;
       --num_active_requests_;
-      if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+      if (IoDeviceUnderloaded()) {
         this->throttle_ec_.notifyAll();
       }
     };
@@ -659,15 +659,14 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
 
 std::pair<bool, PrimeIterator> TieredStorage::ThrottleWrites(DbIndex db_index, PrimeIterator it,
                                                              string_view key) {
-  unsigned max_pending_writes = GetFlag(FLAGS_tiered_storage_max_pending_writes);
   unsigned throttle_usec = GetFlag(FLAGS_tiered_storage_throttle_us);
   PrimeIterator res_it = it;
-  if (num_active_requests_ >= max_pending_writes && throttle_usec > 0) {
+  if (!IoDeviceUnderloaded() && throttle_usec > 0) {
     chrono::steady_clock::time_point next =
         chrono::steady_clock::now() + chrono::microseconds(throttle_usec);
     stats_.throttled_write_cnt++;
 
-    throttle_ec_.await_until([&]() { return num_active_requests_ < max_pending_writes; }, next);
+    throttle_ec_.await_until([&]() { return IoDeviceUnderloaded(); }, next);
 
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
     if (!it.IsOccupied() || it->first != key) {
@@ -680,10 +679,10 @@ std::pair<bool, PrimeIterator> TieredStorage::ThrottleWrites(DbIndex db_index, P
     }
   }
 
-  return std::make_pair((num_active_requests_ < max_pending_writes), res_it);
+  return std::make_pair(IoDeviceUnderloaded(), res_it);
 }
 
-bool TieredStorage::AllowWrites() const {
+bool TieredStorage::IoDeviceUnderloaded() const {
   return num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes);
 }
 

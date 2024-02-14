@@ -56,15 +56,17 @@ class TieredStorage {
 
   std::error_code Read(size_t offset, size_t len, char* dest);
 
-  bool AllowWrites() const;
+  bool IoDeviceUnderloaded() const;
 
  private:
   class InflightWriteRequest;
 
   void WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_len);
 
-  // Returns a pair consisting of an bool denoting whether we can write to disk, and updated
-  // iterator as this function can yield. 'it' should not be used after the call to this function.
+  // If the io device is overloaded this funciton will yield untill the device is underloaded or
+  // throttle timeout is reached. Returns a pair consisting of an bool denoting whether device is
+  // underloaded and updated iterator as this function can yield. 'it' should not be used after the
+  // call to this function.
   std::pair<bool, PrimeIterator> ThrottleWrites(DbIndex db_index, PrimeIterator it,
                                                 std::string_view key);
 
