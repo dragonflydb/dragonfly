@@ -249,4 +249,19 @@ TEST_F(JsonPathTest, EvalDescent) {
   ASSERT_THAT(arr, ElementsAre(json_type::array_value, json_type::object_value));
 }
 
+TEST_F(JsonPathTest, Wildcard) {
+  ASSERT_EQ(0, Parse("$[*]"));
+  Path path = driver_.TakePath();
+  ASSERT_EQ(1, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::WILDCARD));
+
+  JsonType json = JsonFromString(R"([1, 2, 3])").value();
+  vector<int> arr;
+  EvaluatePath(path, json, [&](optional<string_view> key, const JsonType& val) {
+    ASSERT_FALSE(key);
+    arr.push_back(val.as<int>());
+  });
+  ASSERT_THAT(arr, ElementsAre(1, 2, 3));
+}
+
 }  // namespace dfly::json

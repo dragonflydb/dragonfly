@@ -152,7 +152,7 @@ auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
       if (segment_step_ == 1) {
         // first time, branching to return the same object but with the next segment,
         // exploring the path of ignoring the DESCENT operator.
-        // Alsom, shift the state (segment_step) to bypass this branch next time.
+        // Also, shift the state (segment_step) to bypass this branch next time.
         segment_step_ = 0;
         return DepthState{depth_state_.first, depth_state_.second + 1};
       }
