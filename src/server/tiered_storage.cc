@@ -585,13 +585,6 @@ error_code TieredStorage::ScheduleOffloadInternal(DbIndex db_index, PrimeIterato
   if (!flashed) {
     CancelOffload(db_index, it);
   }
-  if (AllowWrites()) {
-    return ScheduleOffloadInternal(db_index, it);
-  } else {
-    CancelOffload(db_index, it);
-  }
-  return error_code{};
-}
 
   // if we reached high utilization of the file range - try to grow the file.
   if (alloc_.allocated_bytes() > size_t(alloc_.capacity() * 0.85)) {
@@ -746,10 +739,6 @@ std::pair<bool, PrimeIterator> TieredStorage::ThrottleWrites(DbIndex db_index, P
 }
 
 bool TieredStorage::IoDeviceUnderloaded() const {
-  return num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes);
-}
-
-bool TieredStorage::AllowWrites() const {
   return num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes);
 }
 
