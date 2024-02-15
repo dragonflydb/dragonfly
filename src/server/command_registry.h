@@ -26,6 +26,10 @@ enum CommandOpt : uint32_t {
   WRITE = 1U << 2,
   LOADING = 1U << 3,  // Command allowed during LOADING state.
   DENYOOM = 1U << 4,  // use-memory in redis.
+
+  // marked commands that demand preserve the order of keys to work correctly.
+  // For example, MGET needs to know the order of keys to return the values in the same order.
+  // BLPOP needs to know the order of keys to return the first non-empty list from the left.
   REVERSE_MAPPING = 1U << 5,
 
   VARIADIC_KEYS = 1U << 6,  // arg 2 determines number of keys. Relevant for ZUNIONSTORE, EVAL etc.

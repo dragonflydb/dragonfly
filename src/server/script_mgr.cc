@@ -199,7 +199,7 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   for (const auto& k_v : result) {
     rb->StartArray(2);
     rb->SendBulkString(k_v.first);
-    rb->SendBulkString(k_v.second.ToString());
+    rb->SendVerbatimString(k_v.second.ToString());
   }
 }
 
@@ -287,7 +287,7 @@ void ScriptMgr::FlushAllScript() {
   lock_guard lk{mu_};
   db_.clear();
 
-  shard_set->pool()->Await([](auto index, auto* pb) {
+  shard_set->pool()->AwaitFiberOnAll([](auto* pb) {
     ServerState* ss = ServerState::tlocal();
     ss->ResetInterpreter();
   });

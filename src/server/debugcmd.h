@@ -19,6 +19,8 @@ class DebugCmd {
     std::string_view prefix{"key"};
     uint32_t val_size = 0;
     bool populate_random_values = false;
+    std::string_view type{"STRING"};
+    uint32_t elements = 1;
 
     std::optional<ClusterConfig::SlotRange> slot_range;
   };

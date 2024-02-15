@@ -55,8 +55,7 @@ struct BlockingController::DbWatchTable {
   WatchQueueMap queue_map;
 
   // awakened keys point to blocked keys that can potentially be unblocked.
-  // they reference key objects in queue_map.
-  absl::flat_hash_set<base::string_view_sso> awakened_keys;
+  absl::flat_hash_set<std::string> awakened_keys;
 
   // returns true if awake event was added.
   // Requires that the key queue be in the required state.
@@ -94,13 +93,14 @@ bool BlockingController::DbWatchTable::UnwatchTx(string_view key, Transaction* t
     // the suspended item does not have to be the first one in the queue.
     // This shard has not been awakened and in case this transaction in the queue
     // we must clean it up.
-
     if (auto it = wq->Find(tx); it != wq->items.end()) {
       wq->items.erase(it);
     }
   }
 
   if (wq->items.empty()) {
+    DVLOG(1) << "queue_map.erase";
+    awakened_keys.erase(wq_it->first);
     queue_map.erase(wq_it);
   }
   return res;
@@ -118,50 +118,10 @@ bool BlockingController::DbWatchTable::AddAwakeEvent(string_view key) {
   if (it == queue_map.end() || it->second->state != WatchQueue::SUSPENDED)
     return false;  /// nobody watches this key or state does not match.
 
-  string_view dbkey = it->first;
-
-  return awakened_keys.insert(dbkey).second;
+  return awakened_keys.insert(it->first).second;
 }
 
-// Optionally removes tx from the front of the watch queues.
-void BlockingController::FinalizeWatched(KeyLockArgs lock_args, Transaction* tx) {
-  DCHECK(tx);
-
-  ShardId sid = owner_->shard_id();
-
-  uint16_t local_mask = tx->GetLocalMask(sid);
-  VLOG(1) << "FinalizeBlocking [" << sid << "]" << tx->DebugId() << " " << local_mask;
-
-  bool is_awakened = local_mask & Transaction::AWAKED_Q;
-
-  if (is_awakened)
-    awakened_transactions_.erase(tx);
-
-  auto dbit = watched_dbs_.find(tx->GetDbIndex());
-
-  // Can happen if it was the only transaction in the queue and it was notified and removed.
-  if (dbit == watched_dbs_.end())
-    return;
-
-  DbWatchTable& wt = *dbit->second;
-
-  // Add keys of processed transaction so we could awake the next one in the queue
-  // in case those keys still exist.
-  for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    string_view key = lock_args.args[i];
-    bool removed_awakened = wt.UnwatchTx(key, tx);
-    if (removed_awakened) {
-      CHECK(is_awakened) << tx->DebugId() << " " << key << " " << local_mask;
-    }
-  }
-
-  if (wt.queue_map.empty()) {
-    watched_dbs_.erase(dbit);
-  }
-  awakened_indices_.emplace(tx->GetDbIndex());
-}
-
-// Similar function but with ArgSlice. TODO: to fix the duplication.
+// Removes tx from its watch queues if tx appears there.
 void BlockingController::FinalizeWatched(ArgSlice args, Transaction* tx) {
   DCHECK(tx);
 
@@ -198,6 +158,7 @@ void BlockingController::FinalizeWatched(ArgSlice args, Transaction* tx) {
   awakened_indices_.emplace(tx->GetDbIndex());
 }
 
+// Runs on the shard thread.
 void BlockingController::NotifyPending() {
   const Transaction* tx = owner_->GetContTx();
   CHECK(tx == nullptr) << tx->DebugId();
@@ -212,10 +173,31 @@ void BlockingController::NotifyPending() {
 
     context.db_index = index;
     DbWatchTable& wt = *dbit->second;
-    for (auto key : wt.awakened_keys) {
-      string_view sv_key = static_cast<string_view>(key);
+    for (const auto& key : wt.awakened_keys) {
+      string_view sv_key = key;
       DVLOG(1) << "Processing awakened key " << sv_key;
-      NotifyWatchQueue(sv_key, &wt.queue_map, context);
+      auto w_it = wt.queue_map.find(sv_key);
+      if (w_it == wt.queue_map.end()) {
+        // This should not happen because we remove keys from awakened_keys every type we remove
+        // the entry from queue_map. TODO: to make it a CHECK after Dec 2024
+        LOG(ERROR) << "Internal error: Key " << sv_key
+                   << " was not found in the watch queue, wt.awakened_keys len is "
+                   << wt.awakened_keys.size() << " wt.queue_map len is " << wt.queue_map.size();
+        for (const auto& item : wt.awakened_keys) {
+          LOG(ERROR) << "Awakened key: " << item;
+        }
+
+        continue;
+      }
+
+      CHECK(w_it != wt.queue_map.end());
+      DVLOG(1) << "Notify WQ: [" << owner_->shard_id() << "] " << key;
+      WatchQueue* wq = w_it->second.get();
+      NotifyWatchQueue(sv_key, wq, context);
+      if (wq->items.empty()) {
+        // we erase awakened_keys right after this loop finishes running.
+        wt.queue_map.erase(w_it);
+      }
     }
     wt.awakened_keys.clear();
 
@@ -270,12 +252,8 @@ void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
 }
 
 // Marks the queue as active and notifies the first transaction in the queue.
-void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm,
+void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
                                           const DbContext& context) {
-  auto w_it = wqm->find(key);
-  CHECK(w_it != wqm->end());
-  DVLOG(1) << "Notify WQ: [" << owner_->shard_id() << "] " << key;
-  WatchQueue* wq = w_it->second.get();
   DCHECK_EQ(wq->state, WatchQueue::SUSPENDED);
 
   auto& queue = wq->items;
@@ -304,10 +282,6 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueueMap* w
     queue.pop_front();
   }
   std::move(skipped.begin(), skipped.end(), std::back_inserter(queue));
-
-  if (wq->items.empty()) {
-    wqm->erase(w_it);
-  }
 }
 
 size_t BlockingController::NumWatched(DbIndex db_indx) const {

@@ -1,10 +1,17 @@
 import asyncio
+import async_timeout
 from redis import asyncio as aioredis
 import time
 import json
+import logging
 import pytest
 import random
 import itertools
+import random
+import string
+
+from .instance import DflyInstance
+
 from . import dfly_args, dfly_multi_test_args
 
 DJANGO_CACHEOPS_SCRIPT = """
@@ -264,3 +271,71 @@ async def test_lua_auto_async(async_client: aioredis.Redis):
 
     flushes = (await async_client.info("transaction"))["eval_squashed_flushes"]
     assert 1 <= flushes <= 3  # all 100 commands are executed in at most 3 batches
+
+
+"""
+Ensure liveness even with only a single interpreter in scenarios where EVAL and EVAL inside multi run concurrently while also contending for keys
+"""
+
+
+@dfly_args({"proactor_threads": 2, "interpreter_per_thread": 1})
+async def test_one_interpreter(async_client: aioredis.Redis):
+    sha = await async_client.script_load("redis.call('GET', KEYS[1])")
+    all_keys = [string.ascii_lowercase[i] for i in range(5)]
+    total_runs = 100
+
+    async def run(transaction):
+        for _ in range(total_runs):
+            p = async_client.pipeline(transaction=transaction)
+            pkeys = random.choices(all_keys, k=3)
+            for key in pkeys:
+                p.evalsha(sha, 1, key)
+            await p.execute()
+
+    max_blocked = 0
+
+    async def measure_blocked():
+        nonlocal max_blocked
+        while True:
+            max_blocked = max(
+                max_blocked, (await async_client.info("STATS"))["blocked_on_interpreter"]
+            )
+            await asyncio.sleep(0.01)
+
+    tm = [asyncio.create_task(run(True)) for _ in range(10)]
+    ts = [asyncio.create_task(run(False)) for _ in range(10)]
+    # block_measure = asyncio.create_task(measure_blocked())
+
+    async with async_timeout.timeout(5):
+        await asyncio.gather(*(tm + ts))
+
+    # block_measure.cancel()
+
+    # At least some connection was seen blocked
+    # Flaky: release build is too fast and never blocks
+    # assert max_blocked > 0
+
+
+"""
+Tests migrate/close interaction for the connection
+Reproduces #2569
+"""
+
+
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 0})
+async def test_migrate_close_connection(async_client: aioredis.Redis, df_server: DflyInstance):
+    sha = await async_client.script_load("return redis.call('GET', KEYS[1])")
+
+    async def run():
+        reader, writer = await asyncio.open_connection("localhost", df_server.port)
+
+        # write a EVALSHA that will ask for migration (75% it's on the wrong shard)
+        writer.write((f"EVALSHA {sha} 1 a\r\n").encode())
+        await writer.drain()
+
+        # disconnect the client connection
+        writer.close()
+        await writer.wait_closed()
+
+    tasks = [asyncio.create_task(run()) for _ in range(50)]
+    await asyncio.gather(*tasks)

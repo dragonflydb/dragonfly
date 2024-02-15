@@ -23,32 +23,12 @@ namespace dfly {
 
 __thread ServerState* ServerState::state_ = nullptr;
 
-ServerState::Stats::Stats() {
+ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
   tx_type_cnt.fill(0);
 }
 
-ServerState::Stats::~Stats() {
-  delete[] tx_width_freq_arr;
-}
-
-auto ServerState::Stats::operator=(Stats&& other) -> Stats& {
-  for (int i = 0; i < NUM_TX_TYPES; ++i) {
-    this->tx_type_cnt[i] = other.tx_type_cnt[i];
-  }
-  this->eval_io_coordination_cnt = other.eval_io_coordination_cnt;
-  this->eval_shardlocal_coordination_cnt = other.eval_shardlocal_coordination_cnt;
-  this->eval_squashed_flushes = other.eval_squashed_flushes;
-  this->tx_schedule_cancel_cnt = other.tx_schedule_cancel_cnt;
-
-  delete[] this->tx_width_freq_arr;
-  this->tx_width_freq_arr = other.tx_width_freq_arr;
-  other.tx_width_freq_arr = nullptr;
-
-  return *this;
-}
-
-ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 12 * 8, "Stats size mismatch");
+ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
+  static_assert(sizeof(Stats) == 14 * 8, "Stats size mismatch");
 
   for (int i = 0; i < NUM_TX_TYPES; ++i) {
     this->tx_type_cnt[i] += other.tx_type_cnt[i];
@@ -63,15 +43,14 @@ ServerState::Stats& ServerState::Stats::Add(unsigned num_shards, const ServerSta
   this->multi_squash_exec_hop_usec += other.multi_squash_exec_hop_usec;
   this->multi_squash_exec_reply_usec += other.multi_squash_exec_reply_usec;
 
-  if (this->tx_width_freq_arr == nullptr) {
-    this->tx_width_freq_arr = new uint64_t[num_shards];
-    std::copy_n(other.tx_width_freq_arr, num_shards, this->tx_width_freq_arr);
-  } else {
-    for (unsigned i = 0; i < num_shards; ++i) {
-      this->tx_width_freq_arr[i] += other.tx_width_freq_arr[i];
-    }
-  }
+  this->blocked_on_interpreter += other.blocked_on_interpreter;
 
+  if (this->tx_width_freq_arr.size() > 0) {
+    DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());
+    this->tx_width_freq_arr += other.tx_width_freq_arr;
+  } else {
+    this->tx_width_freq_arr = other.tx_width_freq_arr;
+  }
   return *this;
 }
 
@@ -119,8 +98,7 @@ void ServerState::Init(uint32_t thread_index, uint32_t num_shards, acl::UserRegi
   state_->gstate_ = GlobalState::ACTIVE;
   state_->thread_index_ = thread_index;
   state_->user_registry = registry;
-  state_->stats.tx_width_freq_arr = new uint64_t[num_shards];
-  std::fill_n(state_->stats.tx_width_freq_arr, num_shards, 0);
+  state_->stats = Stats(num_shards);
 }
 
 void ServerState::Destroy() {
@@ -174,7 +152,10 @@ bool ServerState::IsPaused() const {
 }
 
 Interpreter* ServerState::BorrowInterpreter() {
-  return interpreter_mgr_.Get();
+  stats.blocked_on_interpreter++;
+  auto* ptr = interpreter_mgr_.Get();
+  stats.blocked_on_interpreter--;
+  return ptr;
 }
 
 void ServerState::ReturnInterpreter(Interpreter* ir) {

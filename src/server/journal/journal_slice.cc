@@ -143,6 +143,11 @@ std::string_view JournalSlice::GetEntry(LSN lsn) const {
 }
 
 void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
+  optional<FiberAtomicGuard> guard;
+  if (!await) {
+    guard.emplace();  // Guard is non-movable/copyable, so we must use emplace()
+  }
+
   DCHECK(ring_buffer_);
 
   JournalItem dummy;

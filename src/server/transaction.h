@@ -156,14 +156,14 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,  // Set on all active shards.
+    ACTIVE = 1,      // Whether its active on this shard (to schedule or execute hops)
+    ARMED = 1 << 1,  // Whether its armed (the hop was prepared)
     OUT_OF_ORDER =
-        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED is not set.
+        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
-    SUSPENDED_Q = 1 << 4,       // Whether is suspended (by WatchInShard())
+    SUSPENDED_Q = 1 << 4,       // Whether it suspended (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
-    EXPIRED_Q = 1 << 6,         // Whether it timed out and should be dropped
-    UNLOCK_MULTI = 1 << 7,      // Whether this shard executed UnlockMultiShardCb
+    UNLOCK_MULTI = 1 << 6,      // Whether this shard executed UnlockMultiShardCb
   };
 
  public:
@@ -238,6 +238,8 @@ class Transaction {
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
 
+  void InitTxTime();
+
   // Report which shards had write commands that executed on stub transactions
   // and thus did not mark itself in MultiData::shard_journal_write.
   void ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write);
@@ -252,23 +254,15 @@ class Transaction {
   // Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  // Returns true if the transaction spans this shard_id.
-  bool IsActive(ShardId shard_id) const;
-
   // Returns true if the transaction is waiting for shard callbacks and the shard is armed.
   // Safe to read transaction state (and update shard local) until following RunInShard() finishes.
-  bool IsArmedInShard(ShardId sid) const {
-    if (sid >= shard_data_.size())  // For multi transactions shard_data_ spans all shards.
-      sid = 0;
+  bool IsArmedInShard(ShardId sid) const;
 
-    // Barrier has acquire semantics
-    return run_barrier_.Active() && shard_data_[sid].is_armed.load(std::memory_order_relaxed);
-  }
+  // Returns if the transaction spans this shard. Safe only when the transaction is armed.
+  bool IsActive(ShardId sid) const;
 
-  // Called from engine set shard threads.
-  uint16_t GetLocalMask(ShardId sid) const {
-    return shard_data_[SidToId(sid)].local_mask;
-  }
+  // Returns the state mask on this shard. Safe only when the transaction is armed (or blocked).
+  uint16_t GetLocalMask(ShardId sid) const;
 
   uint32_t GetLocalTxqPos(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;
@@ -324,7 +318,8 @@ class Transaction {
     return cid_;
   }
 
-  std::string DebugId() const;
+  // Return debug information about a transaction, include shard local info if passed
+  std::string DebugId(std::optional<ShardId> sid = std::nullopt) const;
 
   // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
   // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
@@ -344,6 +339,9 @@ class Transaction {
   // Get keys multi transaction was initialized with, normalized and unique
   const absl::flat_hash_set<std::string_view>& GetMultiKeys() const;
 
+  // Send journal EXEC opcode after a series of MULTI commands on the currently active shard
+  void FIX_ConcludeJournalExec();
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
@@ -360,30 +358,20 @@ class Transaction {
   };
 
   struct alignas(64) PerShardData {
-    PerShardData(PerShardData&&) noexcept {
-    }
-
-    PerShardData() = default;
-
-    // this is the only variable that is accessed by both shard and coordinator threads.
-    std::atomic_bool is_armed{false};
-
-    // We pad with some memory so that atomic loads won't cause false sharing between threads.
-    char pad[46];  // to make sure PerShardData is 64 bytes and takes full cacheline.
-
-    uint32_t arg_start = 0;  // Indices into args_ array.
+    uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
     uint32_t arg_count = 0;
 
-    // Needed to rollback inconsistent schedulings or remove OOO transactions from
-    // tx queue.
+    // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
     uint32_t pq_pos = TxQueue::kEnd;
 
-    // Accessed within shard thread.
-    // Bitmask of LocalMask enums.
+    // State of shard - bitmask with LocalState flags
     uint16_t local_mask = 0;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;
+
+    // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
+    char pad[64 - 4 * sizeof(uint32_t)];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
@@ -412,8 +400,7 @@ class Transaction {
   enum CoordinatorState : uint8_t {
     COORD_SCHED = 1,
     COORD_CONCLUDING = 1 << 1,  // Whether its the last hop of a transaction
-    COORD_BLOCKED = 1 << 2,
-    COORD_CANCELLED = 1 << 3,
+    COORD_CANCELLED = 1 << 2,
   };
 
   // Auxiliary structure used during initialization
@@ -440,7 +427,26 @@ class Transaction {
     uint32_t DEBUG_Count() const;  // Get current counter value
    private:
     std::atomic_uint32_t count_{0};
-    EventCount ec_{};
+    util::fb2::EventCount ec_{};
+  };
+
+  // "Single claim - single modification" barrier. Multiple threads might try to claim it, only one
+  // will succeed and will be allowed to modify the guarded object until it closes the barrier.
+  // A closed barrier can't be claimed again or re-used in any way.
+  class BatonBarrier {
+   public:
+    bool IsClaimed() const;  // Return if barrier is claimed, only for peeking
+    bool TryClaim();         // Return if the barrier was claimed successfully
+    void Close();            // Close barrier after it was claimed
+
+    // Wait for barrier until time_point, or indefinitely if time_point::max() was passed.
+    // After Wait returns, the barrier is guaranteed to be closed, including expiration.
+    std::cv_status Wait(time_point);
+
+   private:
+    std::atomic_bool claimed_{false};
+    std::atomic_bool closed_{false};
+    util::fb2::EventCount ec_{};
   };
 
  private:
@@ -457,14 +463,14 @@ class Transaction {
   void EnableAllShards();
 
   // Build shard index by distributing the arguments by shards based on the key index.
-  void BuildShardIndex(const KeyIndex& keys, bool rev_mapping, std::vector<PerShardCache>* out);
+  void BuildShardIndex(const KeyIndex& keys, std::vector<PerShardCache>* out);
 
   // Init shard data from shard index.
   void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
                      bool rev_mapping);
 
   // Store all key index keys in args_. Used only for single shard initialization.
-  void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
+  void StoreKeysInArgs(const KeyIndex& key_index);
 
   // Multi transactions unlock asynchronously, so they need to keep a copy of all they keys.
   // "Launder" keys by filtering uniques and replacing pointers with same lifetime as transaction.
@@ -484,6 +490,7 @@ class Transaction {
   // Optimized version of RunInShard for single shard uncontended cases.
   RunnableResult RunQuickie(EngineShard* shard);
 
+  // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier
   void ExecuteAsync();
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
@@ -592,8 +599,8 @@ class Transaction {
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
   UniqueSlotChecker unique_slot_checker_;
 
-  std::atomic_uint32_t wakeup_requested_{0};  // incremented when blocking transaction gets notified
-  EventCount blocking_ec_;                    // to wait for wakeup_requested > 0 (or cancelled)
+  // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
+  BatonBarrier blocking_barrier_{};
 
   // Transaction coordinator state, written and read by coordinator thread.
   uint8_t coordinator_state_ = 0;

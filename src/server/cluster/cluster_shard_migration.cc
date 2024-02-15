@@ -21,10 +21,11 @@ using namespace facade;
 using namespace util;
 using absl::GetFlag;
 
-ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t shard_id,
-                                             uint32_t sync_id, Service* service)
+ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t local_sync_id,
+                                             uint32_t shard_id, uint32_t sync_id, Service* service)
     : ProtocolClient(server_context), source_shard_id_(shard_id), sync_id_(sync_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
+  executor_->connection_context()->slot_migration_id = local_sync_id;
 }
 
 ClusterShardMigration::~ClusterShardMigration() {
@@ -62,7 +63,7 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
   JournalReader reader{&ps, 0};
-  TransactionReader tx_reader{};
+  TransactionReader tx_reader{false};
 
   while (!cntx->IsCancelled()) {
     if (cntx->IsCancelled())
@@ -74,10 +75,14 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
 
     TouchIoTime();
 
-    if (!tx_data->is_ping) {
-      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
-    } else {
+    if (tx_data->opcode == journal::Op::FIN) {
+      VLOG(2) << "Flow " << source_shard_id_ << " is finalized";
+      is_finalized_ = true;
+      break;
+    } else if (tx_data->opcode == journal::Op::PING) {
       // TODO check about ping logic
+    } else {
+      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
     }
   }
 }

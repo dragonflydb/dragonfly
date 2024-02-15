@@ -18,8 +18,12 @@ class OutgoingMigration::SliceSlotMigration {
     state_ = MigrationState::C_FULL_SYNC;
   }
 
-  ~SliceSlotMigration() {
+  void Cancel() {
     streamer_.Cancel();
+  }
+
+  void Finalize() {
+    streamer_.SendFinalize();
   }
 
   MigrationState GetState() const {
@@ -43,11 +47,7 @@ OutgoingMigration::~OutgoingMigration() = default;
 
 void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal,
                                   io::Sink* dest) {
-  SlotSet sset;
-  for (const auto& slot_range : slots_) {
-    for (auto i = slot_range.start; i <= slot_range.end; ++i)
-      sset.insert(i);
-  }
+  SlotSet sset = ToSlotSet(slots_);
 
   const auto shard_id = slice->shard_id();
 
@@ -56,8 +56,20 @@ void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Jou
       std::make_unique<SliceSlotMigration>(slice, std::move(sset), sync_id, journal, &cntx_, dest);
 }
 
+void OutgoingMigration::Finalize(uint32_t shard_id) {
+  slot_migrations_[shard_id]->Finalize();
+}
+
+void OutgoingMigration::Cancel(uint32_t shard_id) {
+  slot_migrations_[shard_id]->Cancel();
+}
+
 MigrationState OutgoingMigration::GetState() const {
   std::lock_guard lck(flows_mu_);
+  return GetStateImpl();
+}
+
+MigrationState OutgoingMigration::GetStateImpl() const {
   MigrationState min_state = MigrationState::C_STABLE_SYNC;
   for (const auto& slot_migration : slot_migrations_) {
     if (slot_migration)

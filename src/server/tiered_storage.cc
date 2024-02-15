@@ -408,6 +408,8 @@ void TieredStorage::Defrag(DbIndex db_index, PrimeIterator it) {
 }
 
 void TieredStorage::Shutdown() {
+  VLOG(1) << "Shutdown TieredStorage";
+  shutdown_ = true;
   io_mgr_.Shutdown();
 }
 
@@ -420,6 +422,9 @@ TieredStats TieredStorage::GetStats() const {
 }
 
 void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
+  if (shutdown_) {
+    return;
+  }
   PerDb* db = db_arr_[req->db_index()];
   auto& bin_record = db->bin_map[req->bin_index()];
   if (io_res < 0) {
@@ -442,7 +447,7 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   }
   delete req;
   --num_active_requests_;
-  if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+  if (IoDeviceUnderloaded()) {
     this->throttle_ec_.notifyAll();
   }
   VLOG_IF(2, num_active_requests_ == 0) << "Finished active requests";
@@ -559,7 +564,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   if (!schedule_offload) {
     return error_code{};
   }
-  if (AllowWrites()) {
+  if (IoDeviceUnderloaded()) {
     return ScheduleOffloadInternal(db_index, it);
   } else {
     CancelOffload(db_index, it);
@@ -580,6 +585,13 @@ error_code TieredStorage::ScheduleOffloadInternal(DbIndex db_index, PrimeIterato
   if (!flashed) {
     CancelOffload(db_index, it);
   }
+  if (AllowWrites()) {
+    return ScheduleOffloadInternal(db_index, it);
+  } else {
+    CancelOffload(db_index, it);
+  }
+  return error_code{};
+}
 
   // if we reached high utilization of the file range - try to grow the file.
   if (alloc_.allocated_bytes() > size_t(alloc_.capacity() * 0.85)) {
@@ -661,13 +673,16 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   it->second.SetIoPending(true);
 
   auto cb = [this, req, db_index](int io_res) {
+    if (shutdown_) {
+      return;
+    }
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
 
     absl::Cleanup cleanup = [this, req]() {
       mi_free(req->block_ptr);
       delete req;
       --num_active_requests_;
-      if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+      if (IoDeviceUnderloaded()) {
         this->throttle_ec_.notifyAll();
       }
     };
@@ -707,15 +722,14 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
 
 std::pair<bool, PrimeIterator> TieredStorage::ThrottleWrites(DbIndex db_index, PrimeIterator it,
                                                              string_view key) {
-  unsigned max_pending_writes = GetFlag(FLAGS_tiered_storage_max_pending_writes);
   unsigned throttle_usec = GetFlag(FLAGS_tiered_storage_throttle_us);
   PrimeIterator res_it = it;
-  if (num_active_requests_ >= max_pending_writes && throttle_usec > 0) {
+  if (!IoDeviceUnderloaded() && throttle_usec > 0) {
     chrono::steady_clock::time_point next =
         chrono::steady_clock::now() + chrono::microseconds(throttle_usec);
     stats_.throttled_write_cnt++;
 
-    throttle_ec_.await_until([&]() { return num_active_requests_ < max_pending_writes; }, next);
+    throttle_ec_.await_until([&]() { return IoDeviceUnderloaded(); }, next);
 
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
     if (!it.IsOccupied() || it->first != key) {
@@ -728,7 +742,11 @@ std::pair<bool, PrimeIterator> TieredStorage::ThrottleWrites(DbIndex db_index, P
     }
   }
 
-  return std::make_pair((num_active_requests_ < max_pending_writes), res_it);
+  return std::make_pair(IoDeviceUnderloaded(), res_it);
+}
+
+bool TieredStorage::IoDeviceUnderloaded() const {
+  return num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes);
 }
 
 bool TieredStorage::AllowWrites() const {

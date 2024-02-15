@@ -35,11 +35,14 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
   return partition;
 }
 
+atomic_uint32_t next_local_sync_id{1};
+
 }  // namespace
 
 ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
                                            std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(move(host_ip), port), service_(*se), slots_(std::move(slots)) {
+    : ProtocolClient(std::move(host_ip), port), service_(*se), slots_(std::move(slots)) {
+  local_sync_id_ = next_local_sync_id.fetch_add(1);
 }
 
 ClusterSlotMigration::~ClusterSlotMigration() {
@@ -113,6 +116,11 @@ void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
   }
 }
 
+bool ClusterSlotMigration::IsFinalized() const {
+  return std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                     [](const auto& el) { return el->IsFinalized(); });
+}
+
 void ClusterSlotMigration::Stop() {
   for (auto& flow : shard_flows_) {
     flow->Cancel();
@@ -120,7 +128,7 @@ void ClusterSlotMigration::Stop() {
 }
 
 void ClusterSlotMigration::MainMigrationFb() {
-  VLOG(1) << "Main migration fiber started";
+  VLOG(1) << "Main migration fiber started " << sync_id_;
 
   state_ = MigrationState::C_FULL_SYNC;
 
@@ -129,13 +137,25 @@ void ClusterSlotMigration::MainMigrationFb() {
     LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
                  << ec.message();
   }
+
+  if (IsFinalized()) {
+    state_ = MigrationState::C_FINISHED;
+  }
 }
 
 std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(server(), i, sync_id_, &service_));
+    shard_flows_[i].reset(
+        new ClusterShardMigration(server(), local_sync_id_, i, sync_id_, &service_));
   }
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    for (auto& flow : shard_flows_) {
+      flow->JoinFlow();
+    }
+  };
 
   // Switch to new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) mutable {

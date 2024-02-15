@@ -171,7 +171,7 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  Future<GenericError> Load(const std::string& file_name);
+  util::fb2::Future<GenericError> Load(const std::string& file_name);
 
   bool IsSaving() const {
     return is_saving_.load(std::memory_order_relaxed);
@@ -261,7 +261,7 @@ class ServerFamily {
   void SendInvalidationMessages() const;
 
   Fiber snapshot_schedule_fb_;
-  Future<GenericError> load_result_;
+  util::fb2::Future<GenericError> load_result_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;
@@ -294,12 +294,17 @@ class ServerFamily {
   // be --dbfilename.
   bool save_on_shutdown_{true};
 
-  Done schedule_done_;
+  util::fb2::Done schedule_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
-  mutable Mutex peak_stats_mu_;
+  mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;
 };
+
+// Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
+std::optional<util::fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
+                                      facade::Connection* conn, ClientPause pause_state,
+                                      std::function<bool()> is_pause_in_progress);
 
 }  // namespace dfly

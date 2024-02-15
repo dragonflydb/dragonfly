@@ -26,6 +26,10 @@ class JournalExecutor {
 
   void FlushAll();  // Execute FLUSHALL.
 
+  ConnectionContext* connection_context() {
+    return &conn_context_;
+  }
+
  private:
   void Execute(journal::ParsedEntry::CmdData& cmd);
 

@@ -151,15 +151,21 @@ TEST_F(MultiTest, MultiEmpty) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
   resp = Run({"exec"});
-
-  ASSERT_THAT(resp, ArrLen(0));
-  ASSERT_FALSE(service_->IsShardSetLocked());
+  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_FALSE(service_->IsShardSetLocked());
 
   Run({"multi"});
   ASSERT_EQ(Run({"ping", "foo"}), "QUEUED");
   resp = Run({"exec"});
-  // one cell arrays are promoted to respexpr.
   EXPECT_EQ(resp, "foo");
+
+  Run({"multi"});
+  Run({"set", "a", ""});
+  resp = Run({"exec"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"get", "a"});
+  EXPECT_EQ(resp, "");
 }
 
 TEST_F(MultiTest, MultiSeq) {
@@ -632,7 +638,7 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
   const int kRounds = 10;
   vector<string> keys = {kKeySid0, kKeySid1, kKeySid2};
 
-  auto push = [this, keys, kRounds]() mutable {
+  auto push = [this, keys]() mutable {
     int i = 0;
     do {
       Run({"multi"});
@@ -642,7 +648,7 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
     } while (next_permutation(keys.begin(), keys.end()) || i++ < kRounds);
   };
 
-  auto pop = [this, keys, kRounds]() mutable {
+  auto pop = [this, keys]() mutable {
     int i = 0;
     do {
       for (int j = keys.size() - 1; j >= 0; j--)

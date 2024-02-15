@@ -20,7 +20,7 @@ constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 104u);
+  static_assert(kSizeConnStats == 112u);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
@@ -36,12 +36,13 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(num_conns);
   ADD(num_replicas);
   ADD(num_blocked_clients);
+  ADD(num_migrations);
 
   return *this;
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 64u);
+  static_assert(sizeof(ReplyStats) == 64u + kSanitizerOverhead);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 

@@ -56,7 +56,7 @@ void BlockingControllerTest::SetUp() {
 
   trans_.reset(new Transaction{&cid_});
 
-  str_vec_.assign({"blpop", "x", "z", "0"});
+  str_vec_.assign({"x", "z", "0"});
   for (auto& s : str_vec_) {
     arg_vec_.emplace_back(s);
   }
@@ -78,16 +78,16 @@ void BlockingControllerTest::TearDown() {
 }
 
 TEST_F(BlockingControllerTest, Basic) {
-  shard_set->Await(0, [&] {
-    EngineShard* shard = EngineShard::tlocal();
+  trans_->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
     BlockingController bc(shard);
-    auto keys = trans_->GetShardArgs(shard->shard_id());
+    auto keys = t->GetShardArgs(shard->shard_id());
     bc.AddWatched(
-        keys, [](auto...) { return true; }, trans_.get());
+        keys, [](auto...) { return true; }, t);
     EXPECT_EQ(1, bc.NumWatched(0));
 
-    bc.FinalizeWatched(keys, trans_.get());
+    bc.FinalizeWatched(keys, t);
     EXPECT_EQ(0, bc.NumWatched(0));
+    return OpStatus::OK;
   });
 }
 

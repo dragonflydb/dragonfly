@@ -22,3 +22,5 @@ boto3==1.28.55
 redis-om==0.2.1
 pytest-emoji==0.2.0
 pytest-icdiff==0.8
+pytest-timeout==2.2.0
+asyncio==3.4.3

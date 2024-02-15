@@ -101,6 +101,24 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Show memory usage of a key.",
         "DECOMMIT",
         "    Force decommit the memory freed by the server back to OS.",
+        "TRACK",
+        "    Allow tracking of memory allocation via `new` and `delete` based on input criteria.",
+        "    USE WITH CAUTIOUS! This command is designed for Dragonfly developers.",
+        "    ADD <lower-bound> <upper-bound> <sample-odds>",
+        "        Sets up tracking memory allocations in the (inclusive) range [lower, upper]",
+        "        sample-odds indicates how many of the allocations will be logged, there 0 means "
+        "none, 1 means all, and everything in between is linear",
+        "        There could be at most 4 tracking placed in parallel",
+        "    REMOVE <lower-bound> <upper-bound>",
+        "        Removes all memory tracking added which match bounds",
+        "        Could remove 0, 1 or more",
+        "    CLEAR",
+        "        Removes all memory tracking",
+        "    GET",
+        "        Returns an array with all active tracking",
+        "    ADDRESS <address>",
+        "        Returns whether <address> is known to be allocated internally by any of the "
+        "backing heaps",
     };
     auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
     return rb->SendSimpleStrArr(help_arr);
@@ -301,25 +319,6 @@ void MemoryCmd::Usage(std::string_view key) {
   rb->SendLong(memory_usage);
 }
 
-// Allow tracking of memory allocation via `new` and `delete` based on input criteria.
-//
-// MEMORY TRACK ADD <lower-bound> <upper-bound> <sample-odds>
-// - Sets up tracking memory allocations in the (inclusive) range [lower, upper]
-// - sample-odds indicates how many of the allocations will be logged, there 0 means none, 1 means
-//   all, and everything in between is linear
-// - There could be at most 4 tracking placed in parallel
-//
-// MEMORY TRACK REMOVE <lower-bound> <upper-bound>
-// - Removes all memory tracking added which match bounds
-// - Could remove 0, 1 or more
-//
-// MEMORY TRACK CLEAR
-// - Removes all memory tracking
-//
-// MEMORY TRACK GET
-// - Returns an array with all active tracking
-//
-// This command is not documented in `MEMORY HELP` because it's meant to be used internally.
 void MemoryCmd::Track(CmdArgList args) {
 #ifndef DFLY_ENABLE_MEMORY_TRACKING
   return cntx_->SendError("MEMORY TRACK must be enabled at build time.");
@@ -333,15 +332,16 @@ void MemoryCmd::Track(CmdArgList args) {
   }
 
   if (sub_cmd == "ADD") {
-    auto [lower_bound, upper_bound, odds] = parser.Next<size_t, size_t, double>();
+    AllocationTracker::TrackingInfo tracking_info;
+    std::tie(tracking_info.lower_bound, tracking_info.upper_bound, tracking_info.sample_odds) =
+        parser.Next<size_t, size_t, double>();
     if (parser.HasError()) {
       return cntx_->SendError(parser.Error()->MakeReply());
     }
 
-    atomic_bool error;
+    atomic_bool error{false};
     shard_set->pool()->Await([&](unsigned index, auto*) {
-      if (!AllocationTracker::Get().Add(
-              {.lower_bound = lower_bound, .upper_bound = upper_bound, .sample_odds = odds})) {
+      if (!AllocationTracker::Get().Add(tracking_info)) {
         error.store(true);
       }
     });
@@ -359,9 +359,9 @@ void MemoryCmd::Track(CmdArgList args) {
       return cntx_->SendError(parser.Error()->MakeReply());
     }
 
-    atomic_bool error;
-    shard_set->pool()->Await([&](unsigned index, auto*) {
-      if (!AllocationTracker::Get().Remove(lower_bound, upper_bound)) {
+    atomic_bool error{false};
+    shard_set->pool()->Await([&, lo = lower_bound, hi = upper_bound](unsigned index, auto*) {
+      if (!AllocationTracker::Get().Remove(lo, hi)) {
         error.store(true);
       }
     });
@@ -387,6 +387,27 @@ void MemoryCmd::Track(CmdArgList args) {
           absl::StrCat(range.lower_bound, ",", range.upper_bound, ",", range.sample_odds));
     }
     return;
+  }
+
+  if (sub_cmd == "ADDRESS") {
+    string_view ptr_str = parser.Next();
+    if (parser.HasError()) {
+      return cntx_->SendError(parser.Error()->MakeReply());
+    }
+
+    size_t ptr = 0;
+    if (!absl::SimpleHexAtoi(ptr_str, &ptr)) {
+      return cntx_->SendError("Address must be hex number");
+    }
+
+    atomic_bool found{false};
+    shard_set->pool()->Await([&](unsigned index, auto*) {
+      if (mi_heap_check_owned(mi_heap_get_backing(), (void*)ptr)) {
+        found.store(true);
+      }
+    });
+
+    return cntx_->SendSimpleString(found.load() ? "FOUND" : "NOT-FOUND");
   }
 
   return cntx_->SendError(kSyntaxErrType);

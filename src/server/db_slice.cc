@@ -1500,6 +1500,9 @@ void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice&
 }
 
 void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
+  if (client_tracking_map_.empty())
+    return;
+
   auto it = client_tracking_map_.find(key);
   if (it != client_tracking_map_.end()) {
     // notify all the clients.

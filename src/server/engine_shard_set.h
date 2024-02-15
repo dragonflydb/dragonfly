@@ -244,7 +244,7 @@ class EngineShard {
 
   uint32_t defrag_task_ = 0;
   Fiber fiber_periodic_;
-  Done fiber_periodic_done_;
+  util::fb2::Done fiber_periodic_done_;
 
   DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;
@@ -322,7 +322,7 @@ class EngineShardSet {
   // The functions running inside the shard queue run atomically (sequentially)
   // with respect each other on the same shard.
   template <typename U> void AwaitRunningOnShardQueue(U&& func) {
-    BlockingCounter bc{unsigned(shard_queue_.size())};
+    util::fb2::BlockingCounter bc{unsigned(shard_queue_.size())};
     for (size_t i = 0; i < shard_queue_.size(); ++i) {
       Add(i, [&func, bc]() mutable {
         func(EngineShard::tlocal());
@@ -347,7 +347,7 @@ class EngineShardSet {
 
 template <typename U, typename P>
 void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
-  BlockingCounter bc{0};
+  util::fb2::BlockingCounter bc{0};
 
   for (uint32_t i = 0; i < size(); ++i) {
     if (!pred(i))
@@ -364,7 +364,7 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
 }
 
 template <typename U, typename P> void EngineShardSet::RunBlockingInParallel(U&& func, P&& pred) {
-  BlockingCounter bc{0};
+  util::fb2::BlockingCounter bc{0};
   static_assert(std::is_invocable_v<U, EngineShard*>,
                 "Argument must be invocable EngineShard* as argument.");
   static_assert(std::is_void_v<std::invoke_result_t<U, EngineShard*>>,

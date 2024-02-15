@@ -31,11 +31,18 @@ class ClusterSlotMigration : ProtocolClient {
     return sync_id_;
   }
 
+  // Remote sync ids uniquely identifies a sync *remotely*. However, multiple remote sources can
+  // use the same id, so we need a local id as well.
+  uint32_t GetLocalSyncId() const {
+    return local_sync_id_;
+  }
+
   MigrationState GetState() const {
     return state_;
   }
 
   void SetStableSyncForFlow(uint32_t flow);
+
   void Stop();
 
  private:
@@ -45,6 +52,9 @@ class ClusterSlotMigration : ProtocolClient {
   // Creates flows, one per shard on the source node and manage migration process
   std::error_code InitiateSlotsMigration();
 
+  // may be called after we finish all flows
+  bool IsFinalized() const;
+
  private:
   Service& service_;
   Mutex flows_op_mu_;
@@ -52,6 +62,7 @@ class ClusterSlotMigration : ProtocolClient {
   std::vector<ClusterConfig::SlotRange> slots_;
   uint32_t source_shards_num_ = 0;
   uint32_t sync_id_ = 0;
+  uint32_t local_sync_id_ = 0;
   MigrationState state_ = MigrationState::C_NO_STATE;
 
   Fiber sync_fb_;

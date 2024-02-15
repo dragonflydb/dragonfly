@@ -445,10 +445,23 @@ class DflySeeder:
     def target(self, key_cnt):
         self.gen.key_cnt_target = key_cnt
 
+    def _make_client(self, **kwargs):
+        if self.cluster_mode:
+            return aioredis.RedisCluster(host="localhost", **kwargs)
+        else:
+            return aioredis.Redis(**kwargs)
+
+    async def _close_client(self, client):
+        if not self.cluster_mode:
+            await client.connection_pool.disconnect()
+        await client.close()
+
     async def _capture_db(self, port, target_db, keys):
-        client = aioredis.Redis(port=port, db=target_db)
+        client = self._make_client(port=port, db=target_db)
         capture = DataCapture(await self._capture_entries(client, keys))
-        await client.connection_pool.disconnect()
+
+        await self._close_client(client)
+
         return capture
 
     async def _generator_task(self, queues, target_ops=None, target_deviation=None):
@@ -506,10 +519,7 @@ class DflySeeder:
         return submitted
 
     async def _executor_task(self, db, queue):
-        if self.cluster_mode:
-            client = aioredis.RedisCluster(host="localhost", port=self.port, db=db)
-        else:
-            client = aioredis.Redis(port=self.port, db=db)
+        client = self._make_client(port=self.port, db=db)
 
         while True:
             tx_data = await queue.get()
@@ -525,13 +535,14 @@ class DflySeeder:
                 await pipe.execute()
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
+                    await self._close_client(client)
                     raise SystemExit(e)
             except Exception as e:
+                await self._close_client(client)
                 raise SystemExit(e)
             queue.task_done()
-        await client.close()
-        if not self.cluster_mode:
-            await client.connection_pool.disconnect()
+
+        await self._close_client(client)
 
     CAPTURE_COMMANDS = {
         ValueType.STRING: lambda pipe, k: pipe.get(k),
@@ -588,6 +599,10 @@ class DflySeederFactory:
 
 async def disconnect_clients(*clients):
     await asyncio.gather(*(c.connection_pool.disconnect() for c in clients))
+
+
+async def close_clients(*clients):
+    await asyncio.gather(*(c.close() for c in clients))
 
 
 def gen_ca_cert(ca_key_path, ca_cert_path):

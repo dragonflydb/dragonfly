@@ -448,7 +448,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   protocol_ = protocol;
 
   constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
-  static_assert(kReqSz <= 256 && kReqSz >= 232);
+  static_assert(kReqSz <= 256 && kReqSz >= 200);
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -502,20 +502,15 @@ void Connection::OnShutdown() {
 }
 
 void Connection::OnPreMigrateThread() {
-  // If we migrating to another io_uring we should cancel any pending requests we have.
-  if (break_cb_engaged_) {
-    socket_->CancelOnErrorCb();
-    break_cb_engaged_ = false;
-  }
+  CHECK(!cc_->conn_closing);
+
+  socket_->CancelOnErrorCb();
 }
 
 void Connection::OnPostMigrateThread() {
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_) {
-    DCHECK(!break_cb_engaged_);
-
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
-    break_cb_engaged_ = true;
   }
 
   // Update tl variables
@@ -594,14 +589,11 @@ void Connection::HandleRequests() {
       cc_.reset(service_->CreateContext(peer, this));
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
-        break_cb_engaged_ = true;
       }
 
       ConnectionFlow(peer);
 
-      if (break_cb_engaged_) {
-        socket_->CancelOnErrorCb();
-      }
+      socket_->CancelOnErrorCb();  // noop if nothing is registered.
 
       cc_.reset();
     }
@@ -975,14 +967,13 @@ void Connection::OnBreakCb(int32_t mask) {
           << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
 
   cc_->conn_closing = true;
-  break_cb_engaged_ = false;  // do not attempt to cancel it.
 
   breaker_cb_(mask);
   evc_.notify();  // Notify dispatch fiber.
 }
 
 void Connection::HandleMigrateRequest() {
-  if (!migration_request_) {
+  if (cc_->conn_closing || !migration_request_) {
     return;
   }
 
@@ -996,6 +987,7 @@ void Connection::HandleMigrateRequest() {
   // We don't support migrating with subscriptions as it would require moving thread local
   // handles. We can't check above, as the queue might have contained a subscribe request.
   if (cc_->subscriptions == 0) {
+    stats_->num_migrations++;
     migration_request_ = nullptr;
 
     DecreaseStatsOnClose();

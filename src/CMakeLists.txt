@@ -63,7 +63,7 @@ add_third_party(
 
 add_third_party(
   reflex
-  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v3.3.2.tar.gz
+  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v3.5.1.tar.gz
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx --prefix=${THIRD_PARTY_LIB_DIR}/reflex
           CXX=${CMAKE_CXX_COMPILER} CC=${CMAKE_C_COMPILER}
 )

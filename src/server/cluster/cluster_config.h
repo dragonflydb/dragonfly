@@ -23,7 +23,13 @@ using SlotId = uint16_t;
 using SlotSet = absl::flat_hash_set<SlotId>;
 
 // MigrationState constants are ordered in state changing order
-enum class MigrationState : uint8_t { C_NO_STATE, C_CONNECTING, C_FULL_SYNC, C_STABLE_SYNC };
+enum class MigrationState : uint8_t {
+  C_NO_STATE,
+  C_CONNECTING,
+  C_FULL_SYNC,
+  C_STABLE_SYNC,
+  C_FINISHED
+};
 
 class ClusterConfig {
  public:
@@ -79,6 +85,8 @@ class ClusterConfig {
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
 
+  void RemoveSlots(SlotSet slots);
+
   // Returns the master configured for `id`.
   Node GetMasterNodeForSlot(SlotId id) const;
 
@@ -99,5 +107,7 @@ class ClusterConfig {
   // True bits in `my_slots_` indicate that this slot is owned by this node.
   std::bitset<kMaxSlotNum + 1> my_slots_;
 };
+
+SlotSet ToSlotSet(const std::vector<ClusterConfig::SlotRange>& slots);
 
 }  // namespace dfly

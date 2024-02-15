@@ -14,21 +14,23 @@
 
 ABSL_DECLARE_FLAG(std::string, requirepass);
 
+using namespace util;
+
 namespace dfly::acl {
 
 void UserRegistry::MaybeAddAndUpdate(std::string_view username, User::UpdateRequest req) {
-  std::unique_lock<util::SharedMutex> lock(mu_);
+  std::unique_lock<fb2::SharedMutex> lock(mu_);
   auto& user = registry_[username];
   user.Update(std::move(req));
 }
 
 bool UserRegistry::RemoveUser(std::string_view username) {
-  std::unique_lock<util::SharedMutex> lock(mu_);
+  std::unique_lock<fb2::SharedMutex> lock(mu_);
   return registry_.erase(username);
 }
 
 UserRegistry::UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
-  std::shared_lock<util::SharedMutex> lock(mu_);
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
   auto it = registry_.find(username);
   if (it == registry_.end()) {
     return {};
@@ -37,7 +39,7 @@ UserRegistry::UserCredentials UserRegistry::GetCredentials(std::string_view user
 }
 
 bool UserRegistry::IsUserActive(std::string_view username) const {
-  std::shared_lock<util::SharedMutex> lock(mu_);
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
   auto it = registry_.find(username);
   if (it == registry_.end()) {
     return false;
@@ -46,7 +48,7 @@ bool UserRegistry::IsUserActive(std::string_view username) const {
 }
 
 bool UserRegistry::AuthUser(std::string_view username, std::string_view password) const {
-  std::shared_lock<util::SharedMutex> lock(mu_);
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
   const auto& user = registry_.find(username);
   if (user == registry_.end()) {
     return false;
@@ -56,23 +58,23 @@ bool UserRegistry::AuthUser(std::string_view username, std::string_view password
 }
 
 UserRegistry::RegistryViewWithLock UserRegistry::GetRegistryWithLock() const {
-  std::shared_lock<util::SharedMutex> lock(mu_);
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
   return {std::move(lock), registry_};
 }
 
 UserRegistry::RegistryWithWriteLock UserRegistry::GetRegistryWithWriteLock() {
-  std::unique_lock<util::SharedMutex> lock(mu_);
+  std::unique_lock<fb2::SharedMutex> lock(mu_);
   return {std::move(lock), registry_};
 }
 
-UserRegistry::UserWithWriteLock::UserWithWriteLock(std::unique_lock<util::SharedMutex> lk,
+UserRegistry::UserWithWriteLock::UserWithWriteLock(std::unique_lock<fb2::SharedMutex> lk,
                                                    const User& user, bool exists)
     : user(user), exists(exists), registry_lk_(std::move(lk)) {
 }
 
 UserRegistry::UserWithWriteLock UserRegistry::MaybeAddAndUpdateWithLock(std::string_view username,
                                                                         User::UpdateRequest req) {
-  std::unique_lock<util::SharedMutex> lock(mu_);
+  std::unique_lock<fb2::SharedMutex> lock(mu_);
   const bool exists = registry_.contains(username);
   auto& user = registry_[username];
   user.Update(std::move(req));

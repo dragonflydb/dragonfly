@@ -424,7 +424,7 @@ void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
   CmdArgParser parser(args);
 
   auto timeout = parser.Next<uint64_t>();
-  enum ClientPause pause_state = ClientPause::ALL;
+  ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
     pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
@@ -432,53 +432,20 @@ void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
     return cntx->SendError(err->MakeReply());
   }
 
-  // Set global pause state and track commands that are running when the pause state is flipped.
-  // Exlude already paused commands from the busy count.
-  DispatchTracker tracker{listeners, cntx->conn(), true /* ignore paused commands */};
-  shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
-    // Commands don't suspend before checking the pause state, so
-    // it's impossible to deadlock on waiting for a command that will be paused.
-    tracker.TrackOnThread();
-    ServerState::tlocal()->SetPauseState(pause_state, true);
-  });
+  const auto timeout_ms = timeout * 1ms;
+  auto is_pause_in_progress = [end_time = chrono::steady_clock::now() + timeout_ms] {
+    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
+           chrono::steady_clock::now() < end_time;
+  };
 
-  // TODO handle blocking commands
-  // Wait for all busy commands to finish running before replying to guarantee
-  // that no more (write) operations will occur.
-  const absl::Duration kDispatchTimeout = absl::Seconds(1);
-  if (!tracker.Wait(kDispatchTimeout)) {
-    LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
-    shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
-      ServerState::tlocal()->SetPauseState(pause_state, false);
-    });
-    return cntx->SendError("Failed to pause all running clients");
+  if (auto pause_fb_opt =
+          Pause(listeners, cntx->conn(), pause_state, std::move(is_pause_in_progress));
+      pause_fb_opt) {
+    pause_fb_opt->Detach();
+    cntx->SendOk();
+  } else {
+    cntx->SendError("Failed to pause all running clients");
   }
-
-  // We should not expire/evict keys while clients are puased.
-  shard_set->RunBriefInParallel(
-      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
-
-  fb2::Fiber("client_pause", [timeout, pause_state]() mutable {
-    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
-    // ensure this fiber will not left hanging .
-    auto step = 10ms;
-    auto timeout_ms = timeout * 1ms;
-    int64_t steps = timeout_ms.count() / step.count();
-    ServerState& etl = *ServerState::tlocal();
-    do {
-      ThisFiber::SleepFor(step);
-    } while (etl.gstate() != GlobalState::SHUTTING_DOWN && --steps > 0);
-
-    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-        ServerState::tlocal()->SetPauseState(pause_state, false);
-      });
-      shard_set->RunBriefInParallel(
-          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
-    }
-  }).Detach();
-
-  cntx->SendOk();
 }
 
 void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
@@ -585,6 +552,54 @@ string_view GetRedisMode() {
 }
 
 }  // namespace
+
+std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
+                                facade::Connection* conn, ClientPause pause_state,
+                                std::function<bool()> is_pause_in_progress) {
+  // Set global pause state and track commands that are running when the pause state is flipped.
+  // Exlude already paused commands from the busy count.
+  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */};
+  shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
+    // Commands don't suspend before checking the pause state, so
+    // it's impossible to deadlock on waiting for a command that will be paused.
+    tracker.TrackOnThread();
+    ServerState::tlocal()->SetPauseState(pause_state, true);
+  });
+
+  // TODO handle blocking commands
+  // Wait for all busy commands to finish running before replying to guarantee
+  // that no more (write) operations will occur.
+  const absl::Duration kDispatchTimeout = absl::Seconds(1);
+  if (!tracker.Wait(kDispatchTimeout)) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
+    shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
+      ServerState::tlocal()->SetPauseState(pause_state, false);
+    });
+    return std::nullopt;
+  }
+
+  // We should not expire/evict keys while clients are puased.
+  shard_set->RunBriefInParallel(
+      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
+
+  return fb2::Fiber("client_pause", [is_pause_in_progress, pause_state]() mutable {
+    // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
+    // ensure this fiber will not left hanging .
+    constexpr auto step = 10ms;
+    while (is_pause_in_progress()) {
+      ThisFiber::SleepFor(step);
+    }
+
+    ServerState& etl = *ServerState::tlocal();
+    if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
+      shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
+        ServerState::tlocal()->SetPauseState(pause_state, false);
+      });
+      shard_set->RunBriefInParallel(
+          [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    }
+  });
+}
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
@@ -792,12 +807,12 @@ struct AggregateLoadResult {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-Future<GenericError> ServerFamily::Load(const std::string& load_path) {
+fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
   auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
-    Promise<GenericError> ec_promise;
+    fb2::Promise<GenericError> ec_promise;
     ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
   }
@@ -841,8 +856,8 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  Promise<GenericError> ec_promise;
-  Future<GenericError> ec_future = ec_promise.get_future();
+  fb2::Promise<GenericError> ec_promise;
+  fb2::Future<GenericError> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
@@ -1476,6 +1491,23 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
+  if (sub_cmd == "HELP") {
+    string_view help_arr[] = {
+        "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "GET <pattern>",
+        "    Return parameters matching the glob-like <pattern> and their values.",
+        "SET <directive> <value>",
+        "    Set the configuration <directive> to <value>.",
+        "RESETSTAT",
+        "    Reset statistics reported by the INFO command.",
+        "HELP",
+        "    Prints this help.",
+    };
+
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendSimpleStrArr(help_arr);
+  }
+
   if (sub_cmd == "SET") {
     if (args.size() != 3) {
       return cntx->SendError(WrongNumArgsError("config|set"));
@@ -1642,7 +1674,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
 
-    result.coordinator_stats.Add(shard_set->size(), ss->stats);
+    result.coordinator_stats.Add(ss->stats);
 
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
@@ -1827,6 +1859,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
+    append("connection_migrations", conn_stats.num_migrations);
     append("total_net_output_bytes", reply_stats.io_write_bytes);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
@@ -1851,6 +1884,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
+    append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
     append("ram_hits", m.events.ram_hits);
     append("ram_misses", m.events.ram_misses);
   }

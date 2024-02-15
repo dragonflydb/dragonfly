@@ -369,7 +369,6 @@ class DbSlice {
   DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
   void FreeMemWithEvictionStep(DbIndex db_indx, size_t increase_goal_bytes);
   void ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes);
-
   void DefragSecondTierStep(DbIndex db_indx);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;

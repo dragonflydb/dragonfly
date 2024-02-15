@@ -32,8 +32,8 @@ class HestFamilyTestProtocolVersioned : public HSetFamilyTest,
  protected:
 };
 
-INSTANTIATE_TEST_CASE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
-                        ::testing::Values("2", "3"));
+INSTANTIATE_TEST_SUITE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
+                         ::testing::Values("2", "3"));
 
 TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});

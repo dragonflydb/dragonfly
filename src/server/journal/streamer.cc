@@ -75,7 +75,8 @@ void RestoreStreamer::Start(io::Sink* dest) {
       if (fiber_cancellation_.IsCancelled())
         return;
 
-      cursor = pt->Traverse(cursor, absl::bind_front(&RestoreStreamer::WriteBucket, this));
+      cursor =
+          pt->Traverse(cursor, [this](PrimeTable::bucket_iterator it) { WriteBucket(it, true); });
       ++last_yield;
 
       if (last_yield >= 100) {
@@ -90,6 +91,19 @@ void RestoreStreamer::Start(io::Sink* dest) {
     NotifyWritten(true);
     snapshot_finished_ = true;
   });
+}
+
+void RestoreStreamer::SendFinalize() {
+  VLOG(2) << "DFLYMIGRATE FINALIZE for " << sync_id_ << " : " << db_slice_->shard_id();
+  journal::Entry entry(journal::Op::FIN, 0 /*db_id*/, 0 /*slot_id*/);
+
+  JournalWriter writer{this};
+  writer.Write(entry);
+  NotifyWritten(true);
+}
+
+RestoreStreamer::~RestoreStreamer() {
+  CHECK(!snapshot_fb_.IsJoinable());
 }
 
 void RestoreStreamer::Cancel() {
@@ -115,7 +129,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.contains(slot_id);
 }
 
-void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it, bool allow_await) {
   bool is_data_present = false;
 
   if (it.GetVersion() < snapshot_version_) {
@@ -140,7 +154,7 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   }
 
   if (is_data_present)
-    NotifyWritten(true);
+    NotifyWritten(allow_await);
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -150,12 +164,12 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    WriteBucket(*bit);
+    WriteBucket(*bit, false);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      WriteBucket(it);
+      WriteBucket(it, false);
     });
   }
 }

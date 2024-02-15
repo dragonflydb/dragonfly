@@ -888,18 +888,18 @@ string_view CompactObj::GetSlice(string* scratch) const {
       detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
-      size_t space_left = decoded_len - u_.small_str.size();
       scratch->resize(decoded_len);
       string_view slices[2];
 
       unsigned num = u_.small_str.GetV(slices);
       DCHECK_EQ(2u, num);
-      char* next = scratch->data() + space_left;
+      std::string tmp(decoded_len, ' ');
+      char* next = tmp.data();
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(scratch->data() + space_left),
-                                decoded_len, scratch->data());
+      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(tmp.data()), decoded_len,
+                                scratch->data());
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
     }
@@ -993,17 +993,15 @@ void CompactObj::GetString(char* dest) const {
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
 
-      // we left some space on the left to allow inplace ascii unpacking.
-      size_t space_left = decoded_len - u_.small_str.size();
       string_view slices[2];
-
       unsigned num = u_.small_str.GetV(slices);
       DCHECK_EQ(2u, num);
-      char* next = dest + space_left;
+      std::string tmp(decoded_len, ' ');
+      char* next = tmp.data();
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
+      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(tmp.data()), decoded_len, dest);
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
     }
@@ -1065,7 +1063,7 @@ void CompactObj::Free() {
   } else if (taglen_ == JSON_TAG) {
     VLOG(1) << "Freeing JSON object";
     u_.json_obj.json_ptr->~JsonType();
-    tl.local_mr->deallocate(u_.json_obj.json_ptr, kAlignSize);
+    tl.local_mr->deallocate(u_.json_obj.json_ptr, sizeof(JsonType), kAlignSize);
   } else {
     LOG(FATAL) << "Unsupported tag " << int(taglen_);
   }
