@@ -373,7 +373,7 @@ class Transaction {
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;
 
-    // Totally irrational stats just for debugging purposes.
+    // Irrational stats purely for debugging purposes.
     struct Stats {
       unsigned total_runs = 0;  // total number of runs
     } stats;
@@ -616,6 +616,12 @@ class Transaction {
   // Result of callbacks. Usually written by single shard only, lock below for multishard oom error
   OpStatus local_result_ = OpStatus::OK;
   absl::base_internal::SpinLock local_result_mu_;
+
+  // Stats purely for debugging purposes
+  struct Stats {
+    size_t schedule_attempts = 0;
+    ShardId coordinator_index = 0;
+  } stats_;
 
  private:
   struct TLTmpSpace {

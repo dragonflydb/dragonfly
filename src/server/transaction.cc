@@ -210,6 +210,7 @@ void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
   db_index_ = dbid;
   full_args_ = args;
   local_result_ = OpStatus::OK;
+  stats_.coordinator_index = ProactorBase::me() ? ProactorBase::me()->GetPoolIndex() : kInvalidSid;
 }
 
 void Transaction::InitGlobal() {
@@ -581,7 +582,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
-  CHECK(sd.local_mask & ARMED);
+  CHECK(sd.local_mask & ARMED) << DEBUG_PrintFailState(shard->shard_id());
   sd.local_mask &= ~ARMED;
 
   sd.stats.total_runs++;
@@ -721,6 +722,8 @@ void Transaction::ScheduleInternal() {
 
   // Loop until successfully scheduled in all shards.
   while (true) {
+    stats_.schedule_attempts++;
+
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
     InitTxTime();
 
@@ -988,14 +991,16 @@ void Transaction::FIX_ConcludeJournalExec() {
 }
 
 string Transaction::DEBUG_PrintFailState(ShardId sid) const {
-  auto res = StrCat("usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
-                    ", usecnt:", use_count_.load(memory_order_relaxed),
-                    ", runcnt: ", run_barrier_.DEBUG_Count(), ", coordstate: ", coordinator_state_);
-
+  auto res = StrCat(
+      "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
+      ", usecnt:", use_count_.load(memory_order_relaxed), ", runcnt: ", run_barrier_.DEBUG_Count(),
+      ", coordstate: ", coordinator_state_, ", coord native thread: ", stats_.coordinator_index,
+      ", schedule attempts: ", stats_.schedule_attempts, ", report from sid: ", sid, "\n");
+  std::atomic_thread_fence(memory_order_acquire);
   for (unsigned i = 0; i < shard_data_.size(); ++i) {
     const auto& sd = shard_data_[i];
-    absl::StrAppend(&res, "shard: ", i, " local_mask:", sd.local_mask,
-                    " total_runs: ", sd.stats.total_runs);
+    absl::StrAppend(&res, "- shard: ", i, " local_mask:", sd.local_mask,
+                    " total_runs: ", sd.stats.total_runs, "\n");
   }
   return res;
 }
@@ -1027,7 +1032,7 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
-  CHECK(sd.local_mask & ARMED);
+  CHECK(sd.local_mask & ARMED) << DEBUG_PrintFailState(shard->shard_id());
   sd.local_mask &= ~ARMED;
 
   sd.stats.total_runs++;
