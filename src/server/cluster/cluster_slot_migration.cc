@@ -142,8 +142,7 @@ void ClusterSlotMigration::MainMigrationFb() {
                  << ec.message();
   }
 
-  bool success = true;
-  if (success = IsFinalized(); success) {
+  if (IsFinalized()) {
     state_ = MigrationState::C_FINISHED;
 
     const auto added_slots = ToSlotSet(slots_);
@@ -156,9 +155,9 @@ void ClusterSlotMigration::MainMigrationFb() {
     VLOG(1) << "send " << cmd;
 
     auto err = SendCommandAndReadResponse(cmd);
-    success = !err && CheckRespIsSimpleReply("OK");
+    auto success = !err && CheckRespIsSimpleReply("OK");
 
-    LOG_IF(WARNING, success) << ToSV(LastResponseArgs().front().GetBuf());
+    LOG_IF(WARNING, !success) << ToSV(LastResponseArgs().front().GetBuf());
   }
 }
 

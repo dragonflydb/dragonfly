@@ -14,7 +14,7 @@ class ClusterFamily;
 // The main entity on the target side that manage slots migration process
 // Creates initial connection between the target and source node,
 // manage migration process state and data
-class ClusterSlotMigration : ProtocolClient {
+class ClusterSlotMigration : ProtocolClient, std::enable_shared_from_this<ClusterSlotMigration> {
  public:
   struct Info {
     std::string host;
@@ -45,6 +45,10 @@ class ClusterSlotMigration : ProtocolClient {
   void SetStableSyncForFlow(uint32_t flow);
 
   void Stop();
+
+  const auto& GetSlots() const {
+    return slots_;
+  }
 
  private:
   // Send DFLYMIGRATE CONF to the source and get info about migration process

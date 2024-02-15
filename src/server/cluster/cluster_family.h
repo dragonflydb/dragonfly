@@ -77,8 +77,9 @@ class ClusterFamily {
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
 
+  void FinalizeIncomingMigration(uint32_t local_sync_id);
+
   void RemoveFinishedIncomingMigrations();
-  void RemoveOutgoingMigration(uint32_t sync_id);
 
   // store info about migration and create unique session id
   uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
@@ -94,7 +95,7 @@ class ClusterFamily {
   uint32_t next_sync_id_ ABSL_GUARDED_BY(migration_mu_) = 1;
   // holds all outgoing slots migrations that are currently in progress
   using OutgoingMigrationMap = absl::btree_map<uint32_t, std::shared_ptr<OutgoingMigration>>;
-  OutgoingMigrationMap outgoing_migration_jobs_;
+  OutgoingMigrationMap outgoing_migration_jobs_ ABSL_GUARDED_BY(migration_mu_);
 
  private:
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
