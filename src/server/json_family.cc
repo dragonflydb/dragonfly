@@ -697,7 +697,7 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
   vector<StringVec> vec;
   auto cb = [&vec](const string_view& path, const JsonType& val) {
     // Aligned with ElastiCache flavor.
-    LOG(INFO) << "path: " << path << " val: " << val.to_string();
+    DVLOG(2) << "path: " << path << " val: " << val.to_string();
 
     if (!val.is_object()) {
       vec.emplace_back();
