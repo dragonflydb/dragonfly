@@ -933,7 +933,7 @@ void Transaction::ExecuteAsync() {
   DCHECK_LE(shard_data_.size(), 128);
 
   // Set armed flags on all active shards. Copy indices for dispatching poll tasks,
-  // because local_mask can be modified after starting a new phase.
+  // because local_mask can be written concurrently after starting a new phase.
   std::bitset<128> poll_flags(0);
   IterateActiveShards([&poll_flags](auto& sd, auto i) {
     sd.local_mask |= ARMED;
