@@ -23,10 +23,13 @@ bool ShouldIterateAll(SegmentType type) {
 }
 
 // Traverses a json object according to the given path and calls the callback for each matching
-// field.
+// field. With DESCENT segments it will match 0 or more fields in depth.
+// MATCH(node, DESCENT|SUFFIX) = MATCH(node, SUFFIX) ||
+// { MATCH(node->child, DESCENT/SUFFIX) for each child of node }
+
 class Dfs {
  public:
-  using Cb = std::function<void(const JsonType&)>;
+  using Cb = PathCallback;
 
   // TODO: for some operations we need to know the type of mismatches.
   void Traverse(absl::Span<const PathSegment> path, const JsonType& json, const Cb& callback);
@@ -46,9 +49,9 @@ class Dfs {
   nonstd::expected<void, MatchStatus> PerformStep(const PathSegment& segment, const JsonType& node,
                                                   const Cb& callback);
 
-  void DoCall(const Cb& callback, const JsonType& node) {
+  void DoCall(const Cb& callback, optional<string_view> key, const JsonType& node) {
     ++matches_;
-    callback(node);
+    callback(key, node);
   }
 
   using DepthState = pair<const JsonType*, unsigned>;  // object, segment_idx pair
@@ -76,7 +79,7 @@ class Dfs {
     }
 
     DepthState Next(const JsonType& obj) const {
-      return {&obj, depth_state_.second + 1};
+      return {&obj, depth_state_.second + segment_step_};
     }
 
     DepthState Exhausted() const {
@@ -84,6 +87,9 @@ class Dfs {
     }
 
     AdvanceResult Init(const PathSegment& segment);
+
+    // For most operations we advance the path segment by 1 when we descent into the children.
+    unsigned segment_step_ = 1;
 
     DepthState depth_state_;
     variant<monostate, JsonType::const_object_iterator, JsonType::const_array_iterator> state_;
@@ -143,6 +149,15 @@ auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
     }
 
     case SegmentType::DESCENT:
+      if (segment_step_ == 1) {
+        // first time, branching to return the same object but with the next segment,
+        // exploring the path of ignoring the DESCENT operator.
+        // Alsom, shift the state (segment_step) to bypass this branch next time.
+        segment_step_ = 0;
+        return DepthState{depth_state_.first, depth_state_.second + 1};
+      }
+      // Now traverse all the children but do not progress with segment path.
+      // This is why segment_step_ is set to 0.
       [[fallthrough]];
     case SegmentType::WILDCARD: {
       if (obj().is_object()) {
@@ -169,6 +184,10 @@ auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
   return make_unexpected(MISMATCH);
 }
 
+inline bool IsRecursive(jsoncons::json_type type) {
+  return type == jsoncons::json_type::object_value || type == jsoncons::json_type::array_value;
+}
+
 void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, const Cb& callback) {
   DCHECK(!path.empty());
   if (path.size() == 1) {
@@ -181,21 +200,26 @@ void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, con
 
   do {
     unsigned segment_index = stack.back().segment_idx();
+    const auto& path_segment = path[segment_index];
 
     // init or advance the current object
-    AdvanceResult res = stack.back().Advance(path[segment_index]);
+    AdvanceResult res = stack.back().Advance(path_segment);
     if (res && res->first != nullptr) {
       const JsonType* next = res->first;
-      DVLOG(2) << "Handling now " << next->to_string();
-      unsigned next_seg_id = res->second;
+      DVLOG(2) << "Handling now " << next->type() << " " << next->to_string();
 
-      if (next_seg_id + 1 < path.size()) {
-        stack.emplace_back(next, next_seg_id);
-      } else {
-        // terminal step
-        // TODO: to take into account MatchStatus
-        // for `json.set foo $.a[10]` or for `json.set foo $.*.b`
-        PerformStep(path[next_seg_id], *next, callback);
+      // We descent only if next is object or an array.
+      if (IsRecursive(next->type())) {
+        unsigned next_seg_id = res->second;
+
+        if (next_seg_id + 1 < path.size()) {
+          stack.emplace_back(next, next_seg_id);
+        } else {
+          // terminal step
+          // TODO: to take into account MatchStatus
+          // for `json.set foo $.a[10]` or for `json.set foo $.*.b`
+          PerformStep(path[next_seg_id], *next, callback);
+        }
       }
     } else {
       stack.pop_back();
@@ -203,8 +227,7 @@ void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, con
   } while (!stack.empty());
 }
 
-auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node,
-                      const function<void(const JsonType&)>& callback)
+auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node, const Cb& callback)
     -> nonstd::expected<void, MatchStatus> {
   switch (segment.type()) {
     case SegmentType::IDENTIFIER: {
@@ -213,7 +236,7 @@ auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node,
 
       auto it = node.find(segment.identifier());
       if (it != node.object_range().end()) {
-        DoCall(callback, it->value());
+        DoCall(callback, it->key(), it->value());
       }
     } break;
     case SegmentType::INDEX: {
@@ -222,18 +245,18 @@ auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node,
       if (segment.index() >= node.size()) {
         return make_unexpected(OUT_OF_BOUNDS);
       }
-      DoCall(callback, node[segment.index()]);
+      DoCall(callback, nullopt, node[segment.index()]);
     } break;
 
     case SegmentType::DESCENT:
     case SegmentType::WILDCARD: {
       if (node.is_object()) {
         for (const auto& k_v : node.object_range()) {
-          DoCall(callback, k_v.value());
+          DoCall(callback, k_v.key(), k_v.value());
         }
       } else if (node.is_array()) {
         for (const auto& val : node.array_range()) {
-          DoCall(callback, val);
+          DoCall(callback, nullopt, val);
         }
       }
     } break;
@@ -243,8 +266,7 @@ auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node,
 
 }  // namespace
 
-void EvaluatePath(const Path& path, const JsonType& json,
-                  std::function<void(const JsonType&)> callback) {
+void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback) {
   if (path.empty())
     return;
   Dfs().Traverse(path, json, std::move(callback));

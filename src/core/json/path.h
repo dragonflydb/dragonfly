@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/functional/function_ref.h>
+
 #include <string>
 #include <variant>
 #include <vector>
@@ -50,7 +52,10 @@ class PathSegment {
 
 using Path = std::vector<PathSegment>;
 
-void EvaluatePath(const Path& path, const JsonType& json,
-                  std::function<void(const JsonType&)> callback);
+// Passes the key name for object fields or nullopt for array elements.
+// The second argument is a json value of either object fields or array elements.
+using PathCallback = absl::FunctionRef<void(std::optional<std::string_view>, const JsonType&)>;
+
+void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback);
 
 }  // namespace dfly::json
