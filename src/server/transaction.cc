@@ -584,7 +584,9 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   CHECK(sd.local_mask & ARMED);
   sd.local_mask &= ~ARMED;
 
-  CHECK_GT(run_barrier_.DEBUG_Count(), 0u);
+  sd.stats.total_runs++;
+
+  DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
@@ -985,6 +987,19 @@ void Transaction::FIX_ConcludeJournalExec() {
   }
 }
 
+string Transaction::DEBUG_PrintFailState(ShardId sid) const {
+  auto res = StrCat("usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
+                    ", usecnt:", use_count_.load(memory_order_relaxed),
+                    ", runcnt: ", run_barrier_.DEBUG_Count(), ", coordstate: ", coordinator_state_);
+
+  for (unsigned i = 0; i < shard_data_.size(); ++i) {
+    const auto& sd = shard_data_[i];
+    absl::StrAppend(&res, "shard: ", i, " local_mask:", sd.local_mask,
+                    " total_runs: ", sd.stats.total_runs);
+  }
+  return res;
+}
+
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
@@ -1014,6 +1029,8 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
 
   CHECK(sd.local_mask & ARMED);
   sd.local_mask &= ~ARMED;
+
+  sd.stats.total_runs++;
 
   // Calling the callback in somewhat safe way
   RunnableResult result;

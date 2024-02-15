@@ -342,6 +342,9 @@ class Transaction {
   // Send journal EXEC opcode after a series of MULTI commands on the currently active shard
   void FIX_ConcludeJournalExec();
 
+  // Print in-dept failure state for debugging.
+  std::string DEBUG_PrintFailState(ShardId sid) const;
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
@@ -370,8 +373,13 @@ class Transaction {
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;
 
+    // Totally irrational stats just for debugging purposes.
+    struct Stats {
+      unsigned total_runs = 0;  // total number of runs
+    } stats;
+
     // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
-    char pad[64 - 4 * sizeof(uint32_t)];
+    char pad[64 - 4 * sizeof(uint32_t) - sizeof(Stats)];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
