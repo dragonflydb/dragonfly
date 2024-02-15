@@ -543,7 +543,7 @@ class Transaction {
 
   // Iterate over all available shards, run functor accepting (PerShardData&, ShardId)
   template <typename F> void IterateShards(F&& f) {
-    if (unique_shard_cnt == 1) {
+    if (unique_shard_cnt_ == 1) {
       f(shard_data_[SidToId(unique_shard_id_)], unique_shard_id_);
     } else {
       for (ShardId i = 0; i < shard_data_.size(); ++i) {

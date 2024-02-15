@@ -930,7 +930,7 @@ void Transaction::ExecuteAsync() {
   DCHECK_GT(unique_shard_cnt_, 0u);
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
   DCHECK(!IsAtomicMulti() || multi_->lock_mode.has_value());
-  DCHECK_LE(shard_data_.size(), 128);
+  DCHECK_LE(shard_data_.size(), 128u);
 
   // Set armed flags on all active shards. Copy indices for dispatching poll tasks,
   // because local_mask can be written concurrently after starting a new phase.
