@@ -225,7 +225,7 @@ void TieredStorage::InflightWriteRequest::Add(const PrimeKey& pk, const PrimeVal
   unsigned bin_size = kSmallBins[bin_index_];
   unsigned max_entries = NumEntriesInSmallBin(bin_size);
 
-  char* next_hash = block_start_ + entries_.size();
+  char* next_hash = block_start_ + entries_.size() * 8;
   char* next_data = block_start_ + max_entries * 8 + entries_.size() * bin_size;
 
   DCHECK_LE(pv.Size(), bin_size);
@@ -359,6 +359,12 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
   stats->tiered_size -= len;
 }
 
+size_t TieredStorage::GetBinSize(size_t blob_len) {
+  CHECK(blob_len <= kMaxSmallBin);
+  unsigned bin_index = SmallToBin(blob_len);
+  return kSmallBins[bin_index];
+}
+
 void TieredStorage::Defrag(DbIndex db_index, PrimeIterator it) {
   PrimeValue& entry = it->second;
   CHECK(entry.IsExternal());
@@ -368,11 +374,35 @@ void TieredStorage::Defrag(DbIndex db_index, PrimeIterator it) {
   if (offset % kBlockLen > 0) {
     uint32_t offs_page = offset / kBlockLen;
     auto refcnt_it = page_refcnt_.find(offs_page);
-    if (refcnt_it->second <= 10) {
-      string tmp;
-      string_view key = it->first.GetSlice(&tmp);
-      Load(db_index, it, key);
-      ScheduleOffload(db_index, it);
+
+    // check the utilization of the block.
+    size_t bin_size = GetBinSize(len);
+    unsigned max_entries = NumEntriesInSmallBin(bin_size);
+    float bin_util = (float)(refcnt_it->second) / (float)max_entries;
+    float defrag_bin_util_threshold = 0.2;
+
+    // if bin is underutilized, start defragmentation.
+    if (bin_util < defrag_bin_util_threshold) {
+      // 1. retrieve all the hash values stored in this page.
+      size_t hash_section_len = max_entries * 8;
+      std::vector<char> hash_section(hash_section_len);
+
+      auto ec = Read(offs_page * kBlockLen, hash_section_len, &hash_section[0]);
+      CHECK(!ec) << "Error when reading hash section of a page!";
+
+      // for each hash function
+      for (unsigned int i = 0; i < max_entries; ++i) {
+        uint64_t key_hash = absl::little_endian::Load64(&hash_section[i * 8]);
+        auto prime_it = db_slice_.GetDBTable(db_index)->prime.Find(key_hash);
+
+        // if the key still exists, load the key into memory and reschedule
+        if (!prime_it.is_done()) {
+          string tmp;
+          string_view key = prime_it->first.GetSlice(&tmp);
+          prime_it = Load(db_index, prime_it, key);
+          ScheduleOffload(db_index, prime_it);
+        }
+      }
     }
   }
 }
