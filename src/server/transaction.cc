@@ -1393,7 +1393,8 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
 void Transaction::MultiReportJournalOnShard(EngineShard* shard) const {
   DCHECK_EQ(EngineShard::tlocal(), shard);
   auto* journal = shard->journal();
-  if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()]) {
+  size_t write_idx = multi_->role == SQUASHED_STUB ? 0 : shard->shard_id();
+  if (journal != nullptr && multi_->shard_journal_write[write_idx]) {
     journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, multi_->shard_journal_cnt,
                          unique_slot_checker_.GetUniqueSlotId(), {}, true);
   }
