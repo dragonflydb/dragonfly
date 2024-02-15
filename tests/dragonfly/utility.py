@@ -451,12 +451,17 @@ class DflySeeder:
         else:
             return aioredis.Redis(**kwargs)
 
+    async def _close_client(self, client):
+        if not self.cluster_mode:
+            await client.connection_pool.disconnect()
+        await client.close()
+
     async def _capture_db(self, port, target_db, keys):
         client = self._make_client(port=port, db=target_db)
         capture = DataCapture(await self._capture_entries(client, keys))
 
-        if hasattr(client, "connection_pool"):
-            await client.connection_pool.disconnect()
+        await self._close_client(client)
+
         return capture
 
     async def _generator_task(self, queues, target_ops=None, target_deviation=None):
@@ -530,13 +535,14 @@ class DflySeeder:
                 await pipe.execute()
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
+                    await self._close_client(client)
                     raise SystemExit(e)
             except Exception as e:
+                await self._close_client(client)
                 raise SystemExit(e)
             queue.task_done()
-        await client.close()
-        if not self.cluster_mode:
-            await client.connection_pool.disconnect()
+
+        await self._close_client(client)
 
     CAPTURE_COMMANDS = {
         ValueType.STRING: lambda pipe, k: pipe.get(k),

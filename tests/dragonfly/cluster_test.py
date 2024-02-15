@@ -993,8 +993,6 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
         for instance in instances
     ]
 
-    cluster_client = aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port)
-
     async def generate_config():
         return [
             {
@@ -1087,7 +1085,13 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
 
     # Start ten counters
     counter_keys = [f"_counter{i}" for i in range(10)]
-    counters = [asyncio.create_task(list_counter(key, cluster_client)) for key in counter_keys]
+    counter_connections = [
+        aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port) for _ in range(10)
+    ]
+    counters = [
+        asyncio.create_task(list_counter(key, conn))
+        for key, conn in zip(counter_keys, counter_connections)
+    ]
 
     # Finalize slot migration
     for node in nodes:
@@ -1112,19 +1116,16 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
         node.new_slots = []
 
     # Check counter consistency
-    # TODO: This fails and exposes a REAL BUG!
-    # for key in counter_keys:
-    #     counter_list = await cluster_client.lrange(key, 0, -1)
-    #     for i, j in zip(counter_list, counter_list[1:]):
-    #         print(f"comparing {i}, {j}")
-    #         assert int(i) == int(j) + 1, f"huh? {counter_list}"
+    cluster_client = aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port)
+    for key in counter_keys:
+        counter_list = await cluster_client.lrange(key, 0, -1)
+        for i, j in zip(counter_list, counter_list[1:]):
+            assert int(i) == int(j) + 1, f"Found inconsistent list in {key}: {counter_list}"
 
     # Compare capture
     assert await seeder.compare(capture, nodes[0].instance.port)
 
-    await disconnect_clients(
-        *[node.admin_client for node in nodes], *[node.client for node in nodes]
-    )
+    await asyncio.gather(*[c.close() for c in counter_connections])
     await close_clients(
         cluster_client, *[node.admin_client for node in nodes], *[node.client for node in nodes]
     )

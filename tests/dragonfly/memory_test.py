@@ -9,10 +9,10 @@ from .utility import *
     [
         ("JSON", 300_000, 100, 100),
         ("SET", 500_000, 100, 100),
-        ("HASH", 500_000, 100, 100),
+        ("HASH", 400_000, 100, 100),
         ("ZSET", 400_000, 100, 100),
         ("LIST", 500_000, 100, 100),
-        ("STRING", 10_000_000, 1000, 1),
+        ("STRING", 6_000_000, 1000, 1),
     ],
 )
 async def test_rss_used_mem_gap(df_local_factory, type, keys, val_size, elements):

@@ -213,7 +213,7 @@ class DashTable : public detail::DashTableBase {
   }
 
   size_t bucket_count() const {
-    return unique_segments_ * SegmentType::kRegularBucketCnt;
+    return unique_segments_ * SegmentType::kTotalBuckets;
   }
 
   // Overall capacity of the table (including stash buckets).
@@ -239,6 +239,12 @@ class DashTable : public detail::DashTableBase {
   // Takes an iterator pointing to an entry in a dash bucket and traverses all bucket's entries by
   // calling cb(iterator) for every non-empty slot. The iteration goes over a physical bucket.
   template <typename Cb> void TraverseBucket(const_iterator it, Cb&& cb);
+
+  // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
+  // segment by segment over physical backets.
+  // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
+  // when formal full coverage is not critically important.
+  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb);
 
   // Discards slots information.
   static const_bucket_iterator BucketIt(const_iterator it) {
@@ -884,6 +890,30 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
   for (size_t i = start_idx + chunk_size / 2; i < start_idx + chunk_size; ++i) {
     segment_[i] = target;
   }
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <typename Cb>
+auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb) -> Cursor {
+  uint32_t sid = curs.segment_id(global_depth_);
+  assert(sid < segment_.size());
+  SegmentType* s = segment_[sid];
+  assert(s);
+  uint8_t bid = curs.bucket_id();
+
+  auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
+  s->TraverseBucket(bid, std::move(dt_cb));
+
+  ++bid;
+  if (bid == kPhysicalBucketNum) {
+    sid = NextSeg(sid);
+    bid = 0;
+    if (sid >= segment_.size()) {
+      return 0;  // "End of traversal" cursor.
+    }
+  }
+
+  return Cursor{global_depth_, sid, bid};
 }
 
 template <typename _Key, typename _Value, typename Policy>

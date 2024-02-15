@@ -41,6 +41,7 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           run-only-on-ubuntu-latest: false
           build-folder-name: build
+          filter: ${{ matrix.build-type == 'Release' && 'not slow' || '(not slow) and (not opt_only)' }}
 
       - name: Upload logs on failure
         if: failure()

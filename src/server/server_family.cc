@@ -1885,11 +1885,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
+    append("ram_hits", m.events.ram_hits);
+    append("ram_misses", m.events.ram_misses);
   }
 
   if (should_enter("TIERED", true)) {
     append("tiered_entries", total.tiered_entries);
     append("tiered_bytes", total.tiered_size);
+    append("tiered_bytes_human", HumanReadableNumBytes(total.tiered_size));
     append("tiered_reads", m.disk_stats.read_total);
     append("tiered_read_latency_usec", m.disk_stats.read_delay_usec);
     append("tiered_writes", m.tiered_stats.tiered_writes);

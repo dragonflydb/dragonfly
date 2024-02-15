@@ -51,6 +51,10 @@ struct SliceEvents {
   size_t misses = 0;
   size_t mutations = 0;
 
+  // ram hit/miss when tiering is enabled
+  size_t ram_hits = 0;
+  size_t ram_misses = 0;
+
   // how many insertions were rejected due to OOM.
   size_t insertion_rejections = 0;
 
@@ -364,6 +368,7 @@ class DbSlice {
   // Deletes some amount of possible expired items.
   DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
   void FreeMemWithEvictionStep(DbIndex db_indx, size_t increase_goal_bytes);
+  void ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
