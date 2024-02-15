@@ -1055,7 +1055,6 @@ auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, 
   unsigned delta = __builtin_ctz(mask);
   mask >>= delta;
   for (unsigned i = delta; i < NUM_SLOTS; ++i) {
-    // if ((mask & 1) && pred(DoHash(key[i]) & kFpMask, fp_hash)) {
     if ((mask & 1) && pred(key[i], fp_hash)) {
       return i;
     }
