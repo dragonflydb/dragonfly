@@ -85,6 +85,9 @@ class TieredStorage {
   void FinishIoRequest(int io_res, InflightWriteRequest* req);
   void SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest);
 
+  // calculate the bin size given the blob (value to be written) length.
+  size_t GetBinSize(size_t blob_len);
+
   DbSlice& db_slice_;
   IoMgr io_mgr_;
   ExternalAllocator alloc_;

@@ -329,6 +329,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     template <typename U, typename Pred>
     SlotId FindByFp(uint8_t fp_hash, bool probe, U&& k, Pred&& pred) const;
 
+    template <typename Pred> SlotId FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const;
+
     bool ShiftRight();
 
     void Swap(unsigned slot_a, unsigned slot_b) {
@@ -510,6 +512,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   }
 
   template <typename U, typename Pred> Iterator FindIt(U&& key, Hash_t key_hash, Pred&& cf) const;
+
+  template <typename Pred> Iterator FindIt(Hash_t key_hash, Pred&& cf) const;
 
   // Returns valid iterator if succeeded or invalid if not (it's full).
   // Requires: key should be not present in the segment.
@@ -1041,6 +1045,27 @@ auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, 
 }
 
 template <typename Key, typename Value, typename Policy>
+template <typename Pred>
+auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const
+    -> SlotId {
+  unsigned mask = this->Find(fp_hash, probe);
+  if (!mask)
+    return kNanSlot;
+
+  unsigned delta = __builtin_ctz(mask);
+  mask >>= delta;
+  for (unsigned i = delta; i < NUM_SLOTS; ++i) {
+    // if ((mask & 1) && pred(DoHash(key[i]) & kFpMask, fp_hash)) {
+    if ((mask & 1) && pred(key[i], fp_hash)) {
+      return i;
+    }
+    mask >>= 1;
+  };
+
+  return kNanSlot;
+}
+
+template <typename Key, typename Value, typename Policy>
 bool Segment<Key, Value, Policy>::Bucket::ShiftRight() {
   bool res = BucketType::ShiftRight();
   for (int i = NUM_SLOTS - 1; i > 0; i--) {
@@ -1145,6 +1170,79 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
     pos += kRegularBucketCnt;
     const Bucket& bucket = bucket_[pos];
     return bucket.FindByFp(fp_hash, false, key, cf);
+  };
+
+  if (target.HasStashOverflow()) {
+#ifdef ENABLE_DASH_STATS
+    stats.stash_overflow_probes++;
+#endif
+
+    for (unsigned i = 0; i < STASH_BUCKET_NUM; ++i) {
+      auto sid = stash_cb(0, i);
+      if (sid != BucketType::kNanSlot) {
+        return Iterator{uint8_t(kRegularBucketCnt + i), sid};
+      }
+    }
+
+    // We exit because we searched through all stash buckets anyway, no need to use overflow fps.
+    return Iterator{};
+  }
+
+#ifdef ENABLE_DASH_STATS
+  stats.stash_probes++;
+#endif
+
+  auto stash_res = target.IterateStash(fp_hash, false, stash_cb);
+  if (stash_res.second != BucketType::kNanSlot) {
+    return Iterator{uint8_t(kRegularBucketCnt + stash_res.first), stash_res.second};
+  }
+
+  stash_res = probe.IterateStash(fp_hash, true, stash_cb);
+  if (stash_res.second != BucketType::kNanSlot) {
+    return Iterator{uint8_t(kRegularBucketCnt + stash_res.first), stash_res.second};
+  }
+  return Iterator{};
+}
+
+template <typename Key, typename Value, typename Policy>
+template <typename Pred>
+auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& cf) const -> Iterator {
+  uint8_t bidx = BucketIndex(key_hash);
+  const Bucket& target = bucket_[bidx];
+
+  // It helps a bit (10% on my home machine) and more importantly, it does not hurt
+  // since we are going to access this memory in a bit.
+  __builtin_prefetch(&target);
+
+  uint8_t fp_hash = key_hash & kFpMask;
+  SlotId sid = target.FindByFp(fp_hash, false, cf);
+  if (sid != BucketType::kNanSlot) {
+    return Iterator{bidx, sid};
+  }
+
+  uint8_t nid = NextBid(bidx);
+  const Bucket& probe = bucket_[nid];
+
+  sid = probe.FindByFp(fp_hash, true, cf);
+
+#ifdef ENABLE_DASH_STATS
+  stats.neighbour_probes++;
+#endif
+
+  if (sid != BucketType::kNanSlot) {
+    return Iterator{nid, sid};
+  }
+
+  if (!target.HasStash()) {
+    return Iterator{};
+  }
+
+  auto stash_cb = [&](unsigned overflow_index, unsigned pos) -> SlotId {
+    assert(pos < STASH_BUCKET_NUM);
+
+    pos += kRegularBucketCnt;
+    const Bucket& bucket = bucket_[pos];
+    return bucket.FindByFp(fp_hash, false, cf);
   };
 
   if (target.HasStashOverflow()) {
