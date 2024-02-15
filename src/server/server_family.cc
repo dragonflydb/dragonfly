@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <optional>
 
+#include "absl/strings/ascii.h"
 #include "facade/error.h"
 #include "slowlog.h"
 
@@ -1658,7 +1659,7 @@ Metrics ServerFamily::GetMetrics() const {
   Mutex mu;
 
   auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
-    auto& [calls, sum] = dest[string{name}];
+    auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
     calls += stat.first;
     sum += stat.second;
   };
