@@ -389,7 +389,7 @@ void TieredStorage::Defrag(DbIndex db_index, PrimeIterator it) {
       // for each hash function
       for (unsigned int i = 0; i < max_entries; ++i) {
         uint64_t key_hash = absl::little_endian::Load64(&hash_section[i * 8]);
-        auto prime_it = db_slice_.GetDBTable(db_index)->prime.Find(key_hash);
+        auto prime_it = db_slice_.GetDBTable(db_index)->prime.FindByHash(key_hash);
 
         // if the key still exists, load the key into memory and reschedule
         if (!prime_it.is_done()) {
