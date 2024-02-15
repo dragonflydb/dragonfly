@@ -541,17 +541,23 @@ class Transaction {
     return sid < shard_data_.size() ? sid : 0;
   }
 
-  // Iterate over shards and run function accepting (PerShardData&, ShardId) on all active ones.
-  template <typename F> void IterateActiveShards(F&& f) {
+  // Iterate over all available shards, run functor accepting (PerShardData&, ShardId)
+  template <typename F> void IterateShards(F&& f) {
     if (unique_shard_cnt_ == 1) {
       f(shard_data_[SidToId(unique_shard_id_)], unique_shard_id_);
     } else {
       for (ShardId i = 0; i < shard_data_.size(); ++i) {
-        if (auto& sd = shard_data_[i]; sd.local_mask & ACTIVE) {
-          f(sd, i);
-        }
+        f(shard_data_[i], i);
       }
     }
+  }
+
+  // Iterate over ACTIVE shards, run functor accepting (PerShardData&, ShardId)
+  template <typename F> void IterateActiveShards(F&& f) {
+    IterateShards([&f](auto& sd, auto i) {
+      if (sd.local_mask & ACTIVE)
+        f(sd, i);
+    });
   }
 
  private:

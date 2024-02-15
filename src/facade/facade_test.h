@@ -78,9 +78,9 @@ inline ::testing::PolymorphicMatcher<RespTypeMatcher> ArgType(RespExpr::Type t) 
 }
 
 MATCHER_P(RespArray, value, "") {
-  return ExplainMatchResult(testing::AllOf(testing::Field(&RespExpr::type, RespExpr::ARRAY),
-                                           testing::Property(&RespExpr::GetVec, value)),
-                            arg, result_listener);
+  return ExplainMatchResult(
+      testing::AllOf(ArgType(RespExpr::ARRAY), testing::Property(&RespExpr::GetVec, value)), arg,
+      result_listener);
 }
 
 inline bool operator==(const RespExpr& left, std::string_view s) {

@@ -8,6 +8,7 @@ clang-*
 third_party
 genfiles/*
 *.sublime-*
+*.orig
 .tags
 !third_party/include/*
 *.pyc
