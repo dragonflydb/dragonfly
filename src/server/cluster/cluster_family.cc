@@ -650,6 +650,8 @@ static std::string_view state_to_str(MigrationState state) {
       return "STABLE_SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
+    case MigrationState::C_MAX_INVALID:
+      break;
   }
   DCHECK(false) << "Unknown State value " << static_cast<underlying_type_t<MigrationState>>(state);
   return "UNDEFINED_STATE"sv;

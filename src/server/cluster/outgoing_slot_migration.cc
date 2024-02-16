@@ -76,7 +76,7 @@ MigrationState OutgoingMigration::GetState() const {
 }
 
 MigrationState OutgoingMigration::GetStateImpl() const {
-  MigrationState min_state = MigrationState::C_FINISHED;
+  MigrationState min_state = MigrationState::C_MAX_INVALID;
   for (const auto& slot_migration : slot_migrations_) {
     if (slot_migration)
       min_state = std::min(min_state, slot_migration->GetState());
