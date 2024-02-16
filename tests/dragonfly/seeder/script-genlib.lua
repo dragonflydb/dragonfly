@@ -60,7 +60,7 @@ function LG_funcs.add_set(key, keys)
         while i1 == i2 do
             i2 = math.random(#keys)
         end
-        -- redis.apcall('SDIFFSTORE', key, keys[i1], keys[i2])
+        redis.apcall('SDIFFSTORE', key, keys[i1], keys[i2])
     else
         local elements = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize)
         redis.apcall('SADD', key, unpack(elements))

@@ -18,19 +18,21 @@ except ImportError:
 class SeederBase:
     UID_COUNTER = 1  # multiple generators should not conflict on keys
     CACHED_SCRIPTS = {}
-    TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON"]
+    TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET"]
 
     def __init__(self):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
 
     @classmethod
-    async def capture(clz, client: aioredis.Redis) -> typing.List[int]:
+    async def capture(clz, client: aioredis.Redis) -> typing.Tuple[int]:
         """Generate hash capture for all data stored in instance pointed by client"""
 
         sha = await client.script_load(clz._load_script("hash"))
-        return await asyncio.gather(
-            *(clz._run_capture(client, sha, data_type) for data_type in clz.TYPES)
+        return tuple(
+            await asyncio.gather(
+                *(clz._run_capture(client, sha, data_type) for data_type in clz.TYPES)
+            )
         )
 
     @staticmethod
@@ -111,7 +113,7 @@ class Seeder(SeederBase):
 
     units: typing.List[Unit]
 
-    def __init__(self, units=10, key_target=10_000, data_size=10):
+    def __init__(self, units=10, key_target=10_000, data_size=100):
         SeederBase.__init__(self)
         self.key_target = key_target
         self.data_size = data_size
@@ -166,4 +168,6 @@ class Seeder(SeederBase):
 
         unit.counter = await client.evalsha(sha, 0, *args)
 
-        logging.debug(f"running unit {unit.prefix}/{unit.type} took {time.time() - s}")
+        logging.debug(
+            f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
+        )

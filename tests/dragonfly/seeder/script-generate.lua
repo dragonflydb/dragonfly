@@ -22,6 +22,7 @@ local data_size = tonumber(ARGV[8])
 -- assumes exclusive ownership
 local keys = LU_collect_keys(prefix, type)
 
+LG_funcs.init(data_size)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 
@@ -87,7 +88,7 @@ while true do
         -- the add intensity is monotonically decreasing with keycount growing,
         -- the delete intensity is monotonically increasing with keycount growing,
         -- the point where the intensities are equal is the equilibrium point,
-        -- based on the formulas it's ~0.82 * key_target
+        -- based on the formulas it's ~0.956 * key_target
         local i_add = math.max(0, 1 - (#keys / key_target) ^ 16)
         local i_del = (#keys / key_target) ^ 16
 

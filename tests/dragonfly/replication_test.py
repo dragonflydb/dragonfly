@@ -3,12 +3,14 @@ from itertools import chain, repeat
 import re
 import pytest
 import asyncio
+import async_timeout
+import pymemcache
+import logging
 from redis import asyncio as aioredis
 from .utility import *
 from .instance import DflyInstanceFactory, DflyInstance
+from .seeder import Seeder as SeederV2
 from . import dfly_args
-import pymemcache
-import logging
 from .proxy import Proxy
 
 ADMIN_PORT = 1211
@@ -17,36 +19,46 @@ DISCONNECT_CRASH_FULL_SYNC = 0
 DISCONNECT_CRASH_STABLE_SYNC = 1
 DISCONNECT_NORMAL_STABLE_SYNC = 2
 
+M_OPT = [pytest.mark.opt_only]
+M_SLOW = [pytest.mark.slow]
+M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
+
+
+async def wait_for_replicas_state(*clients, state="stable_sync", timeout=0.05):
+    """Wait until all clients (replicas) reach passed state"""
+    while len(clients) > 0:
+        await asyncio.sleep(timeout)
+        roles = await asyncio.gather(*(c.role() for c in clients))
+        clients = [c for c, role in zip(clients, roles) if role[0] != "replica" or role[3] != state]
+
+
 """
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
 
-# 1. Number of master threads
-# 2. Number of threads for each replica
-# 3. Seeder config
-# 4. Admin port
-replication_cases = [
-    (8, [8], dict(keys=10_000, dbcount=4), False),
-    (6, [6, 6, 6], dict(keys=4_000, dbcount=4), False),
-    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4), False),
-    (4, [8, 8], dict(keys=4_000, dbcount=4), False),
-    (4, [1] * 8, dict(keys=500, dbcount=2), False),
-    (1, [1], dict(keys=100, dbcount=2), False),
-    (6, [6, 6, 6], dict(keys=500, dbcount=4), True),
-    (1, [1], dict(keys=100, dbcount=2), True),
-]
 
-
-@pytest.mark.asyncio
-@pytest.mark.slow
-@pytest.mark.parametrize("t_master, t_replicas, seeder_config, from_admin_port", replication_cases)
+@pytest.mark.parametrize(
+    "t_master, t_replicas, seeder_config, stream_target",
+    [
+        # Quick general test that replication is working
+        (1, 3 * [1], dict(key_target=1_000), 500),
+        (4, [4, 4], dict(key_target=10_000), 1_000),
+        pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, marks=M_OPT),
+        # Skewed tests with different thread ratio
+        pytest.param(8, 6 * [1], dict(key_target=5_000), 2_000, marks=M_SLOW),
+        pytest.param(2, [8, 8], dict(key_target=10_000), 2_000, marks=M_SLOW),
+        # Test with big value size
+        pytest.param(2, [2], dict(key_target=1_000, data_size=10_000), 100, marks=M_SLOW),
+        # Stress test
+        pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
+    ],
+)
 async def test_replication_all(
     df_local_factory: DflyInstanceFactory,
-    df_seeder_factory,
     t_master,
     t_replicas,
     seeder_config,
-    from_admin_port,
+    stream_target,
 ):
     master = df_local_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master)
     replicas = [
@@ -54,56 +66,59 @@ async def test_replication_all(
         for i, t in enumerate(t_replicas)
     ]
 
-    # Start master
-    master.start()
+    from_admin_port = random.choice([True, False])
+
+    # Start instances and connect clients
+    df_local_factory.start_all([master] + replicas)
     c_master = master.client()
-
-    # Fill master with test data
-    seeder = df_seeder_factory.create(port=master.port, **seeder_config)
-    await seeder.run(target_deviation=0.1)
-
-    # Start replicas
-    df_local_factory.start_all(replicas)
-
     c_replicas = [replica.client() for replica in replicas]
 
+    # Fill master with test data
+    seeder = SeederV2(**seeder_config)
+    await seeder.run(c_master, target_deviation=0.01)
+
     # Start data stream
-    stream_task = asyncio.create_task(seeder.run(target_ops=3000))
+    stream_task = asyncio.create_task(seeder.run(c_master))
     await asyncio.sleep(0.0)
 
     # Start replication
     master_port = master.port if not from_admin_port else master.admin_port
+    await asyncio.gather(
+        *(
+            asyncio.create_task(c.execute_command("REPLICAOF localhost " + str(master_port)))
+            for c in c_replicas
+        )
+    )
 
-    async def run_replication(c_replica):
-        await c_replica.execute_command("REPLICAOF localhost " + str(master_port))
+    # Wait for all replicas to transition into stable sync
+    async with async_timeout.timeout(20):
+        await wait_for_replicas_state(*c_replicas)
 
-    await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
-
-    # Wait for streaming to finish
-    assert (
-        not stream_task.done()
-    ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
+    # Stop streaming data once every replica is in stable sync
+    await seeder.stop(c_master)
     await stream_task
 
     # Check data after full sync
     await check_all_replicas_finished(c_replicas, c_master)
-    await check_data(seeder, replicas, c_replicas)
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
+    assert len(set(hashes)) == 1
 
     # Stream more data in stable state
-    await seeder.run(target_ops=2000)
+    await seeder.run(c_master, target_ops=stream_target)
 
     # Check data after stable state stream
     await check_all_replicas_finished(c_replicas, c_master)
-    await check_data(seeder, replicas, c_replicas)
+    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
+    assert len(set(hashes)) == 1
+
     await disconnect_clients(c_master, *c_replicas)
 
 
-async def check_replica_finished_exec(c_replica: aioredis.Redis, c_master: aioredis.Redis):
+async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
     role = await c_replica.role()
     if role[0] != "replica" or role[3] != "stable_sync":
         return False
     syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
-    m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
 
     logging.debug(f"  offset {syncid} {r_offset} {m_offset}")
     return r_offset == m_offset
@@ -117,23 +132,19 @@ async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
     while (time.time() - start) < timeout:
         if not waiting_for:
             return
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.2)
 
-        tasks = (asyncio.create_task(check_replica_finished_exec(c, c_master)) for c in waiting_for)
-        finished_list = await asyncio.gather(*tasks)
+        m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
+        finished_list = await asyncio.gather(
+            *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
+        )
 
         # Remove clients that finished from waiting list
         waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
+
     first_r: aioredis.Redis = waiting_for[0]
     logging.error("Replica not finished, role %s", await first_r.role())
     raise RuntimeError("Not all replicas finished in time!")
-
-
-async def check_data(seeder, replicas, c_replicas):
-    capture = await seeder.capture()
-    for replica, c_replica in zip(replicas, c_replicas):
-        await wait_available_async(c_replica)
-        assert await seeder.compare(capture, port=replica.port)
 
 
 """
@@ -1052,50 +1063,42 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=4, logtostdout=True)
-    replica = df_local_factory.create(proactor_threads=2, logtostdout=True)
+async def test_flushall_in_full_sync(df_local_factory):
+    master = df_local_factory.create(proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=2)
 
-    # Start master
-    master.start()
+    df_local_factory.start_all([master, replica])
     c_master = master.client()
+    c_replica = replica.client()
 
     # Fill master with test data
-    seeder = df_seeder_factory.create(port=master.port, keys=100_000, dbcount=1)
-    await seeder.run(target_deviation=0.1)
+    seeder = SeederV2(key_target=30_000)
+    await seeder.run(c_master, target_deviation=0.1)
 
-    # Start replica
-    replica.start()
-    c_replica = replica.client()
+    # Start replication and wait for full sync
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-
-    async def get_sync_mode(c_master):
-        result = await c_master.execute_command("role")
-        # result[1]->replicas info [0]->first replica info [2]->replication state
-        return result[1][0][2]
-
-    async def is_full_sync_mode(c_master):
-        return await get_sync_mode(c_master) == "full_sync"
-
-    # Wait for full sync to start
-    while not await is_full_sync_mode(c_master):
-        await asyncio.sleep(0.0)
+    async with async_timeout.timeout(3):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.05)
 
     syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
 
-    # Issue FLUSHALL and push some more entries
-    await c_master.execute_command("FLUSHALL")
+    # Issue FLUSHALL and record replica role at the same instant
+    _, role = await asyncio.gather(c_master.execute_command("FLUSHALL"), c_replica.role())
 
-    if not await is_full_sync_mode(c_master):
+    # Print warning if replication was too quick
+    if role[3] != "full_sync":
         logging.error("!!! Full sync finished too fast. Adjust test parameters !!!")
         return
 
-    post_seeder = df_seeder_factory.create(port=master.port, keys=10, dbcount=1)
-    await post_seeder.run(target_deviation=0.1)
+    # Run a few more commands on top
+    post_seeder = SeederV2(key_target=100)
+    await post_seeder.run(c_master, target_deviation=0.1)
 
     await check_all_replicas_finished([c_replica], c_master)
 
-    await check_data(post_seeder, [replica], [c_replica])
+    # Check replica data consisten
+    hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
+    assert hash1 == hash2
 
     # Make sure that a new sync ID is present, meaning replication restarted following FLUSHALL.
     new_syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
