@@ -1293,11 +1293,9 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
   Transaction* transaction = cntx->transaction;
 
   if (transaction->GetUniqueShardCnt() == 1) {
+    transaction->RenableAutoJournal();  // Safe to use RENAME with single shard
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto ec = OpRen(t->GetOpArgs(shard), key[0], key[1], skip_exist_dest);
-      // Incase of uniqe shard count we can use rename command in replica.
-      t->RenableAutoJournal();
-      return ec;
+      return OpRen(t->GetOpArgs(shard), key[0], key[1], skip_exist_dest);
     };
     OpResult<void> result = transaction->ScheduleSingleHopT(std::move(cb));
 

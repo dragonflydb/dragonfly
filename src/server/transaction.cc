@@ -27,6 +27,7 @@ thread_local Transaction::TLTmpSpace Transaction::tmp_space;
 
 namespace {
 
+// Global txid sequence
 atomic_uint64_t op_seq{1};
 
 constexpr size_t kTransSize [[maybe_unused]] = sizeof(Transaction);
@@ -90,11 +91,11 @@ std::ostream& operator<<(std::ostream& os, Transaction::time_point tp) {
   return os << ms << "ms";
 }
 
-}  // namespace
-
-IntentLock::Mode Transaction::LockMode() const {
-  return cid_->IsReadOnly() ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
+uint16_t trans_id(const Transaction* ptr) {
+  return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
+
+}  // namespace
 
 void Transaction::PhasedBarrier::Start(uint32_t count) {
   DCHECK_EQ(DEBUG_Count(), 0u);
@@ -159,13 +160,6 @@ cv_status Transaction::BatonBarrier::Wait(time_point tp) {
   return cv_status::no_timeout;
 }
 
-/**
- * @brief Construct a new Transaction:: Transaction object
- *
- * @param cid
- * @param ess
- * @param cs
- */
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   InitTxTime();
   string_view cmd_name(cid_->name());
@@ -1155,6 +1149,16 @@ uint16_t Transaction::GetLocalMask(ShardId sid) const {
   return shard_data_[SidToId(sid)].local_mask;
 }
 
+IntentLock::Mode Transaction::LockMode() const {
+  return cid_->IsReadOnly() ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
+}
+
+OpArgs Transaction::GetOpArgs(EngineShard* shard) const {
+  DCHECK(IsActive(shard->shard_id()));
+  DCHECK((multi_ && multi_->role == SQUASHED_STUB) || (run_barrier_.DEBUG_Count() > 0));
+  return OpArgs{shard, this, GetDbContext()};
+}
+
 // Runs within a engine shard thread.
 // Optimized path that schedules and runs transactions out of order if possible.
 // Returns true if eagerly executed, false if the callback will be handled by the transaction
@@ -1278,35 +1282,31 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   ShardId idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
-  auto pos = sd.pq_pos;
-  if (pos == TxQueue::kEnd)
+  TxQueue::Iterator prev_pos = exchange(sd.pq_pos, TxQueue::kEnd);
+  if (prev_pos == TxQueue::kEnd) {
+    DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) == 0);
     return false;
-
-  sd.pq_pos = TxQueue::kEnd;
+  }
 
   TxQueue* txq = shard->txq();
   TxQueue::Iterator head = txq->Head();
-  auto val = txq->At(pos);
-  Transaction* trans = absl::get<Transaction*>(val);
-  DCHECK(trans == this) << "Pos " << pos << ", txq size " << txq->size() << ", trans " << trans;
-  txq->Remove(pos);
 
-  if (sd.local_mask & KEYLOCK_ACQUIRED) {
-    auto mode = LockMode();
-    auto lock_args = GetLockArgs(shard->shard_id());
-    DCHECK(lock_args.args.size() > 0);
-    shard->db_slice().Release(mode, lock_args);
-    sd.local_mask &= ~KEYLOCK_ACQUIRED;
-  }
+  Transaction* trans = absl::get<Transaction*>(txq->At(prev_pos));
+  DCHECK(trans == this) << txq->size() << ' ' << sd.pq_pos << ' ' << trans->DebugId();
+  txq->Remove(prev_pos);
+
   if (IsGlobal()) {
     shard->shard_lock()->Release(LockMode());
+  } else {
+    auto lock_args = GetLockArgs(shard->shard_id());
+    DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
+    DCHECK(lock_args.args.size() > 0);
+    shard->db_slice().Release(LockMode(), lock_args);
+    sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
 
-  if (pos == head && !txq->Empty()) {
-    return true;
-  }
-
-  return false;
+  // Check if we need to poll the next head
+  return prev_pos == head && !txq->Empty();
 }
 
 // runs in engine-shard thread.
@@ -1541,7 +1541,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   }
 
   // If autojournaling was disabled and not re-enabled, skip it
-  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !renabled_auto_journal_.load(memory_order_relaxed))
+  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_)
     return;
 
   // TODO: Handle complex commands like LMPOP correctly once they are implemented.
@@ -1584,6 +1584,12 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   CHECK(journal);
   journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt,
                        unique_slot_checker_.GetUniqueSlotId(), {}, false);
+}
+
+void Transaction::RenableAutoJournal() {
+  DCHECK(cid_->opt_mask() & CO::NO_AUTOJOURNAL);
+  DCHECK_EQ(run_barrier_.DEBUG_Count(), 0u);  // Can't be changed while dispatching
+  re_enabled_auto_journal_ = true;
 }
 
 void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
