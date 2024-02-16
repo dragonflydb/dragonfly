@@ -22,6 +22,76 @@ bool ShouldIterateAll(SegmentType type) {
   return type == SegmentType::WILDCARD || type == SegmentType::DESCENT;
 }
 
+enum MatchStatus {
+  OUT_OF_BOUNDS,
+  MISMATCH,
+};
+
+// Describes the current state of the DFS traversal for a single node inside json hierarchy.
+// Specifically it holds the parent object (can be a either a real object or an array),
+// and the iterator to one of its children that is currently being traversed.
+template <bool IsConst> class DfsItem {
+ public:
+  using ValueType = std::conditional_t<IsConst, const JsonType, JsonType>;
+  using Ptr = ValueType*;
+  using Ref = ValueType&;
+  using ObjIterator =
+      std::conditional_t<IsConst, JsonType::const_object_iterator, JsonType::object_iterator>;
+  using ArrayIterator =
+      std::conditional_t<IsConst, JsonType::const_array_iterator, JsonType::array_iterator>;
+
+  using DepthState = pair<Ptr, unsigned>;  // object, segment_idx pair
+  using AdvanceResult = nonstd::expected<DepthState, MatchStatus>;
+
+  DfsItem(Ptr o, unsigned idx = 0) : depth_state_(o, idx) {
+  }
+
+  // Returns the next object to traverse
+  // or null if traverse was exhausted or the segment does not match.
+  AdvanceResult Advance(const PathSegment& segment);
+
+  unsigned segment_idx() const {
+    return depth_state_.second;
+  }
+
+ private:
+  ObjIterator Begin() const {
+    if constexpr (IsConst) {
+      return obj().object_range().cbegin();
+    } else {
+      return obj().object_range().begin();
+    }
+  }
+
+  ArrayIterator ArrBegin() const {
+    if constexpr (IsConst) {
+      return obj().array_range().cbegin();
+    } else {
+      return obj().array_range().begin();
+    }
+  }
+
+  Ref obj() const {
+    return *depth_state_.first;
+  }
+
+  DepthState Next(Ref obj) const {
+    return {&obj, depth_state_.second + segment_step_};
+  }
+
+  DepthState Exhausted() const {
+    return {nullptr, 0};
+  }
+
+  AdvanceResult Init(const PathSegment& segment);
+
+  // For most operations we advance the path segment by 1 when we descent into the children.
+  unsigned segment_step_ = 1;
+
+  DepthState depth_state_;
+  variant<monostate, ObjIterator, ArrayIterator> state_;
+};
+
 // Traverses a json object according to the given path and calls the callback for each matching
 // field. With DESCENT segments it will match 0 or more fields in depth.
 // MATCH(node, DESCENT|SUFFIX) = MATCH(node, SUFFIX) ||
@@ -39,11 +109,6 @@ class Dfs {
   }
 
  private:
-  enum MatchStatus {
-    OUT_OF_BOUNDS,
-    MISMATCH,
-  };
-
   bool TraverseImpl(absl::Span<const PathSegment> path, const Cb& callback);
 
   nonstd::expected<void, MatchStatus> PerformStep(const PathSegment& segment, const JsonType& node,
@@ -54,62 +119,22 @@ class Dfs {
     callback(key, node);
   }
 
-  using DepthState = pair<const JsonType*, unsigned>;  // object, segment_idx pair
-  using AdvanceResult = nonstd::expected<DepthState, MatchStatus>;
-
-  // Describes the current state of the DFS traversal for a single node inside json hierarchy.
-  // Specifically it holds the parent object (can be a either a real object or an array),
-  // and the iterator to one of its children that is currently being traversed.
-  class Item {
-   public:
-    Item(const JsonType* o, unsigned idx = 0) : depth_state_(o, idx) {
-    }
-
-    // Returns the next object to traverse
-    // or null if traverse was exhausted or the segment does not match.
-    AdvanceResult Advance(const PathSegment& segment);
-
-    unsigned segment_idx() const {
-      return depth_state_.second;
-    }
-
-   private:
-    const JsonType& obj() const {
-      return *depth_state_.first;
-    }
-
-    DepthState Next(const JsonType& obj) const {
-      return {&obj, depth_state_.second + segment_step_};
-    }
-
-    DepthState Exhausted() const {
-      return {nullptr, 0};
-    }
-
-    AdvanceResult Init(const PathSegment& segment);
-
-    // For most operations we advance the path segment by 1 when we descent into the children.
-    unsigned segment_step_ = 1;
-
-    DepthState depth_state_;
-    variant<monostate, JsonType::const_object_iterator, JsonType::const_array_iterator> state_;
-  };
-
   unsigned matches_ = 0;
 };
 
-auto Dfs::Item::Advance(const PathSegment& segment) -> AdvanceResult {
+template <bool IsConst>
+auto DfsItem<IsConst>::Advance(const PathSegment& segment) -> AdvanceResult {
   AdvanceResult result = std::visit(  // line break
       Overloaded{
           [&](monostate) { return Init(segment); },  // Init state
-          [&](JsonType::const_object_iterator& it) -> AdvanceResult {
+          [&](ObjIterator& it) -> AdvanceResult {
             if (!ShouldIterateAll(segment.type()))
               return Exhausted();
 
             ++it;
             return it == obj().object_range().end() ? Exhausted() : Next(it->value());
           },
-          [&](JsonType::const_array_iterator& it) -> AdvanceResult {
+          [&](ArrayIterator& it) -> AdvanceResult {
             if (!ShouldIterateAll(segment.type()))
               return Exhausted();
 
@@ -121,7 +146,7 @@ auto Dfs::Item::Advance(const PathSegment& segment) -> AdvanceResult {
   return result;
 }
 
-auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
+template <bool IsConst> auto DfsItem<IsConst>::Init(const PathSegment& segment) -> AdvanceResult {
   switch (segment.type()) {
     case SegmentType::IDENTIFIER: {
       if (obj().is_object()) {
@@ -141,7 +166,7 @@ auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
         if (index >= obj().size()) {
           return make_unexpected(OUT_OF_BOUNDS);
         }
-        auto it = obj().array_range().cbegin() + index;
+        auto it = ArrBegin() + index;
         state_ = it;
         return Next(*it);
       }
@@ -156,6 +181,7 @@ auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
         segment_step_ = 0;
         return DepthState{depth_state_.first, depth_state_.second + 1};
       }
+
       // Now traverse all the children but do not progress with segment path.
       // This is why segment_step_ is set to 0.
       [[fallthrough]];
@@ -165,8 +191,8 @@ auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
         if (rng.cbegin() == rng.cend()) {
           return Exhausted();
         }
-        state_ = rng.begin();
-        return Next(rng.begin()->value());
+        state_ = Begin();
+        return Next(Begin()->value());
       }
 
       if (obj().is_array()) {
@@ -174,8 +200,8 @@ auto Dfs::Item::Init(const PathSegment& segment) -> AdvanceResult {
         if (rng.cbegin() == rng.cend()) {
           return Exhausted();
         }
-        state_ = rng.cbegin();
-        return Next(*rng.cbegin());
+        state_ = ArrBegin();
+        return Next(*ArrBegin());
       }
       break;
     }
@@ -195,7 +221,8 @@ void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, con
     return;
   }
 
-  vector<Item> stack;
+  using ConstItem = DfsItem<true>;
+  vector<ConstItem> stack;
   stack.emplace_back(&root);
 
   do {
@@ -203,7 +230,7 @@ void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, con
     const auto& path_segment = path[segment_index];
 
     // init or advance the current object
-    AdvanceResult res = stack.back().Advance(path_segment);
+    ConstItem::AdvanceResult res = stack.back().Advance(path_segment);
     if (res && res->first != nullptr) {
       const JsonType* next = res->first;
       DVLOG(2) << "Handling now " << next->type() << " " << next->to_string();
