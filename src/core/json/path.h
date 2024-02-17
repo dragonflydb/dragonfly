@@ -56,6 +56,10 @@ using Path = std::vector<PathSegment>;
 // The second argument is a json value of either object fields or array elements.
 using PathCallback = absl::FunctionRef<void(std::optional<std::string_view>, const JsonType&)>;
 
+// Returns true if the entry should be deleted, false otherwise.
+using MutateCallback = absl::FunctionRef<bool(std::optional<std::string_view>, JsonType*)>;
+
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback);
+void MutatePath(const Path& path, MutateCallback callback, JsonType* json);
 
 }  // namespace dfly::json

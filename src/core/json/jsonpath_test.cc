@@ -267,4 +267,44 @@ TEST_F(JsonPathTest, Wildcard) {
   ASSERT_THAT(arr, ElementsAre(1, 2, 3));
 }
 
+TEST_F(JsonPathTest, Mutate) {
+  JsonType json = JsonFromString(R"([1, 2, 3, 5, 6])").value();
+  ASSERT_EQ(0, Parse("$[*]"));
+  Path path = driver_.TakePath();
+  MutateCallback cb = [&](optional<string_view>, JsonType* val) {
+    int intval = val->as<int>();
+    *val = intval + 1;
+    return false;
+  };
+
+  MutatePath(path, cb, &json);
+  vector<int> arr;
+  for (auto& el : json.array_range()) {
+    arr.push_back(el.as<int>());
+  }
+  ASSERT_THAT(arr, ElementsAre(2, 3, 4, 6, 7));
+
+  json = JsonFromString(R"(
+    {"a":[7], "inner": {"a": {"bool": true, "c": 42}}}
+  )");
+  ASSERT_EQ(0, Parse("$..a.*"));
+  path = driver_.TakePath();
+  MutatePath(
+      path,
+      [&](optional<string_view> key, JsonType* val) {
+        if (val->is_int64() && !key) {  // array element
+          *val = 42;
+          return false;
+        }
+        if (val->is_bool()) {
+          *val = false;
+          return false;
+        }
+        return true;
+      },
+      &json);
+
+  ASSERT_EQ(R"({"a":[42],"inner":{"a":{"bool":false}}})", json.to_string());
+}
+
 }  // namespace dfly::json
