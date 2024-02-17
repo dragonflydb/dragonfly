@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "dict.h"
 #include "intset.h"
 #include "listpack.h"
 #include "object.h"
@@ -64,23 +65,6 @@ robj *createObject(int type, void *ptr) {
     } else {
         o->lru = LRU_CLOCK();
     }
-    return o;
-}
-
-/* Set a special refcount in the object to make it "shared":
- * incrRefCount and decrRefCount() will test for this special refcount
- * and will not touch the object. This way it is free to access shared
- * objects such as small integers from different threads without any
- * mutex.
- *
- * A common patter to create shared objects:
- *
- * robj *myobject = makeObjectShared(createObject(...));
- *
- */
-robj *makeObjectShared(robj *o) {
-    serverAssert(o->refcount == 1);
-    o->refcount = OBJ_SHARED_REFCOUNT;
     return o;
 }
 
@@ -235,6 +219,29 @@ robj *createQuicklistObject(void) {
     o->encoding = OBJ_ENCODING_QUICKLIST;
     return o;
 }
+
+
+/* Set dictionary type. Keys are SDS strings, values are not used. */
+dictType setDictType = {
+    dictSdsHash,       /* hash function */
+    NULL,              /* key dup */
+    NULL,              /* val dup */
+    dictSdsKeyCompare, /* key compare */
+    dictSdsDestructor, /* key destructor */
+    NULL,              /* val destructor */
+    NULL               /* allow to expand */
+};
+
+/* Hash type hash table (note that small hashes are represented with listpacks) */
+dictType hashDictType = {
+    dictSdsHash,       /* hash function */
+    NULL,              /* key dup */
+    NULL,              /* val dup */
+    dictSdsKeyCompare, /* key compare */
+    dictSdsDestructor, /* key destructor */
+    dictSdsDestructor, /* val destructor */
+    NULL               /* allow to expand */
+};
 
 robj *createSetObject(void) {
     dict *d = dictCreate(&setDictType);

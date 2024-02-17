@@ -251,30 +251,6 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
   mi_collect(false);
 }
 
-TEST_F(CompactObjectTest, Basic) {
-  robj* rv = createRawStringObject("foo", 3);
-  cobj_.ImportRObj(rv);
-
-  CompactObj a;
-  a.SetExpire(true);
-  a.SetFlag(true);
-  a.SetString("val");
-  string res;
-  a.GetString(&res);
-  EXPECT_EQ("val", res);
-  EXPECT_TRUE(a.HasExpire());
-  EXPECT_TRUE(a.HasFlag());
-
-  CompactObj b("vala");
-  EXPECT_NE(a, b);
-
-  CompactObj c = a.AsRef();
-  EXPECT_EQ(a, c);
-  EXPECT_TRUE(c.HasExpire());
-
-  cobj_.SetString(string_view{});
-}
-
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
   CompactObj obj{s};

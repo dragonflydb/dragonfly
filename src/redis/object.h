@@ -3,7 +3,6 @@
 
 #include <stddef.h>
 
-#include "dict.h"
 #include "sds.h"
 #include "quicklist.h"
 
@@ -111,28 +110,6 @@ void setTypeConvert(robj *subject, int enc);
 static inline int sdsEncodedObject(const robj *o) {
     return o->encoding == OBJ_ENCODING_RAW || o->encoding == OBJ_ENCODING_EMBSTR;
 }
-
-/* Structure to hold set iteration abstraction. */
-typedef struct {
-    robj *subject;
-    int encoding;
-    int ii; /* intset iterator */
-    dictIterator *di;
-} setTypeIterator;
-
-/* Structure to hold hash iteration abstraction. Note that iteration over
- * hashes involves both fields and values. Because it is possible that
- * not both are required, store pointers in the iterator to avoid
- * unnecessary memory allocation for fields/values. */
-typedef struct {
-    robj *subject;
-    int encoding;
-
-    unsigned char *fptr, *vptr;
-
-    dictIterator *di;
-    dictEntry *de;
-} hashTypeIterator;
 
 /* Structure to hold list iteration abstraction. */
 typedef struct {

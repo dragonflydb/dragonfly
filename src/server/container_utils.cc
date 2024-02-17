@@ -163,22 +163,11 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
       success = func(ContainerEntry{ival});
     }
   } else {
-    if (pv.Encoding() == kEncodingStrMap2) {
-      for (sds ptr : *static_cast<StringSet*>(pv.RObjPtr())) {
-        if (!func(ContainerEntry{ptr, sdslen(ptr)})) {
-          success = false;
-          break;
-        }
+    for (sds ptr : *static_cast<StringSet*>(pv.RObjPtr())) {
+      if (!func(ContainerEntry{ptr, sdslen(ptr)})) {
+        success = false;
+        break;
       }
-    } else {
-      dict* ds = static_cast<dict*>(pv.RObjPtr());
-      dictIterator* di = dictGetIterator(ds);
-      dictEntry* de = nullptr;
-      while (success && (de = dictNext(di))) {
-        sds ptr = static_cast<sds>(de->key);
-        success = func(ContainerEntry{ptr, sdslen(ptr)});
-      }
-      dictReleaseIterator(di);
     }
   }
 

@@ -53,7 +53,6 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
-ABSL_DECLARE_FLAG(bool, use_set2);
 
 namespace dfly {
 
@@ -122,8 +121,8 @@ inline auto Unexpected(errc ev) {
 static const error_code kOk;
 
 struct ZiplistCbArgs {
-  long count;
-  dict* fields;
+  long count = 0;
+  absl::flat_hash_set<string_view> fields;
   unsigned char** lp;
 };
 
@@ -137,9 +136,8 @@ int ziplistPairsEntryConvertAndValidate(unsigned char* p, unsigned int head_coun
 
   ZiplistCbArgs* data = (ZiplistCbArgs*)userdata;
 
-  if (data->fields == NULL) {
-    data->fields = dictCreate(&hashDictType);
-    dictExpand(data->fields, head_count / 2);
+  if (data->fields.empty()) {
+    data->fields.reserve(head_count / 2);
   }
 
   if (!ziplistGet(p, &str, &slen, &vll))
@@ -148,7 +146,8 @@ int ziplistPairsEntryConvertAndValidate(unsigned char* p, unsigned int head_coun
   /* Even records are field names, add to dict and check that's not a dup */
   if (((data->count) & 1) == 0) {
     sds field = str ? sdsnewlen(str, slen) : sdsfromlonglong(vll);
-    if (dictAdd(data->fields, field, NULL) != DICT_OK) {
+    auto [_, inserted] = data->fields.emplace(field, sdslen(field));
+    if (!inserted) {
       /* Duplicate, return an error */
       sdsfree(field);
       return 0;
@@ -190,7 +189,8 @@ int ziplistEntryConvertAndValidate(unsigned char* p, unsigned int head_count, vo
  * when encounter an integrity validation issue. */
 int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsigned char** lp) {
   /* Keep track of the field names to locate duplicate ones */
-  ZiplistCbArgs data = {0, NULL, lp};
+  ZiplistCbArgs data;
+  data.lp = lp;
 
   int ret = ziplistValidateIntegrity(const_cast<uint8_t*>(zl), size, 1,
                                      ziplistPairsEntryConvertAndValidate, &data);
@@ -199,18 +199,15 @@ int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsi
   if (data.count & 1)
     ret = 0;
 
-  if (data.fields)
-    dictRelease(data.fields);
+  for (auto field : data.fields) {
+    sdsfree((sds)field.data());
+  }
   return ret;
 }
 
-bool resizeStringSet(robj* set, size_t size, bool use_set2) {
-  if (use_set2) {
-    ((dfly::StringSet*)set->ptr)->Reserve(size);
-    return true;
-  } else {
-    return dictTryExpand((dict*)set->ptr, size) != DICT_OK;
-  }
+bool resizeStringSet(robj* set, size_t size) {
+  ((dfly::StringSet*)set->ptr)->Reserve(size);
+  return true;
 }
 
 }  // namespace
@@ -502,36 +499,24 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    bool use_set2 = GetFlag(FLAGS_use_set2);
-
-    if (use_set2) {
+    if (true) {
       StringSet* set = CompactObj::AllocateMR<StringSet>();
       set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       res = createObject(OBJ_SET, set);
       res->encoding = OBJ_ENCODING_HT;
-    } else {
-      res = createSetObject();
-
-      if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
-        LOG(ERROR) << "Detected set with key expiration, but use_set2 is disabled. Unable to load "
-                      "set - key will be ignored.";
-        pv_->ImportRObj(res);
-        std::move(cleanup).Cancel();
-        return;
-      }
     }
 
     // TODO: to move this logic to set_family similarly to ConvertToStrSet.
 
     /* It's faster to expand the dict to the right size asap in order
      * to avoid rehashing */
-    if (len > DICT_HT_INITIAL_SIZE && !resizeStringSet(res, len, use_set2)) {
+    if (len > 2 && !resizeStringSet(res, len)) {
       LOG(ERROR) << "OOM in dictTryExpand " << len;
       ec_ = RdbError(errc::out_of_memory);
       return;
     }
 
-    if (use_set2) {
+    if (true) {
       size_t increment = 1;
       if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
         increment = 2;
@@ -567,19 +552,6 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
           }
         }
       }
-    } else {
-      Iterate(*ltrace, [&](const LoadBlob& blob) {
-        sdsele = ToSds(blob.rdb_var);
-        if (!sdsele)
-          return false;
-
-        if (dictAdd((dict*)res->ptr, sdsele, NULL) != DICT_OK) {
-          LOG(ERROR) << "Duplicate set members detected";
-          ec_ = RdbError(errc::duplicate_key);
-          return false;
-        }
-        return true;
-      });
     }
   }
 
@@ -760,7 +732,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   unsigned encoding = OBJ_ENCODING_SKIPLIST;
   auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<detail::SortedMap>(zs); });
 
-  if (zsetlen > DICT_HT_INITIAL_SIZE && !zs->Reserve(zsetlen)) {
+  if (zsetlen > 2 && !zs->Reserve(zsetlen)) {
     LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
     ec_ = RdbError(errc::out_of_memory);
     return;
@@ -969,9 +941,8 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
         f(res, slen, lval);
       }
     };
-    const bool use_set2 = GetFlag(FLAGS_use_set2);
     robj* res = nullptr;
-    if (use_set2) {
+    if (true) {
       StringSet* set = CompactObj::AllocateMR<StringSet>();
       res = createObject(OBJ_SET, set);
       res->encoding = OBJ_ENCODING_HT;
@@ -979,16 +950,6 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
         sds sdsele = (val) ? sdsnewlen(val, slen) : sdsfromlonglong(lval);
         if (!((StringSet*)res->ptr)->AddSds(sdsele)) {
           LOG(ERROR) << "Error adding to member set2";
-          ec_ = RdbError(errc::duplicate_key);
-        }
-      };
-      iterate_and_apply_f(f);
-    } else {
-      res = createSetObject();
-      auto f = [this, res](unsigned char* val, unsigned int slen, long long lval) {
-        sds sdsele = (val) ? sdsnewlen(val, slen) : sdsfromlonglong(lval);
-        if (!dictAdd((dict*)res->ptr, sdsele, nullptr)) {
-          LOG(ERROR) << "Error adding to member set";
           ec_ = RdbError(errc::duplicate_key);
         }
       };

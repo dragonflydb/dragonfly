@@ -30,7 +30,7 @@ extern "C" {
 #include "core/string_map.h"
 #include "core/string_set.h"
 
-ABSL_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
+ABSL_RETIRED_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
 
 namespace dfly {
 using namespace std;
@@ -51,10 +51,6 @@ size_t QlMAllocSize(quicklist* ql) {
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
-    case kEncodingStrMap: {
-      dictRelease((dict*)ptr);
-      break;
-    }
     case kEncodingStrMap2: {
       CompactObj::DeleteMR<StringSet>(ptr);
       break;
@@ -279,10 +275,6 @@ size_t RobjWrapper::Size() const {
         case kEncodingIntSet: {
           intset* is = (intset*)inner_obj_;
           return intsetLen(is);
-        }
-        case kEncodingStrMap: {
-          dict* d = (dict*)inner_obj_;
-          return dictSize(d);
         }
         case kEncodingStrMap2: {
           StringSet* ss = (StringSet*)inner_obj_;
@@ -700,7 +692,7 @@ void CompactObj::ImportRObj(robj* o) {
       if (o->encoding == OBJ_ENCODING_INTSET) {
         enc = kEncodingIntSet;
       } else {
-        enc = GetFlag(FLAGS_use_set2) ? kEncodingStrMap2 : kEncodingStrMap;
+        enc = kEncodingStrMap2;
       }
     } else if (o->type == OBJ_HASH) {
       LOG(FATAL) << "Should not reach";

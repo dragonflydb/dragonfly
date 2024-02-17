@@ -47,10 +47,6 @@ bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
 }
 
-bool IsDenseEncoding(const SetType& co) {
-  return co.second == kEncodingStrMap2;
-}
-
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
   long long llval;
   *added = false;
@@ -72,33 +68,12 @@ intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
   return is;
 }
 
-bool dictContains(const dict* d, string_view key) {
-  uint64_t h = dictGenHashFunction(key.data(), key.size());
-
-  for (unsigned table = 0; table <= 1; table++) {
-    uint64_t idx = h & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
-    dictEntry* he = d->ht_table[table][idx];
-    while (he) {
-      sds dkey = (sds)he->key;
-      if (sdslen(dkey) == key.size() &&
-          (key.empty() || memcmp(dkey, key.data(), key.size()) == 0)) {
-        return true;
-      }
-      he = he->next;
-    }
-    if (!dictIsRehashing(d)) {
-      break;
-    }
-  }
-  return false;
-}
-
 pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* set) {
   unsigned removed = 0;
   bool isempty = false;
-  auto* shard = EngineShard::tlocal();
+  DCHECK(IsDenseEncoding(*set));
 
-  if (IsDenseEncoding(*set)) {
+  if (true) {
     StringSet* ss = ((StringSet*)set->RObjPtr());
     ss->set_time(now_sec);
 
@@ -107,16 +82,6 @@ pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* s
     }
 
     isempty = ss->Empty();
-  } else {
-    DCHECK_EQ(set->Encoding(), kEncodingStrMap);
-    dict* d = (dict*)set->RObjPtr();
-    for (auto member : vals) {
-      shard->tmp_str1 = sdscpylen(shard->tmp_str1, member.data(), member.size());
-      int result = dictDelete(d, shard->tmp_str1);
-      removed += (result == DICT_OK);
-    }
-
-    isempty = dictSize(d) == 0;
   }
 
   return make_pair(removed, isempty);
@@ -124,8 +89,9 @@ pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* s
 
 unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec, CompactObj* dest) {
   unsigned res = 0;
+  DCHECK(IsDenseEncoding(*dest));
 
-  if (IsDenseEncoding(*dest)) {
+  if (true) {
     StringSet* ss = (StringSet*)dest->RObjPtr();
     uint32_t time_now = MemberTimeSeconds(db_context.time_now_ms);
 
@@ -134,31 +100,13 @@ unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec,
     for (auto member : vals) {
       res += ss->Add(member, ttl_sec);
     }
-  } else {
-    DCHECK_EQ(dest->Encoding(), kEncodingStrMap);
-    dict* ds = (dict*)dest->RObjPtr();
-    auto* es = EngineShard::tlocal();
-
-    for (auto member : vals) {
-      es->tmp_str1 = sdscpylen(es->tmp_str1, member.data(), member.size());
-      dictEntry* de = dictAddRaw(ds, es->tmp_str1, NULL);
-      if (de) {
-        de->key = sdsdup(es->tmp_str1);
-        ++res;
-      }
-    }
   }
 
   return res;
 }
 
 void InitStrSet(CompactObj* set) {
-  if (GetFlag(FLAGS_use_set2)) {
-    set->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
-  } else {
-    dict* ds = dictCreate(&setDictType);
-    set->InitRobj(OBJ_SET, kEncodingStrMap, ds);
-  }
+  set->InitRobj(OBJ_SET, kEncodingStrMap2, CompactObj::AllocateMR<StringSet>());
 }
 
 // returns (removed, isempty)
@@ -210,8 +158,9 @@ uint64_t ScanStrSet(const DbContext& db_context, const CompactObj& co, uint64_t 
                     const ScanOpts& scan_op, StringVec* res) {
   uint32_t count = scan_op.limit;
   long maxiterations = count * 10;
+  DCHECK(IsDenseEncoding(co));
 
-  if (IsDenseEncoding(co)) {
+  if (true) {
     StringSet* set = (StringSet*)co.RObjPtr();
     set->set_time(MemberTimeSeconds(db_context.time_now_ms));
 
@@ -226,29 +175,7 @@ uint64_t ScanStrSet(const DbContext& db_context, const CompactObj& co, uint64_t 
       curs = set->Scan(curs, scan_callback);
 
     } while (curs && maxiterations-- && res->size() < count);
-  } else {
-    DCHECK_EQ(co.Encoding(), kEncodingStrMap);
-    using PrivateDataRef = std::tuple<StringVec*, const ScanOpts&>;
-    PrivateDataRef private_data_ref(res, scan_op);
-    void* private_data = &private_data_ref;
-    dict* ds = (dict*)co.RObjPtr();
-
-    auto scan_callback = [](void* private_data, const dictEntry* de) {
-      StringVec* sv = std::get<0>(*(PrivateDataRef*)private_data);
-      const ScanOpts& scan_op = std::get<1>(*(PrivateDataRef*)private_data);
-
-      sds key = (sds)de->key;
-      auto len = sdslen(key);
-      if (scan_op.Matches(std::string_view(key, len))) {
-        sv->emplace_back(key, len);
-      }
-    };
-
-    do {
-      curs = dictScan(ds, curs, scan_callback, NULL, private_data);
-    } while (curs && maxiterations-- && res->size() < count);
   }
-
   return curs;
 }
 
@@ -257,14 +184,11 @@ uint32_t SetTypeLen(const DbContext& db_context, const SetType& set) {
     return intsetLen((const intset*)set.first);
   }
 
-  if (IsDenseEncoding(set)) {
+  if (true) {
     StringSet* ss = (StringSet*)set.first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     return ss->UpperBoundSize();
   }
-
-  DCHECK_EQ(set.second, kEncodingStrMap);
-  return dictSize((const dict*)set.first);
 }
 
 bool IsInSet(const DbContext& db_context, const SetType& st, int64_t val) {
@@ -275,14 +199,11 @@ bool IsInSet(const DbContext& db_context, const SetType& st, int64_t val) {
   char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
   string_view str{buf, size_t(next - buf)};
 
-  if (IsDenseEncoding(st)) {
+  if (true) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     return ss->Contains(str);
   }
-
-  DCHECK_EQ(st.second, kEncodingStrMap);
-  return dictContains((dict*)st.first, str);
 }
 
 bool IsInSet(const DbContext& db_context, const SetType& st, string_view member) {
@@ -294,14 +215,11 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
     return intsetFind((intset*)st.first, llval);
   }
 
-  if (IsDenseEncoding(st)) {
+  if (true) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
 
     return ss->Contains(member);
-  } else {
-    DCHECK_EQ(st.second, kEncodingStrMap);
-    return dictContains((dict*)st.first, member);
   }
 }
 
@@ -315,7 +233,7 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
     return -1;
   }
 
-  if (IsDenseEncoding(st)) {
+  if (true) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
 
@@ -324,9 +242,6 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
       return -3;
 
     return it.HasExpiry() ? it.ExpiryTime() : -1;
-  } else {
-    // Old encoding, does not support expiry.
-    return -1;
   }
 }
 
@@ -341,27 +256,17 @@ void FindInSet(StringVec& memberships, const DbContext& db_context, const SetTyp
 // Removes arg from result.
 void DiffStrSet(const DbContext& db_context, const SetType& st,
                 absl::flat_hash_set<string>* result) {
-  if (IsDenseEncoding(st)) {
+  if (true) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     for (sds ptr : *ss) {
       result->erase(string_view{ptr, sdslen(ptr)});
     }
-  } else {
-    DCHECK_EQ(st.second, kEncodingStrMap);
-    dict* ds = (dict*)st.first;
-    dictIterator* di = dictGetIterator(ds);
-    dictEntry* de = nullptr;
-    while ((de = dictNext(di))) {
-      sds key = (sds)de->key;
-      result->erase(string_view{key, sdslen(key)});
-    }
-    dictReleaseIterator(di);
   }
 }
 
 void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, StringVec* result) {
-  if (IsDenseEncoding(vec.front())) {
+  if (true) {
     StringSet* ss = (StringSet*)vec.front().first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     for (const sds ptr : *ss) {
@@ -377,34 +282,13 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
         result->push_back(std::string(str));
       }
     }
-  } else {
-    DCHECK_EQ(vec.front().second, kEncodingStrMap);
-    dict* ds = (dict*)vec.front().first;
-    dictIterator* di = dictGetIterator(ds);
-    dictEntry* de = nullptr;
-    while ((de = dictNext(di))) {
-      size_t j = 1;
-      sds key = (sds)de->key;
-      string_view member{key, sdslen(key)};
-
-      for (j = 1; j < vec.size(); j++) {
-        if (vec[j].first != ds && !IsInSet(db_context, vec[j], member))
-          break;
-      }
-
-      /* Only take action when all vec contain the member */
-      if (j == vec.size()) {
-        result->push_back(string(member));
-      }
-    }
-    dictReleaseIterator(di);
   }
 }
 
 StringVec PopStrSet(const DbContext& db_context, unsigned count, const SetType& st) {
   StringVec result;
 
-  if (IsDenseEncoding(st)) {
+  if (true) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
 
@@ -412,18 +296,6 @@ StringVec PopStrSet(const DbContext& db_context, unsigned count, const SetType& 
     for (unsigned i = 0; i < count && !ss->Empty(); ++i) {
       result.push_back(ss->Pop().value());
     }
-  } else {
-    DCHECK_EQ(st.second, kEncodingStrMap);
-    dict* ds = (dict*)st.first;
-    string str;
-    dictIterator* di = dictGetSafeIterator(ds);
-    for (uint32_t i = 0; i < count; ++i) {
-      dictEntry* de = dictNext(di);
-      DCHECK(de);
-      result.emplace_back((sds)de->key, sdslen((sds)de->key));
-      dictDelete(ds, de->key);
-    }
-    dictReleaseIterator(di);
   }
 
   return result;
@@ -605,12 +477,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
         }
 
         // frees 'is' on a way.
-        if (GetFlag(FLAGS_use_set2)) {
-          co.InitRobj(OBJ_SET, kEncodingStrMap2, tmp.ptr);
-        } else {
-          co.InitRobj(OBJ_SET, kEncodingStrMap, tmp.ptr);
-        }
-
+        co.InitRobj(OBJ_SET, kEncodingStrMap2, tmp.ptr);
         inner_obj = co.RObjPtr();
         break;
       }
@@ -648,7 +515,6 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
   CompactObj& co = add_res.it->second;
 
   if (add_res.is_new) {
-    CHECK(absl::GetFlag(FLAGS_use_set2));
     InitStrSet(&co);
   } else {
     // for non-overwrite case it must be set.
@@ -1627,7 +1493,7 @@ bool SetFamily::ConvertToStrSet(const intset* is, size_t expected_len, robj* des
   char buf[32];
   int ii = 0;
 
-  if (GetFlag(FLAGS_use_set2)) {
+  if (true) {
     StringSet* ss = CompactObj::AllocateMR<StringSet>();
     if (expected_len) {
       ss->Reserve(expected_len);
@@ -1641,25 +1507,6 @@ bool SetFamily::ConvertToStrSet(const intset* is, size_t expected_len, robj* des
 
     dest->ptr = ss;
     dest->encoding = kEncodingStrMap2;
-  } else {
-    dict* ds = dictCreate(&setDictType);
-
-    if (expected_len) {
-      if (dictTryExpand(ds, expected_len) != DICT_OK) {
-        dictRelease(ds);
-        return false;
-      }
-    }
-
-    /* To add the elements we extract integers and create redis objects */
-    while (intsetGet(const_cast<intset*>(is), ii++, &intele)) {
-      char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
-      sds s = sdsnewlen(buf, next - buf);
-      CHECK(dictAddRaw(ds, s, NULL));
-    }
-
-    dest->ptr = ds;
-    dest->encoding = OBJ_ENCODING_HT;
   }
   return true;
 }
@@ -1713,29 +1560,12 @@ void SetFamily::Register(CommandRegistry* registry) {
       << CI{"SUNIONSTORE",    CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1,
             acl::kSUnionStore}
              .HFUNC(SUnionStore)
-      << CI{"SSCAN", CO::READONLY, -3, 1, 1, acl::kSScan}.HFUNC(SScan);
-
-  if (absl::GetFlag(FLAGS_use_set2)) {
-    *registry << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kSAdd}.HFUNC(
-        SAddEx);
-  }
+      << CI{"SSCAN", CO::READONLY, -3, 1, 1, acl::kSScan}.HFUNC(SScan)
+      << CI{"SADDEX", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kSAdd}.HFUNC(SAddEx);
 }
 
 uint32_t SetFamily::MaxIntsetEntries() {
   return kMaxIntSetEntries;
-}
-
-void SetFamily::ConvertTo(const intset* src, dict* dest) {
-  int64_t intele;
-  char buf[32];
-
-  /* To add the elements we extract integers and create redis objects */
-  int ii = 0;
-  while (intsetGet(const_cast<intset*>(src), ii++, &intele)) {
-    char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
-    sds s = sdsnewlen(buf, next - buf);
-    CHECK(dictAddRaw(dest, s, NULL));
-  }
 }
 
 int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,

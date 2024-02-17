@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include "crc64.h"
+#include "dict.h"
 #include "endianconv.h"
 #include "object.h"
 #include "zmalloc.h"
@@ -83,25 +84,3 @@ uint64_t intrev64(uint64_t v) {
   memrev64(&v);
   return v;
 }
-
-/* Set dictionary type. Keys are SDS strings, values are not used. */
-dictType setDictType = {
-    dictSdsHash,       /* hash function */
-    NULL,              /* key dup */
-    NULL,              /* val dup */
-    dictSdsKeyCompare, /* key compare */
-    dictSdsDestructor, /* key destructor */
-    NULL,              /* val destructor */
-    NULL               /* allow to expand */
-};
-
-/* Hash type hash table (note that small hashes are represented with listpacks) */
-dictType hashDictType = {
-    dictSdsHash,       /* hash function */
-    NULL,              /* key dup */
-    NULL,              /* val dup */
-    dictSdsKeyCompare, /* key compare */
-    dictSdsDestructor, /* key destructor */
-    dictSdsDestructor, /* val destructor */
-    NULL               /* allow to expand */
-};

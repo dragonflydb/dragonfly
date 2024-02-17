@@ -451,21 +451,7 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
 }
 
 error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
-  if (obj.Encoding() == kEncodingStrMap) {
-    dict* set = (dict*)obj.RObjPtr();
-
-    RETURN_ON_ERR(SaveLen(dictSize(set)));
-
-    dictIterator* di = dictGetIterator(set);
-    dictEntry* de;
-    auto cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
-
-    while ((de = dictNext(di)) != NULL) {
-      sds ele = (sds)de->key;
-
-      RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
-    }
-  } else if (obj.Encoding() == kEncodingStrMap2) {
+  if (obj.Encoding() == kEncodingStrMap2) {
     StringSet* set = (StringSet*)obj.RObjPtr();
 
     RETURN_ON_ERR(SaveLen(set->SizeSlow()));
