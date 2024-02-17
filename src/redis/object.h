@@ -62,7 +62,6 @@ typedef struct redisObject {
 
 
 /* Redis object implementation */
-void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
 int getLongLongFromObject(robj *o, long long *target);
 void incrRefCount(robj *o);

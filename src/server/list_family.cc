@@ -78,24 +78,22 @@ quicklist* GetQL(const PrimeValue& mv) {
 }
 
 void* listPopSaver(unsigned char* data, size_t sz) {
-  return createStringObject((char*)data, sz);
+  return new string((char*)data, sz);
 }
 
 string ListPop(ListDir dir, quicklist* ql) {
   long long vlong;
-  robj* value = NULL;
+  string* pop_str = nullptr;
 
   int ql_where = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
 
   // Empty list automatically removes the key (see below).
   CHECK_EQ(1,
-           quicklistPopCustom(ql, ql_where, (unsigned char**)&value, NULL, &vlong, listPopSaver));
+           quicklistPopCustom(ql, ql_where, (unsigned char**)&pop_str, NULL, &vlong, listPopSaver));
   string res;
-  if (value) {
-    DCHECK(value->encoding == OBJ_ENCODING_EMBSTR || value->encoding == OBJ_ENCODING_RAW);
-    sds s = (sds)(value->ptr);
-    res = string{s, sdslen(s)};
-    decrRefCount(value);
+  if (pop_str) {
+    pop_str->swap(res);
+    delete pop_str;
   } else {
     res = absl::StrCat(vlong);
   }
@@ -256,11 +254,10 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   src_it = src_res->it;
 
   if (dest_res.is_new) {
-    robj* obj = createQuicklistObject();
-    dest_ql = (quicklist*)obj->ptr;
+    dest_ql = quicklistCreate();
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    dest_res.it->second.ImportRObj(obj);
+    dest_res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, dest_ql);
     DCHECK(IsValid(src_it));
   } else {
     if (dest_res.it->second.ObjType() != OBJ_LIST)
@@ -327,11 +324,10 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
 
   if (res.is_new) {
-    robj* o = createQuicklistObject();
-    ql = (quicklist*)o->ptr;
+    ql = quicklistCreate();
     quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    res.it->second.ImportRObj(o);
+    res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
   } else {
     if (res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
