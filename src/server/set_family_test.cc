@@ -47,6 +47,7 @@ TEST_F(SetFamilyTest, SUnionStore) {
   Run({"sadd", "c", "10", "11"});
   Run({"set", "a", "foo"});
   resp = Run({"sunionstore", "a", "b", "c"});
+
   EXPECT_THAT(resp, IntArg(5));
   resp = Run({"type", "a"});
   ASSERT_EQ(resp, "set");

@@ -26,8 +26,6 @@ class SetFamily {
 
   static uint32_t MaxIntsetEntries();
 
-  static void ConvertTo(const intset* src, dict* dest);
-
   // Returns true if succeeded, false on OOM.
   static bool ConvertToStrSet(const intset* is, size_t expected_len, robj* dest);
 

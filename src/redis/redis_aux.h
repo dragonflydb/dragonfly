@@ -1,7 +1,6 @@
 #ifndef __REDIS_AUX_H
 #define __REDIS_AUX_H
 
-#include "dict.h"
 #include "sds.h"
 
 /* redis.h auxiliary definitions */
@@ -36,10 +35,6 @@
 
 #define CONFIG_RUN_ID_SIZE 40U
 
-/* Hash table types */
-extern dictType setDictType;
-extern dictType hashDictType;
-
 /* To improve the quality of the LRU approximation we take a set of keys
  * that are good candidate for eviction across performEvictions() calls.
  *
@@ -52,6 +47,7 @@ extern dictType hashDictType;
  *
  * Empty entries have the key pointer set to NULL. */
 
+typedef struct dict dict;
 
 uint64_t dictSdsHash(const void* key);
 int dictSdsKeyCompare(dict* privdata, const void* key1, const void* key2);

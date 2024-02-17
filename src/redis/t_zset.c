@@ -60,6 +60,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "dict.h"
 #include "listpack.h"
 #include "redis_aux.h"
 #include "sds.h"
