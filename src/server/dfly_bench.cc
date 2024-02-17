@@ -14,22 +14,32 @@
 #include "base/histogram.h"
 #include "base/init.h"
 #include "base/io_buf.h"
+#include "base/zipf_gen.h"
 #include "core/fibers.h"
 #include "facade/redis_parser.h"
 #include "util/fibers/dns_resolve.h"
 #include "util/fibers/pool.h"
-#include "util/uring/uring_socket.h"
+#include "util/fibers/uring_socket.h"
 
 // A load-test for DragonflyDB that fixes coordinated omission problem.
+
+using std::string;
 
 ABSL_FLAG(uint16_t, p, 6379, "Server port");
 ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
 ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
-ABSL_FLAG(std::string, h, "localhost", "server hostname/ip");
-ABSL_FLAG(uint32_t, key_minimum, 0, "Min value for keys used");
-ABSL_FLAG(uint32_t, key_maximum, 1'000, "Max value for keys used");
-ABSL_FLAG(std::string, ratio, "1:10", "Set:Get ratio");
+ABSL_FLAG(string, h, "localhost", "server hostname/ip");
+ABSL_FLAG(uint64_t, key_minimum, 0, "Min value for keys used");
+ABSL_FLAG(uint64_t, key_maximum, 10'000, "Max value for keys used");
+ABSL_FLAG(string, key_prefix, "key:", "keys prefix");
+ABSL_FLAG(string, key_dist, "U", "U for uniform, N for normal, Z for zipfian");
+ABSL_FLAG(double, zipf_alpha, 0.99, "zipfian alpha parameter");
+ABSL_FLAG(uint64_t, key_stddev, 0,
+          "Standard deviation for non-uniform distribution, 0 chooses"
+          " a default value of (max-min)/6");
+ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
+ABSL_FLAG(string, command, "", "custom command with __key__ placeholder for keys");
 
 using namespace std;
 using namespace util;
@@ -37,6 +47,73 @@ using absl::GetFlag;
 using facade::RedisParser;
 using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
+
+thread_local absl::InsecureBitGen bit_gen;
+
+class KeyGenerator {
+ public:
+  KeyGenerator(uint32_t min, uint32_t max);
+
+  string operator()();
+
+ private:
+  string prefix_;
+  uint64_t min_, max_, range_;
+  double stddev_ = 1.0 / 6;
+  optional<base::ZipfianGenerator> zipf_;
+  enum DistType { UNIFORM, NORMAL, ZIPFIAN } dist_type_;
+};
+
+class CommandGenerator {
+ public:
+  CommandGenerator(KeyGenerator* keygen);
+
+  string operator()();
+
+ private:
+  KeyGenerator* keygen_;
+  uint32_t ratio_set_ = 0, ratio_get_ = 0;
+  string command_;
+  string cmd_;
+  std::vector<size_t> key_indices_;
+};
+
+CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
+  command_ = GetFlag(FLAGS_command);
+  if (command_.empty()) {
+    pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
+    CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set_));
+    CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get_));
+  } else {
+    for (size_t pos = 0; (pos = command_.find("__key__", pos)) != string::npos; pos += 7) {
+      key_indices_.push_back(pos);
+    }
+  }
+}
+
+string CommandGenerator::operator()() {
+  cmd_.clear();
+  string key;
+  if (command_.empty()) {
+    key = (*keygen_)();
+
+    if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
+      // TODO: value size
+      absl::StrAppend(&cmd_, "set ", key, " val\r\n");
+    } else {
+      absl::StrAppend(&cmd_, "get ", key, "\r\n");
+    }
+  } else {
+    size_t last_pos = 0;
+    for (size_t pos : key_indices_) {
+      key = (*keygen_)();
+      absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), key);
+      last_pos = pos + 7;
+    }
+    absl::StrAppend(&cmd_, command_.substr(last_pos), "\r\n");
+  }
+  return cmd_;
+}
 
 // Per connection driver.
 class Driver {
@@ -48,7 +125,7 @@ class Driver {
   Driver(const Driver&) = delete;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
-  void Run(base::Histogram* dest);
+  void Run(uint32_t num_reqs, uint64_t cycle_ns, base::Histogram* dest);
 
  private:
   void ReceiveFb(base::Histogram* dest);
@@ -74,7 +151,7 @@ class TLocalClient {
   TLocalClient(const TLocalClient&) = delete;
 
   void Connect(tcp::endpoint ep);
-  void Run();
+  void Run(uint64_t cycle_ns);
 
   base::Histogram hist;
 
@@ -83,37 +160,66 @@ class TLocalClient {
   vector<unique_ptr<Driver>> drivers_;
 };
 
+KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
+    : min_(min), max_(max), range_(max - min + 1) {
+  prefix_ = GetFlag(FLAGS_key_prefix);
+  string dist = GetFlag(FLAGS_key_dist);
+  CHECK_GT(range_, 0u);
+
+  if (dist == "U") {
+    dist_type_ = UNIFORM;
+  } else if (dist == "N") {
+    dist_type_ = NORMAL;
+    uint64_t stddev = GetFlag(FLAGS_key_stddev);
+    if (stddev != 0) {
+      stddev_ = double(stddev) / double(range_);
+    }
+  } else if (dist == "Z") {
+    dist_type_ = ZIPFIAN;
+    zipf_.emplace(min, max, GetFlag(FLAGS_zipf_alpha));
+  } else {
+    LOG(FATAL) << "Unknown distribution type: " << dist;
+  }
+}
+
+string KeyGenerator::operator()() {
+  uint64_t key_suffix{0};
+  switch (dist_type_) {
+    case UNIFORM:
+      key_suffix = absl::Uniform(bit_gen, min_, max_);
+      break;
+    case NORMAL: {
+      double val = absl::Gaussian(bit_gen, 0.5, stddev_);
+      key_suffix = min_ + uint64_t(val * range_);
+      break;
+    }
+    case ZIPFIAN:
+      key_suffix = zipf_->Next(bit_gen);
+      break;
+  }
+
+  return absl::StrCat(prefix_, key_suffix);
+}
+
 void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   VLOG(2) << "Connecting " << index;
   error_code ec = socket_->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
 }
 
-void Driver::Run(base::Histogram* dest) {
-  // TODO: move flag parsing to a central place and copy it to each thread
-  string cmd;
-  const uint32_t qps = GetFlag(FLAGS_qps);
-  const int64_t interval = 1000000000LL / qps;
-
+void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, base::Histogram* dest) {
   auto receive_fb = MakeFiber([this, dest] { ReceiveFb(dest); });
 
   int64_t next_invocation = absl::GetCurrentTimeNanos();
 
-  uint32_t n = GetFlag(FLAGS_n);
   const absl::Time start = absl::Now();
-  LOG(INFO) << "Sending " << n << " requests at a rate of " << GetFlag(FLAGS_qps)
-            << "qps, i.e. request every " << interval << "ns";
 
-  thread_local absl::InsecureBitGen bit_gen;
   const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
   const uint32_t key_maximum = GetFlag(FLAGS_key_maximum);
 
-  pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
-  uint32_t ratio_set, ratio_get;
-  CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set));
-  CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get));
-
-  for (unsigned i = 0; i < n; ++i) {
+  KeyGenerator key_gen(key_minimum, key_maximum);
+  CommandGenerator cmd_gen(&key_gen);
+  for (unsigned i = 0; i < num_reqs; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
     int64_t sleep_ns = next_invocation - now;
@@ -123,18 +229,9 @@ void Driver::Run(base::Histogram* dest) {
     } else {
       VLOG(5) << "Behind QPS schedule";
     }
-    next_invocation += interval;
+    next_invocation += cycle_ns;
 
-    cmd.clear();
-
-    uint32_t key_suffix = absl::Uniform(bit_gen, key_minimum, key_maximum);
-
-    if (absl::Uniform(bit_gen, 0U, ratio_get + ratio_set) < ratio_set) {
-      // TODO: value size
-      absl::StrAppend(&cmd, "set ", "key", key_suffix, " val\r\n");
-    } else {
-      absl::StrAppend(&cmd, "get ", "key", key_suffix, "\r\n");
-    }
+    string cmd = cmd_gen();
 
     Req req;
     req.start = absl::GetCurrentTimeNanos();
@@ -151,8 +248,8 @@ void Driver::Run(base::Histogram* dest) {
   }
 
   const absl::Time finish = absl::Now();
-  LOG(INFO) << "Done queuing " << n << " requests, which took " << finish - start
-            << ". Waiting for server processing";
+  VLOG(1) << "Done queuing " << num_reqs << " requests, which took " << finish - start
+          << ". Waiting for server processing";
 
   // TODO: to change to a condvar or something.
   while (!reqs_.empty()) {
@@ -161,10 +258,11 @@ void Driver::Run(base::Histogram* dest) {
 
   socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
   receive_fb.Join();
+  std::ignore = socket_->Close();
 }
 
 void Driver::ReceiveFb(base::Histogram* dest) {
-  facade::RedisParser parser{false};
+  facade::RedisParser parser{1 << 16, false};
   base::IoBuf io_buf{512};
   unsigned num_resp = 0;
   while (true) {
@@ -185,7 +283,9 @@ void Driver::ReceiveFb(base::Histogram* dest) {
     do {
       result = parser.Parse(io_buf.InputBuffer(), &consumed, &parse_args);
       if (result == RedisParser::OK && !parse_args.empty()) {
-        dest->Add(absl::GetCurrentTimeNanos() - reqs_.front().start);
+        uint64_t now = absl::GetCurrentTimeNanos();
+        uint64_t usec = (now - reqs_.front().start) / 1000;
+        dest->Add(usec);
         reqs_.pop();
         parse_args.clear();
         ++num_resp;
@@ -211,14 +311,13 @@ void TLocalClient::Connect(tcp::endpoint ep) {
     fb.Join();
 }
 
-void TLocalClient::Run() {
+void TLocalClient::Run(uint64_t cycle_ns) {
   vector<fb2::Fiber> fbs(drivers_.size());
+  uint32_t num_reqs = GetFlag(FLAGS_n);
 
   for (size_t i = 0; i < fbs.size(); ++i) {
-    fbs[i] = MakeFiber([&, i] {
-      ThisFiber::SetName(absl::StrCat("run/", i));
-      drivers_[i]->Run(&hist);
-    });
+    fbs[i] = fb2::Fiber(absl::StrCat("run/", i),
+                        [&, i] { drivers_[i]->Run(num_reqs, cycle_ns, &hist); });
   }
 
   for (auto& fb : fbs)
@@ -250,9 +349,15 @@ int main(int argc, char* argv[]) {
     client->Connect(ep);
   });
 
-  LOG(INFO) << "Running all threads";
+  const uint32_t qps = GetFlag(FLAGS_qps);
+  const int64_t interval = 1000000000LL / qps;
+  uint32_t num_reqs = GetFlag(FLAGS_n);
+
+  CONSOLE_INFO << "Running all threads, sending " << num_reqs << " requests at a rate of "
+               << GetFlag(FLAGS_qps) << "qps, i.e. request every " << interval / 1000 << "us";
+
   const absl::Time start_time = absl::Now();
-  pp->AwaitFiberOnAll([&](auto* p) { client->Run(); });
+  pp->AwaitFiberOnAll([&](auto* p) { client->Run(interval); });
   absl::Duration duration = absl::Now() - start_time;
   LOG(INFO) << "Finished. Total time: " << duration;
 
@@ -265,7 +370,7 @@ int main(int argc, char* argv[]) {
     client.reset();
   });
 
-  LOG(INFO) << "Summary:\n" << hist.ToString();
+  CONSOLE_INFO << "Summary, all times are in usec:\n" << hist.ToString();
 
   pp->Stop();
 
