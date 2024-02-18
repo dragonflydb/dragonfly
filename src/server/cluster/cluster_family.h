@@ -28,6 +28,8 @@ class ClusterFamily {
   // Returns a thread-local pointer.
   ClusterConfig* cluster_config();
 
+  void FinalizeIncomingMigration(uint32_t local_sync_id);
+
  private:
   // Cluster commands compatible with Redis
   void Cluster(CmdArgList args, ConnectionContext* cntx);
@@ -76,8 +78,6 @@ class ClusterFamily {
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
                                      std::vector<ClusterConfig::SlotRange> slots);
-
-  void FinalizeIncomingMigration(uint32_t local_sync_id);
 
   void RemoveFinishedIncomingMigrations();
 

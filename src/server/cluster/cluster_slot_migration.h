@@ -14,7 +14,7 @@ class ClusterFamily;
 // The main entity on the target side that manage slots migration process
 // Creates initial connection between the target and source node,
 // manage migration process state and data
-class ClusterSlotMigration : ProtocolClient, std::enable_shared_from_this<ClusterSlotMigration> {
+class ClusterSlotMigration : private ProtocolClient {
  public:
   struct Info {
     std::string host;
@@ -46,7 +46,7 @@ class ClusterSlotMigration : ProtocolClient, std::enable_shared_from_this<Cluste
 
   void Stop();
 
-  const auto& GetSlots() const {
+  const std::vector<ClusterConfig::SlotRange>& GetSlots() const {
     return slots_;
   }
 

@@ -82,17 +82,12 @@ class ClusterConfig {
   static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
                                                          const JsonType& json_config);
 
-  std::shared_ptr<ClusterConfig> CloneAndUpdate(const std::vector<SlotRange>& slots,
-                                                bool enable) const;
+  std::shared_ptr<ClusterConfig> CloneWithChanges(const std::vector<SlotRange>& slots,
+                                                  bool enable) const;
 
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
-
-  // TODO this method should be removed, config shouldn't be modified
-  void RemoveSlots(SlotSet slots);
-  // TODO this method should be removed, config shouldn't be modified
-  void AddSlots(SlotSet slots);
 
   // Returns the master configured for `id`.
   Node GetMasterNodeForSlot(SlotId id) const;

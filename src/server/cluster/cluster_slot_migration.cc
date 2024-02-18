@@ -147,10 +147,6 @@ void ClusterSlotMigration::MainMigrationFb() {
 
     const auto added_slots = ToSlotSet(slots_);
 
-    // TODO it's a bug need to rewrite with mutex or fix tl_cluster_config because it's not thread
-    // local
-    cluster_family_->cluster_config()->AddSlots(added_slots);
-
     auto cmd = absl::StrCat("DFLYMIGRATE ACK ", sync_id_);
     VLOG(1) << "send " << cmd;
 
@@ -158,6 +154,8 @@ void ClusterSlotMigration::MainMigrationFb() {
     auto success = !err && CheckRespIsSimpleReply("OK");
 
     LOG_IF(WARNING, !success) << ToSV(LastResponseArgs().front().GetBuf());
+
+    cluster_family_->FinalizeIncomingMigration(local_sync_id_);
   }
 }
 

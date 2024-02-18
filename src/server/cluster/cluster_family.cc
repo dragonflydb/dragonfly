@@ -907,16 +907,12 @@ void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {
   {
     lock_guard gu(set_config_mu);
 
-    auto new_config = tl_cluster_config->CloneAndUpdate((*it)->GetSlots(), true);
+    auto new_config = tl_cluster_config->CloneWithChanges((*it)->GetSlots(), true);
 
     shard_set->pool()->AwaitFiberOnAll(
         [&new_config](util::ProactorBase* pb) { tl_cluster_config = new_config; });
     DCHECK(tl_cluster_config != nullptr);
   }
-
-  incoming_migrations_jobs_.erase(it);
-
-  // we don't drop old slots, it should be done explicitly
 }
 
 void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
@@ -942,7 +938,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   {
     lock_guard gu(set_config_mu);
 
-    auto new_config = tl_cluster_config->CloneAndUpdate(it->second->GetSlots(), false);
+    auto new_config = tl_cluster_config->CloneWithChanges(it->second->GetSlots(), false);
 
     shard_set->pool()->AwaitFiberOnAll(
         [&new_config](util::ProactorBase* pb) { tl_cluster_config = new_config; });
