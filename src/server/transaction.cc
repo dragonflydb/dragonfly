@@ -799,18 +799,19 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     return RunSquashedMultiCb(cb);
   }
 
+  DCHECK(!cb_ptr_);
   cb_ptr_ = &cb;
 
   // We can be already scheduled if we're part of a multi transaction. Note: If a multi tx isn't
   // scheduled, we assume it's not mimicking the interface, but actually preparing a single hop.
   bool scheduled = (coordinator_state_ & COORD_SCHED) > 0;
-  if (!scheduled) {
+  if (scheduled) {
+    DCHECK(IsAtomicMulti());
+    multi_->concluding = true;
+  } else {
     // For multi it only makes sense with squashing and thus a proper underlying command
     DCHECK(!IsAtomicMulti() || (multi_->role == SQUASHER && cid_->IsMultiTransactional()));
     coordinator_state_ |= COORD_CONCLUDING;
-  } else {
-    DCHECK(IsAtomicMulti());
-    multi_->concluding = true;
   }
 
   // If we run only on one shard and conclude, we can possibly avoid scheduling at all
@@ -923,7 +924,7 @@ void Transaction::Schedule() {
   if (multi_ && multi_->role == SQUASHED_STUB)
     return;
 
-  if (!IsAtomicMulti())
+  if ((coordinator_state_ & COORD_SCHED) == 0)
     ScheduleInternal();
 }
 
