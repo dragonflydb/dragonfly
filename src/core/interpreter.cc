@@ -70,18 +70,17 @@ void PushError(lua_State* lua, string_view error, bool trace = true) {
   lua_settable(lua, -3);
 }
 
+// Custom object explorer that collects all values into string array
 struct StringCollectorTranslator : public ObjectExplorer {
   void OnString(std::string_view str) final {
     values.emplace_back(str);
   }
-
   void OnArrayStart(unsigned len) final {
     CHECK(values.empty());
     values.reserve(len);
   }
   void OnArrayEnd() final {
   }
-
   void OnBool(bool b) final {
     OnString(absl::AlphaNum(b).Piece());
   }
@@ -95,7 +94,7 @@ struct StringCollectorTranslator : public ObjectExplorer {
     OnString("");
   }
   void OnStatus(std::string_view str) final {
-    OnString(absl::AlphaNum(str).Piece());
+    OnString(str);
   }
   void OnError(std::string_view str) final {
     LOG(ERROR) << str;
@@ -343,15 +342,18 @@ int DragonflyHashCommand(lua_State* lua) {
   XXH64_hash_t hash = absl::bit_cast<XXH64_hash_t>(lua_tointeger(lua, 1));
   bool requires_sort = lua_toboolean(lua, 2);
 
+  // Pop first two arguments to call RedisGenericCommand from this function with tail
   lua_remove(lua, 1);
   lua_remove(lua, 1);
 
+  // Compute key hash, we assume it's always second after the command
   {
     size_t len;
     const char* key = lua_tolstring(lua, 2, &len);
     hash = XXH64(key, len, hash);
   }
 
+  // Collect output into custom string collector
   StringCollectorTranslator translator;
   void** ptr = static_cast<void**>(lua_getextraspace(lua));
   reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, false, &translator);
@@ -359,6 +361,7 @@ int DragonflyHashCommand(lua_State* lua) {
   if (requires_sort)
     sort(translator.values.begin(), translator.values.end());
 
+  // Compute new hash and return it
   for (string_view str : translator.values)
     hash = XXH64(str.data(), str.size(), hash);
 
@@ -387,7 +390,7 @@ int DragonflyRandstrCommand(lua_State* state) {
   } else {
     lua_Integer num = lua_tonumber(state, 1);
     lua_createtable(state, num, 0);
-    for (size_t i = 1; i <= num; i++) {
+    for (int i = 1; i <= num; i++) {
       push_str();
       lua_rawseti(state, -2, i);
     }
@@ -483,12 +486,12 @@ Interpreter::Interpreter() {
   /* Register the dragonfly commands table and fields */
   lua_newtable(lua_);
 
-  /* dragonfly.ihash call - compute quick integer hash of string/interger or flat table */
+  /* dragonfly.ihash - compute quick integer hash of command result */
   lua_pushstring(lua_, "ihash");
   lua_pushcfunction(lua_, DragonflyHashCommand);
   lua_settable(lua_, -3);
 
-  /* dragonfly.*/
+  /* dragonfly.randstr - generate random string or table of random strings */
   lua_pushstring(lua_, "randstr");
   lua_pushcfunction(lua_, DragonflyRandstrCommand);
   lua_settable(lua_, -3);
@@ -947,8 +950,10 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
    * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
 
+  // Calling with custom explorer is not supported with errors or async
   DCHECK(explorer == nullptr || (!raise_error && !async));
 
+  // If no custom explorer is set, use default translator
   optional<RedisTranslator> translator;
   if (explorer == nullptr) {
     translator.emplace(lua_);
