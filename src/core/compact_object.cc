@@ -66,8 +66,6 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
 
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case kEncodingStrMap /*OBJ_ENCODING_HT*/:
-      return 0;  // TODO
     case kEncodingStrMap2: {
       StringSet* ss = (StringSet*)ptr;
       return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
@@ -670,36 +668,6 @@ unsigned CompactObj::Encoding() const {
       return OBJ_ENCODING_INT;
     default:
       return OBJ_ENCODING_RAW;
-  }
-}
-
-// Takes ownership over o.
-void CompactObj::ImportRObj(robj* o) {
-  CHECK(1 == o->refcount || o->refcount == OBJ_STATIC_REFCOUNT);
-  CHECK_NE(o->encoding, OBJ_ENCODING_EMBSTR);  // need regular one
-  CHECK_NE(o->type, OBJ_ZSET);
-
-  SetMeta(ROBJ_TAG);
-
-  if (o->type == OBJ_STRING) {
-    std::string_view src((sds)o->ptr, sdslen((sds)o->ptr));
-    u_.r_obj.SetString(src, tl.local_mr);
-    decrRefCount(o);
-  } else {  // Non-string objects we move as is and release Robj wrapper.
-    auto type = o->type;
-    auto enc = o->encoding;
-    if (o->type == OBJ_SET) {
-      if (o->encoding == OBJ_ENCODING_INTSET) {
-        enc = kEncodingIntSet;
-      } else {
-        enc = kEncodingStrMap2;
-      }
-    } else if (o->type == OBJ_HASH) {
-      LOG(FATAL) << "Should not reach";
-    }
-    u_.r_obj.Init(type, enc, o->ptr);
-    if (o->refcount == 1)
-      zfree(o);
   }
 }
 

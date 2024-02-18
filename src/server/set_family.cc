@@ -471,13 +471,13 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
       if (!success) {
         co.SetRObjPtr(is);
 
-        robj tmp;
-        if (!SetFamily::ConvertToStrSet(is, intsetLen(is), &tmp)) {
+        StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+        if (!ss) {
           return OpStatus::OUT_OF_MEMORY;
         }
 
         // frees 'is' on a way.
-        co.InitRobj(OBJ_SET, kEncodingStrMap2, tmp.ptr);
+        co.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
         inner_obj = co.RObjPtr();
         break;
       }
@@ -524,11 +524,11 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
     // Update stats and trigger any handle the old value if needed.
     if (co.Encoding() == kEncodingIntSet) {
       intset* is = (intset*)co.RObjPtr();
-      robj tmp;
-      if (!SetFamily::ConvertToStrSet(is, intsetLen(is), &tmp)) {
+      StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+      if (!ss) {
         return OpStatus::OUT_OF_MEMORY;
       }
-      co.InitRobj(OBJ_SET, kEncodingStrMap2, tmp.ptr);
+      co.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
     }
 
     CHECK(IsDenseEncoding(co));
@@ -768,7 +768,6 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     return result;
   }
 
-  // we must copy by value because AsRObj is temporary.
   vector<SetType> sets(keys.size());
 
   OpStatus status = OpStatus::OK;
@@ -1488,27 +1487,23 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
 
 }  // namespace
 
-bool SetFamily::ConvertToStrSet(const intset* is, size_t expected_len, robj* dest) {
+StringSet* SetFamily::ConvertToStrSet(const intset* is, size_t expected_len) {
   int64_t intele;
   char buf[32];
   int ii = 0;
 
-  if (true) {
-    StringSet* ss = CompactObj::AllocateMR<StringSet>();
-    if (expected_len) {
-      ss->Reserve(expected_len);
-    }
-
-    while (intsetGet(const_cast<intset*>(is), ii++, &intele)) {
-      char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
-      string_view str{buf, size_t(next - buf)};
-      CHECK(ss->Add(str));
-    }
-
-    dest->ptr = ss;
-    dest->encoding = kEncodingStrMap2;
+  StringSet* ss = CompactObj::AllocateMR<StringSet>();
+  if (expected_len) {
+    ss->Reserve(expected_len);
   }
-  return true;
+
+  while (intsetGet(const_cast<intset*>(is), ii++, &intele)) {
+    char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
+    string_view str{buf, size_t(next - buf)};
+    CHECK(ss->Add(str));
+  }
+
+  return ss;
 }
 
 using CI = CommandId;

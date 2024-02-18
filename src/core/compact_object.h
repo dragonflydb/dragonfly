@@ -135,10 +135,6 @@ class CompactObj {
   CompactObj() {  // By default - empty string.
   }
 
-  explicit CompactObj(robj* o) {
-    ImportRObj(o);
-  }
-
   explicit CompactObj(std::string_view str) {
     SetString(str);
   }
@@ -272,9 +268,6 @@ class CompactObj {
   void SetRObjPtr(void* ptr) {
     u_.r_obj.Init(u_.r_obj.type(), u_.r_obj.encoding(), ptr);
   }
-
-  // Takes ownership over o.
-  void ImportRObj(robj* o);
 
   robj* AsRObj() const;
 

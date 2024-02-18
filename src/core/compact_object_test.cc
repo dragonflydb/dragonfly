@@ -330,13 +330,11 @@ TEST_F(CompactObjectTest, AsciiUtil) {
 }
 
 TEST_F(CompactObjectTest, IntSet) {
-  robj* src = createIntsetObject();
-  cobj_.ImportRObj(src);
-  EXPECT_EQ(OBJ_SET, cobj_.ObjType());
-  EXPECT_EQ(kEncodingIntSet, cobj_.Encoding());
+  intset* is = intsetNew();
+  cobj_.InitRobj(OBJ_SET, kEncodingIntSet, is);
 
   EXPECT_EQ(0, cobj_.Size());
-  intset* is = (intset*)cobj_.RObjPtr();
+  is = (intset*)cobj_.RObjPtr();
   uint8_t success = 0;
 
   is = intsetAdd(is, 10, &success);
@@ -369,24 +367,6 @@ TEST_F(CompactObjectTest, Hash) {
   cobj_.InitRobj(OBJ_HASH, kEncodingListPack, lp);
   EXPECT_EQ(OBJ_HASH, cobj_.ObjType());
   EXPECT_EQ(1, cobj_.Size());
-}
-
-TEST_F(CompactObjectTest, StreamObj) {
-  robj* stream_obj = createStreamObject();
-  stream* sm = (stream*)stream_obj->ptr;
-  robj* item[2];
-  item[0] = createStringObject("FIELD", 5);
-  item[1] = createStringObject("VALUE", 5);
-  ASSERT_EQ(C_OK, streamAppendItem(sm, item, 1, NULL, NULL, 0));
-
-  decrRefCount(item[0]);
-  decrRefCount(item[1]);
-
-  cobj_.ImportRObj(stream_obj);
-
-  EXPECT_EQ(OBJ_STREAM, cobj_.ObjType());
-  EXPECT_EQ(OBJ_ENCODING_STREAM, cobj_.Encoding());
-  EXPECT_FALSE(cobj_.IsInline());
 }
 
 TEST_F(CompactObjectTest, MimallocUnderutilzation) {
