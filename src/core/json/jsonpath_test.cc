@@ -268,7 +268,7 @@ TEST_F(JsonPathTest, Wildcard) {
 }
 
 TEST_F(JsonPathTest, Mutate) {
-  JsonType json = JsonFromString(R"([1, 2, 3, 5, 6])").value();
+  JsonType json = JsonFromString(R"([1, 2, 3, 5, 6])", pmr::get_default_resource()).value();
   ASSERT_EQ(0, Parse("$[*]"));
   Path path = driver_.TakePath();
   MutateCallback cb = [&](optional<string_view>, JsonType* val) {
@@ -286,7 +286,8 @@ TEST_F(JsonPathTest, Mutate) {
 
   json = JsonFromString(R"(
     {"a":[7], "inner": {"a": {"bool": true, "c": 42}}}
-  )");
+  )",
+                        pmr::get_default_resource());
   ASSERT_EQ(0, Parse("$..a.*"));
   path = driver_.TakePath();
   MutatePath(

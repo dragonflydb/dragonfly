@@ -348,8 +348,7 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
 
       auto it = node->find(segment.identifier());
       if (it != node->object_range().end()) {
-        bool erase = Mutate(cb, it->key(), &it->value());
-        if (erase) {
+        if (Mutate(cb, it->key(), &it->value())) {
           node->erase(it);
         }
       }
@@ -360,8 +359,7 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
       if (segment.index() >= node->size()) {
         return make_unexpected(OUT_OF_BOUNDS);
       }
-      bool erase = Mutate(cb, nullopt, &node[segment.index()]);
-      if (erase) {
+      if (Mutate(cb, nullopt, &node[segment.index()])) {
         node->erase(node->array_range().begin() + segment.index());
       }
     } break;
@@ -371,26 +369,17 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
       if (node->is_object()) {
         auto it = node->object_range().begin();
         while (it != node->object_range().end()) {
-          bool res = Mutate(cb, it->key(), &it->value());
-          if (res) {
-            it = node->erase(it);
-          } else {
-            ++it;
-          }
+          it = Mutate(cb, it->key(), &it->value()) ? node->erase(it) : it + 1;
         }
       } else if (node->is_array()) {
         auto it = node->array_range().begin();
         while (it != node->array_range().end()) {
-          bool res = Mutate(cb, nullopt, &*it);
-          if (res) {
-            it = node->erase(it);
-          } else {
-            ++it;
-          }
+          it = Mutate(cb, nullopt, &*it) ? node->erase(it) : it + 1;
         }
       }
     } break;
   }
+
   return {};
 }
 
