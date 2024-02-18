@@ -7,9 +7,7 @@
 
 #include <filesystem>
 
-#include "server/detail/snapshot_storage.h"
 #include "server/rdb_save.h"
-#include "server/server_family.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 
 namespace dfly {
@@ -19,16 +17,28 @@ class Service;
 
 namespace detail {
 
+class SnapshotStorage;
+
+struct LastSaveInfo {
+  // last success save info
+  time_t save_time = 0;  // epoch time in seconds.
+  uint32_t success_duration_sec = 0;
+  std::string file_name;                                      //
+  std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
+  // last error save info
+  GenericError last_error;
+  time_t last_error_time = 0;      // epoch time in seconds.
+  time_t failed_duration_sec = 0;  // epoch time in seconds.
+};
+
 struct SaveStagesInputs {
   bool use_dfs_format_;
   std::string_view basename_;
   Transaction* trans_;
   Service* service_;
-  std::atomic_bool* is_saving_;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
   LastSaveInfo* last_save_info_ ABSL_GUARDED_BY(save_mu_);
   util::fb2::Mutex* save_mu_;
-  std::function<size_t()>* save_bytes_cb_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
 };
 
@@ -71,6 +81,12 @@ struct SaveStagesController : public SaveStagesInputs {
   ~SaveStagesController();
 
   GenericError Save();
+  size_t GetSaveBuffersSize();
+  uint32_t GetCurrentSaveDuratio();
+
+  bool IsSaving() {
+    return is_saving_;
+  }
 
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.
@@ -102,12 +118,11 @@ struct SaveStagesController : public SaveStagesInputs {
 
   void RunStage(void (SaveStagesController::*cb)(unsigned));
 
-  size_t GetSaveBuffersSize();
-
  private:
   absl::Time start_time_;
   std::filesystem::path full_path_;
   bool is_cloud_;
+  bool is_saving_ = false;
 
   AggregateGenericError shared_err_;
   std::vector<std::pair<std::unique_ptr<RdbSnapshot>, std::filesystem::path>> snapshots_;

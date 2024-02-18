@@ -9,6 +9,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/detail/snapshot_storage.h"
 #include "server/main_service.h"
 #include "server/script_mgr.h"
 #include "server/transaction.h"
@@ -160,21 +161,12 @@ GenericError SaveStagesController::Save() {
   else
     SaveRdb();
 
-  is_saving_->store(true, memory_order_relaxed);
-  {
-    lock_guard lk{*save_mu_};
-    *save_bytes_cb_ = [this]() { return GetSaveBuffersSize(); };
-  }
+  is_saving_ = true;
 
   RunStage(&SaveStagesController::SaveCb);
-  {
-    lock_guard lk{*save_mu_};
-    *save_bytes_cb_ = nullptr;
-  }
-
-  is_saving_->store(false, memory_order_relaxed);
 
   RunStage(&SaveStagesController::CloseCb);
+  is_saving_ = false;
 
   FinalizeFileMovement();
 
@@ -262,6 +254,10 @@ void SaveStagesController::SaveRdb() {
     return OpStatus::OK;
   };
   trans_->ScheduleSingleHop(std::move(cb));
+}
+
+uint32_t SaveStagesController::GetCurrentSaveDuratio() {
+  return (absl::Now() - start_time_) / absl::Seconds(1);
 }
 
 void SaveStagesController::UpdateSaveInfo() {
