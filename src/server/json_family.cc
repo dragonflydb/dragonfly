@@ -4,12 +4,6 @@
 
 #include "server/json_family.h"
 
-#include "facade/op_status.h"
-
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
@@ -25,6 +19,7 @@ extern "C" {
 #include "core/json/jsonpath_grammar.hh"
 #include "core/json_object.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/error.h"

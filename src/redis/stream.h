@@ -3,9 +3,11 @@
 
 #include "util.h"
 #include "rax.h"
-#include "object.h"
+#include "sds.h"
 #include "listpack.h"
 
+
+typedef struct redisObject robj;
 
 /* Stream item ID: a 128 bit number composed of a milliseconds time and
  * a sequence counter. IDs generated in the same millisecond (or in a past
@@ -98,12 +100,6 @@ typedef struct streamNACK {
                                    in the last delivery. */
 } streamNACK;
 
-/* Stream propagation information, passed to functions in order to propagate
- * XCLAIM commands to AOF and slaves. */
-typedef struct streamPropInfo {
-    robj *keyname;
-    robj *groupname;
-} streamPropInfo;
 
 typedef struct {
   /* XADD options */
@@ -146,7 +142,6 @@ typedef struct {
 
 stream *streamNew(void);
 void freeStream(stream *s);
-unsigned long streamLength(const robj *subject);
 // size_t streamReplyWithRange(client *c, stream *s, streamID *start, streamID *end, size_t count, int rev, streamCG *group, streamConsumer *consumer, int flags, streamPropInfo *spi);
 void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamID *end, int rev);
 int streamIteratorGetID(streamIterator *si, streamID *id, int64_t *numfields);
@@ -165,8 +160,7 @@ int streamEntryExists(stream *s, streamID *id);
 void streamFreeNACK(streamNACK *na);
 int streamIncrID(streamID *id);
 int streamDecrID(streamID *id);
-// void streamPropagateConsumerCreation(client *c, robj *key, robj *groupname, sds consumername);
-robj *streamDup(robj *o);
+
 int streamValidateListpackIntegrity(unsigned char *lp, size_t size, int deep);
 int streamParseID(const robj *o, streamID *id);
 robj *createObjectFromStreamID(streamID *id);

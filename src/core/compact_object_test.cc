@@ -18,9 +18,7 @@
 #include "core/mi_memory_resource.h"
 
 extern "C" {
-#include "redis/dict.h"
 #include "redis/intset.h"
-#include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
 #include "redis/zmalloc.h"

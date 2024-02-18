@@ -18,7 +18,6 @@
 
 extern "C" {
 #include "redis/listpack.h"
-#include "redis/object.h"
 };
 
 namespace dfly {

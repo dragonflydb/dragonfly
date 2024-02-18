@@ -14,10 +14,6 @@
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
 
-extern "C" {
-#include "redis/object.h"
-};
-
 namespace dfly {
 
 using namespace std;

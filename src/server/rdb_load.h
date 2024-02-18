@@ -7,7 +7,7 @@
 #include <system_error>
 
 extern "C" {
-#include "redis/object.h"
+#include "redis/rdb.h"
 }
 
 #include "base/io_buf.h"
@@ -15,7 +15,6 @@ extern "C" {
 #include "base/pod_array.h"
 #include "core/json_object.h"
 #include "io/io.h"
-#include "redis/rdb.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 

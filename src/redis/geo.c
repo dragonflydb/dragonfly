@@ -34,7 +34,7 @@
 #include "geohash_helper.h"
 #include "listpack.h"
 #include "pqsort.h"
-#include "object.h"
+#include "util.h"
 #include "zmalloc.h"
 #include "zset.h"
 
