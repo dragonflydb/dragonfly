@@ -193,8 +193,7 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optio
   multi_->role = SQUASHED_STUB;
   multi_->shard_journal_write.resize(1);
 
-  time_now_ms_ = parent->time_now_ms_;
-
+  MultiUpdateWithParent(parent);
   if (slot_id.has_value()) {
     unique_slot_checker_.Add(*slot_id);
   }
@@ -447,7 +446,6 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
 
   MultiSwitchCmd(cid);
 
-  multi_->role = SQUASHER;
   InitBase(db_index_, {});
 
   // Because squashing already determines active shards by partitioning commands,
@@ -465,6 +463,8 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
     shard_data_[i].arg_start = 0;
     shard_data_[i].arg_count = 0;
   }
+
+  MultiBecomeSquasher();
 }
 
 void Transaction::StartMultiGlobal(DbIndex dbid) {
@@ -479,7 +479,7 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   ScheduleInternal();
 }
 
-void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys) {
+void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys, bool skip_scheduling) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
 
   DCHECK(multi_);
@@ -493,7 +493,8 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys) {
   InitBase(dbid, absl::MakeSpan(keys));
   InitByKeys(KeyIndex::Range(0, keys.size()));
 
-  ScheduleInternal();
+  if (!skip_scheduling)
+    ScheduleInternal();
 
   full_args_ = {nullptr, 0};  // InitBase set it to temporary keys, now we reset it.
 }
@@ -543,8 +544,26 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
     DCHECK_EQ(coordinator_state_, 0u);
   }
 
+  // Each hop needs to be prepared, reset role
   if (multi_->role == SQUASHER)
     multi_->role = DEFAULT;
+}
+
+void Transaction::MultiUpdateWithParent(const Transaction* parent) {
+  // Disabled because of single shard lua optimization
+  // DCHECK(multi_);
+  // DCHECK(parent->multi_);  // it might not be a squasher yet, but certainly is multi
+  DCHECK_EQ(multi_->role, SQUASHED_STUB);
+  txid_ = parent->txid_;
+  time_now_ms_ = parent->time_now_ms_;
+  unique_slot_checker_ = parent->unique_slot_checker_;
+}
+
+void Transaction::MultiBecomeSquasher() {
+  DCHECK(multi_->mode == GLOBAL || multi_->mode == LOCK_AHEAD);
+  DCHECK_GT(GetUniqueShardCnt(), 0u);    // initialized and determined active shards
+  DCHECK(cid_->IsMultiTransactional());  // proper base command set
+  multi_->role = SQUASHER;
 }
 
 string Transaction::DebugId(std::optional<ShardId> sid) const {
@@ -681,6 +700,11 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     // This is the last hop, so clear cont_trans if its held by the current tx
     shard->RemoveContTx(this);
 
+    if (IsAtomicMulti()) {  // Can only be true if run through ScheduleSingleHop
+      DCHECK(cid_->IsMultiTransactional());
+      MultiReportJournalOnShard(shard);
+    }
+
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
@@ -708,10 +732,10 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 // For eval-like transactions - we can decide based on the command flavor (EVAL/EVALRO) or
 // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
 void Transaction::ScheduleInternal() {
-  DCHECK(!shard_data_.empty());
-  DCHECK_EQ(0u, txid_);
-  DCHECK_EQ(0, coordinator_state_ & COORD_SCHED);
+  DCHECK_EQ(txid_, 0u);
+  DCHECK_EQ(coordinator_state_ & COORD_SCHED, 0);
   DCHECK_GT(unique_shard_cnt_, 0u);
+  DCHECK(!IsAtomicMulti() || cid_->IsMultiTransactional());
 
   DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards";
 
@@ -776,26 +800,29 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   }
 
   DCHECK(!cb_ptr_);
-  DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
-
   cb_ptr_ = &cb;
 
-  if (IsAtomicMulti()) {
+  // We can be already scheduled if we're part of a multi transaction. Note: If a multi tx isn't
+  // scheduled, we assume it's not mimicking the interface, but actually preparing a single hop.
+  bool scheduled = (coordinator_state_ & COORD_SCHED) > 0;
+  if (scheduled) {
+    DCHECK(IsAtomicMulti());
     multi_->concluding = true;
   } else {
-    coordinator_state_ |= COORD_CONCLUDING;  // Single hop means we conclude.
+    // For multi it only makes sense with squashing and thus a proper underlying command
+    DCHECK(!IsAtomicMulti() || (multi_->role == SQUASHER && cid_->IsMultiTransactional()));
+    coordinator_state_ |= COORD_CONCLUDING;
   }
 
   // If we run only on one shard and conclude, we can possibly avoid scheduling at all
   // and directly run the callback on the destination thread if the locks are free.
-  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
-
+  bool schedule_fast = !scheduled && (unique_shard_cnt_ == 1) && !IsGlobal();
   bool was_ooo = false, was_inline = false;
 
   if (schedule_fast) {
     DCHECK_NE(unique_shard_id_, kInvalidSid);
     DCHECK(IsActive(unique_shard_id_));
-    DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
+    DCHECK(shard_data_.size() == 1 || multi_);
 
     InitTxTime();
     shard_data_[SidToId(unique_shard_id_)].local_mask |= ARMED;
@@ -825,7 +852,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     }
   } else {
     // This transaction either spans multiple shards and/or is multi, which schedule in advance.
-    if (!IsAtomicMulti())
+    if (!scheduled)
       ScheduleInternal();
 
     ExecuteAsync();
@@ -845,6 +872,9 @@ void Transaction::ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had
   DCHECK(multi_);
   for (unsigned i = 0; i < multi_->shard_journal_write.size(); i++)
     multi_->shard_journal_write[i] |= had_write(i);
+
+  // Update imemdiately if we decide to conclude after one hop without UnlockMulti
+  multi_->shard_journal_cnt = CalcMultiNumOfShardJournals();
 }
 
 // Runs in the coordinator fiber.
@@ -853,7 +883,8 @@ void Transaction::UnlockMulti() {
   DCHECK(multi_);
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
 
-  if (multi_->mode == NON_ATOMIC)
+  // Return if we either didn't schedule at all (and thus run) or already did conclude
+  if ((coordinator_state_ & COORD_SCHED) == 0 || (coordinator_state_ & COORD_CONCLUDING) > 0)
     return;
 
   multi_->frozen_keys_set.clear();
@@ -864,15 +895,14 @@ void Transaction::UnlockMulti() {
     (*sharded_keys)[sid].emplace_back(key);
   }
 
-  unsigned shard_journals_cnt =
-      ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
+  multi_->shard_journal_cnt = ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
 
   use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
 
   DCHECK_EQ(shard_data_.size(), shard_set->size());
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    shard_set->Add(i, [this, sharded_keys, i, shard_journals_cnt]() {
-      this->UnlockMultiShardCb((*sharded_keys)[i], EngineShard::tlocal(), shard_journals_cnt);
+    shard_set->Add(i, [this, sharded_keys, i]() {
+      this->UnlockMultiShardCb((*sharded_keys)[i], EngineShard::tlocal());
       intrusive_ptr_release(this);
     });
   }
@@ -894,7 +924,7 @@ void Transaction::Schedule() {
   if (multi_ && multi_->role == SQUASHED_STUB)
     return;
 
-  if (!IsAtomicMulti())
+  if ((coordinator_state_ & COORD_SCHED) == 0)
     ScheduleInternal();
 }
 
@@ -987,10 +1017,8 @@ void Transaction::FIX_ConcludeJournalExec() {
   if (!multi_->shard_journal_write.front())
     return;
 
-  if (auto journal = EngineShard::tlocal()->journal(); journal != nullptr) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, 1,
-                         unique_slot_checker_.GetUniqueSlotId(), {}, false);
-  }
+  multi_->shard_journal_cnt = 1;
+  MultiReportJournalOnShard(EngineShard::tlocal());
 }
 
 void Transaction::EnableShard(ShardId sid) {
@@ -1363,16 +1391,21 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   return result;
 }
 
-void Transaction::UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys,
-                                     EngineShard* shard, uint32_t shard_journals_cnt) {
-  DCHECK(multi_ && multi_->lock_mode);
-
-  auto journal = shard->journal();
-
-  if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()]) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt,
+void Transaction::MultiReportJournalOnShard(EngineShard* shard) const {
+  DCHECK_EQ(EngineShard::tlocal(), shard);
+  auto* journal = shard->journal();
+  size_t write_idx = multi_->role == SQUASHED_STUB ? 0 : shard->shard_id();
+  if (journal != nullptr && multi_->shard_journal_write[write_idx]) {
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, multi_->shard_journal_cnt,
                          unique_slot_checker_.GetUniqueSlotId(), {}, true);
   }
+}
+
+void Transaction::UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys,
+                                     EngineShard* shard) {
+  DCHECK(multi_ && multi_->lock_mode);
+
+  MultiReportJournalOnShard(shard);
 
   if (multi_->mode == GLOBAL) {
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
