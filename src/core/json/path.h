@@ -10,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-#include "src/core/json_object.h"
+#include "src/core/json/json_object.h"
 
 namespace dfly::json {
 

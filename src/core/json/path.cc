@@ -8,7 +8,6 @@
 
 #include "base/expected.hpp"
 #include "base/logging.h"
-#include "src/core/json_object.h"
 #include "src/core/overloaded.h"
 
 using namespace std;

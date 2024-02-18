@@ -9,7 +9,7 @@
 #include <optional>
 
 #include "base/pmr/memory_resource.h"
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "core/small_string.h"
 
 typedef struct redisObject robj;

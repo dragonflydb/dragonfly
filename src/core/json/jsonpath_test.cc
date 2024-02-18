@@ -160,7 +160,8 @@ TEST_F(JsonPathTest, Path) {
   Path path;
   JsonType json = JsonFromString(R"({"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "a2": [1]},
       "v13": 3
-      })")
+      })",
+                                 pmr::get_default_resource())
                       .value();
   int called = 0;
 
@@ -203,7 +204,8 @@ TEST_F(JsonPathTest, EvalDescent) {
   JsonType json = JsonFromString(R"(
     {"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "v21": {"f": 3, "a2": [1]}},
       "v13": { "a2" : { "b" : {"f" : 4}}}
-      })");
+      })",
+                                 pmr::get_default_resource());
 
   Path path;
 
@@ -236,7 +238,8 @@ TEST_F(JsonPathTest, EvalDescent) {
 
   json = JsonFromString(R"(
     {"a":[7], "inner": {"a": {"b": 2, "c": 1337}}}
-  )");
+  )",
+                        pmr::get_default_resource());
   path.pop_back();
   path.emplace_back(SegmentType::IDENTIFIER, "a");
 
@@ -255,7 +258,7 @@ TEST_F(JsonPathTest, Wildcard) {
   ASSERT_EQ(1, path.size());
   EXPECT_THAT(path[0], SegType(SegmentType::WILDCARD));
 
-  JsonType json = JsonFromString(R"([1, 2, 3])").value();
+  JsonType json = JsonFromString(R"([1, 2, 3])", pmr::get_default_resource()).value();
   vector<int> arr;
   EvaluatePath(path, json, [&](optional<string_view> key, const JsonType& val) {
     ASSERT_FALSE(key);

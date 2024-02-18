@@ -10,7 +10,6 @@
 #include <lz4frame.h>
 #include <zstd.h>
 
-#include <jsoncons/json.hpp>
 #include <queue>
 
 extern "C" {
@@ -27,7 +26,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"

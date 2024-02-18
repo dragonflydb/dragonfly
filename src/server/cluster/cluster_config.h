@@ -12,7 +12,7 @@
 #include <string_view>
 #include <vector>
 
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "src/core/fibers.h"
 #include "src/server/common.h"
 

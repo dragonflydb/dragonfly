@@ -26,12 +26,11 @@ extern "C" {
 #include <zstd.h>
 
 #include <cstring>
-#include <jsoncons/json.hpp>
 
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -1009,7 +1008,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     std::memcpy(lp, src_lp, bytes);
     pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
   } else if (rdb_type_ == RDB_TYPE_JSON) {
-    auto json = JsonFromString(blob);
+    auto json = JsonFromString(blob, CompactObj::memory_resource());
     if (!json) {
       ec_ = RdbError(errc::bad_json_string);
     }
