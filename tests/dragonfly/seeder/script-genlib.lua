@@ -127,3 +127,29 @@ function LG_funcs.mod_zset(key, dbsize)
         redis.apcall('ZPOPMIN', key)
     end
 end
+
+-- json
+-- store single list of integers inside object
+
+function LG_funcs.add_json(key)
+    -- generate single list of counters
+    local seed = math.random(100)
+    local counters = {}
+    for i = 1, LG_funcs.csize do
+        counters[i] = ((i + seed) * 123) % 701
+    end
+    redis.apcall('JSON.SET', key, '$', cjson.encode({counters = counters}))
+end
+
+function LG_funcs.mod_json(key, dbsize)
+    local action = math.random(1, 4)
+    if action == 1 then
+        redis.apcall('JSON.ARRAPPEND', key, '$.counters', math.random(701))
+    elseif action == 2 then
+        redis.apcall('JSON.ARRPOP', key, '$.counters')
+    elseif action == 3 then
+        redis.apcall('JSON.NUMMULTBY', key, '$.counters[' .. math.random(LG_funcs.csize ) .. ']', 2)
+    else
+        redis.apcall('JSON.NUMINCRBY', key, '$.counters[' .. math.random(LG_funcs.csize ) .. ']', 1)
+    end
+end

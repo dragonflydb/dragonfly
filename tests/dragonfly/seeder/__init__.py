@@ -18,7 +18,7 @@ except ImportError:
 class SeederBase:
     UID_COUNTER = 1  # multiple generators should not conflict on keys
     CACHED_SCRIPTS = {}
-    TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET"]
+    TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON"]
 
     def __init__(self):
         self.uid = SeederBase.UID_COUNTER
