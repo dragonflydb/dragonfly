@@ -1999,3 +1999,29 @@ async def test_journal_doesnt_yield_issue_2500(df_local_factory, df_seeder_facto
     assert set(keys_master) == set(keys_replica)
 
     await disconnect_clients(c_master, *[c_replica])
+
+
+@pytest.mark.asyncio
+async def test_saving_replica(df_local_factory):
+    tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
+
+    master = df_local_factory.create(proactor_threads=1)
+    replica = df_local_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name}")
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("DEBUG POPULATE 100000 key 4048 RAND")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    async def save_replica():
+        await c_replica.execute_command("save")
+
+    save_task = asyncio.create_task(save_replica())
+    await asyncio.sleep(0.1)  # let save start
+    await c_replica.execute_command("replicaof no one")
+    await save_task
+
+    await disconnect_clients(c_master, *[c_replica])
