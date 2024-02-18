@@ -111,7 +111,7 @@ void Transaction::PhasedBarrier::Dec(Transaction* keep_alive) {
   ::boost::intrusive_ptr guard(keep_alive);
 
   uint32_t before = count_.fetch_sub(1);
-  CHECK_GE(before, 1u);
+  CHECK_GE(before, 1u) << keep_alive->DEBUG_PrintFailState(EngineShard::tlocal()->shard_id());
   if (before == 1)
     ec_.notify();
 }
