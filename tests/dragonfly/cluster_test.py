@@ -1105,6 +1105,9 @@ async def test_cluster_fuzzymigration(
         for key, conn in zip(counter_keys, counter_connections)
     ]
 
+    # Generate capture, capture ignores counter keys
+    capture = await seeder.capture()
+
     # Finalize slot migration
     for node in nodes:
         for sync_id in node.sync_ids:
@@ -1115,9 +1118,6 @@ async def test_cluster_fuzzymigration(
     # Stop counters
     for counter in counters:
         counter.cancel()
-
-    # Generate capture, capture ignores counter keys
-    capture = await seeder.capture()
 
     # Push new config
     await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
