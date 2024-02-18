@@ -12,8 +12,6 @@
 #include "core/json/json_object.h"
 #include "core/small_string.h"
 
-typedef struct redisObject robj;
-
 namespace dfly {
 
 constexpr unsigned kEncodingIntSet = 0;
@@ -269,15 +267,9 @@ class CompactObj {
     u_.r_obj.Init(u_.r_obj.type(), u_.r_obj.encoding(), ptr);
   }
 
-  robj* AsRObj() const;
-
   // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
   void InitRobj(unsigned type, unsigned encoding, void* obj_inner);
-
-  // Syncs 'this' instance with the object that was previously returned by AsRObj().
-  // Requires: AsRObj() has been called before in the same thread in fiber-atomic section.
-  void SyncRObj();
 
   // For STR object.
   void SetInt(int64_t val);

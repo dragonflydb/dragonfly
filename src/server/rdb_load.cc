@@ -7,11 +7,10 @@
 #include "absl/strings/escaping.h"
 
 extern "C" {
-
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/lzfP.h" /* LZF compression library */
-#include "redis/rdb.h"
+#include "redis/quicklist.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/ziplist.h"

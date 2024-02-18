@@ -6,7 +6,6 @@
 #include "server/acl/acl_commands_def.h"
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/sds.h"
 }
 

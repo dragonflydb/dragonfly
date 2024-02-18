@@ -60,11 +60,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "dict.h"
 #include "listpack.h"
 #include "redis_aux.h"
 #include "sds.h"
-#include "object.h"
 #include "zmalloc.h"
 #include "zset.h"
 #include "util.h"
@@ -393,6 +391,7 @@ zskiplistNode *zslLastInRange(zskiplist *zsl, const zrangespec *range) {
     return x;
 }
 
+#if 0
 /* Delete all the elements with score between min and max from the skiplist.
  * Both min and max can be inclusive or exclusive (see range->minex and
  * range->maxex). When inclusive a score >= min && score <= max is deleted.
@@ -484,6 +483,7 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
     }
     return removed;
 }
+#endif 
 
 /* Find the rank for an element by both score and key.
  * Returns 0 when the element cannot be found, rank otherwise.
@@ -534,46 +534,6 @@ zskiplistNode* zslGetElementByRank(zskiplist *zsl, unsigned long rank) {
 
 /* ------------------------ Lexicographic ranges ---------------------------- */
 
-/* Parse max or min argument of ZRANGEBYLEX.
-  * (foo means foo (open interval)
-  * [foo means foo (closed interval)
-  * - means the min string possible
-  * + means the max string possible
-  *
-  * If the string is valid the *dest pointer is set to the redis object
-  * that will be used for the comparison, and ex will be set to 0 or 1
-  * respectively if the item is exclusive or inclusive. C_OK will be
-  * returned.
-  *
-  * If the string is not a valid range C_ERR is returned, and the value
-  * of *dest and *ex is undefined. */
-int zslParseLexRangeItem(robj *item, sds *dest, int *ex) {
-    char *c = item->ptr;
-
-    switch(c[0]) {
-    case '+':
-        if (c[1] != '\0') return C_ERR;
-        *ex = 1;
-        *dest = cmaxstring;
-        return C_OK;
-    case '-':
-        if (c[1] != '\0') return C_ERR;
-        *ex = 1;
-        *dest = cminstring;
-        return C_OK;
-    case '(':
-        *ex = 1;
-        *dest = sdsnewlen(c+1,sdslen(c)-1);
-        return C_OK;
-    case '[':
-        *ex = 0;
-        *dest = sdsnewlen(c+1,sdslen(c)-1);
-        return C_OK;
-    default:
-        return C_ERR;
-    }
-}
-
 /* Free a lex range structure, must be called only after zslParseLexRange()
  * populated the structure with success (C_OK returned). */
 void zslFreeLexRange(zlexrangespec *spec) {
@@ -581,27 +541,6 @@ void zslFreeLexRange(zlexrangespec *spec) {
         spec->min != cmaxstring) sdsfree(spec->min);
     if (spec->max != cminstring &&
         spec->max != cmaxstring) sdsfree(spec->max);
-}
-
-/* Populate the lex rangespec according to the objects min and max.
- *
- * Return C_OK on success. On error C_ERR is returned.
- * When OK is returned the structure must be freed with zslFreeLexRange(),
- * otherwise no release is needed. */
-int zslParseLexRange(robj *min, robj *max, zlexrangespec *spec) {
-    /* The range can't be valid if objects are integer encoded.
-     * Every item must start with ( or [. */
-    if (min->encoding == OBJ_ENCODING_INT ||
-        max->encoding == OBJ_ENCODING_INT) return C_ERR;
-
-    spec->min = spec->max = NULL;
-    if (zslParseLexRangeItem(min, &spec->min, &spec->minex) == C_ERR ||
-        zslParseLexRangeItem(max, &spec->max, &spec->maxex) == C_ERR) {
-        zslFreeLexRange(spec);
-        return C_ERR;
-    } else {
-        return C_OK;
-    }
 }
 
 /* This is just a wrapper to sdscmp() that is able to

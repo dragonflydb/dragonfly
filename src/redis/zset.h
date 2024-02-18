@@ -95,4 +95,7 @@ unsigned char *zzlDeleteRangeByLex(unsigned char *zl, const zlexrangespec *range
 extern sds cmaxstring;
 extern sds cminstring;
 
+#define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^64 elements */
+#define ZSKIPLIST_P 0.25      /* Skiplist P = 1/4 */
+
 #endif

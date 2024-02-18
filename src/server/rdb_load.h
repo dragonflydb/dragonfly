@@ -6,14 +6,13 @@
 #include <system_error>
 
 extern "C" {
-#include "redis/object.h"
+#include "redis/rdb.h"
 }
 
 #include "base/io_buf.h"
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
 #include "io/io.h"
-#include "redis/rdb.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 

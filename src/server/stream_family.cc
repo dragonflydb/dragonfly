@@ -7,7 +7,6 @@
 #include <absl/strings/str_cat.h>
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/stream.h"
 #include "redis/zmalloc.h"
 }

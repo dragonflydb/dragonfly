@@ -3,6 +3,10 @@
 //
 #include "server/debugcmd.h"
 
+extern "C" {
+#include "redis/redis_aux.h"
+}
+
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>

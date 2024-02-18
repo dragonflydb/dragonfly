@@ -8,13 +8,16 @@ else()
   set(ZMALLOC_DEPS "")
 endif()
 
-add_library(redis_lib crc16.c crc64.c crcspeed.c debug.c dict.c intset.c geo.c 
-            geohash.c geohash_helper.c
-            listpack.c mt19937-64.c object.c lzf_c.c lzf_d.c sds.c
-            quicklist.c rax.c pqsort.c redis_aux.c siphash.c t_stream.c t_zset.c
+add_library(redis_lib crc16.c crc64.c crcspeed.c debug.c  intset.c geo.c 
+            geohash.c geohash_helper.c t_zset.c
+            listpack.c mt19937-64.c lzf_c.c lzf_d.c sds.c
+            quicklist.c rax.c pqsort.c redis_aux.c siphash.c t_stream.c 
             util.c ziplist.c hyperloglog.c ${ZMALLOC_SRC})
 
 cxx_link(redis_lib  ${ZMALLOC_DEPS})
+
+add_library(redis_test_lib dict.c)
+cxx_link(redis_test_lib redis_lib)
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
   target_compile_options(redis_lib PRIVATE -Wno-maybe-uninitialized)
