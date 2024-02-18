@@ -4,7 +4,6 @@
 #include <unistd.h>
 
 #include "crc64.h"
-#include "dict.h"
 #include "endianconv.h"
 #include "zmalloc.h"
 

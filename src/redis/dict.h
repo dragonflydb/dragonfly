@@ -36,7 +36,6 @@
 #ifndef __DICT_H
 #define __DICT_H
 
-#include "mt19937-64.h"  // ROMAN: needed by dictGetFairRandomKey
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
