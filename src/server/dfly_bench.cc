@@ -48,6 +48,8 @@ using facade::RedisParser;
 using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
 
+constexpr string_view kKeyPlaceholder = "__key__"sv;
+
 thread_local absl::InsecureBitGen bit_gen;
 
 class KeyGenerator {
@@ -85,7 +87,8 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
     CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set_));
     CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get_));
   } else {
-    for (size_t pos = 0; (pos = command_.find("__key__", pos)) != string::npos; pos += 7) {
+    for (size_t pos = 0; (pos = command_.find(kKeyPlaceholder, pos)) != string::npos;
+         pos += kKeyPlaceholder.size()) {
       key_indices_.push_back(pos);
     }
   }
@@ -108,7 +111,7 @@ string CommandGenerator::operator()() {
     for (size_t pos : key_indices_) {
       key = (*keygen_)();
       absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), key);
-      last_pos = pos + 7;
+      last_pos = pos + kKeyPlaceholder.size();
     }
     absl::StrAppend(&cmd_, command_.substr(last_pos), "\r\n");
   }
@@ -118,11 +121,14 @@ string CommandGenerator::operator()() {
 // Per connection driver.
 class Driver {
  public:
-  explicit Driver(ProactorBase* p) {
-    socket_.reset(p->CreateSocket());
+  explicit Driver(ProactorBase* p = nullptr) {
+    if (p)
+      socket_.reset(p->CreateSocket());
   }
 
   Driver(const Driver&) = delete;
+  Driver(Driver&&) = default;
+  Driver& operator=(Driver&&) = default;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(uint32_t num_reqs, uint64_t cycle_ns, base::Histogram* dest);
@@ -144,7 +150,7 @@ class TLocalClient {
   explicit TLocalClient(ProactorBase* p) : p_(p) {
     drivers_.resize(GetFlag(FLAGS_c));
     for (auto& driver : drivers_) {
-      driver = make_unique<Driver>(p_);
+      driver = Driver{p_};
     }
   }
 
@@ -157,7 +163,7 @@ class TLocalClient {
 
  private:
   ProactorBase* p_;
-  vector<unique_ptr<Driver>> drivers_;
+  vector<Driver> drivers_;
 };
 
 KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
@@ -303,7 +309,7 @@ void TLocalClient::Connect(tcp::endpoint ep) {
   for (size_t i = 0; i < fbs.size(); ++i) {
     fbs[i] = MakeFiber([&, i] {
       ThisFiber::SetName(absl::StrCat("connect/", i));
-      drivers_[i]->Connect(i, ep);
+      drivers_[i].Connect(i, ep);
     });
   }
 
@@ -316,8 +322,8 @@ void TLocalClient::Run(uint64_t cycle_ns) {
   uint32_t num_reqs = GetFlag(FLAGS_n);
 
   for (size_t i = 0; i < fbs.size(); ++i) {
-    fbs[i] = fb2::Fiber(absl::StrCat("run/", i),
-                        [&, i] { drivers_[i]->Run(num_reqs, cycle_ns, &hist); });
+    fbs[i] =
+        fb2::Fiber(absl::StrCat("run/", i), [&, i] { drivers_[i].Run(num_reqs, cycle_ns, &hist); });
   }
 
   for (auto& fb : fbs)
