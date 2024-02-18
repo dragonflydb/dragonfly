@@ -14,7 +14,6 @@
 #include "base/logging.h"
 #include "core/detail/bitpacking.h"
 #include "core/flat_set.h"
-#include "core/json_object.h"
 #include "core/mi_memory_resource.h"
 
 extern "C" {
@@ -443,14 +442,14 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
     "children":[],"spouse":null}
   )";
   std::optional<JsonType> json_option2 =
-      JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
+      JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", CompactObj::memory_resource());
 
   cobj_.SetString(json_str);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   JsonType* failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);
-  std::optional<JsonType> json_option = JsonFromString(json_str);
+  std::optional<JsonType> json_option = JsonFromString(json_str, CompactObj::memory_resource());
   ASSERT_TRUE(json_option.has_value());
   cobj_.SetJson(std::move(json_option.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type
@@ -465,7 +464,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   ASSERT_TRUE(json != nullptr);
   ASSERT_TRUE(json->contains("b"));
   ASSERT_FALSE(json->contains("firstName"));
-  std::optional<JsonType> set_array = JsonFromString("");
+  std::optional<JsonType> set_array = JsonFromString("", CompactObj::memory_resource());
   // now set it to string again
   cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
@@ -492,7 +491,7 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
             "title" : "The Night Watch",
             "author" : "Phillips, David Atlee"
         }]})";
-  std::optional<JsonType> json_array = JsonFromString(books_json);
+  std::optional<JsonType> json_array = JsonFromString(books_json, CompactObj::memory_resource());
   ASSERT_TRUE(json_array.has_value());
   cobj_.SetJson(std::move(json_array.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type

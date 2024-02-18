@@ -4,7 +4,6 @@
 
 #include "server/cluster/cluster_family.h"
 
-#include <jsoncons/json.hpp>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -12,7 +11,6 @@
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/json_object.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
@@ -497,7 +495,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   }
 
   string_view json_str = ArgS(args, 0);
-  optional<JsonType> json = JsonFromString(json_str);
+  optional<JsonType> json = JsonFromString(json_str, PMR_NS::get_default_resource());
   if (!json.has_value()) {
     LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
     return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);

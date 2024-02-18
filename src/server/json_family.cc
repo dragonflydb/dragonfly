@@ -22,8 +22,8 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json/driver.h"
+#include "core/json/json_object.h"
 #include "core/json/jsonpath_grammar.hh"
-#include "core/json_object.h"
 #include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -130,6 +130,10 @@ string JsonTypeToName(const JsonType& val) {
   }
 
   return std::string{};
+}
+
+inline std::optional<JsonType> JsonFromString(std::string_view input) {
+  return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
 io::Result<JsonExpression> ParseJsonPath(string_view path) {

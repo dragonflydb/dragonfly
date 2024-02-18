@@ -24,7 +24,7 @@ MATCHER_P(NodeMatches, expected, "") {
 class ClusterConfigTest : public ::testing::Test {
  protected:
   JsonType ParseJson(string_view json_str) {
-    optional<JsonType> opt_json = JsonFromString(json_str);
+    optional<JsonType> opt_json = JsonFromString(json_str, PMR_NS::get_default_resource());
     CHECK(opt_json.has_value());
     return opt_json.value();
   }
