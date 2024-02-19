@@ -53,6 +53,7 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
+#include "server/snapshot.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
@@ -1327,6 +1328,15 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   }
 
   return save_info.error;
+}
+
+bool ServerFamily::TEST_IsSaving() const {
+  std::atomic_bool is_saving{false};
+  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
+    if (SliceSnapshot::IsSnaphotInProgress())
+      is_saving.store(true, std::memory_order_relaxed);
+  });
+  return is_saving.load(std::memory_order_relaxed);
 }
 
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {

@@ -174,10 +174,7 @@ class ServerFamily {
   // future with error_code.
   util::fb2::Future<GenericError> Load(const std::string& file_name);
 
-  bool TEST_IsSaving() const {
-    std::lock_guard lk(save_mu_);
-    return save_controller_ && save_controller_->TEST_IsSaving();
-  }
+  bool TEST_IsSaving() const;
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 

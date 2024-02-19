@@ -211,14 +211,6 @@ void SaveStagesController::SaveDfs() {
   trans_->ScheduleSingleHop(std::move(cb));
 }
 
-bool SaveStagesController::TEST_IsSaving() {
-  if (snapshots_.size() == 0) {
-    return false;
-  }
-  auto& [snapshot, _] = snapshots_.front();
-  return snapshot->HasStarted();
-}
-
 // Start saving a dfs file on shard
 void SaveStagesController::SaveDfsSingle(EngineShard* shard) {
   // for summary file, shard=null and index=shard_set->size(), see SaveDfs() above

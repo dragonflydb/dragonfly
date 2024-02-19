@@ -78,8 +78,6 @@ struct SaveStagesController : public SaveStagesInputs {
   size_t GetSaveBuffersSize();
   uint32_t GetCurrentSaveDuration();
 
-  bool TEST_IsSaving();
-
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.
   // Summary file is always last in snapshots array.
