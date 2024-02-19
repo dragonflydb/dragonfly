@@ -45,9 +45,6 @@ class DflyStartException(Exception):
     pass
 
 
-uid_iterator = itertools.count()
-
-
 class DflyInstance:
     """
     Represents a runnable and stoppable Dragonfly instance
@@ -143,8 +140,6 @@ class DflyInstance:
             raise DflyStartException("Process didn't start listening on port in time")
 
         self.log_files = self.get_logs_from_psutil()
-        id = next(uid_iterator)
-        logging.info(f"Starting instance with id {id} and port {self._port}")
 
         last_log_file = open("/tmp/last_test_log_files.txt", "w")
 

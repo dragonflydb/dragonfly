@@ -37,7 +37,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        timeout 1m pytest -m "${{inputs.filter}}" --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
+        timeout 1m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
@@ -61,7 +61,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
         run_pytest_with_args() {
-          timeout 20m pytest -m "${{inputs.filter}}" --color=yes --json-report \
+          timeout 20m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report \
             --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO \
             --df alsologtostderr $1 $2 || code=$?
 
@@ -91,6 +91,10 @@ runs:
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
+
+          # Copy over the logs of the test that timedout. We need this because the exception/failure
+          # handlers do not run when the TIMEOUT commands sends a SIGTERM to terminate the process
+          cat /tmp/last_test_log_files.txt | xargs -I {} cp {} /tmp/failed/
         fi
 
     - name: Send notification on failure

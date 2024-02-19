@@ -337,11 +337,11 @@ def copy_failed_logs_and_clean_tmp_folder(report):
 
     last_log_file = open("/tmp/last_test_log_files.txt", "r")
     files = last_log_file.readlines()
-    logging.info(f"Test failed {report.nodeid} with logs: ")
+    logging.error(f"Test failed {report.nodeid} with logs: ")
     for file in files:
         # copy to failed folder
         file = file.rstrip("\n")
-        logging.info(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
+        logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
         shutil.copy(file, failed_path)
 
 
