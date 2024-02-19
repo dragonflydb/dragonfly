@@ -141,7 +141,7 @@ class RdbLoaderBase {
 
   std::error_code EnsureRead(size_t min_sz);
 
-  std::error_code EnsureReadInternal(size_t min_sz);
+  std::error_code EnsureReadInternal(size_t min_to_read);
 
   base::IoBuf* mem_buf_ = nullptr;
   base::IoBuf origin_mem_buf_;

@@ -2046,12 +2046,13 @@ std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
     return std::error_code{};
   if (mem_buf_->InputLen() >= min_sz)
     return std::error_code{};
-  // We need to include what we already read inside Input buffer. Otherwise we might expect to read
-  // more than the minimum
-  return EnsureReadInternal(min_sz - mem_buf_->InputLen());
+  return EnsureReadInternal(min_sz);
 }
 
-error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
+error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
+  // We need to include what we already read inside Input buffer. Otherwise we might expect to read
+  // more than the minimum
+  const size_t min_sz = min_to_read - mem_buf_->InputLen();
   DCHECK_LT(mem_buf_->InputLen(), min_sz + mem_buf_->InputLen());
 
   auto out_buf = mem_buf_->AppendBuffer();
