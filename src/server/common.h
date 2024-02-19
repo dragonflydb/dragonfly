@@ -154,7 +154,6 @@ struct SearchStats {
 enum class GlobalState : uint8_t {
   ACTIVE,
   LOADING,
-  SAVING,
   SHUTTING_DOWN,
   TAKEN_OVER,
 };

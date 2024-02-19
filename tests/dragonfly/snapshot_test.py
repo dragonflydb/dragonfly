@@ -125,21 +125,21 @@ async def test_dbfilenames(
 
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
-async def test_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
+async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     file = None
     with async_timeout.timeout(65):
         while file is None:
             await asyncio.sleep(1)
-            file = find_main_file(tmp_path, "test-cron-summary.dfs")
+            file = find_main_file(tmp_dir, "test-cron-summary.dfs")
 
-    assert file is not None, os.listdir(tmp_path)
+    assert file is not None, os.listdir(tmp_dir)
 
 
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron-set"})
-async def test_set_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
+async def test_set_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     await async_client.config_set("snapshot_cron", "* * * * *")
@@ -148,7 +148,7 @@ async def test_set_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
     with async_timeout.timeout(65):
         while file is None:
             await asyncio.sleep(1)
-            file = find_main_file(tmp_path, "test-cron-set-summary.dfs")
+            file = find_main_file(tmp_dir, "test-cron-set-summary.dfs")
 
     assert file is not None
 

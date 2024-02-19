@@ -48,6 +48,10 @@ size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
   return mem;
 }
 
+bool SliceSnapshot::IsSnaphotInProgress() {
+  return tl_slice_snapshots.size() > 0;
+}
+
 void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   DCHECK(!snapshot_fb_.IsJoinable());
 

@@ -40,6 +40,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
 #include "server/detail/save_stages_controller.h"
+#include "server/detail/snapshot_storage.h"
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -52,6 +53,7 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
+#include "server/snapshot.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
@@ -1290,28 +1292,51 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     return GenericError{make_error_code(errc::operation_not_permitted),
                         StrCat("Can not save database in tiering mode")};
   }
-  if (!ignore_state) {
-    auto [new_state, success] = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-    if (!success) {
+  auto state = service_.GetGlobalState();
+  // In some cases we want to create a snapshot even if server is not active, f.e in takeover
+  if (!ignore_state && (state != GlobalState::ACTIVE)) {
+    return GenericError{make_error_code(errc::operation_in_progress),
+                        StrCat(GlobalStateName(state), " - can not save database")};
+  }
+
+  {
+    std::lock_guard lk(save_mu_);
+    if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
-                          StrCat(GlobalStateName(new_state), " - can not save database")};
+                          "SAVING - can not save database"};
     }
+    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+        new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
   }
+
+  detail::SaveInfo save_info = save_controller_->Save();
+
   {
-    std::lock_guard lck(save_mu_);
-    start_save_time_ = absl::Now();
+    std::lock_guard lk(save_mu_);
+
+    if (save_info.error) {
+      last_save_info_.last_error = save_info.error;
+      last_save_info_.last_error_time = save_info.save_time;
+      last_save_info_.failed_duration_sec = save_info.duration_sec;
+    } else {
+      last_save_info_.save_time = save_info.save_time;
+      last_save_info_.success_duration_sec = save_info.duration_sec;
+      last_save_info_.file_name = save_info.file_name;
+      last_save_info_.freq_map = save_info.freq_map;
+    }
+    save_controller_.reset();
   }
-  SaveStagesController sc{detail::SaveStagesInputs{
-      new_version, basename, trans, &service_, &is_saving_, fq_threadpool_.get(), &last_save_info_,
-      &save_mu_, &save_bytes_cb_, snapshot_storage_}};
-  auto res = sc.Save();
-  {
-    std::lock_guard lck(save_mu_);
-    start_save_time_.reset();
-  }
-  if (!ignore_state)
-    service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
-  return res;
+
+  return save_info.error;
+}
+
+bool ServerFamily::TEST_IsSaving() const {
+  std::atomic_bool is_saving{false};
+  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
+    if (SliceSnapshot::IsSnaphotInProgress())
+      is_saving.store(true, std::memory_order_relaxed);
+  });
+  return is_saving.load(std::memory_order_relaxed);
 }
 
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
@@ -1841,10 +1866,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
     }
 
-    if (IsSaving()) {
+    {
       lock_guard lk{save_mu_};
-      if (save_bytes_cb_) {
-        append("save_buffer_bytes", save_bytes_cb_());
+      if (save_controller_) {
+        append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
       }
     }
   }
@@ -1914,9 +1939,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
     append("loading", is_loading);
 
-    auto curent_durration_sec =
-        start_save_time_ ? (absl::Now() - *start_save_time_) / absl::Seconds(1) : 0;
-    append("saving", curent_durration_sec != 0);
+    bool is_saving = false;
+    uint32_t curent_durration_sec = 0;
+    {
+      lock_guard lk{save_mu_};
+      if (save_controller_) {
+        is_saving = true;
+        curent_durration_sec = save_controller_->GetCurrentSaveDuration();
+      }
+    }
+
+    append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
 
     for (const auto& k_v : save_info.freq_map) {

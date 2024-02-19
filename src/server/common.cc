@@ -75,8 +75,6 @@ const char* GlobalStateName(GlobalState s) {
       return "ACTIVE";
     case GlobalState::LOADING:
       return "LOADING";
-    case GlobalState::SAVING:
-      return "SAVING";
     case GlobalState::SHUTTING_DOWN:
       return "SHUTTING DOWN";
     case GlobalState::TAKEN_OVER:
