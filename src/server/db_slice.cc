@@ -4,10 +4,6 @@
 
 #include "server/db_slice.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/cleanup/cleanup.h>
 
 #include "base/flags.h"

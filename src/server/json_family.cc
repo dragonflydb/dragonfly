@@ -4,12 +4,6 @@
 
 #include "server/json_family.h"
 
-#include "facade/op_status.h"
-
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
@@ -22,9 +16,10 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json/driver.h"
+#include "core/json/json_object.h"
 #include "core/json/jsonpath_grammar.hh"
-#include "core/json_object.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/error.h"
@@ -130,6 +125,10 @@ string JsonTypeToName(const JsonType& val) {
   }
 
   return std::string{};
+}
+
+inline std::optional<JsonType> JsonFromString(std::string_view input) {
+  return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
 io::Result<JsonExpression> ParseJsonPath(string_view path) {
@@ -574,23 +573,49 @@ OpResult<vector<OptSizeT>> OpArrLen(const OpArgs& op_args, string_view key, Json
   return vec;
 }
 
-OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, string_view path) {
+OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, string_view path,
+                                   JsonPathV2 expression) {
   vector<OptBool> vec;
-  auto cb = [&vec](const auto&, JsonType& val) {
-    if (val.is_bool()) {
-      bool current_val = val.as_bool() ^ true;
-      val = current_val;
-      vec.emplace_back(current_val);
-    } else {
-      vec.emplace_back(nullopt);
+  if (std::holds_alternative<json::Path>(expression)) {
+    auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+    if (!it_res.ok()) {
+      return it_res.status();
     }
-  };
 
-  OpStatus status = UpdateEntry(op_args, key, path, cb);
-  if (status != OpStatus::OK) {
-    return status;
+    PrimeValue& pv = it_res->it->second;
+
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+
+    const json::Path& expr = std::get<json::Path>(expression);
+    auto cb = [&vec](optional<string_view>, JsonType* val) {
+      if (val->is_bool()) {
+        bool next_val = val->as_bool() ^ true;
+        *val = next_val;
+        vec.emplace_back(next_val);
+      } else {
+        vec.emplace_back(nullopt);
+      }
+      return false;
+    };
+    json::MutatePath(expr, std::move(cb), pv.GetJson());
+    it_res->post_updater.Run();
+    op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  } else {
+    auto cb = [&vec](const auto&, JsonType& val) {
+      if (val.is_bool()) {
+        bool current_val = val.as_bool() ^ true;
+        val = current_val;
+        vec.emplace_back(current_val);
+      } else {
+        vec.emplace_back(nullopt);
+      }
+    };
+
+    OpStatus status = UpdateEntry(op_args, key, path, cb);
+    if (status != OpStatus::OK) {
+      return status;
+    }
   }
-
   return vec;
 }
 
@@ -1694,8 +1719,10 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
+  JsonPathV2 expression = PARSE_PATHV2(path);
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpToggle(t->GetOpArgs(shard), key, path);
+    return OpToggle(t->GetOpArgs(shard), key, path, std::move(expression));
   };
 
   Transaction* trans = cntx->transaction;

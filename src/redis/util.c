@@ -710,33 +710,7 @@ sds getAbsolutePath(char *filename) {
     return abspath;
 }
 
-/*
- * Gets the proper timezone in a more portable fashion
- * i.e timezone variables are linux specific.
- */
-
-long getTimeZone(void) {
-#if defined(__linux__) || defined(__sun)
-    return timezone;
-#else
-    struct timeval tv;
-    struct timezone tz;
-
-    gettimeofday(&tv, &tz);
-
-    return tz.tz_minuteswest * 60L;
 #endif
-}
-
-/* Return true if the specified path is just a file basename without any
- * relative or absolute path. This function just checks that no / or \
- * character exists inside the specified path, that's enough in the
- * environments where Redis runs. */
-int pathIsBaseName(char *path) {
-    return strchr(path,'/') == NULL && strchr(path,'\\') == NULL;
-}
-
-#endif 
 
 /* Return the UNIX time in microseconds */
 long long ustime(void) {
@@ -747,30 +721,6 @@ long long ustime(void) {
     ust = ((long long)tv.tv_sec)*1000000;
     ust += tv.tv_usec;
     return ust;
-}
-
-/* This function is used to obtain the current LRU clock.
- * If the current resolution is lower than the frequency we refresh the
- * LRU clock (as it should be in production servers) we return the
- * precomputed value, otherwise we need to resort to a system call. */
-unsigned int LRU_CLOCK(void) {
-    unsigned int lruclock;
-    if (0 /* 1000/server.hz <= LRU_CLOCK_RESOLUTION*/) {
-      // NOTE(roman): server.lruclock is just an optimization
-      // lruclock = server.lruclock;
-    } else {
-      lruclock = getLRUClock();
-    }
-    return lruclock;
-}
-
-/* Positive input is sleep time in microseconds. Negative input is fractions
- * of microseconds, i.e. -10 means 100 nanoseconds. */
-void debugDelay(int usec) {
-    /* Since even the shortest sleep results in context switch and system call,
-     * the way we achieve short sleeps is by statistically sleeping less often. */
-    if (usec < 0) usec = (rand() % -usec) == 0 ? 1: 0;
-    if (usec) usleep(usec);
 }
 
 #ifdef REDIS_TEST

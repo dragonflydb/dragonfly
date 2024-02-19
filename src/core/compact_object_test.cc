@@ -14,13 +14,10 @@
 #include "base/logging.h"
 #include "core/detail/bitpacking.h"
 #include "core/flat_set.h"
-#include "core/json_object.h"
 #include "core/mi_memory_resource.h"
 
 extern "C" {
-#include "redis/dict.h"
 #include "redis/intset.h"
-#include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
 #include "redis/zmalloc.h"
@@ -251,30 +248,6 @@ TEST_F(CompactObjectTest, WastedMemoryDontCount) {
   mi_collect(false);
 }
 
-TEST_F(CompactObjectTest, Basic) {
-  robj* rv = createRawStringObject("foo", 3);
-  cobj_.ImportRObj(rv);
-
-  CompactObj a;
-  a.SetExpire(true);
-  a.SetFlag(true);
-  a.SetString("val");
-  string res;
-  a.GetString(&res);
-  EXPECT_EQ("val", res);
-  EXPECT_TRUE(a.HasExpire());
-  EXPECT_TRUE(a.HasFlag());
-
-  CompactObj b("vala");
-  EXPECT_NE(a, b);
-
-  CompactObj c = a.AsRef();
-  EXPECT_EQ(a, c);
-  EXPECT_TRUE(c.HasExpire());
-
-  cobj_.SetString(string_view{});
-}
-
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
   CompactObj obj{s};
@@ -354,13 +327,11 @@ TEST_F(CompactObjectTest, AsciiUtil) {
 }
 
 TEST_F(CompactObjectTest, IntSet) {
-  robj* src = createIntsetObject();
-  cobj_.ImportRObj(src);
-  EXPECT_EQ(OBJ_SET, cobj_.ObjType());
-  EXPECT_EQ(kEncodingIntSet, cobj_.Encoding());
+  intset* is = intsetNew();
+  cobj_.InitRobj(OBJ_SET, kEncodingIntSet, is);
 
   EXPECT_EQ(0, cobj_.Size());
-  intset* is = (intset*)cobj_.RObjPtr();
+  is = (intset*)cobj_.RObjPtr();
   uint8_t success = 0;
 
   is = intsetAdd(is, 10, &success);
@@ -393,24 +364,6 @@ TEST_F(CompactObjectTest, Hash) {
   cobj_.InitRobj(OBJ_HASH, kEncodingListPack, lp);
   EXPECT_EQ(OBJ_HASH, cobj_.ObjType());
   EXPECT_EQ(1, cobj_.Size());
-}
-
-TEST_F(CompactObjectTest, StreamObj) {
-  robj* stream_obj = createStreamObject();
-  stream* sm = (stream*)stream_obj->ptr;
-  robj* item[2];
-  item[0] = createStringObject("FIELD", 5);
-  item[1] = createStringObject("VALUE", 5);
-  ASSERT_EQ(C_OK, streamAppendItem(sm, item, 1, NULL, NULL, 0));
-
-  decrRefCount(item[0]);
-  decrRefCount(item[1]);
-
-  cobj_.ImportRObj(stream_obj);
-
-  EXPECT_EQ(OBJ_STREAM, cobj_.ObjType());
-  EXPECT_EQ(OBJ_ENCODING_STREAM, cobj_.Encoding());
-  EXPECT_FALSE(cobj_.IsInline());
 }
 
 TEST_F(CompactObjectTest, MimallocUnderutilzation) {
@@ -487,14 +440,14 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
     "children":[],"spouse":null}
   )";
   std::optional<JsonType> json_option2 =
-      JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
+      JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})", CompactObj::memory_resource());
 
   cobj_.SetString(json_str);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
   JsonType* failed_json = cobj_.GetJson();
   ASSERT_TRUE(failed_json == nullptr);
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);
-  std::optional<JsonType> json_option = JsonFromString(json_str);
+  std::optional<JsonType> json_option = JsonFromString(json_str, CompactObj::memory_resource());
   ASSERT_TRUE(json_option.has_value());
   cobj_.SetJson(std::move(json_option.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type
@@ -509,7 +462,7 @@ TEST_F(CompactObjectTest, JsonTypeTest) {
   ASSERT_TRUE(json != nullptr);
   ASSERT_TRUE(json->contains("b"));
   ASSERT_FALSE(json->contains("firstName"));
-  std::optional<JsonType> set_array = JsonFromString("");
+  std::optional<JsonType> set_array = JsonFromString("", CompactObj::memory_resource());
   // now set it to string again
   cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
   ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
@@ -536,7 +489,7 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
             "title" : "The Night Watch",
             "author" : "Phillips, David Atlee"
         }]})";
-  std::optional<JsonType> json_array = JsonFromString(books_json);
+  std::optional<JsonType> json_array = JsonFromString(books_json, CompactObj::memory_resource());
   ASSERT_TRUE(json_array.has_value());
   cobj_.SetJson(std::move(json_array.value()));
   ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type

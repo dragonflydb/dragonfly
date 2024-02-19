@@ -6,7 +6,6 @@
 
 extern "C" {
 #include "redis/listpack.h"
-#include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"

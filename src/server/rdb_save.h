@@ -7,7 +7,6 @@
 
 extern "C" {
 #include "redis/lzfP.h"
-#include "redis/object.h"
 }
 
 #include <optional>
@@ -215,11 +214,11 @@ class RdbSerializer : public SerializerBase {
 
  private:
   std::error_code SaveObject(const PrimeValue& pv);
-  std::error_code SaveListObject(const robj* obj);
+  std::error_code SaveListObject(const PrimeValue& pv);
   std::error_code SaveSetObject(const PrimeValue& pv);
   std::error_code SaveHSetObject(const PrimeValue& pv);
   std::error_code SaveZSetObject(const PrimeValue& pv);
-  std::error_code SaveStreamObject(const robj* obj);
+  std::error_code SaveStreamObject(const PrimeValue& obj);
   std::error_code SaveJsonObject(const PrimeValue& pv);
 
   std::error_code SaveLongLongAsString(int64_t value);

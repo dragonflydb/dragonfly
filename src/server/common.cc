@@ -11,7 +11,6 @@
 #include <system_error>
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/rdb.h"
 #include "redis/util.h"
 }

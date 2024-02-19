@@ -10,7 +10,7 @@
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
-#include "redis/object.h"
+#include "redis/quicklist.h"
 #include "redis/redis_aux.h"
 #include "redis/stream.h"
 #include "redis/util.h"
@@ -30,7 +30,7 @@ extern "C" {
 #include "core/string_map.h"
 #include "core/string_set.h"
 
-ABSL_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
+ABSL_RETIRED_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
 
 namespace dfly {
 using namespace std;
@@ -51,10 +51,6 @@ size_t QlMAllocSize(quicklist* ql) {
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
-    case kEncodingStrMap: {
-      dictRelease((dict*)ptr);
-      break;
-    }
     case kEncodingStrMap2: {
       CompactObj::DeleteMR<StringSet>(ptr);
       break;
@@ -70,8 +66,6 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
 
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case kEncodingStrMap /*OBJ_ENCODING_HT*/:
-      return 0;  // TODO
     case kEncodingStrMap2: {
       StringSet* ss = (StringSet*)ptr;
       return ss->ObjMallocUsed() + ss->SetMallocUsed() + zmalloc_usable_size(ptr);
@@ -205,9 +199,6 @@ static_assert(ascii_len(16) == 18);
 static_assert(ascii_len(17) == 19);
 
 struct TL {
-  robj tmp_robj{
-      .type = 0, .encoding = 0, .lru = 0, .refcount = OBJ_STATIC_REFCOUNT, .ptr = nullptr};
-
   MemoryResource* local_mr = PMR_NS::get_default_resource();
   size_t small_str_bytes;
   base::PODArray<uint8_t> tmp_buf;
@@ -279,10 +270,6 @@ size_t RobjWrapper::Size() const {
         case kEncodingIntSet: {
           intset* is = (intset*)inner_obj_;
           return intsetLen(is);
-        }
-        case kEncodingStrMap: {
-          dict* d = (dict*)inner_obj_;
-          return dictSize(d);
         }
         case kEncodingStrMap2: {
           StringSet* ss = (StringSet*)inner_obj_;
@@ -681,70 +668,10 @@ unsigned CompactObj::Encoding() const {
   }
 }
 
-// Takes ownership over o.
-void CompactObj::ImportRObj(robj* o) {
-  CHECK(1 == o->refcount || o->refcount == OBJ_STATIC_REFCOUNT);
-  CHECK_NE(o->encoding, OBJ_ENCODING_EMBSTR);  // need regular one
-  CHECK_NE(o->type, OBJ_ZSET);
-
-  SetMeta(ROBJ_TAG);
-
-  if (o->type == OBJ_STRING) {
-    std::string_view src((sds)o->ptr, sdslen((sds)o->ptr));
-    u_.r_obj.SetString(src, tl.local_mr);
-    decrRefCount(o);
-  } else {  // Non-string objects we move as is and release Robj wrapper.
-    auto type = o->type;
-    auto enc = o->encoding;
-    if (o->type == OBJ_SET) {
-      if (o->encoding == OBJ_ENCODING_INTSET) {
-        enc = kEncodingIntSet;
-      } else {
-        enc = GetFlag(FLAGS_use_set2) ? kEncodingStrMap2 : kEncodingStrMap;
-      }
-    } else if (o->type == OBJ_HASH) {
-      LOG(FATAL) << "Should not reach";
-    }
-    u_.r_obj.Init(type, enc, o->ptr);
-    if (o->refcount == 1)
-      zfree(o);
-  }
-}
-
-robj* CompactObj::AsRObj() const {
-  CHECK_EQ(ROBJ_TAG, taglen_);
-
-  robj* res = &tl.tmp_robj;
-  unsigned enc = u_.r_obj.encoding();
-  res->type = u_.r_obj.type();
-
-  if (res->type == OBJ_SET || res->type == OBJ_HASH || res->type == OBJ_ZSET) {
-    LOG(DFATAL) << "Should not call AsRObj for type " << res->type;
-  }
-
-  res->encoding = enc;
-  res->lru = 0;  // u_.r_obj.unneeded;
-  res->ptr = u_.r_obj.inner_obj();
-
-  return res;
-}
-
 void CompactObj::InitRobj(unsigned type, unsigned encoding, void* obj) {
   DCHECK_NE(type, OBJ_STRING);
   SetMeta(ROBJ_TAG, mask_);
   u_.r_obj.Init(type, encoding, obj);
-}
-
-void CompactObj::SyncRObj() {
-  robj* obj = &tl.tmp_robj;
-
-  DCHECK_EQ(ROBJ_TAG, taglen_);
-  DCHECK_EQ(u_.r_obj.type(), obj->type);
-  DCHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
-  CHECK_NE(OBJ_ZSET, obj->type) << "zsets should be handled without robj";
-
-  unsigned enc = obj->encoding;
-  u_.r_obj.Init(obj->type, enc, obj->ptr);
 }
 
 void CompactObj::SetInt(int64_t val) {

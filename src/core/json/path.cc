@@ -4,11 +4,12 @@
 
 #include "src/core/json/path.h"
 
+#include <absl/strings/str_cat.h>
 #include <absl/types/span.h>
 
-#include "base/expected.hpp"
 #include "base/logging.h"
-#include "src/core/json_object.h"
+#include "core/json/jsonpath_grammar.hh"
+#include "src/core/json/driver.h"
 #include "src/core/overloaded.h"
 
 using namespace std;
@@ -103,6 +104,7 @@ class Dfs {
 
   // TODO: for some operations we need to know the type of mismatches.
   void Traverse(absl::Span<const PathSegment> path, const JsonType& json, const Cb& callback);
+  void Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback, JsonType* json);
 
   unsigned matches() const {
     return matches_;
@@ -114,9 +116,19 @@ class Dfs {
   nonstd::expected<void, MatchStatus> PerformStep(const PathSegment& segment, const JsonType& node,
                                                   const Cb& callback);
 
+  nonstd::expected<void, MatchStatus> MutateStep(const PathSegment& segment,
+                                                 const MutateCallback& cb, JsonType* node);
+
+  void Mutate(const PathSegment& segment, const MutateCallback& callback, JsonType* node);
+
   void DoCall(const Cb& callback, optional<string_view> key, const JsonType& node) {
     ++matches_;
     callback(key, node);
+  }
+
+  bool Mutate(const MutateCallback& callback, optional<string_view> key, JsonType* node) {
+    ++matches_;
+    return callback(key, node);
   }
 
   unsigned matches_ = 0;
@@ -205,6 +217,8 @@ template <bool IsConst> auto DfsItem<IsConst>::Init(const PathSegment& segment) 
       }
       break;
     }
+    default:
+      LOG(DFATAL) << "Unknown segment " << SegmentName(segment.type());
   }  // end switch
 
   return make_unexpected(MISMATCH);
@@ -254,6 +268,44 @@ void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, con
   } while (!stack.empty());
 }
 
+void Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
+                 JsonType* json) {
+  DCHECK(!path.empty());
+  if (path.size() == 1) {
+    MutateStep(path[0], callback, json);
+    return;
+  }
+
+  using Item = DfsItem<false>;
+  vector<Item> stack;
+  stack.emplace_back(json);
+
+  do {
+    unsigned segment_index = stack.back().segment_idx();
+    const auto& path_segment = path[segment_index];
+
+    // init or advance the current object
+    Item::AdvanceResult res = stack.back().Advance(path_segment);
+    if (res && res->first != nullptr) {
+      JsonType* next = res->first;
+      DVLOG(2) << "Handling now " << next->type() << " " << next->to_string();
+
+      // We descent only if next is object or an array.
+      if (IsRecursive(next->type())) {
+        unsigned next_seg_id = res->second;
+
+        if (next_seg_id + 1 < path.size()) {
+          stack.emplace_back(next, next_seg_id);
+        } else {
+          MutateStep(path[next_seg_id], callback, next);
+        }
+      }
+    } else {
+      stack.pop_back();
+    }
+  } while (!stack.empty());
+}
+
 auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node, const Cb& callback)
     -> nonstd::expected<void, MatchStatus> {
   switch (segment.type()) {
@@ -287,16 +339,144 @@ auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node, const Cb
         }
       }
     } break;
+    default:
+      LOG(DFATAL) << "Unknown segment " << SegmentName(segment.type());
   }
   return {};
 }
 
+auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonType* node)
+    -> nonstd::expected<void, MatchStatus> {
+  switch (segment.type()) {
+    case SegmentType::IDENTIFIER: {
+      if (!node->is_object())
+        return make_unexpected(MISMATCH);
+
+      auto it = node->find(segment.identifier());
+      if (it != node->object_range().end()) {
+        if (Mutate(cb, it->key(), &it->value())) {
+          node->erase(it);
+        }
+      }
+    } break;
+    case SegmentType::INDEX: {
+      if (!node->is_array())
+        return make_unexpected(MISMATCH);
+      if (segment.index() >= node->size()) {
+        return make_unexpected(OUT_OF_BOUNDS);
+      }
+      if (Mutate(cb, nullopt, &node[segment.index()])) {
+        node->erase(node->array_range().begin() + segment.index());
+      }
+    } break;
+
+    case SegmentType::DESCENT:
+    case SegmentType::WILDCARD: {
+      if (node->is_object()) {
+        auto it = node->object_range().begin();
+        while (it != node->object_range().end()) {
+          it = Mutate(cb, it->key(), &it->value()) ? node->erase(it) : it + 1;
+        }
+      } else if (node->is_array()) {
+        auto it = node->array_range().begin();
+        while (it != node->array_range().end()) {
+          it = Mutate(cb, nullopt, &*it) ? node->erase(it) : it + 1;
+        }
+      }
+    } break;
+    case SegmentType::FUNCTION:
+      LOG(DFATAL) << "Function segment is not supported for mutation";
+      break;
+  }
+  return {};
+}
+
+class JsonPathDriver : public json::Driver {
+ public:
+  string msg;
+  void Error(const json::location& l, const std::string& msg) final {
+    this->msg = absl::StrCat("Error: ", msg);
+  }
+};
+
 }  // namespace
+
+const char* SegmentName(SegmentType type) {
+  switch (type) {
+    case SegmentType::IDENTIFIER:
+      return "IDENTIFIER";
+    case SegmentType::INDEX:
+      return "INDEX";
+    case SegmentType::WILDCARD:
+      return "WILDCARD";
+    case SegmentType::DESCENT:
+      return "DESCENT";
+    case SegmentType::FUNCTION:
+      return "FUNCTION";
+  }
+  return nullptr;
+}
+
+void PathSegment::Evaluate(const JsonType& json) const {
+  CHECK(type() == SegmentType::FUNCTION);
+  AggFunction* func = std::get<shared_ptr<AggFunction>>(value_).get();
+  CHECK(func);
+  func->Apply(json);
+}
+
+JsonType PathSegment::GetResult() const {
+  CHECK(type() == SegmentType::FUNCTION);
+  const auto& func = std::get<shared_ptr<AggFunction>>(value_).get();
+  CHECK(func);
+  return func->GetResult();
+}
 
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback) {
   if (path.empty())
     return;
-  Dfs().Traverse(path, json, std::move(callback));
+
+  if (path.front().type() != SegmentType::FUNCTION) {
+    Dfs().Traverse(path, json, std::move(callback));
+    return;
+  }
+
+  // Handling the case of `func($.somepath)`
+  // We pass our own callback to gather all the results and then call the function.
+  JsonType result(JsonType::null());
+  absl::Span<const PathSegment> path_tail(path.data() + 1, path.size() - 1);
+
+  const PathSegment& func_segment = path.front();
+
+  if (path_tail.empty()) {
+    LOG(DFATAL) << "Invalid path";  // parser should not allow this.
+  } else {
+    Dfs().Traverse(path_tail, json, [&](auto, const JsonType& val) { func_segment.Evaluate(val); });
+  }
+  callback(nullopt, func_segment.GetResult());
+}
+
+nonstd::expected<json::Path, string> ParsePath(string_view path) {
+  if (path.size() > 8192)
+    return nonstd::make_unexpected("Path too long");
+
+  VLOG(2) << "Parsing path: " << path;
+
+  JsonPathDriver driver;
+  Parser parser(&driver);
+
+  driver.SetInput(string(path));
+  int res = parser();
+  if (res != 0) {
+    return nonstd::make_unexpected(driver.msg);
+  }
+
+  return driver.TakePath();
+}
+
+void MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
+  if (path.empty())
+    return;
+  Dfs().Mutate(path, callback, json);
 }
 
 }  // namespace dfly::json
