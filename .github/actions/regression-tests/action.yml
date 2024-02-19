@@ -92,8 +92,11 @@ runs:
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
 
+          # It could be the case that the first test failed and the folder was not created. We need mkdir
+          # therefore so plz do not remove
+          mkdir /tmp/failed
           # Copy over the logs of the test that timedout. We need this because the exception/failure
-          # handlers do not run when the TIMEOUT commands sends a SIGTERM to terminate the process
+          # handlers do not run when the shell command TIMEOUT sends a SIGTERM to terminate the pytest process.
           cat /tmp/last_test_log_files.txt | xargs -I {} cp {} /tmp/failed/
         fi
 
