@@ -170,7 +170,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v3
         with:
-          name: unit_logs
+          name: regression_logs
           path: /tmp/failed/*
 
 
