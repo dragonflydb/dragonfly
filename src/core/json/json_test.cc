@@ -101,6 +101,18 @@ TEST_F(JsonTest, Path) {
     ASSERT_EQ("$['field-dash']", path);
     ASSERT_EQ(2, val.as<int>());
   });
+
+  int called = 0;
+  jsonpath::json_query(j1, "max($.*)", [&](const std::string& path, const json& val) {
+    EXPECT_EQ("$", path);
+    ASSERT_EQ(2, val.as<int>());
+    ++called;
+  });
+  EXPECT_EQ(1, called);
+
+  auto res = jsonpath::json_query(j1, "max($.*)");
+  ASSERT_TRUE(res.is_array() && res.size() == 1);
+  EXPECT_EQ(2, res[0].as<int>());
 }
 
 TEST_F(JsonTest, Delete) {

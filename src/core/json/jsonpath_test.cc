@@ -20,24 +20,7 @@ MATCHER_P(SegType, value, "") {
 }
 
 void PrintTo(SegmentType st, std::ostream* os) {
-  *os << " segment(";
-  switch (st) {
-    {
-      case SegmentType::IDENTIFIER:
-        *os << "IDENTIFIER";
-        break;
-      case SegmentType::INDEX:
-        *os << "INDEX";
-        break;
-      case SegmentType::WILDCARD:
-        *os << "WILDCARD";
-        break;
-      case SegmentType::DESCENT:
-        *os << "DESCENT";
-        break;
-    }
-  }
-  *os << ")";
+  *os << " segment(" << SegmentName(st) << ")";
 }
 
 class TestDriver : public Driver {
@@ -136,6 +119,28 @@ TEST_F(JsonPathTest, Parser) {
   EXPECT_THAT(path[2], SegType(SegmentType::INDEX));
   EXPECT_EQ("bar", path[1].identifier());
   EXPECT_EQ(1, path[2].index());
+
+  EXPECT_EQ(0, Parse("$.plays[*].game"));
+}
+
+TEST_F(JsonPathTest, Functions) {
+  ASSERT_EQ(0, Parse("max($.plays[*].score)"));
+  Path path = driver_.TakePath();
+  ASSERT_EQ(4, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::FUNCTION));
+  EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
+  EXPECT_THAT(path[2], SegType(SegmentType::WILDCARD));
+  EXPECT_THAT(path[3], SegType(SegmentType::IDENTIFIER));
+  JsonType json =
+      JsonFromString(R"({"plays": [{"score": 1}, {"score": 2}]})", pmr::get_default_resource())
+          .value();
+  int called = 0;
+  EvaluatePath(path, json, [&](auto, const JsonType& val) {
+    ASSERT_TRUE(val.is<int>());
+    ASSERT_EQ(2, val.as<int>());
+    ++called;
+  });
+  ASSERT_EQ(1, called);
 }
 
 TEST_F(JsonPathTest, Descent) {
