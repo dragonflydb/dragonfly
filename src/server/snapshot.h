@@ -61,6 +61,7 @@ class SliceSnapshot {
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
+  static bool IsSnaphotInProgress();
 
   // Initialize snapshot, start bucket iteration fiber, register listeners.
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.

@@ -12,6 +12,7 @@
 #include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "server/channel_store.h"
+#include "server/detail/save_stages_controller.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
 #include "server/server_state.h"
@@ -171,9 +172,7 @@ class ServerFamily {
   // future with error_code.
   Future<GenericError> Load(const std::string& file_name);
 
-  bool IsSaving() const {
-    return is_saving_.load(std::memory_order_relaxed);
-  }
+  bool TEST_IsSaving() const;
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
@@ -280,13 +279,7 @@ class ServerFamily {
   time_t start_time_ = 0;  // in seconds, epoch time.
 
   LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
-  std::atomic_bool is_saving_{false};
-  // this field duplicate SaveStagesController::start_save_time_
-  // TODO make SaveStagesController as member of this class
-  std::optional<absl::Time> start_save_time_;
-  // If a save operation is currently in progress, calling this function will provide information
-  // about the memory consumption during the save operation.
-  std::function<size_t()> save_bytes_cb_ = nullptr;
+  std::unique_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
 
   // Used to override save on shutdown behavior that is usually set
   // be --dbfilename.

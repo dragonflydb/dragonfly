@@ -318,7 +318,7 @@ TEST_F(RdbTest, SaveFlush) {
 
   do {
     usleep(10);
-  } while (!service_->server_family().IsSaving());
+  } while (!service_->server_family().TEST_IsSaving());
 
   Run({"flushdb"});
   save_fb.Join();
@@ -348,7 +348,7 @@ TEST_F(RdbTest, SaveManyDbs) {
 
   do {
     usleep(10);
-  } while (!service_->server_family().IsSaving());
+  } while (!service_->server_family().TEST_IsSaving());
 
   pp_->at(1)->Await([&] {
     Run({"select", "1"});
