@@ -32,6 +32,8 @@ class Driver {
     AddSegment(PathSegment(SegmentType::IDENTIFIER, identifier));
   }
 
+  void AddFunction(std::string_view fname);
+
   void AddWildcard() {
     AddSegment(PathSegment(SegmentType::WILDCARD));
   }
