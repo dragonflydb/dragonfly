@@ -1292,6 +1292,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
                         StrCat("Can not save database in tiering mode")};
   }
   auto state = service_.GetGlobalState();
+  // In some cases we want to create a snapshot even if server is not active, f.e in takeover
   if (!ignore_state && (state != GlobalState::ACTIVE)) {
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
@@ -1303,19 +1304,29 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
-    save_controller_ = make_unique<SaveStagesController>(
-        detail::SaveStagesInputs{new_version, basename, trans, &service_, fq_threadpool_.get(),
-                                 &last_save_info_, &save_mu_, snapshot_storage_});
+    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+        new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
   }
 
-  auto res = save_controller_->Save();
+  detail::SaveInfo save_info = save_controller_->Save();
 
   {
     std::lock_guard lk(save_mu_);
+
+    if (save_info.error) {
+      last_save_info_.last_error = save_info.error;
+      last_save_info_.last_error_time = save_info.save_time;
+      last_save_info_.failed_duration_sec = save_info.duration_sec;
+    } else {
+      last_save_info_.save_time = save_info.save_time;
+      last_save_info_.success_duration_sec = save_info.duration_sec;
+      last_save_info_.file_name = save_info.file_name;
+      last_save_info_.freq_map = save_info.freq_map;
+    }
     save_controller_.reset();
   }
 
-  return res;
+  return save_info.error;
 }
 
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
@@ -1333,7 +1344,7 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   return error_code{};
 }
 
-detail::LastSaveInfo ServerFamily::GetLastSaveInfo() const {
+LastSaveInfo ServerFamily::GetLastSaveInfo() const {
   lock_guard lk(save_mu_);
   return last_save_info_;
 }
@@ -1924,7 +1935,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       lock_guard lk{save_mu_};
       if (save_controller_) {
         is_saving = true;
-        curent_durration_sec = save_controller_->GetCurrentSaveDuratio();
+        curent_durration_sec = save_controller_->GetCurrentSaveDuration();
       }
     }
 

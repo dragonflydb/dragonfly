@@ -148,31 +148,26 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 SaveStagesController::~SaveStagesController() {
 }
 
-GenericError SaveStagesController::Save() {
-  if (auto err = BuildFullPath(); err)
-    return err;
+SaveInfo SaveStagesController::Save() {
+  if (auto err = BuildFullPath(); err) {
+    shared_err_ = err;
+    return GetSaveInfo();
+  }
 
-  if (auto err = InitResources(); err)
-    return err;
+  InitResources();
 
-  // The stages below report errors to shared_err_
   if (use_dfs_format_)
     SaveDfs();
   else
     SaveRdb();
 
-  is_saving_ = true;
-
   RunStage(&SaveStagesController::SaveCb);
 
   RunStage(&SaveStagesController::CloseCb);
-  is_saving_ = false;
 
   FinalizeFileMovement();
 
-  UpdateSaveInfo();
-
-  return *shared_err_;
+  return GetSaveInfo();
 }
 
 size_t SaveStagesController::GetSaveBuffersSize() {
@@ -216,6 +211,14 @@ void SaveStagesController::SaveDfs() {
   trans_->ScheduleSingleHop(std::move(cb));
 }
 
+bool SaveStagesController::TEST_IsSaving() {
+  if (snapshots_.size() == 0) {
+    return false;
+  }
+  auto& [snapshot, _] = snapshots_.front();
+  return snapshot->HasStarted();
+}
+
 // Start saving a dfs file on shard
 void SaveStagesController::SaveDfsSingle(EngineShard* shard) {
   // for summary file, shard=null and index=shard_set->size(), see SaveDfs() above
@@ -256,18 +259,18 @@ void SaveStagesController::SaveRdb() {
   trans_->ScheduleSingleHop(std::move(cb));
 }
 
-uint32_t SaveStagesController::GetCurrentSaveDuratio() {
+uint32_t SaveStagesController::GetCurrentSaveDuration() {
   return (absl::Now() - start_time_) / absl::Seconds(1);
 }
 
-void SaveStagesController::UpdateSaveInfo() {
-  auto seconds = (absl::Now() - start_time_) / absl::Seconds(1);
+SaveInfo SaveStagesController::GetSaveInfo() {
+  SaveInfo info;
+  info.save_time = absl::ToUnixSeconds(start_time_);
+  info.duration_sec = GetCurrentSaveDuration();
+
   if (shared_err_) {
-    lock_guard lk{*save_mu_};
-    last_save_info_->last_error = *shared_err_;
-    last_save_info_->last_error_time = absl::ToUnixSeconds(start_time_);
-    last_save_info_->failed_duration_sec = seconds;
-    return;
+    info.error = *shared_err_;
+    return info;
   }
 
   fs::path resulting_path = full_path_;
@@ -277,23 +280,22 @@ void SaveStagesController::UpdateSaveInfo() {
     resulting_path.replace_extension();  // remove .tmp
 
   LOG(INFO) << "Saving " << resulting_path << " finished after "
-            << strings::HumanReadableElapsedTime(seconds);
+            << strings::HumanReadableElapsedTime(info.duration_sec);
 
-  lock_guard lk{*save_mu_};
-  last_save_info_->freq_map.clear();
+  info.freq_map.clear();
   for (const auto& k_v : rdb_name_map_) {
-    last_save_info_->freq_map.emplace_back(k_v);
+    info.freq_map.emplace_back(k_v);
   }
-  last_save_info_->save_time = absl::ToUnixSeconds(start_time_);
-  last_save_info_->file_name = resulting_path.generic_string();
-  last_save_info_->success_duration_sec = seconds;
+
+  info.file_name = resulting_path.generic_string();
+
+  return info;
 }
 
-GenericError SaveStagesController::InitResources() {
+void SaveStagesController::InitResources() {
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
     snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
-  return {};
 }
 
 // Remove .tmp extension or delete files in case of error

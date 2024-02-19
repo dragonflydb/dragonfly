@@ -19,16 +19,12 @@ namespace detail {
 
 class SnapshotStorage;
 
-struct LastSaveInfo {
-  // last success save info
+struct SaveInfo {
   time_t save_time = 0;  // epoch time in seconds.
-  uint32_t success_duration_sec = 0;
-  std::string file_name;                                      //
+  uint32_t duration_sec = 0;
+  std::string file_name;
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
-  // last error save info
-  GenericError last_error;
-  time_t last_error_time = 0;      // epoch time in seconds.
-  time_t failed_duration_sec = 0;  // epoch time in seconds.
+  GenericError error;
 };
 
 struct SaveStagesInputs {
@@ -37,8 +33,6 @@ struct SaveStagesInputs {
   Transaction* trans_;
   Service* service_;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
-  LastSaveInfo* last_save_info_ ABSL_GUARDED_BY(save_mu_);
-  util::fb2::Mutex* save_mu_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
 };
 
@@ -80,13 +74,11 @@ struct SaveStagesController : public SaveStagesInputs {
 
   ~SaveStagesController();
 
-  GenericError Save();
+  SaveInfo Save();
   size_t GetSaveBuffersSize();
-  uint32_t GetCurrentSaveDuratio();
+  uint32_t GetCurrentSaveDuration();
 
-  bool IsSaving() {
-    return is_saving_;
-  }
+  bool TEST_IsSaving();
 
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.
@@ -99,9 +91,9 @@ struct SaveStagesController : public SaveStagesInputs {
   // Save a single rdb file
   void SaveRdb();
 
-  void UpdateSaveInfo();
+  SaveInfo GetSaveInfo();
 
-  GenericError InitResources();
+  void InitResources();
 
   // Remove .tmp extension or delete files in case of error
   void FinalizeFileMovement();
@@ -122,7 +114,6 @@ struct SaveStagesController : public SaveStagesInputs {
   absl::Time start_time_;
   std::filesystem::path full_path_;
   bool is_cloud_;
-  bool is_saving_ = false;
 
   AggregateGenericError shared_err_;
   std::vector<std::pair<std::unique_ptr<RdbSnapshot>, std::filesystem::path>> snapshots_;

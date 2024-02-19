@@ -104,6 +104,18 @@ struct Metrics {
   std::vector<ReplicaRoleInfo> replication_metrics;
 };
 
+struct LastSaveInfo {
+  // last success save info
+  time_t save_time = 0;  // epoch time in seconds.
+  uint32_t success_duration_sec = 0;
+  std::string file_name;                                      //
+  std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
+  // last error save info
+  GenericError last_error;
+  time_t last_error_time = 0;      // epoch time in seconds.
+  time_t failed_duration_sec = 0;  // epoch time in seconds.
+};
+
 struct SnapshotSpec {
   std::string hour_spec;
   std::string minute_spec;
@@ -156,15 +168,15 @@ class ServerFamily {
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
-  detail::LastSaveInfo GetLastSaveInfo() const;
+  LastSaveInfo GetLastSaveInfo() const;
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
   util::fb2::Future<GenericError> Load(const std::string& file_name);
 
-  bool IsSaving() const {
+  bool TEST_IsSaving() const {
     std::lock_guard lk(save_mu_);
-    return save_controller_ && save_controller_->IsSaving();
+    return save_controller_ && save_controller_->TEST_IsSaving();
   }
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
@@ -271,7 +283,7 @@ class ServerFamily {
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  detail::LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
+  LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
   std::unique_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
 
   // Used to override save on shutdown behavior that is usually set
