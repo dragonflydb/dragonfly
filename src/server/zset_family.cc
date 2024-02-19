@@ -11,7 +11,6 @@ extern "C" {
 #include "redis/geohash.h"
 #include "redis/geohash_helper.h"
 #include "redis/listpack.h"
-#include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
@@ -1561,11 +1560,10 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
     /* Use the first element in range as the starting point */
     eptr = zzlFirstInLexRange(zl, &range);
 
-    /* No "first" element */
     if (eptr) {
       /* First element is in range */
       sptr = lpNext(zl, eptr);
-      serverAssertWithInfo(c, robj_wrapper, zzlLexValueLteMax(eptr, &range));
+      DCHECK(zzlLexValueLteMax(eptr, &range));
 
       /* Iterate over elements in range */
       while (eptr) {

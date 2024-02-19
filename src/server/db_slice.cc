@@ -4,10 +4,6 @@
 
 #include "server/db_slice.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/cleanup/cleanup.h>
 
 #include "base/flags.h"
@@ -18,6 +14,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "strings/human_readable.h"
 
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
@@ -229,7 +226,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 96, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 112, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -243,6 +240,8 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(mutations);
   ADD(insertion_rejections);
   ADD(update);
+  ADD(ram_hits);
+  ADD(ram_misses);
 
   return *this;
 }
@@ -472,16 +471,21 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
 
   if (TieredStorage* tiered = shard_owner()->tiered_storage();
       tiered && load_mode == LoadExternalMode::kLoad) {
-    if (res.it->second.HasIoPending()) {
-      tiered->CancelIo(cntx.db_index, res.it);
-    } else if (res.it->second.IsExternal()) {
+    if (res.it->second.IsExternal()) {
       // Load reads data from disk therefore we will preempt in this function.
       // We will update the iterator if it changed during the preemption
       res.it = tiered->Load(cntx.db_index, res.it, key);
       if (!IsValid(res.it)) {
         return OpStatus::KEY_NOTFOUND;
       }
+      events_.ram_misses++;
+    } else {
+      if (res.it->second.HasIoPending()) {
+        tiered->CancelIo(cntx.db_index, res.it);
+      }
+      events_.ram_hits++;
     }
+    res.it->first.SetTouched(true);
   }
 
   FiberAtomicGuard fg;
@@ -975,7 +979,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
 void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key) {
   DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));
-  DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " "
+  DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " "
            << " for " << key;
 
   auto& lt = db_arr_[db_index]->trans_locks;
@@ -1196,6 +1200,37 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
   // wraps around if we reached the end
   return db_arr_[db_ind]->prime.NextSeg((size_t)segment_id) %
          db_arr_[db_ind]->prime.GetSegmentCount();
+}
+
+void DbSlice::ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes) {
+  VLOG(1) << "ScheduleForOffloadStep increase_goal_bytes:"
+          << strings::HumanReadableNumBytes(increase_goal_bytes);
+  DCHECK(shard_owner()->tiered_storage());
+  FiberAtomicGuard guard;
+  PrimeTable& pt = db_arr_[db_indx]->prime;
+
+  static PrimeTable::Cursor cursor;
+
+  size_t offloaded_bytes = 0;
+  auto cb = [&](PrimeIterator it) {
+    // TBD check we did not lock it for future transaction
+
+    // If the item is cold (not touched) and can be externalized, schedule it for offload.
+    if (increase_goal_bytes > offloaded_bytes && !(it->first.WasTouched()) &&
+        TieredStorage::CanExternalizeEntry(it)) {
+      shard_owner()->tiered_storage()->ScheduleOffload(db_indx, it);
+      if (it->second.HasIoPending()) {
+        offloaded_bytes += it->second.Size();
+        VLOG(2) << "ScheduleOffload bytes:" << offloaded_bytes;
+      }
+    }
+    it->first.SetTouched(false);
+  };
+
+  // Traverse a single segment every time this function is called.
+  for (int i = 0; i < 60; ++i) {
+    cursor = pt.TraverseBySegmentOrder(cursor, cb);
+  }
 }
 
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
@@ -1441,6 +1476,9 @@ void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice&
 }
 
 void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
+  if (client_tracking_map_.empty())
+    return;
+
   auto it = client_tracking_map_.find(key);
   if (it != client_tracking_map_.end()) {
     // notify all the clients.

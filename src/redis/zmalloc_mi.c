@@ -5,8 +5,8 @@
 #include <assert.h>
 #include <mimalloc.h>
 #include <string.h>
+#include <unistd.h>
 
-#include "atomicvar.h"
 #include "zmalloc.h"
 
 __thread ssize_t zmalloc_used_memory_tl = 0;

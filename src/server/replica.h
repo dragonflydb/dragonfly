@@ -148,7 +148,7 @@ class Replica : ProtocolClient {
   // In redis replication mode.
   Fiber sync_fb_;
   Fiber acks_fb_;
-  EventCount waker_;
+  util::fb2::EventCount waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
   // A vector of the last executer LSNs when a replication is interrupted.
@@ -182,13 +182,14 @@ class DflyShardReplica : public ProtocolClient {
 
   // Start replica initialized as dfly flow.
   // Sets is_full_sync when successful.
-  io::Result<bool> StartSyncFlow(BlockingCounter block, Context* cntx, std::optional<LSN>);
+  io::Result<bool> StartSyncFlow(util::fb2::BlockingCounter block, Context* cntx,
+                                 std::optional<LSN>);
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(Context* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(std::string eof_token, BlockingCounter block, Context* cntx);
+  void FullSyncDflyFb(std::string eof_token, util::fb2::BlockingCounter block, Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyReadFb(Context* cntx);
@@ -213,7 +214,7 @@ class DflyShardReplica : public ProtocolClient {
 
   std::queue<std::pair<TransactionData, bool>> trans_data_queue_;
   static constexpr size_t kYieldAfterItemsInQueue = 50;
-  EventCount waker_;  // waker for trans_data_queue_
+  util::fb2::EventCount waker_;  // waker for trans_data_queue_
   bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;

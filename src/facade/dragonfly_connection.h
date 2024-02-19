@@ -308,7 +308,7 @@ class Connection : public util::Connection {
     // Block until memory usage is below limit, can be called from any thread
     void EnsureBelowLimit();
 
-    dfly::EventCount ec;
+    util::fb2::EventCount ec;
     std::atomic_size_t subscriber_bytes = 0;
 
     size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
@@ -377,7 +377,7 @@ class Connection : public util::Connection {
   void DecreaseStatsOnClose();
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
-  dfly::EventCount evc_;                  // dispatch queue waker
+  util::fb2::EventCount evc_;             // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
   size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued async commands in dispatch_q
@@ -401,7 +401,6 @@ class Connection : public util::Connection {
   std::string name_;
 
   unsigned parser_error_ = 0;
-  bool break_cb_engaged_ = false;
 
   BreakerCb breaker_cb_;
   std::unique_ptr<Shutdown> shutdown_cb_;

@@ -5,7 +5,8 @@
 
 
 %{
-  // SECOND SECTION
+  #include <absl/strings/numbers.h>
+  #include "base/logging.h"
 %}
 
 %o bison-cc-namespace="dfly.json" bison-cc-parser="Parser"
@@ -16,6 +17,8 @@
 
 // our derived class from AbstractLexer
 %o class="Lexer"
+
+/* nodefault removes default echo rule */
 %o nodefault batch
 %option unicode
 
@@ -40,9 +43,21 @@
 [[:space:]]+     ; // skip white space
 
 "$"         return Parser::make_ROOT(loc());
+".."        return Parser::make_DESCENT(loc());
 "."         return Parser::make_DOT(loc());
+"["         return Parser::make_LBRACKET(loc());
+"]"         return Parser::make_RBRACKET(loc());
+"*"         return Parser::make_WILDCARD(loc());
+"("         return Parser::make_LPARENT(loc());
+")"         return Parser::make_RPARENT(loc());
+[0-9]{1,9}  {
+              unsigned val;
+              CHECK(absl::SimpleAtoi(str(), &val));
+              return Parser::make_UINT(val, loc());
+            }
 \w[\w_\-]*  return Parser::make_UNQ_STR(str(), loc());
-<<EOF>>     printf("EOF%s\n", matcher().text());
+<<EOF>>     return Parser::make_YYEOF(loc());
+.           throw Parser::syntax_error(loc(), UnknownTokenMsg());
 %%
 
 // Function definitions

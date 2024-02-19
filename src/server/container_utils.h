@@ -9,7 +9,6 @@
 
 extern "C" {
 #include "redis/listpack.h"
-#include "redis/object.h"
 #include "redis/quicklist.h"
 }
 

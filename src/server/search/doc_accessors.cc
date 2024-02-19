@@ -10,7 +10,6 @@
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
 
-#include "core/json_object.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "core/string_map.h"
@@ -18,7 +17,6 @@
 
 extern "C" {
 #include "redis/listpack.h"
-#include "redis/object.h"
 };
 
 namespace dfly {

@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "core/search/search.h"
 #include "server/common.h"
 #include "server/search/doc_index.h"

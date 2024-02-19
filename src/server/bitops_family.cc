@@ -6,16 +6,11 @@
 
 #include <bitset>
 
-#include "base/expected.hpp"
-#include "facade/op_status.h"
-
-extern "C" {
-#include "redis/object.h"
-}
-
 #include "absl/strings/match.h"
+#include "base/expected.hpp"
 #include "base/logging.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"

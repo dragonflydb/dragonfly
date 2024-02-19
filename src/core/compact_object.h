@@ -9,10 +9,8 @@
 #include <optional>
 
 #include "base/pmr/memory_resource.h"
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "core/small_string.h"
-
-typedef struct redisObject robj;
 
 namespace dfly {
 
@@ -118,6 +116,12 @@ class CompactObj {
     ASCII2_ENC_BIT = 0x10,
     IO_PENDING = 0x20,
     STICKY = 0x40,
+
+    // TOUCHED used to determin which items are hot/cold.
+    // by checking if the item was touched from the last time we
+    // reached this item while travering the database to set items as cold.
+    // https://junchengyang.com/publication/nsdi24-SIEVE.pdf
+    TOUCHED = 0x80,
   };
 
   static constexpr uint8_t kEncMask = ASCII1_ENC_BIT | ASCII2_ENC_BIT;
@@ -127,10 +131,6 @@ class CompactObj {
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
   CompactObj() {  // By default - empty string.
-  }
-
-  explicit CompactObj(robj* o) {
-    ImportRObj(o);
   }
 
   explicit CompactObj(std::string_view str) {
@@ -216,6 +216,18 @@ class CompactObj {
     }
   }
 
+  bool WasTouched() const {
+    return mask_ & TOUCHED;
+  }
+
+  void SetTouched(bool e) {
+    if (e) {
+      mask_ |= TOUCHED;
+    } else {
+      mask_ &= ~TOUCHED;
+    }
+  }
+
   bool HasIoPending() const {
     return mask_ & IO_PENDING;
   }
@@ -255,18 +267,9 @@ class CompactObj {
     u_.r_obj.Init(u_.r_obj.type(), u_.r_obj.encoding(), ptr);
   }
 
-  // Takes ownership over o.
-  void ImportRObj(robj* o);
-
-  robj* AsRObj() const;
-
   // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
   void InitRobj(unsigned type, unsigned encoding, void* obj_inner);
-
-  // Syncs 'this' instance with the object that was previously returned by AsRObj().
-  // Requires: AsRObj() has been called before in the same thread in fiber-atomic section.
-  void SyncRObj();
 
   // For STR object.
   void SetInt(int64_t val);

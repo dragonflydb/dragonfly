@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "base/logging.h"
-#include "core/json_object.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "facade/cmd_arg_parser.h"

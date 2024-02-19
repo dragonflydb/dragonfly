@@ -807,12 +807,12 @@ struct AggregateLoadResult {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-Future<GenericError> ServerFamily::Load(const std::string& load_path) {
+fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
   auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
-    Promise<GenericError> ec_promise;
+    fb2::Promise<GenericError> ec_promise;
     ec_promise.set_value(paths_result.error());
     return ec_promise.get_future();
   }
@@ -856,8 +856,8 @@ Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  Promise<GenericError> ec_promise;
-  Future<GenericError> ec_future = ec_promise.get_future();
+  fb2::Promise<GenericError> ec_promise;
+  fb2::Future<GenericError> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
@@ -1674,7 +1674,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
 
-    result.coordinator_stats.Add(shard_set->size(), ss->stats);
+    result.coordinator_stats.Add(ss->stats);
 
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
@@ -1859,6 +1859,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
+    append("connection_migrations", conn_stats.num_migrations);
     append("total_net_output_bytes", reply_stats.io_write_bytes);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
@@ -1884,11 +1885,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
+    append("ram_hits", m.events.ram_hits);
+    append("ram_misses", m.events.ram_misses);
   }
 
   if (should_enter("TIERED", true)) {
     append("tiered_entries", total.tiered_entries);
     append("tiered_bytes", total.tiered_size);
+    append("tiered_bytes_human", HumanReadableNumBytes(total.tiered_size));
     append("tiered_reads", m.disk_stats.read_total);
     append("tiered_read_latency_usec", m.disk_stats.read_delay_usec);
     append("tiered_writes", m.tiered_stats.tiered_writes);

@@ -287,7 +287,7 @@ void ScriptMgr::FlushAllScript() {
   lock_guard lk{mu_};
   db_.clear();
 
-  shard_set->pool()->Await([](auto index, auto* pb) {
+  shard_set->pool()->AwaitFiberOnAll([](auto* pb) {
     ServerState* ss = ServerState::tlocal();
     ss->ResetInterpreter();
   });

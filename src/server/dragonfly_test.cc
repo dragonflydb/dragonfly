@@ -397,7 +397,8 @@ TEST_F(DflyEngineTest, OOM) {
     run_args.push_back("bar");
 
     for (unsigned i = 0; i < 5000; ++i) {
-      run_args[1] = StrCat("key", cmd, i);
+      auto str = StrCat("key", cmd, i);
+      run_args[1] = str;
       resp = Run(run_args);
 
       if (resp.type == RespExpr::ERROR)

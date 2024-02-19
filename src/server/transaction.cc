@@ -111,7 +111,7 @@ void Transaction::PhasedBarrier::Dec(Transaction* keep_alive) {
   ::boost::intrusive_ptr guard(keep_alive);
 
   uint32_t before = count_.fetch_sub(1);
-  CHECK_GE(before, 1u);
+  CHECK_GE(before, 1u) << keep_alive->DEBUG_PrintFailState(EngineShard::tlocal()->shard_id());
   if (before == 1)
     ec_.notify();
 }
@@ -124,21 +124,21 @@ uint32_t Transaction::PhasedBarrier::DEBUG_Count() const {
   return count_.load(memory_order_relaxed);
 }
 
-bool Transaction::BatonBarrierrier::IsClaimed() const {
+bool Transaction::BatonBarrier::IsClaimed() const {
   return claimed_.load(memory_order_relaxed);
 }
 
-bool Transaction::BatonBarrierrier::TryClaim() {
+bool Transaction::BatonBarrier::TryClaim() {
   return !claimed_.exchange(true, memory_order_relaxed);  // false means first means success
 }
 
-void Transaction::BatonBarrierrier::Close() {
+void Transaction::BatonBarrier::Close() {
   DCHECK(claimed_.load(memory_order_relaxed));
   closed_.store(true, memory_order_relaxed);
   ec_.notify();  // release
 }
 
-cv_status Transaction::BatonBarrierrier::Wait(time_point tp) {
+cv_status Transaction::BatonBarrier::Wait(time_point tp) {
   auto cb = [this] { return closed_.load(memory_order_acquire); };
 
   if (tp != time_point::max()) {
@@ -193,8 +193,7 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optio
   multi_->role = SQUASHED_STUB;
   multi_->shard_journal_write.resize(1);
 
-  time_now_ms_ = parent->time_now_ms_;
-
+  MultiUpdateWithParent(parent);
   if (slot_id.has_value()) {
     unique_slot_checker_.Add(*slot_id);
   }
@@ -210,6 +209,7 @@ void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
   db_index_ = dbid;
   full_args_ = args;
   local_result_ = OpStatus::OK;
+  stats_.coordinator_index = ProactorBase::me() ? ProactorBase::me()->GetPoolIndex() : kInvalidSid;
 }
 
 void Transaction::InitGlobal() {
@@ -407,7 +407,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   for (const auto& sd : shard_data_) {
     // sd.local_mask may be non-zero for multi transactions with instant locking.
     // Specifically EVALs may maintain state between calls.
-    DCHECK(!sd.is_armed.load(std::memory_order_relaxed));
+    DCHECK_EQ(sd.local_mask & ARMED, 0);
     if (!multi_) {
       DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
     }
@@ -447,7 +447,6 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
 
   MultiSwitchCmd(cid);
 
-  multi_->role = SQUASHER;
   InitBase(db_index_, {});
 
   // Because squashing already determines active shards by partitioning commands,
@@ -465,6 +464,8 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
     shard_data_[i].arg_start = 0;
     shard_data_[i].arg_count = 0;
   }
+
+  MultiBecomeSquasher();
 }
 
 void Transaction::StartMultiGlobal(DbIndex dbid) {
@@ -479,7 +480,7 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   ScheduleInternal();
 }
 
-void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys) {
+void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys, bool skip_scheduling) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
 
   DCHECK(multi_);
@@ -493,7 +494,8 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys) {
   InitBase(dbid, absl::MakeSpan(keys));
   InitByKeys(KeyIndex::Range(0, keys.size()));
 
-  ScheduleInternal();
+  if (!skip_scheduling)
+    ScheduleInternal();
 
   full_args_ = {nullptr, 0};  // InitBase set it to temporary keys, now we reset it.
 }
@@ -533,7 +535,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
       DCHECK(IsAtomicMulti());   // Every command determines it's own active shards
       sd.local_mask &= ~ACTIVE;  // so remove ACTIVE flags, but keep KEYLOCK_ACQUIRED
     }
-    DCHECK(!sd.is_armed.load(memory_order_relaxed));
+    DCHECK_EQ(sd.local_mask & ARMED, 0);
   }
 
   if (multi_->mode == NON_ATOMIC) {
@@ -543,17 +545,40 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
     DCHECK_EQ(coordinator_state_, 0u);
   }
 
+  // Each hop needs to be prepared, reset role
   if (multi_->role == SQUASHER)
     multi_->role = DEFAULT;
 }
 
-string Transaction::DebugId() const {
+void Transaction::MultiUpdateWithParent(const Transaction* parent) {
+  // Disabled because of single shard lua optimization
+  // DCHECK(multi_);
+  // DCHECK(parent->multi_);  // it might not be a squasher yet, but certainly is multi
+  DCHECK_EQ(multi_->role, SQUASHED_STUB);
+  txid_ = parent->txid_;
+  time_now_ms_ = parent->time_now_ms_;
+  unique_slot_checker_ = parent->unique_slot_checker_;
+}
+
+void Transaction::MultiBecomeSquasher() {
+  DCHECK(multi_->mode == GLOBAL || multi_->mode == LOCK_AHEAD);
+  DCHECK_GT(GetUniqueShardCnt(), 0u);    // initialized and determined active shards
+  DCHECK(cid_->IsMultiTransactional());  // proper base command set
+  multi_->role = SQUASHER;
+}
+
+string Transaction::DebugId(std::optional<ShardId> sid) const {
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
   string res = StrCat(Name(), "@", txid_, "/", unique_shard_cnt_);
   if (multi_) {
     absl::StrAppend(&res, ":", multi_->cmd_seq_num);
   }
-  absl::StrAppend(&res, " (", trans_id(this), ")");
+  absl::StrAppend(&res, " {id=", trans_id(this));
+  if (sid) {
+    absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
+                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
+  }
+  absl::StrAppend(&res, "}");
   return res;
 }
 
@@ -573,16 +598,15 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(txid_, 0u);
   CHECK(cb_ptr_) << DebugId();
 
-  // Unlike with regular transactions we do not acquire locks upon scheduling
-  // because Scheduling is done before multi-exec batch is executed. Therefore we
-  // lock keys right before the execution of each statement.
-
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
-  CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
-  CHECK_GT(run_barrier_.DEBUG_Count(), 0u);
+  CHECK(sd.local_mask & ARMED) << DEBUG_PrintFailState(shard->shard_id());
+  sd.local_mask &= ~ARMED;
 
+  sd.stats.total_runs++;
+
+  DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
@@ -679,6 +703,11 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     // This is the last hop, so clear cont_trans if its held by the current tx
     shard->RemoveContTx(this);
 
+    if (IsAtomicMulti()) {  // Can only be true if run through ScheduleSingleHop
+      DCHECK(cid_->IsMultiTransactional());
+      MultiReportJournalOnShard(shard);
+    }
+
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
@@ -706,10 +735,10 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 // For eval-like transactions - we can decide based on the command flavor (EVAL/EVALRO) or
 // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
 void Transaction::ScheduleInternal() {
-  DCHECK(!shard_data_.empty());
-  DCHECK_EQ(0u, txid_);
-  DCHECK_EQ(0, coordinator_state_ & COORD_SCHED);
+  DCHECK_EQ(txid_, 0u);
+  DCHECK_EQ(coordinator_state_ & COORD_SCHED, 0);
   DCHECK_GT(unique_shard_cnt_, 0u);
+  DCHECK(!IsAtomicMulti() || cid_->IsMultiTransactional());
 
   DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards";
 
@@ -717,6 +746,8 @@ void Transaction::ScheduleInternal() {
 
   // Loop until successfully scheduled in all shards.
   while (true) {
+    stats_.schedule_attempts++;
+
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
     InitTxTime();
 
@@ -758,12 +789,9 @@ void Transaction::ScheduleInternal() {
     // We do not need to wait for this callback to finish - just make sure it will eventually run.
     // See https://github.com/dragonflydb/dragonfly/issues/150 for more info.
     if (should_poll_execution.load(memory_order_relaxed)) {
-      for (uint32_t i = 0; i < shard_set->size(); ++i) {
-        if (!is_active(i))
-          continue;
-
+      IterateActiveShards([](const auto& sd, auto i) {
         shard_set->Add(i, [] { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
-      }
+      });
     }
   }
 }
@@ -777,29 +805,32 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   }
 
   DCHECK(!cb_ptr_);
-  DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
-
   cb_ptr_ = &cb;
 
-  if (IsAtomicMulti()) {
+  // We can be already scheduled if we're part of a multi transaction. Note: If a multi tx isn't
+  // scheduled, we assume it's not mimicking the interface, but actually preparing a single hop.
+  bool scheduled = (coordinator_state_ & COORD_SCHED) > 0;
+  if (scheduled) {
+    DCHECK(IsAtomicMulti());
     multi_->concluding = true;
   } else {
-    coordinator_state_ |= COORD_CONCLUDING;  // Single hop means we conclude.
+    // For multi it only makes sense with squashing and thus a proper underlying command
+    DCHECK(!IsAtomicMulti() || (multi_->role == SQUASHER && cid_->IsMultiTransactional()));
+    coordinator_state_ |= COORD_CONCLUDING;
   }
 
   // If we run only on one shard and conclude, we can possibly avoid scheduling at all
   // and directly run the callback on the destination thread if the locks are free.
-  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
-
+  bool schedule_fast = !scheduled && (unique_shard_cnt_ == 1) && !IsGlobal();
   bool was_ooo = false, was_inline = false;
 
   if (schedule_fast) {
     DCHECK_NE(unique_shard_id_, kInvalidSid);
     DCHECK(IsActive(unique_shard_id_));
-    DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
+    DCHECK(shard_data_.size() == 1 || multi_);
 
     InitTxTime();
-    shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_relaxed);
+    shard_data_[SidToId(unique_shard_id_)].local_mask |= ARMED;
 
     // Start new phase, be careful with writes until phase end!
     run_barrier_.Start(1);
@@ -826,7 +857,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     }
   } else {
     // This transaction either spans multiple shards and/or is multi, which schedule in advance.
-    if (!IsAtomicMulti())
+    if (!scheduled)
       ScheduleInternal();
 
     ExecuteAsync();
@@ -846,6 +877,9 @@ void Transaction::ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had
   DCHECK(multi_);
   for (unsigned i = 0; i < multi_->shard_journal_write.size(); i++)
     multi_->shard_journal_write[i] |= had_write(i);
+
+  // Update imemdiately if we decide to conclude after one hop without UnlockMulti
+  multi_->shard_journal_cnt = CalcMultiNumOfShardJournals();
 }
 
 // Runs in the coordinator fiber.
@@ -854,7 +888,8 @@ void Transaction::UnlockMulti() {
   DCHECK(multi_);
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
 
-  if (multi_->mode == NON_ATOMIC)
+  // Return if we either didn't schedule at all (and thus run) or already did conclude
+  if ((coordinator_state_ & COORD_SCHED) == 0 || (coordinator_state_ & COORD_CONCLUDING) > 0)
     return;
 
   multi_->frozen_keys_set.clear();
@@ -865,13 +900,14 @@ void Transaction::UnlockMulti() {
     (*sharded_keys)[sid].emplace_back(key);
   }
 
-  unsigned shard_journals_cnt =
-      ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
+  multi_->shard_journal_cnt = ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
 
   use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
+
+  DCHECK_EQ(shard_data_.size(), shard_set->size());
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    shard_set->Add(i, [this, sharded_keys, i, shard_journals_cnt]() {
-      this->UnlockMultiShardCb((*sharded_keys)[i], EngineShard::tlocal(), shard_journals_cnt);
+    shard_set->Add(i, [this, sharded_keys, i]() {
+      this->UnlockMultiShardCb((*sharded_keys)[i], EngineShard::tlocal());
       intrusive_ptr_release(this);
     });
   }
@@ -893,7 +929,7 @@ void Transaction::Schedule() {
   if (multi_ && multi_->role == SQUASHED_STUB)
     return;
 
-  if (!IsAtomicMulti())
+  if ((coordinator_state_ & COORD_SCHED) == 0)
     ScheduleInternal();
 }
 
@@ -929,12 +965,18 @@ void Transaction::ExecuteAsync() {
   DCHECK_GT(unique_shard_cnt_, 0u);
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
   DCHECK(!IsAtomicMulti() || multi_->lock_mode.has_value());
+  DCHECK_LE(shard_data_.size(), 1024u);
 
-  // Set armed flags on all active shards
-  IterateActiveShards([](auto& sd, auto i) { sd.is_armed.store(true, memory_order_relaxed); });
+  // Set armed flags on all active shards. Copy indices for dispatching poll tasks,
+  // because local_mask can be written concurrently after starting a new phase.
+  std::bitset<1024> poll_flags(0);
+  IterateActiveShards([&poll_flags](auto& sd, auto i) {
+    sd.local_mask |= ARMED;
+    poll_flags.set(i, true);
+  });
 
   // Start new phase: release semantics. From here we can be discovered by IsArmedInShard(),
-  // and thus picked by a foreign thread's PollExecution(). Careful with writes until phase end!
+  // and thus picked by a foreign thread's PollExecution(). Careful with data access!
   run_barrier_.Start(unique_shard_cnt_);
 
   auto* ss = ServerState::tlocal();
@@ -952,7 +994,10 @@ void Transaction::ExecuteAsync() {
     DVLOG(3) << "ptr_release " << DebugId();
     intrusive_ptr_release(this);  // against use_count_.fetch_add above.
   };
-  IterateActiveShards([&poll_cb](PerShardData& sd, auto i) { shard_set->Add(i, poll_cb); });
+  IterateShards([&poll_cb, &poll_flags](PerShardData& sd, auto i) {
+    if (poll_flags.test(i))
+      shard_set->Add(i, poll_cb);
+  });
 }
 
 void Transaction::Conclude() {
@@ -977,10 +1022,23 @@ void Transaction::FIX_ConcludeJournalExec() {
   if (!multi_->shard_journal_write.front())
     return;
 
-  if (auto journal = EngineShard::tlocal()->journal(); journal != nullptr) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, 1,
-                         unique_slot_checker_.GetUniqueSlotId(), {}, false);
+  multi_->shard_journal_cnt = 1;
+  MultiReportJournalOnShard(EngineShard::tlocal());
+}
+
+string Transaction::DEBUG_PrintFailState(ShardId sid) const {
+  auto res = StrCat(
+      "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
+      ", usecnt:", use_count_.load(memory_order_relaxed), ", runcnt: ", run_barrier_.DEBUG_Count(),
+      ", coordstate: ", coordinator_state_, ", coord native thread: ", stats_.coordinator_index,
+      ", schedule attempts: ", stats_.schedule_attempts, ", report from sid: ", sid, "\n");
+  std::atomic_thread_fence(memory_order_acquire);
+  for (unsigned i = 0; i < shard_data_.size(); ++i) {
+    const auto& sd = shard_data_[i];
+    absl::StrAppend(&res, "- shard: ", i, " local_mask:", sd.local_mask,
+                    " total_runs: ", sd.stats.total_runs, "\n");
   }
+  return res;
 }
 
 void Transaction::EnableShard(ShardId sid) {
@@ -1010,7 +1068,10 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
-  CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
+  CHECK(sd.local_mask & ARMED) << DEBUG_PrintFailState(shard->shard_id());
+  sd.local_mask &= ~ARMED;
+
+  sd.stats.total_runs++;
 
   // Calling the callback in somewhat safe way
   RunnableResult result;
@@ -1071,6 +1132,11 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   return res;
 }
 
+bool Transaction::IsArmedInShard(ShardId sid) const {
+  // Barrier has acquire semantics
+  return run_barrier_.Active() && (shard_data_[SidToId(sid)].local_mask & ARMED);
+}
+
 bool Transaction::IsActive(ShardId sid) const {
   // If we have only one shard, we often don't store infromation about all shards, so determine it
   // solely by id
@@ -1081,6 +1147,12 @@ bool Transaction::IsActive(ShardId sid) const {
   }
 
   return shard_data_[SidToId(sid)].local_mask & ACTIVE;
+}
+
+uint16_t Transaction::GetLocalMask(ShardId sid) const {
+  DCHECK(IsActive(sid));
+  DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
+  return shard_data_[SidToId(sid)].local_mask;
 }
 
 // Runs within a engine shard thread.
@@ -1114,7 +1186,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
     if (result.flags & RunnableResult::AVOID_CONCLUDING) {
       // If we want to run again, we have to actually schedule this transaction
-      DCHECK_EQ(sd.is_armed, false);
+      DCHECK_EQ(sd.local_mask & ARMED, 0);
       continue_scheduling = true;
     } else {
       LogAutoJournalOnShard(shard, result);
@@ -1341,16 +1413,21 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   return result;
 }
 
-void Transaction::UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys,
-                                     EngineShard* shard, uint32_t shard_journals_cnt) {
-  DCHECK(multi_ && multi_->lock_mode);
-
-  auto journal = shard->journal();
-
-  if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()]) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt,
+void Transaction::MultiReportJournalOnShard(EngineShard* shard) const {
+  DCHECK_EQ(EngineShard::tlocal(), shard);
+  auto* journal = shard->journal();
+  size_t write_idx = multi_->role == SQUASHED_STUB ? 0 : shard->shard_id();
+  if (journal != nullptr && multi_->shard_journal_write[write_idx]) {
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, multi_->shard_journal_cnt,
                          unique_slot_checker_.GetUniqueSlotId(), {}, true);
   }
+}
+
+void Transaction::UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys,
+                                     EngineShard* shard) {
+  DCHECK(multi_ && multi_->lock_mode);
+
+  MultiReportJournalOnShard(shard);
 
   if (multi_->mode == GLOBAL) {
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);

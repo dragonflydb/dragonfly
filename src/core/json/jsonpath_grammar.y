@@ -12,6 +12,7 @@
 
 // Added to header file before parser declaration.
 %code requires {
+  #include "src/core/json/path.h"
   namespace dfly {
   namespace json {
     class Driver;
@@ -45,34 +46,52 @@ using namespace std;
 
 %token
   LBRACKET "["
+  RBRACKET "]"
+  LPARENT  "("
+  RPARENT  ")"
   ROOT "$"
   DOT  "."
+  WILDCARD "*"
+  DESCENT ".."
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> UNQ_STR "unq_str"
+%token <std::string> UNQ_STR "unquoted string"
+%token <unsigned>    UINT "integer"
+
+%nterm <std::string> identifier
+%nterm <PathSegment> bracket_index
+
 
 %%
 // Based on the following specification:
 // https://danielaparker.github.io/JsonCons.Net/articles/JsonPath/Specification.html
 
-jsonpath: ROOT
-        | ROOT relative_location
+jsonpath: ROOT { /* skip adding root */ } opt_relative_location
+         | function_expr opt_relative_location
+
+opt_relative_location:
+        | relative_location
 
 relative_location: DOT relative_path
+        | DESCENT { driver->AddSegment(PathSegment{SegmentType::DESCENT}); } relative_path
+        | LBRACKET bracket_index RBRACKET { driver->AddSegment($2); } opt_relative_location
 
-relative_path: identifier
-        | identifier relative_location
+relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
+        | WILDCARD { driver->AddWildcard(); } opt_relative_location
 
-identifier: unquoted_string
+
+identifier: UNQ_STR
          // | single_quoted_string | double_quoted_string
 
-unquoted_string : UNQ_STR
+bracket_index: WILDCARD { $$ = PathSegment{SegmentType::WILDCARD}; }
+              | UINT { $$ = PathSegment(SegmentType::INDEX, $1); }
 
+function_expr: UNQ_STR { driver->AddFunction($1); } LPARENT ROOT relative_location RPARENT
 %%
 
 
 void dfly::json::Parser::error(const location_type& l, const string& m)
 {
-  cerr << l << ": " << m << '\n';
+  driver->Error(l, m);
 }

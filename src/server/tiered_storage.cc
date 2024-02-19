@@ -4,10 +4,6 @@
 
 #include "server/tiered_storage.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <mimalloc.h>
 
 #include "absl/cleanup/cleanup.h"
@@ -360,6 +356,8 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
 }
 
 void TieredStorage::Shutdown() {
+  VLOG(1) << "Shutdown TieredStorage";
+  shutdown_ = true;
   io_mgr_.Shutdown();
 }
 
@@ -372,6 +370,9 @@ TieredStats TieredStorage::GetStats() const {
 }
 
 void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
+  if (shutdown_) {
+    return;
+  }
   PerDb* db = db_arr_[req->db_index()];
   auto& bin_record = db->bin_map[req->bin_index()];
   if (io_res < 0) {
@@ -394,7 +395,7 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
   }
   delete req;
   --num_active_requests_;
-  if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+  if (IoDeviceUnderloaded()) {
     this->throttle_ec_.notifyAll();
   }
   VLOG_IF(2, num_active_requests_ == 0) << "Finished active requests";
@@ -435,7 +436,7 @@ PrimeIterator TieredStorage::Load(DbIndex db_index, PrimeIterator it, string_vie
   return it;
 }
 
-error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it, string_view key) {
+bool TieredStorage::PrepareForOffload(DbIndex db_index, PrimeIterator it) {
   CHECK_EQ(OBJ_STRING, it->second.ObjType());
   DCHECK(!it->second.IsExternal());
   DCHECK(!it->second.HasIoPending());
@@ -451,13 +452,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it, st
   }
 
   if (blob_len > kMaxSmallBin) {
-    auto [schedule, res_it] = CanScheduleOffload(db_index, it, key);
-    if (schedule) {
-      WriteSingle(db_index, res_it, blob_len);
-    } else {
-      VLOG(2) << "Skip WriteSingle for: " << key;
-    }
-    return error_code{};
+    return true;
   }
 
   PerDb* db = db_arr_[db_index];
@@ -469,34 +464,79 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it, st
   unsigned max_entries = NumEntriesInSmallBin(kSmallBins[bin_index]);
   auto& bin_record = db->bin_map[bin_index];
 
-  // TODO: we need to track in stats all the cases where we omit offloading attempt.
-  CHECK_LT(bin_record.pending_entries.size(), max_entries);
+  if (bin_record.pending_entries.size() == max_entries) {
+    // This bin is full and was not offloaded yet, can not set this entry for offload.
+    return false;
+  }
 
-  VLOG(2) << "ScheduleOffload:" << key;
+  VLOG(2) << "ScheduleOffload:" << it->first.ToString();
   bin_record.pending_entries.insert(it->first.AsRef());
   it->second.SetIoPending(true);
 
-  if (bin_record.pending_entries.size() < max_entries)
-    return error_code{};  // gather more.
+  if (bin_record.pending_entries.size() == max_entries) {
+    return true;
+  }
+  return false;  // Gather more entries for bin before offload.
+}
 
-  bool flush_succeeded = false;
+void TieredStorage::CancelOffload(DbIndex db_index, PrimeIterator it) {
+  size_t blob_len = it->second.Size();
+  if (blob_len > kMaxSmallBin) {
+    return;
+  }
+  PerDb* db = db_arr_[db_index];
+  unsigned bin_index = SmallToBin(blob_len);
+  auto& bin_record = db->bin_map[bin_index];
+  bin_record.pending_entries.erase(it->first.AsRef());
+  it->second.SetIoPending(false);
+  ++stats_.flush_skip_cnt;
+}
 
-  auto [schedule, res_it] = CanScheduleOffload(db_index, it, key);
+error_code TieredStorage::ScheduleOffloadWithThrottle(DbIndex db_index, PrimeIterator it,
+                                                      string_view key) {
+  bool schedule_offload = PrepareForOffload(db_index, it);
+  if (!schedule_offload) {
+    return error_code{};
+  }
+  auto [schedule, res_it] = ThrottleWrites(db_index, it, key);
   if (schedule) {
-    flush_succeeded = FlushPending(db_index, bin_index);
+    return ScheduleOffloadInternal(db_index, res_it);
+  } else {
+    CancelOffload(db_index, res_it);
+  }
+  return error_code{};
+}
 
-    // if we reached high utilization of the file range - try to grow the file.
-    if (alloc_.allocated_bytes() > size_t(alloc_.capacity() * 0.85)) {
-      InitiateGrow(1ULL << 28);
-    }
+error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
+  bool schedule_offload = PrepareForOffload(db_index, it);
+  if (!schedule_offload) {
+    return error_code{};
+  }
+  if (IoDeviceUnderloaded()) {
+    return ScheduleOffloadInternal(db_index, it);
+  } else {
+    CancelOffload(db_index, it);
+  }
+  return error_code{};
+}
+
+error_code TieredStorage::ScheduleOffloadInternal(DbIndex db_index, PrimeIterator it) {
+  size_t blob_len = it->second.Size();
+
+  if (blob_len > kMaxSmallBin) {
+    WriteSingle(db_index, it, blob_len);
+    return error_code{};
   }
 
-  if (!flush_succeeded) {
-    VLOG(2) << "flush failed remove entry: " << key;
-    // we could not flush because I/O is saturated, so lets remove the last item.
-    bin_record.pending_entries.erase(res_it->first.AsRef());
-    res_it->second.SetIoPending(false);
-    ++stats_.flush_skip_cnt;
+  unsigned bin_index = SmallToBin(blob_len);
+  bool flashed = FlushPending(db_index, bin_index);
+  if (!flashed) {
+    CancelOffload(db_index, it);
+  }
+
+  // if we reached high utilization of the file range - try to grow the file.
+  if (alloc_.allocated_bytes() > size_t(alloc_.capacity() * 0.85)) {
+    InitiateGrow(1ULL << 28);
   }
 
   return error_code{};
@@ -574,13 +614,16 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   it->second.SetIoPending(true);
 
   auto cb = [this, req, db_index](int io_res) {
+    if (shutdown_) {
+      return;
+    }
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
 
     absl::Cleanup cleanup = [this, req]() {
       mi_free(req->block_ptr);
       delete req;
       --num_active_requests_;
-      if (num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
+      if (IoDeviceUnderloaded()) {
         this->throttle_ec_.notifyAll();
       }
     };
@@ -618,17 +661,16 @@ void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_
   ++stats_.tiered_writes;
 }
 
-std::pair<bool, PrimeIterator> TieredStorage::CanScheduleOffload(DbIndex db_index, PrimeIterator it,
-                                                                 string_view key) {
-  unsigned max_pending_writes = GetFlag(FLAGS_tiered_storage_max_pending_writes);
+std::pair<bool, PrimeIterator> TieredStorage::ThrottleWrites(DbIndex db_index, PrimeIterator it,
+                                                             string_view key) {
   unsigned throttle_usec = GetFlag(FLAGS_tiered_storage_throttle_us);
   PrimeIterator res_it = it;
-  if (num_active_requests_ >= max_pending_writes && throttle_usec > 0) {
+  if (!IoDeviceUnderloaded() && throttle_usec > 0) {
     chrono::steady_clock::time_point next =
         chrono::steady_clock::now() + chrono::microseconds(throttle_usec);
     stats_.throttled_write_cnt++;
 
-    throttle_ec_.await_until([&]() { return num_active_requests_ < max_pending_writes; }, next);
+    throttle_ec_.await_until([&]() { return IoDeviceUnderloaded(); }, next);
 
     PrimeTable* pt = db_slice_.GetTables(db_index).first;
     if (!it.IsOccupied() || it->first != key) {
@@ -641,7 +683,11 @@ std::pair<bool, PrimeIterator> TieredStorage::CanScheduleOffload(DbIndex db_inde
     }
   }
 
-  return std::make_pair((num_active_requests_ < max_pending_writes), res_it);
+  return std::make_pair(IoDeviceUnderloaded(), res_it);
+}
+
+bool TieredStorage::IoDeviceUnderloaded() const {
+  return num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes);
 }
 
 bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
@@ -717,6 +763,11 @@ void TieredStorage::InitiateGrow(size_t grow_size) {
 
   error_code ec = io_mgr_.GrowAsync(grow_size, std::move(cb));
   CHECK(!ec) << "TBD";  // TODO
+}
+
+bool TieredStorage::CanExternalizeEntry(PrimeIterator it) {
+  return it->first.ObjType() == OBJ_STRING && !it->second.HasIoPending() &&
+         !it->second.IsExternal() && EligibleForOffload(it->second.Size());
 }
 
 }  // namespace dfly

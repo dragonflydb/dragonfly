@@ -4,10 +4,6 @@
 
 #include "server/string_family.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/container/inlined_vector.h>
 
 #include <algorithm>
@@ -610,10 +606,8 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   }
 
   if (shard->tiered_storage() &&
-      TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
-    // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
-    // afterwards. handle this
-    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it, key);
+      TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
+    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it, key);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {

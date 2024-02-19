@@ -4,10 +4,6 @@
 
 #include "server/snapshot.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/functional/bind_front.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>

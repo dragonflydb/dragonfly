@@ -165,9 +165,8 @@ TEST_F(JsonFamilyTest, Type) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.TYPE", "json", "$[*]"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(),
-              ElementsAre("integer", "number", "string", "boolean", "null", "object", "array"));
+  ASSERT_THAT(resp, RespArray(ElementsAre("integer", "number", "string", "boolean", "null",
+                                          "object", "array")));
 
   resp = Run({"JSON.TYPE", "json", "$[10]"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
@@ -589,7 +588,7 @@ TEST_F(JsonFamilyTest, ObjKeys) {
   ASSERT_THAT(resp, ArrLen(2));
   const auto& arr1 = resp.GetVec();
   EXPECT_THAT(arr1[0], ArgType(RespExpr::NIL_ARRAY));
-  EXPECT_THAT(arr1[1].GetVec(), ElementsAre("b", "c"));
+  EXPECT_THAT(arr1[1], RespArray(ElementsAre("b", "c")));
 
   json = R"(
     {"a":{}, "b":{"c":{"d": {"e": 1337}}}}

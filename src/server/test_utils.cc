@@ -247,9 +247,7 @@ void BaseFamilyTest::ResetService() {
             auto it = head;
             do {
               Transaction* trans = std::get<Transaction*>(es->txq()->At(it));
-              LOG(ERROR) << "Transaction " << trans->DebugId() << " "
-                         << trans->GetLocalMask(es->shard_id()) << " "
-                         << trans->IsArmedInShard(es->shard_id());
+              LOG(ERROR) << "Transaction " << trans->DebugId(es->shard_id());
               it = txq->Next(it);
             } while (it != head);
           }
@@ -318,11 +316,8 @@ unsigned BaseFamilyTest::NumLocked() {
 }
 
 void BaseFamilyTest::ClearMetrics() {
-  shard_set->pool()->Await([](auto*) {
-    ServerState::Stats stats;
-    stats.tx_width_freq_arr = new uint64_t[shard_set->size()];
-    ServerState::tlocal()->stats = std::move(stats);
-  });
+  shard_set->pool()->Await(
+      [](auto*) { ServerState::tlocal()->stats = ServerState::Stats(shard_set->size()); });
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
@@ -333,6 +328,17 @@ void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double t
     ThisFiber::SleepFor(step);
   } while (!IsLocked(db_index, key) && --steps > 0);
   CHECK(IsLocked(db_index, key));
+}
+
+bool BaseFamilyTest::WaitUntilCondition(std::function<bool()> condition_cb,
+                                        std::chrono::milliseconds timeout_ms) {
+  auto step = 50us;
+  auto timeout_micro = chrono::duration_cast<chrono::microseconds>(timeout_ms);
+  int64_t steps = timeout_micro.count() / step.count();
+  do {
+    ThisFiber::SleepFor(step);
+  } while (!condition_cb() && --steps > 0);
+  return condition_cb();
 }
 
 RespExpr BaseFamilyTest::Run(ArgSlice list) {

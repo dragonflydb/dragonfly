@@ -7,7 +7,6 @@
 #include <absl/strings/match.h>
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/zmalloc.h"
 }
 #include <sys/statvfs.h>
@@ -37,6 +36,9 @@ ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "
           "0 - means the program will automatically determine its maximum file size. "
           "default: 0");
+
+ABSL_FLAG(float, tiered_offload_threshold, 0.5,
+          "The ratio of used/max memory above which we start offloading values to disk");
 
 ABSL_FLAG(uint32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
@@ -602,7 +604,9 @@ void EngineShard::Heartbeat() {
     ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
   }
 
-  ssize_t redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
+  ssize_t eviction_redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
+  size_t tiering_redline =
+      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
@@ -620,8 +624,16 @@ void EngineShard::Heartbeat() {
     }
 
     // if our budget is below the limit
-    if (db_slice_.memory_budget() < redline) {
-      db_slice_.FreeMemWithEvictionStep(i, redline - db_slice_.memory_budget());
+    if (db_slice_.memory_budget() < eviction_redline) {
+      db_slice_.FreeMemWithEvictionStep(i, eviction_redline - db_slice_.memory_budget());
+    }
+
+    if (tiered_storage_) {
+      size_t offload_bytes = 0;
+      if (UsedMemory() > tiering_redline) {
+        offload_bytes = UsedMemory() - tiering_redline;
+      }
+      db_slice_.ScheduleForOffloadStep(i, offload_bytes);
     }
   }
 

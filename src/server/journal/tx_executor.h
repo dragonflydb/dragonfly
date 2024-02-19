@@ -16,9 +16,9 @@ struct JournalReader;
 class MultiShardExecution {
  public:
   struct TxExecutionSync {
-    Barrier barrier;
+    util::fb2::Barrier barrier;
     std::atomic_uint32_t counter;
-    BlockingCounter block;
+    util::fb2::BlockingCounter block;
 
     explicit TxExecutionSync(uint32_t counter)
         : barrier(counter), counter(counter), block(counter) {
@@ -38,9 +38,8 @@ class MultiShardExecution {
 // This class holds the commands of transaction in single shard.
 // Once all commands were received, the transaction can be executed.
 struct TransactionData {
-  // Update the data from ParsedEntry and return true if all shard transaction commands were
-  // received.
-  bool AddEntry(journal::ParsedEntry&& entry);
+  // Update the data from ParsedEntry
+  void AddEntry(journal::ParsedEntry&& entry);
 
   bool IsGlobalCmd() const;
 
@@ -58,11 +57,14 @@ struct TransactionData {
 // The journal stream can contain interleaved data for multiple multi transactions,
 // expiries and out of order executed transactions that need to be grouped on the replica side.
 struct TransactionReader {
+  TransactionReader(bool accumulate_multi) : accumulate_multi_(accumulate_multi) {
+  }
   std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
 
  private:
   // Stores ongoing multi transaction data.
   absl::flat_hash_map<TxId, TransactionData> current_;
+  bool accumulate_multi_ = false;
 };
 
 }  // namespace dfly

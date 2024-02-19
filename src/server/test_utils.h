@@ -17,6 +17,7 @@
 
 namespace dfly {
 using namespace facade;
+using namespace std;
 
 class TestConnection : public facade::Connection {
  public:
@@ -123,6 +124,10 @@ class BaseFamilyTest : public ::testing::Test {
 
   // Wait for a locked key to unlock. Aborts after timeout seconds passed.
   void WaitUntilLocked(DbIndex db_index, std::string_view key, double timeout = 3);
+
+  // Wait until condition_cb returns true or timeout reached. Returns condition_cb value
+  bool WaitUntilCondition(std::function<bool()> condition_cb,
+                          std::chrono::milliseconds timeout_ms = 100ms);
 
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;

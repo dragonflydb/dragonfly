@@ -4,11 +4,13 @@
 
 #include "core/interpreter.h"
 
+#include <absl/base/casts.h>
 #include <absl/container/fixed_array.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/clock.h>
 #include <mimalloc.h>
 #include <openssl/evp.h>
+#include <xxhash.h>
 
 #include <cstring>
 #include <optional>
@@ -303,6 +305,41 @@ void ToHex(const uint8_t* src, char* dest) {
   dest[40] = '\0';
 }
 
+int DragonflyHashCommand(lua_State* lua) {
+  int argc = lua_gettop(lua);
+  if (argc != 2) {
+    lua_pushstring(lua, "wrong number of arguments");
+    return lua_error(lua);
+  }
+
+  XXH64_hash_t hash = absl::bit_cast<XXH64_hash_t>(lua_tointeger(lua, 1));
+  auto update_hash = [&hash](string_view sv) { hash = XXH64(sv.data(), sv.length(), hash); };
+
+  auto digest_value = [&hash, &update_hash, lua](int pos) {
+    if (int type = lua_type(lua, pos); type == LUA_TSTRING) {
+      const char* str = lua_tostring(lua, pos);
+      update_hash(string_view{str, strlen(str)});
+    } else {
+      CHECK_EQ(type, LUA_TNUMBER) << "Only strings and integers can be hashed";
+      update_hash(to_string(lua_tointeger(lua, pos)));
+    }
+  };
+
+  if (lua_type(lua, 2) == LUA_TTABLE) {
+    lua_pushnil(lua);
+    while (lua_next(lua, 2) != 0) {
+      digest_value(-2);  // key, included for correct hashing
+      digest_value(-1);  // value
+      lua_pop(lua, 1);
+    }
+  } else {
+    digest_value(2);
+  }
+
+  lua_pushinteger(lua, absl::bit_cast<lua_Integer>(hash));
+  return 1;
+}
+
 int RedisSha1Command(lua_State* lua) {
   int argc = lua_gettop(lua);
   if (argc != 1) {
@@ -387,6 +424,17 @@ Interpreter::Interpreter() {
   *ptr = this;
   // SaveOnRegistry(lua_, kInstanceKey, this);
 
+  /* Register the dragonfly commands table and fields */
+  lua_newtable(lua_);
+
+  lua_pushstring(lua_, "ihash");
+  lua_pushcfunction(lua_, DragonflyHashCommand);
+  lua_settable(lua_, -3);
+
+  /* Finally set the table as 'dragonfly' global var. */
+  lua_setglobal(lua_, "dragonfly");
+  CHECK(lua_checkstack(lua_, 64));
+
   /* Register the redis commands table and fields */
   lua_newtable(lua_);
 
@@ -468,6 +516,8 @@ auto Interpreter::AddFunction(string_view sha, string_view body, string* result)
 }
 
 bool Interpreter::Exists(string_view sha) const {
+  DCHECK(lua_);
+
   if (sha.size() != 40)
     return false;
 
@@ -484,7 +534,7 @@ bool Interpreter::Exists(string_view sha) const {
 }
 
 auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult {
-  DVLOG(1) << "RunFunction " << sha << " " << lua_gettop(lua_);
+  DVLOG(2) << "RunFunction " << sha << " " << lua_gettop(lua_);
 
   DCHECK_EQ(40u, sha.size());
 
@@ -892,17 +942,38 @@ Interpreter* InterpreterManager::Get() {
 }
 
 void InterpreterManager::Return(Interpreter* ir) {
-  DCHECK_LE(storage_.data(), ir);                    // ensure the pointer
-  DCHECK_GE(storage_.data() + storage_.size(), ir);  // belongs to storage_
-  available_.push_back(ir);
-  waker_.notify();
+  if (ir >= storage_.data() && ir < storage_.data() + storage_.size()) {
+    available_.push_back(ir);
+    waker_.notify();
+  } else if (return_untracked_ > 0) {
+    return_untracked_--;
+    if (return_untracked_ == 0) {
+      reset_ec_.notify();
+    }
+  } else {
+    LOG(DFATAL) << "Returning untracked interpreter";
+  }
 }
 
 void InterpreterManager::Reset() {
-  waker_.await([this]() { return available_.size() == storage_.size(); });
+  lock_guard guard{reset_mu_};
+
+  // we perform double buffer swapping with storage and wait for the old interepreters to be
+  // returned.
+  return_untracked_ = storage_.size() - available_.size();
+
+  std::vector<Interpreter> next_storage;
+  next_storage.reserve(storage_.capacity());
+  next_storage.resize(storage_.size());
+  next_storage.swap(storage_);
 
   available_.clear();
-  storage_.clear();
+  for (auto& ir : storage_) {
+    available_.push_back(&ir);
+  }
+
+  reset_ec_.await([this]() { return return_untracked_ == 0; });
+  VLOG(1) << "InterpreterManager::Reset ended";
 }
 
 }  // namespace dfly
