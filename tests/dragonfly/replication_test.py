@@ -2012,16 +2012,22 @@ async def test_saving_replica(df_local_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("DEBUG POPULATE 100000 key 4048 RAND")
+    await c_master.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
     async def save_replica():
         await c_replica.execute_command("save")
 
+    async def is_saving():
+        return "saving:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
+
     save_task = asyncio.create_task(save_replica())
-    await asyncio.sleep(0.1)  # let save start
+    while not await is_saving():  # wait for replica start saving
+        asyncio.sleep(0.1)
     await c_replica.execute_command("replicaof no one")
+    assert await is_saving()
     await save_task
+    assert not await is_saving()
 
     await disconnect_clients(c_master, *[c_replica])
