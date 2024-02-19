@@ -4,9 +4,12 @@
 
 #include "server/cluster/outgoing_slot_migration.h"
 
+#include <atomic>
+
 #include "server/db_slice.h"
 #include "server/journal/streamer.h"
 
+using namespace std;
 namespace dfly {
 
 class OutgoingMigration::SliceSlotMigration {
@@ -15,7 +18,7 @@ class OutgoingMigration::SliceSlotMigration {
                      Context* cntx, io::Sink* dest)
       : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
     streamer_.Start(dest);
-    state_ = MigrationState::C_FULL_SYNC;
+    state_.store(MigrationState::C_FULL_SYNC, memory_order_relaxed);
   }
 
   void Cancel() {
@@ -24,17 +27,20 @@ class OutgoingMigration::SliceSlotMigration {
 
   void Finalize() {
     streamer_.SendFinalize();
+    state_.store(MigrationState::C_FINISHED, memory_order_relaxed);
   }
 
   MigrationState GetState() const {
-    return state_ == MigrationState::C_FULL_SYNC && streamer_.IsSnapshotFinished()
+    auto state = state_.load(memory_order_relaxed);
+    return state == MigrationState::C_FULL_SYNC && streamer_.IsSnapshotFinished()
                ? MigrationState::C_STABLE_SYNC
-               : state_;
+               : state;
   }
 
  private:
   RestoreStreamer streamer_;
-  MigrationState state_ = MigrationState::C_CONNECTING;
+  // Atomic only for simple read operation, writes - from the same thread, reads - from any thread
+  atomic<MigrationState> state_ = MigrationState::C_CONNECTING;
 };
 
 OutgoingMigration::OutgoingMigration(std::uint32_t flows_num, std::string ip, uint16_t port,
@@ -70,7 +76,7 @@ MigrationState OutgoingMigration::GetState() const {
 }
 
 MigrationState OutgoingMigration::GetStateImpl() const {
-  MigrationState min_state = MigrationState::C_STABLE_SYNC;
+  MigrationState min_state = MigrationState::C_MAX_INVALID;
   for (const auto& slot_migration : slot_migrations_) {
     if (slot_migration)
       min_state = std::min(min_state, slot_migration->GetState());

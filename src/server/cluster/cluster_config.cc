@@ -298,6 +298,18 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
   return CreateFromConfig(my_id, config.value());
 }
 
+std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithChanges(const std::vector<SlotRange>& slots,
+                                                               bool enable) const {
+  auto new_config = std::make_shared<ClusterConfig>(*this);
+
+  auto slot_set = ToSlotSet(slots);
+
+  for (const auto s : slot_set) {
+    new_config->my_slots_.set(s, enable);
+  }
+  return new_config;
+}
+
 bool ClusterConfig::IsMySlot(SlotId id) const {
   if (id >= my_slots_.size()) {
     DCHECK(false) << "Requesting a non-existing slot id " << id;
@@ -309,12 +321,6 @@ bool ClusterConfig::IsMySlot(SlotId id) const {
 
 bool ClusterConfig::IsMySlot(std::string_view key) const {
   return IsMySlot(KeySlot(key));
-}
-
-void ClusterConfig::RemoveSlots(SlotSet slots) {
-  for (const auto s : slots) {
-    my_slots_.set(s, false);
-  }
 }
 
 ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {

@@ -1119,6 +1119,8 @@ async def test_cluster_fuzzymigration(
     for counter in counters:
         counter.cancel()
 
+    # need this sleep to avoid race between finalize and config
+    await asyncio.sleep(0.5)
     # Push new config
     await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 

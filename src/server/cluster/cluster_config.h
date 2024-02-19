@@ -28,7 +28,8 @@ enum class MigrationState : uint8_t {
   C_CONNECTING,
   C_FULL_SYNC,
   C_STABLE_SYNC,
-  C_FINISHED
+  C_FINISHED,
+  C_MAX_INVALID = std::numeric_limits<uint8_t>::max()
 };
 
 class ClusterConfig {
@@ -81,11 +82,12 @@ class ClusterConfig {
   static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
                                                          const JsonType& json_config);
 
+  std::shared_ptr<ClusterConfig> CloneWithChanges(const std::vector<SlotRange>& slots,
+                                                  bool enable) const;
+
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
-
-  void RemoveSlots(SlotSet slots);
 
   // Returns the master configured for `id`.
   Node GetMasterNodeForSlot(SlotId id) const;

@@ -38,7 +38,7 @@ class OutgoingMigration {
     return port_;
   };
 
-  const std::vector<ClusterConfig::SlotRange>& GetSlotRange() const {
+  const std::vector<ClusterConfig::SlotRange>& GetSlots() const {
     return slots_;
   }
 

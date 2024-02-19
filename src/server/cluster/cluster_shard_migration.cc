@@ -93,7 +93,7 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
   }
   CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
   if (!tx_data.IsGlobalCmd()) {
-    VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
   } else {
     // TODO check which global commands should be supported
