@@ -6,6 +6,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/server_state.h"
 
 ABSL_FLAG(bool, enable_top_keys_tracking, false,
           "Enables / disables tracking of hot keys debugging feature");
@@ -103,9 +104,11 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
   if (ClusterConfig::IsEnabled()) {
     slots_stats.resize(ClusterConfig::kMaxSlotNum + 1);
   }
+  thread_index = ServerState::tlocal()->thread_index();
 }
 
 DbTable::~DbTable() {
+  DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
 }
 
 void DbTable::Clear() {
