@@ -1030,6 +1030,7 @@ async def test_cluster_fuzzymigration(
     # Fill instances with some data
     seeder = df_seeder_factory.create(keys=keys, port=nodes[0].instance.port, cluster_mode=True)
     await seeder.run(target_deviation=0.1)
+    initial_seeder_size = sum([c.size() for c in await seeder.capture()])
 
     fill_task = asyncio.create_task(seeder.run())
 
@@ -1138,6 +1139,17 @@ async def test_cluster_fuzzymigration(
 
     # Compare capture
     assert await seeder.compare(capture, nodes[0].instance.port)
+
+    # Make sure migrated slots are flushed (removed). TODO: uncomment when implemented
+    # retries = 10
+    # while retries > 0:
+    #   capture_sum = sum([c.size() for c in capture])
+    #   real_sum = sum([await node.client.dbsize() for node in nodes])
+    #   if len(counter_keys) + initial_seeder_size + capture_sum == real_sum:
+    #       retries = 0
+    #   retries -= 1
+    #   await asyncio.sleep(0.5)
+    # assert retries > 0, f"unflushed items {initial_seeder_size} {capture_sum} {real_sum} {counter_keys}"
 
     await asyncio.gather(*[c.close() for c in counter_connections])
     await close_clients(

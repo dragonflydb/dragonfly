@@ -313,6 +313,9 @@ class DataCapture:
         self._print_diff(other)
         return False
 
+    def size(self):
+        return len(self.entries)
+
     def _print_diff(self, other):
         eprint("=== DIFF ===")
         printed = 0
