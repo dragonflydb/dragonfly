@@ -30,7 +30,6 @@ inline iovec constexpr IoVec(std::string_view s) {
 
 constexpr char kCRLF[] = "\r\n";
 constexpr char kErrPref[] = "-ERR ";
-constexpr char kLoadingPrefix[] = "-LOADING ";
 constexpr char kSimplePref[] = "+";
 
 constexpr unsigned kConvFlags =
@@ -297,20 +296,12 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
     err_type = str;
     if (err_type == kSyntaxErr)
       err_type = kSyntaxErrType;
-    if (err_type == kLoadingErr)
-      err_type = kLoadingErrType;
   }
 
   tl_facade_stats->reply_stats.err_count[err_type]++;
 
   if (str[0] == '-') {
     iovec v[] = {IoVec(str), IoVec(kCRLF)};
-    Send(v, ABSL_ARRAYSIZE(v));
-    return;
-  }
-
-  if (err_type == kLoadingErrType) {
-    iovec v[] = {IoVec(kLoadingPrefix), IoVec(str), IoVec(kCRLF)};
     Send(v, ABSL_ARRAYSIZE(v));
     return;
   }
