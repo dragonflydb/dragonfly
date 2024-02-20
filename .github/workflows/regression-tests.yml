@@ -41,7 +41,9 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           run-only-on-ubuntu-latest: false
           build-folder-name: build
-          filter: ${{ matrix.build-type == 'Release' && '' || 'not opt_only' }}
+          # Do not filter anything in Release, but do not run opt_only in Debug. Unfortunately an
+          # empty string creates a 'false' expression, so we use a non existing mark
+          filter: ${{ matrix.build-type == 'Release' && 'not NON_EXISTING_MARK' || 'not opt_only' }}
 
       - name: Upload logs on failure
         if: failure()
