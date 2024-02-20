@@ -988,7 +988,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   // Check if the command is allowed to execute under this global state
   bool allowed_by_state = true;
-  switch (etl.gstate()) {
+  const auto gstate = etl.gstate();
+  switch (gstate) {
     case GlobalState::LOADING:
       allowed_by_state = dfly_cntx.journal_emulated || (cid->opt_mask() & CO::LOADING);
       break;
@@ -1004,8 +1005,13 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
   if (!allowed_by_state) {
     VLOG(1) << "Command " << cid->name() << " not executed because global state is "
-            << GlobalStateName(etl.gstate());
-    return ErrorReply{StrCat("Can not execute during ", GlobalStateName(etl.gstate()))};
+            << GlobalStateName(gstate);
+
+    if (gstate == GlobalState::LOADING) {
+      return ErrorReply(kLoadingErr);
+    }
+
+    return ErrorReply{StrCat("Can not execute during ", GlobalStateName(gstate))};
   }
 
   string_view cmd_name{cid->name()};

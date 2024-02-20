@@ -31,9 +31,11 @@ extern const char kIndexOutOfRange[];
 extern const char kOutOfMemory[];
 extern const char kInvalidNumericResult[];
 extern const char kClusterNotConfigured[];
+extern const char kLoadingErr[];
 
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
 extern const char kConfigErrType[];
+extern const char kLoadingErrType[];
 
 }  // namespace facade
