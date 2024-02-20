@@ -90,6 +90,7 @@ const char kIndexOutOfRange[] = "index out of range";
 const char kOutOfMemory[] = "Out of memory";
 const char kInvalidNumericResult[] = "result is not a number";
 const char kClusterNotConfigured[] = "Cluster is not yet configured";
+const char kLoadingErr[] = "-LOADING Dragonfly is loading the dataset in memory";
 
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
