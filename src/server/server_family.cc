@@ -2196,7 +2196,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
 
   // We should not execute replica of command while loading from snapshot.
   if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
-    cntx->SendError("Can not execute during LOADING");
+    cntx->SendError(kLoadingErr);
     return;
   }
 

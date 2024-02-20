@@ -52,7 +52,8 @@ async def wait_available_async(client: aioredis.Redis, timeout=10):
             if "MOVED" in str(e):
                 # MOVED means we *can* serve traffic, but 'key' does not belong to an owned slot
                 return
-            assert "Can not execute during LOADING" in str(e)
+        except aioredis.BusyLoadingError as e:
+            assert "Dragonfly is loading the dataset in memory" in str(e)
 
         # Print W to indicate test is waiting for replica
         print("W", end="", flush=True)
