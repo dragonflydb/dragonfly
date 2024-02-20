@@ -226,8 +226,17 @@ string_view TopSv(lua_State* lua) {
 }
 
 optional<int> FetchKey(lua_State* lua, const char* key) {
+  lua_pushcfunction(lua, [](lua_State* lua) -> int {
+    lua_gettable(lua, -3);
+    return 1;
+  });
   lua_pushstring(lua, key);
-  int type = lua_gettable(lua, -2);
+  int status = lua_pcall(lua, 1, 1, 0);
+  if (status != LUA_OK) {
+    lua_pop(lua, 1);
+    return nullopt;
+  }
+  int type = lua_type(lua, -1);
   if (type == LUA_TNIL) {
     lua_pop(lua, 1);
     return nullopt;
