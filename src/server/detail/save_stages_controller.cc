@@ -338,9 +338,11 @@ void SaveStagesController::CloseCb(unsigned index) {
   if (auto& snapshot = snapshots_[index].first; snapshot) {
     shared_err_ = snapshot->Close();
 
-    lock_guard lk{rdb_name_map_mu_};
+    unique_lock lk{rdb_name_map_mu_};
     for (const auto& k_v : snapshot->freq_map())
       rdb_name_map_[RdbTypeName(k_v.first)] += k_v.second;
+    lk.unlock();
+    snapshot.reset();
   }
 
   if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)

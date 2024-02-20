@@ -99,6 +99,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 
   TopKeys top_keys;
   DbIndex index;
+  uint32_t thread_index;
 
   explicit DbTable(PMR_NS::memory_resource* mr, DbIndex index);
   ~DbTable();

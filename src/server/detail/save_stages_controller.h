@@ -49,7 +49,7 @@ class RdbSnapshot {
   error_code Close();
   size_t GetSaveBuffersSize();
 
-  const RdbTypeFreqMap freq_map() const {
+  const RdbTypeFreqMap& freq_map() const {
     return freq_map_;
   }
 
