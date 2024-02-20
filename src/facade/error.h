@@ -36,6 +36,5 @@ extern const char kLoadingErr[];
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
 extern const char kConfigErrType[];
-extern const char kLoadingErrType[];
 
 }  // namespace facade
