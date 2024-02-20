@@ -1,7 +1,6 @@
 import asyncio
 import async_timeout
 import string
-import random
 from redis import asyncio as aioredis
 from . import dfly_args
 from .seeder import Seeder, StaticSeeder
@@ -18,7 +17,7 @@ async def test_static_seeder(async_client: aioredis.Redis):
 @dfly_args({"proactor_threads": 4})
 async def test_seeder_key_target(async_client: aioredis.Redis):
     """Ensure seeder reaches its key targets"""
-    s = Seeder(units=random.randint(4, 12), key_target=5000)
+    s = Seeder(units=len(Seeder.TYPES) * 2, key_target=5000)
 
     # Ensure tests are not reasonably slow
     async with async_timeout.timeout(1 + 4):
@@ -41,6 +40,15 @@ async def test_seeder_key_target(async_client: aioredis.Redis):
         await s.run(async_client, target_deviation=0.5)  # don't set low precision with low values
         assert await async_client.dbsize() < 200
 
+        # Get cmdstat calls
+        info = await async_client.info("ALL")
+        calls = {
+            k.split("_")[1]: v["calls"]
+            for k, v in info.items()
+            if k.startswith("cmdstat_") and v["calls"] > 50
+        }
+        assert len(calls) > 15  # we use at least 15 different commands
+
 
 @dfly_args({"proactor_threads": 4})
 async def test_seeder_capture(async_client: aioredis.Redis):
@@ -49,17 +57,15 @@ async def test_seeder_capture(async_client: aioredis.Redis):
     async def set_data():
         p = async_client.pipeline()
         p.mset(mapping={f"string{i}": f"{i}" for i in range(100)})
-        # uncomment when seeder supports more than strings
-        # p.lpush("list1", *list(string.ascii_letters))
-        # p.sadd("set1", *list(string.ascii_letters))
-        # p.hset("hash1", mapping={f"{i}": l for i, l in enumerate(string.ascii_letters)})
-        # p.zadd("zset1", mapping={l: i for i, l in enumerate(string.ascii_letters)})
-        # p.json().set("json1", ".", {"a": [1, 2, 3], "b": {"c": 1, "d": 2, "e": [5, 6]}})
+        p.lpush("list1", *list(string.ascii_letters))
+        p.sadd("set1", *list(string.ascii_letters))
+        p.hset("hash1", mapping={f"{i}": l for i, l in enumerate(string.ascii_letters)})
+        p.zadd("zset1", mapping={l: i for i, l in enumerate(string.ascii_letters)})
         await p.execute()
 
     # Capture with filled data
     await set_data()
-    c1 = await Seeder.capture(async_client)
+    capture = await Seeder.capture(async_client)
 
     # Check hashes are 0 without data
     await async_client.flushall()
@@ -67,11 +73,16 @@ async def test_seeder_capture(async_client: aioredis.Redis):
 
     # Check setting the same data results in same hashes
     await set_data()
-    c2 = await Seeder.capture(async_client)
-    assert c1 == c2
+    assert capture == await Seeder.capture(async_client)
 
-    # Check chaning the data gives different hahses
-    # await async_client.lpush("list1", "NEW")
-    await async_client.append("string1", "MORE-DATA")
-    c3 = await Seeder.capture(async_client)
-    assert c1 != c3
+    # Check changing the data gives different hahses
+    await async_client.lpush("list1", "NEW")
+    assert capture != await Seeder.capture(async_client)
+
+    # Undo our change
+    await async_client.lpop("list1")
+    assert capture == await Seeder.capture(async_client)
+
+    # Do another change
+    await async_client.spop("set1")
+    assert capture != await Seeder.capture(async_client)

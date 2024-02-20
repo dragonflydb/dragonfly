@@ -98,7 +98,7 @@ const char* ObjTypeName(int type) {
     case OBJ_STREAM:
       return "stream";
     case OBJ_JSON:
-      return "ReJSON-RL";
+      return "rejson-rl";
     default:
       LOG(ERROR) << "Unsupported type " << type;
   }
