@@ -15,9 +15,8 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/json/driver.h"
 #include "core/json/json_object.h"
-#include "core/json/jsonpath_grammar.hh"
+#include "core/json/path.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
@@ -60,29 +59,6 @@ inline void Evaluate(const json::Path& expr, const JsonType& obj, ExprCallback c
   json::EvaluatePath(expr, obj, [&cb](optional<string_view> key, const JsonType& val) {
     cb(key ? *key : string_view{}, val);
   });
-}
-
-class JsonPathDriver : public json::Driver {
- public:
-  string msg;
-  void Error(const json::location& l, const std::string& msg) final {
-    this->msg = absl::StrCat("Error: ", msg);
-  }
-};
-
-io::Result<json::Path, string> JsonPathV2Parse(string_view path) {
-  if (path.size() > 8_KB)
-    return nonstd::make_unexpected("Path too long");
-  JsonPathDriver driver;
-  json::Parser parser(&driver);
-
-  driver.SetInput(string(path));
-  int res = parser();
-  if (res != 0) {
-    return nonstd::make_unexpected(driver.msg);
-  }
-
-  return driver.TakePath();
 }
 
 inline OpStatus JsonReplaceVerifyNoOp(JsonType&) {
@@ -1206,7 +1182,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
 
 io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
-    return JsonPathV2Parse(path);
+    return json::ParsePath(path);
   }
   io::Result<JsonExpression> expr_result = ParseJsonPath(path);
   if (!expr_result) {

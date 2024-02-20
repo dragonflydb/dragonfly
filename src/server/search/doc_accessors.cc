@@ -2,14 +2,21 @@
 // See LICENSE for licensing terms.
 //
 
+// GCC yields a spurious warning about uninitialized data in DocumentAccessor::StringList.
+#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 #include "server/search/doc_accessors.h"
 
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
 #include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 
+#include "base/flags.h"
+#include "core/json/path.h"
+#include "core/overloaded.h"
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 #include "core/string_map.h"
@@ -18,6 +25,8 @@
 extern "C" {
 #include "redis/listpack.h"
 };
+
+ABSL_DECLARE_FLAG(bool, jsonpathv2);
 
 namespace dfly {
 
@@ -104,7 +113,25 @@ SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
   return out;
 }
 
-struct JsonAccessor::JsonPathContainer : public jsoncons::jsonpath::jsonpath_expression<JsonType> {
+struct JsonAccessor::JsonPathContainer {
+  vector<JsonType> Evaluate(const JsonType& json) const {
+    vector<JsonType> res;
+
+    visit(Overloaded{[&](const json::Path& path) {
+                       json::EvaluatePath(path, json,
+                                          [&](auto, const JsonType& v) { res.push_back(v); });
+                     },
+                     [&](const jsoncons::jsonpath::jsonpath_expression<JsonType>& path) {
+                       auto json_arr = path.evaluate(json);
+                       for (const auto& v : json_arr.array_range())
+                         res.push_back(v);
+                     }},
+          val);
+
+    return res;
+  }
+
+  variant<json::Path, jsoncons::jsonpath::jsonpath_expression<JsonType>> val;
 };
 
 BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) const {
@@ -112,9 +139,7 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
   if (!path)
     return {};
 
-  auto path_res = path->evaluate(json_);
-  DCHECK(path_res.is_array());  // json path always returns arrays
-
+  auto path_res = path->Evaluate(json_);
   if (path_res.empty())
     return {};
 
@@ -122,12 +147,11 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
     buf_ = path_res[0].as_string();
     return {buf_};
   }
-
   buf_.clear();
 
   // First, grow buffer and compute string sizes
   vector<size_t> sizes;
-  for (auto element : path_res.array_range()) {
+  for (const auto& element : path_res) {
     size_t start = buf_.size();
     buf_ += element.as_string();
     sizes.push_back(buf_.size() - start);
@@ -135,6 +159,7 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
 
   // Reposition start pointers to the most recent allocation of buf
   StringList out(sizes.size());
+
   size_t start = 0;
   for (size_t i = 0; i < out.size(); i++) {
     out[i] = string_view{buf_}.substr(start, sizes[i]);
@@ -149,8 +174,7 @@ BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const
   if (!path)
     return {};
 
-  auto res = path->evaluate(json_);
-  DCHECK(res.is_array());
+  auto res = path->Evaluate(json_);
   if (res.empty())
     return {nullptr, 0};
 
@@ -158,7 +182,7 @@ BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const
   auto ptr = make_unique<float[]>(size);
 
   size_t i = 0;
-  for (auto v : res[0].array_range())
+  for (const auto& v : res[0].array_range())
     ptr[i++] = v.as<float>();
 
   return {std::move(ptr), size};
@@ -169,16 +193,29 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
     return it->second.get();
   }
 
-  error_code ec;
-  auto path_expr = MakeJsonPathExpr(field, ec);
-
-  if (ec) {
-    LOG(WARNING) << "Invalid Json path: " << field << ' ' << ec.message();
-    return nullptr;
+  string ec_msg;
+  unique_ptr<JsonPathContainer> ptr;
+  if (absl::GetFlag(FLAGS_jsonpathv2)) {
+    auto path_expr = json::ParsePath(field);
+    if (path_expr) {
+      ptr.reset(new JsonPathContainer{std::move(path_expr.value())});
+    } else {
+      ec_msg = path_expr.error();
+    }
+  } else {
+    error_code ec;
+    auto path_expr = MakeJsonPathExpr(field, ec);
+    if (ec) {
+      ec_msg = ec.message();
+    } else {
+      ptr.reset(new JsonPathContainer{std::move(path_expr)});
+    }
   }
 
-  JsonPathContainer path_container{std::move(path_expr)};
-  auto ptr = make_unique<JsonPathContainer>(std::move(path_container));
+  if (!ptr) {
+    LOG(WARNING) << "Invalid Json path: " << field << ' ' << ec_msg;
+    return nullptr;
+  }
 
   JsonPathContainer* path = ptr.get();
   path_cache_[field] = std::move(ptr);
@@ -194,7 +231,7 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
   SearchDocData out{};
   for (const auto& [ident, name] : fields) {
     if (auto* path = GetPath(ident); path) {
-      if (auto res = path->evaluate(json_); !res.empty())
+      if (auto res = path->Evaluate(json_); !res.empty())
         out[name] = res[0].to_string();
     }
   }
