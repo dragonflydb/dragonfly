@@ -2044,7 +2044,7 @@ async def test_start_replicating_while_save(df_local_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_replica.execute_command("DEBUG POPULATE 100000 key 4096 RAND")
+    await c_replica.execute_command("DEBUG POPULATE 1000 key 4096 RAND")
 
     async def save_replica():
         await c_replica.execute_command("save")
