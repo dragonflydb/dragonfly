@@ -100,6 +100,8 @@ jobs:
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
+            -DWITH_ASAN=ON \
+            -DWITH_USAN=ON \
             -L
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
