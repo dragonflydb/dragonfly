@@ -129,9 +129,11 @@ size_t RdbSnapshot::GetSaveBuffersSize() {
 }
 
 error_code RdbSnapshot::Close() {
+#ifdef __linux__
   if (is_linux_file_) {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
   }
+#endif
   return static_cast<io::WriteFile*>(io_sink_.get())->Close();
 }
 

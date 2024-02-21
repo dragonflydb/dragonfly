@@ -22,6 +22,7 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "io/file.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
@@ -149,6 +150,7 @@ void OpenTrafficLogger(string_view base_path) {
   if (tl_traffic_logger.log_file)
     return;
 
+#ifdef __linux__
   // Open file with append mode, without it concurrent fiber writes seem to conflict
   string path = absl::StrCat(
       base_path, "-", absl::Dec(ProactorBase::me()->GetPoolIndex(), absl::kZeroPad3), ".bin");
@@ -158,6 +160,9 @@ void OpenTrafficLogger(string_view base_path) {
     return;
   }
   tl_traffic_logger.log_file = unique_ptr<io::WriteFile>{file.value()};
+#else
+  LOG(WARNING) << "Traffic logger is only supported on Linux";
+#endif
 }
 
 void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {

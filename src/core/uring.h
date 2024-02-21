@@ -4,6 +4,7 @@
 
 #pragma once
 
+#ifdef __linux__
 #include "util/fibers/uring_file.h"
 #include "util/fibers/uring_proactor.h"
 namespace dfly {
@@ -14,3 +15,5 @@ using util::fb2::OpenLinux;
 using util::fb2::OpenRead;
 
 }  // namespace dfly
+
+#endif
