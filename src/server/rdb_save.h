@@ -87,7 +87,10 @@ class RdbSaver {
 
   // Initiates the serialization in the shard's thread.
   // TODO: to implement break functionality to allow stopping early.
-  void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
+  // if save_mode is true we store the per-thread progress of the snapshot. This is
+  // used by bgsave
+  void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard,
+                            bool save_mode = false);
 
   // Send only the incremental snapshot since start_lsn.
   void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);

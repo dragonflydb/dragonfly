@@ -99,6 +99,8 @@ struct Metrics {
   // Max length of the all the tx shard-queues.
   uint32_t tx_queue_len = 0;
 
+  ServerState::CurrentSaveStats current_save_stats;
+
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
   std::vector<ReplicaRoleInfo> replication_metrics;

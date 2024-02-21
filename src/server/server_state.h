@@ -267,6 +267,14 @@ class ServerState {  // public struct - to allow initialization.
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;
 
+  struct CurrentSaveStats {
+    // snapshot related
+    size_t keys_processed = 0;
+    size_t keys_total = 0;
+  };
+
+  CurrentSaveStats current_save_stats;
+
  private:
   int64_t live_transactions_ = 0;
   SlowLogShard slow_log_shard_;

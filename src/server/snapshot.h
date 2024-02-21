@@ -57,7 +57,8 @@ class SliceSnapshot {
 
   using RecordChannel = SizeTrackingChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
 
-  SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode);
+  SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode,
+                bool save_mode = false);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -154,6 +155,8 @@ class SliceSnapshot {
     size_t loop_serialized = 0, skipped = 0, side_saved = 0;
     size_t savecb_calls = 0;
   } stats_;
+
+  bool save_mode_;
 };
 
 }  // namespace dfly

@@ -1034,7 +1034,8 @@ class RdbSaver::Impl {
 
   ~Impl();
 
-  void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
+  void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard,
+                         bool save_mode = false);
   void StartIncrementalSnapshotting(Context* cntx, EngineShard* shard, LSN start_lsn);
 
   void StopSnapshotting(EngineShard* shard);
@@ -1207,9 +1208,9 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 }
 
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
-                                       EngineShard* shard) {
+                                       EngineShard* shard, bool save_mode) {
   auto& s = GetSnapshot(shard);
-  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_);
+  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_, save_mode);
 
   s->Start(stream_journal, cll);
 }
@@ -1343,8 +1344,8 @@ RdbSaver::~RdbSaver() {
 }
 
 void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation* cll,
-                                    EngineShard* shard) {
-  impl_->StartSnapshotting(stream_journal, cll, shard);
+                                    EngineShard* shard, bool save_mode) {
+  impl_->StartSnapshotting(stream_journal, cll, shard, save_mode);
 }
 
 void RdbSaver::StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn) {

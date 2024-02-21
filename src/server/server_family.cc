@@ -1706,6 +1706,9 @@ Metrics ServerFamily::GetMetrics() const {
     result.qps += uint64_t(ss->MovingSum6());
     result.facade_stats += *tl_facade_stats;
 
+    result.current_save_stats.keys_processed += ss->current_save_stats.keys_processed;
+    result.current_save_stats.keys_total += ss->current_save_stats.keys_total;
+
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
       MergeDbSliceStats(shard->db_slice().GetStats(), &result);
@@ -1807,6 +1810,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("dispatch_queue_entries", m.facade_stats.conn_stats.dispatch_queue_entries);
   }
 
+  bool has_save_controller = false;
+  {
+    lock_guard lk{save_mu_};
+    if (save_controller_) {
+      has_save_controller = true;
+    }
+  }
+
   if (should_enter("MEMORY")) {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
@@ -1867,11 +1878,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
     }
 
-    {
-      lock_guard lk{save_mu_};
-      if (save_controller_) {
-        append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
-      }
+    if (has_save_controller) {
+      append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
     }
   }
 
@@ -1931,6 +1939,20 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("PERSISTENCE", true)) {
     auto save_info = GetLastSaveInfo();
+
+    size_t current = m.current_save_stats.keys_processed;
+    size_t total = m.current_save_stats.keys_total;
+    double perc = 0;
+    if (has_save_controller && total != 0) {
+      perc = (static_cast<double>(current) / total) * 100;
+    } else {
+      current = 0;
+      total = 0;
+    }
+
+    append("current_fork_perc", perc);
+    append("current_save_keys_processed", current);
+    append("current_save_keys_total", total);
 
     // when last success save
     append("last_success_save", save_info.save_time);
