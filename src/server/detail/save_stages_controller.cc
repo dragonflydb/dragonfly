@@ -125,6 +125,7 @@ error_code RdbSnapshot::SaveBody() {
 }
 
 size_t RdbSnapshot::GetSaveBuffersSize() {
+  CHECK(saver_);
   return saver_->GetTotalBuffersSize();
 }
 
@@ -172,17 +173,24 @@ SaveInfo SaveStagesController::Save() {
 
 size_t SaveStagesController::GetSaveBuffersSize() {
   std::atomic<size_t> total_bytes{0};
-  if (use_dfs_format_) {
-    auto cb = [this, &total_bytes](ShardId sid) {
-      total_bytes.fetch_add(snapshots_[sid].first->GetSaveBuffersSize(), memory_order_relaxed);
-    };
-    shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
 
-  } else {
-    // When rdb format save is running, there is only one rdb saver instance, it is running on the
-    // connection thread that runs the save command.
-    total_bytes.store(snapshots_.front().first->GetSaveBuffersSize(), memory_order_relaxed);
+  auto add_snapshot_bytes = [this, &total_bytes](ShardId sid) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot && snapshot->HasStarted()) {
+      total_bytes.fetch_add(snapshot->GetSaveBuffersSize(), memory_order_relaxed);
+    }
+  };
+
+  if (snapshots_.size() > 0) {
+    if (use_dfs_format_) {
+      shard_set->RunBriefInParallel([&](EngineShard* es) { add_snapshot_bytes(es->shard_id()); });
+
+    } else {
+      // When rdb format save is running, there is only one rdb saver instance, it is running on the
+      // connection thread that runs the save command.
+      add_snapshot_bytes(0);
+    }
   }
+
   return total_bytes.load(memory_order_relaxed);
 }
 
