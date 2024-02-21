@@ -1001,9 +1001,14 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
   std::string_view header;
   bool valid = false;
 
+  auto bad_header = [str]() {
+    LOG(ERROR) << "Bad replication header: " << str;
+    return std::make_error_code(std::errc::illegal_byte_sequence);
+  };
+
   // non-empty lines
   if (str[0] != '+') {
-    goto bad_header;
+    return bad_header();
   }
 
   header = str.substr(1);
@@ -1021,7 +1026,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     }
 
     if (!valid)
-      goto bad_header;
+      return bad_header();
 
     io_buf->ConsumeInput(str.size() + 2);
     RETURN_ON_ERR(ReadLine(io_buf, &str));  // Read the next line parsed below.
@@ -1031,7 +1036,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     DCHECK(!str.empty());
 
     if (str[0] != '$') {
-      goto bad_header;
+      return bad_header();
     }
 
     std::string_view token = str.substr(1);
@@ -1057,10 +1062,6 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
   }
 
   return error_code{};
-
-bad_header:
-  LOG(ERROR) << "Bad replication header: " << str;
-  return std::make_error_code(std::errc::illegal_byte_sequence);
 }
 
 Replica::Info Replica::GetInfo() const {
