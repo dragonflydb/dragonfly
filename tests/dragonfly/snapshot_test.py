@@ -334,23 +334,25 @@ class TestDflySnapshotOnShutdown:
         memory_empty = await self._get_info_memory_fields(async_client)
         assert memory_empty == {"object_used_memory": 0}
 
-    @pytest.mark.asyncio
-    async def test_memory_while_snapshoting(self, df_server, async_client):
-        await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
 
-        async def save():
-            await async_client.execute_command("save")
+@pytest.mark.parametrize("format", FILE_FORMATS)
+@dfly_args({**BASIC_ARGS, "dbfilename": "info-while-snapshot"})
+async def test_infomemory_while_snapshoting(async_client: aioredis.Redis, format: str):
+    await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
 
-        save_finished = False
+    async def save():
+        await async_client.execute_command("SAVE", format)
 
-        async def info_in_loop():
-            while not save_finished:
-                await self._get_info_memory_fields(async_client)
-                asyncio.sleep(0.1)
+    save_finished = False
 
-        save_task = asyncio.create_task(save())
-        info_task = asyncio.create_task(info_in_loop())
+    async def info_in_loop():
+        while not save_finished:
+            await async_client.execute_command("INFO MEMORY")
+            await asyncio.sleep(0.1)
 
-        await save_task
-        save_finished = True
-        await info_task
+    save_task = asyncio.create_task(save())
+    info_task = asyncio.create_task(info_in_loop())
+
+    await save_task
+    save_finished = True
+    await info_task
