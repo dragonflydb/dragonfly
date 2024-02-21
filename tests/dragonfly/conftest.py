@@ -14,6 +14,7 @@ import redis
 import pymemcache
 import random
 import subprocess
+import shutil
 from copy import deepcopy
 
 from pathlib import Path
@@ -326,3 +327,24 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
     args = deepcopy(with_tls_client_args)
     args["ssl_ca_certs"] = with_tls_ca_cert_args["ca_cert"]
     return args
+
+
+def copy_failed_logs_and_clean_tmp_folder(report):
+    failed_path = "/tmp/failed"
+    path_exists = os.path.exists(failed_path)
+    if not path_exists:
+        os.makedirs(failed_path)
+
+    last_log_file = open("/tmp/last_test_log_files.txt", "r")
+    files = last_log_file.readlines()
+    logging.error(f"Test failed {report.nodeid} with logs: ")
+    for file in files:
+        # copy to failed folder
+        file = file.rstrip("\n")
+        logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
+        shutil.copy(file, failed_path)
+
+
+def pytest_exception_interact(node, call, report):
+    if report.failed:
+        copy_failed_logs_and_clean_tmp_folder(report)

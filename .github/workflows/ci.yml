@@ -103,6 +103,7 @@ jobs:
             -L
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
+
       - name: Build
         run: |
           cd ${GITHUB_WORKSPACE}/build
@@ -110,11 +111,13 @@ jobs:
           df -h
           echo "-----------------------------"
           ninja src/all
+
       - name: PostFail
         if: failure()
         run: |
           echo "disk space is:"
           df -h
+
       - name: C++ Unit Tests
         run: |
           cd ${GITHUB_WORKSPACE}/build
@@ -146,6 +149,14 @@ jobs:
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
+
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
+
       - name: Run regression tests
         if: matrix.container == 'ubuntu-dev:20'
         uses: ./.github/actions/regression-tests
@@ -154,12 +165,14 @@ jobs:
           run-only-on-ubuntu-latest: true
           build-folder-name: build
           filter: ${{ matrix.build-type == 'Release' && 'not slow' || '(not slow) and (not opt_only)' }}
-      - name: Upload logs on failure
+
+      - name: Upload regression logs on failure
         if: failure()
         uses: actions/upload-artifact@v3
         with:
-          name: unit_logs
-          path: /tmp/*INFO*
+          name: regression_logs
+          path: /tmp/failed/*
+
 
   lint-test-chart:
     runs-on: ubuntu-latest
