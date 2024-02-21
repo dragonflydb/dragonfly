@@ -68,6 +68,7 @@ class GenericFamily {
   static void Type(CmdArgList args, ConnectionContext* cntx);
   static void Dump(CmdArgList args, ConnectionContext* cntx);
   static void Restore(CmdArgList args, ConnectionContext* cntx);
+  static void RandomKey(CmdArgList args, ConnectionContext* cntx);
   static void FieldTtl(CmdArgList args, ConnectionContext* cntx);
 
   static OpResult<void> RenameGeneric(CmdArgList args, bool skip_exist_dest,

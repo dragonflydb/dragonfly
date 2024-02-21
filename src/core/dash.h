@@ -5,6 +5,7 @@
 
 #include <vector>
 
+#include "absl/random/random.h"
 #include "base/pmr/memory_resource.h"
 #include "core/dash_internal.h"
 
@@ -224,6 +225,10 @@ class DashTable : public detail::DashTableBase {
   double load_factor() const {
     return double(size()) / (SegmentType::capacity() * unique_segments());
   }
+
+  // Gets a random cursor based on the available segments and buckets.
+  // Returns: cursor with a random position
+  Cursor GetRandomCursor(absl::BitGen* bitgen);
 
   // Traverses over a single bucket in table and calls cb(iterator) 0 or more
   // times. if cursor=0 starts traversing from the beginning, otherwise continues from where it
@@ -912,6 +917,14 @@ auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& c
       return 0;  // "End of traversal" cursor.
     }
   }
+
+  return Cursor{global_depth_, sid, bid};
+}
+
+template <typename _Key, typename _Value, typename Policy>
+auto DashTable<_Key, _Value, Policy>::GetRandomCursor(absl::BitGen* bitgen) -> Cursor {
+  uint32_t sid = absl::Uniform<uint32_t>(*bitgen, 0, segment_.size());
+  uint8_t bid = absl::Uniform<uint8_t>(*bitgen, 0, kLogicalBucketNum);
 
   return Cursor{global_depth_, sid, bid};
 }

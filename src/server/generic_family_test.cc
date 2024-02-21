@@ -734,4 +734,12 @@ TEST_F(GenericFamilyTest, FieldTtl) {
   EXPECT_EQ(-3, CheckedInt({"fieldttl", "k2", "f4"}));
 }
 
+TEST_F(GenericFamilyTest, RandomKey) {
+  auto resp = Run({"randomkey"});
+  EXPECT_EQ(resp.type, RespExpr::NIL);
+
+  resp = Run({"set", "k1", "1"});
+  EXPECT_EQ(Run({"randomkey"}), "k1");
+}
+
 }  // namespace dfly

@@ -4,6 +4,10 @@
 
 #include "server/generic_family.h"
 
+#include <optional>
+
+#include "facade/reply_builder.h"
+
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/util.h"
@@ -1509,6 +1513,54 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   return OpStatus::OK;
 }
 
+void GenericFamily::RandomKey(CmdArgList args, ConnectionContext* cntx) {
+  const static size_t kMaxAttempts = 3;
+
+  absl::BitGen bitgen;
+  atomic_size_t candidates_counter{0};
+  DbContext db_cntx{.db_index = cntx->conn_state.db_index};
+  ScanOpts scan_opts;
+  scan_opts.limit = 3;  // number of entries per shard
+  std::vector<StringVec> candidates_collection(shard_set->size());
+
+  shard_set->RunBriefInParallel(
+      [&](EngineShard* shard) {
+        auto [prime_table, expire_table] = shard->db_slice().GetTables(db_cntx.db_index);
+        if (prime_table->size() == 0) {
+          return;
+        }
+
+        StringVec* candidates = &candidates_collection[shard->shard_id()];
+
+        for (size_t i = 0; i <= kMaxAttempts; ++i) {
+          if (!candidates->empty()) {
+            break;
+          }
+          uint64_t cursor = 0;  // scans from the start of the shard after reaching kMaxAttemps
+          if (i < kMaxAttempts) {
+            cursor = prime_table->GetRandomCursor(&bitgen).value();
+          }
+          OpScan({shard, 0u, db_cntx}, scan_opts, &cursor, candidates);
+        }
+
+        candidates_counter.fetch_add(candidates->size(), memory_order_relaxed);
+      },
+      [&](ShardId) { return true; });
+
+  auto candidates_count = candidates_counter.load(memory_order_relaxed);
+  std::optional<string> random_key = std::nullopt;
+  auto random_idx = absl::Uniform<size_t>(bitgen, 0, candidates_count);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  for (const auto& candidate : candidates_collection) {
+    if (random_idx >= candidate.size()) {
+      random_idx -= candidate.size();
+    } else {
+      return rb->SendBulkString(candidate[random_idx]);
+    }
+  }
+  rb->SendNull();
+}
+
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&GenericFamily::x)
@@ -1580,7 +1632,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"SORT", CO::READONLY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(
              Move)
-      << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore);
+      << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
+      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey);
 }
 
 }  // namespace dfly
