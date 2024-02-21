@@ -333,3 +333,24 @@ class TestDflySnapshotOnShutdown:
         await self._delete_all_keys(async_client)
         memory_empty = await self._get_info_memory_fields(async_client)
         assert memory_empty == {"object_used_memory": 0}
+
+    @pytest.mark.asyncio
+    async def test_memory_while_snapshoting(self, df_server, async_client):
+        await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
+
+        async def save():
+            await async_client.execute_command("save")
+
+        save_finished = False
+
+        async def info_in_loop():
+            while not save_finished:
+                await self._get_info_memory_fields(async_client)
+                asyncio.sleep(0.1)
+
+        save_task = asyncio.create_task(save())
+        info_task = asyncio.create_task(info_in_loop())
+
+        await save_task
+        save_finished = True
+        await info_task
