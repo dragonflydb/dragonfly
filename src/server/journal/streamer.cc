@@ -75,8 +75,15 @@ void RestoreStreamer::Start(io::Sink* dest) {
       if (fiber_cancellation_.IsCancelled())
         return;
 
-      cursor = pt->Traverse(cursor, absl::bind_front(&RestoreStreamer::WriteBucket, this));
-      NotifyWritten(true);
+      bool written = false;
+      cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+        if (WriteBucket(it)) {
+          written = true;
+        }
+      });
+      if (written) {
+        NotifyWritten(true);
+      }
       ++last_yield;
 
       if (last_yield >= 100) {
