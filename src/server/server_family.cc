@@ -1300,25 +1300,41 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
 
+  auto set_last_save_error = [this](const auto& save_info) mutable {
+    last_save_info_.last_error = save_info.error;
+    last_save_info_.last_error_time = save_info.save_time;
+    last_save_info_.failed_duration_sec = save_info.duration_sec;
+  };
+
+  absl::Cleanup clean([this]() { save_controller_.reset(); });
+
   {
     std::lock_guard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
         new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
+
+    auto res = save_controller_->InitResourcesAndStart();
+
+    if (res) {
+      CHECK_EQ(res->error, true);
+      set_last_save_error(*res);
+      save_controller_.reset();
+      return res->error;
+    }
   }
 
-  detail::SaveInfo save_info = save_controller_->Save();
+  detail::SaveInfo save_info = save_controller_->RunSaveSteps();
 
   {
     std::lock_guard lk(save_mu_);
 
     if (save_info.error) {
-      last_save_info_.last_error = save_info.error;
-      last_save_info_.last_error_time = save_info.save_time;
-      last_save_info_.failed_duration_sec = save_info.duration_sec;
+      set_last_save_error(save_info);
     } else {
       last_save_info_.save_time = save_info.save_time;
       last_save_info_.success_duration_sec = save_info.duration_sec;

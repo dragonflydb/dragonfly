@@ -71,10 +71,11 @@ class RdbSnapshot {
 
 struct SaveStagesController : public SaveStagesInputs {
   SaveStagesController(SaveStagesInputs&& input);
+  std::optional<SaveInfo> InitResourcesAndStart();
 
   ~SaveStagesController();
 
-  SaveInfo Save();
+  SaveInfo RunSaveSteps();
   size_t GetSaveBuffersSize();
   uint32_t GetCurrentSaveDuration();
 
