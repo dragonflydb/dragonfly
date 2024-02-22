@@ -13,8 +13,12 @@ endif()
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
-if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc)
+
+    add_executable(dfly_bench dfly_bench.cc)
+    cxx_link(dfly_bench dfly_facade fibers2 absl::random_random)
+    cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
 
@@ -76,9 +80,6 @@ add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
 
-add_executable(dfly_bench dfly_bench.cc)
-cxx_link(dfly_bench dfly_facade fibers2 absl::random_random)
-
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(multi_test dfly_test_lib LABELS DFLY)
 cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
@@ -95,7 +96,6 @@ cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
-cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)

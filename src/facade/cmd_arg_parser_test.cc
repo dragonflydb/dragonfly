@@ -37,13 +37,11 @@ TEST_F(CmdArgParserTest, BasicTypes) {
   EXPECT_EQ(parser.Next<string>(), "STRING"s);
   EXPECT_EQ(parser.Next<string_view>(), "VIEW"sv);
 
-#ifndef __APPLE__
   EXPECT_EQ(parser.Next<size_t>(), 11u);
   EXPECT_EQ(parser.Next<size_t>(), 22u);
   auto [a, b] = parser.Next<size_t, size_t>();
   EXPECT_EQ(a, 33u);
   EXPECT_EQ(b, 44u);
-#endif
 
   EXPECT_FALSE(parser.HasNext());
   EXPECT_FALSE(parser.Error());

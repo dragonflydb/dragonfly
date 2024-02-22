@@ -105,6 +105,7 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 // Returns bucket_name, obj_path for an s3 path.
 std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_view path);
 
+#ifdef __linux__
 // takes ownership over the file.
 class LinuxWriteWrapper : public io::Sink {
  public:
@@ -121,6 +122,7 @@ class LinuxWriteWrapper : public io::Sink {
   std::unique_ptr<util::fb2::LinuxFile> lf_;
   off_t offset_ = 0;
 };
+#endif
 
 struct FilenameSubstitutions {
   std::string_view ts;
