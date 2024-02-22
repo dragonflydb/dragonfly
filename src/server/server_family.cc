@@ -1327,10 +1327,11 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   }
 
   save_controller_->WaitAllSnapshots();
+  detail::SaveInfo save_info;
 
   {
     std::lock_guard lk(save_mu_);
-    auto res = Finalize();
+    save_info = save_controller_->Finalize();
 
     if (save_info.error) {
       set_last_save_error(save_info);
