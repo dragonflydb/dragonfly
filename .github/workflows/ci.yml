@@ -80,7 +80,7 @@ jobs:
           df -h
 
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.3
+        uses: mozilla-actions/sccache-action@v0.0.4
 
       - name: Configure Cache Env
         uses: actions/github-script@v6
