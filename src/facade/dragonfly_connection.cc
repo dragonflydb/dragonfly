@@ -582,6 +582,7 @@ void Connection::HandleRequests() {
   if (http_res) {
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
+      is_http_ = true;
       HttpConnection http_conn{http_listener_};
       http_conn.SetSocket(peer);
       auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
@@ -589,6 +590,9 @@ void Connection::HandleRequests() {
       if (!ec) {
         http_conn.HandleRequests();
       }
+
+      // Release the ownership of the socket from http_conn so it would stay with
+      // this connection.
       http_conn.ReleaseSocket();
     } else {
       cc_.reset(service_->CreateContext(peer, this));
@@ -612,7 +616,12 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
 }
 
 std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() const {
-  CHECK(service_ && socket_);
+  if (!service_ || !socket_) {
+    LOG(DFATAL) << "unexpected null members: service_ " << service_ << ", socket_ " << socket_.get()
+                << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_);
+    return {};
+  }
+
   CHECK_LT(unsigned(phase_), NUM_PHASES);
 
   string before;
