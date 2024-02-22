@@ -18,6 +18,7 @@
 #include "core/fibers.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
+#include "facade/memcache_parser.h"
 #include "facade/resp_expr.h"
 #include "util/connection.h"
 #include "util/http/http_handler.h"
@@ -45,7 +46,6 @@ namespace facade {
 class ConnectionContext;
 class RedisParser;
 class ServiceInterface;
-class MemcacheParser;
 class SinkReplyBuilder;
 
 // Connection represents an active connection for a client.
@@ -78,7 +78,7 @@ class Connection : public util::Connection {
                size_t message_len);
   };
 
-  // Pipeline message, accumulated command to be executed.
+  // Pipeline message, accumulated Redis command to be executed.
   struct PipelineMessage {
     PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
@@ -95,6 +95,15 @@ class Connection : public util::Connection {
 
     absl::InlinedVector<MutableSlice, 6> args;
     StorageType storage;
+  };
+
+  // Pipeline message, accumulated Memcached command to be executed.
+  struct MCPipelineMessage {
+    MCPipelineMessage(MemcacheParser::Command cmd, std::string_view value);
+
+    MemcacheParser::Command cmd;
+    std::string_view value;
+    std::unique_ptr<char[]> backing;  // backing for cmd and value
   };
 
   // Monitor message, carries a simple payload with the registered event to be sent.
@@ -129,6 +138,8 @@ class Connection : public util::Connection {
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
   using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
   using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
+
+  using MCPipelineMessagePtr = std::unique_ptr<MCPipelineMessage>;
   using AclUpdateMessagePtr = std::unique_ptr<AclUpdateMessage>;
 
   // Variant wrapper around different message types
@@ -143,8 +154,9 @@ class Connection : public util::Connection {
     bool IsPubMsg() const;
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
-    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, AclUpdateMessagePtr,
-                 MigrationRequestMessage, CheckpointMessage, InvalidationMessage>
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
+                 AclUpdateMessagePtr, MigrationRequestMessage, CheckpointMessage,
+                 InvalidationMessage>
         handle;
 
     // time when the message was dispatched to the dispatch queue as reported by
@@ -329,8 +341,11 @@ class Connection : public util::Connection {
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
 
-  // Dispatch last command parsed by ParseRedis
-  void DispatchCommand(uint32_t consumed, mi_heap_t* heap);
+  // Dispatch Redis or MC command. `has_more` should indicate whether the buffer has more commands
+  // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
+  // has_more is true, otherwise uses synchronous dispatch.
+  void DispatchCommand(bool has_more, absl::FunctionRef<void()> sync_dispatch,
+                       absl::FunctionRef<MessageHandle()> async_dispatch);
 
   // Handles events from dispatch queue.
   void DispatchFiber(util::FiberSocketBase* peer);
@@ -405,6 +420,7 @@ class Connection : public util::Connection {
   BreakerCb breaker_cb_;
   std::unique_ptr<Shutdown> shutdown_cb_;
 
+  // Used by redis parser to avoid allocations
   RespVec tmp_parse_args_;
   CmdArgVec tmp_cmd_vec_;
 
