@@ -364,8 +364,8 @@ size_t SliceSnapshot::GetTotalChannelCapacity() const {
   return dest_->GetSize();
 }
 
-std::pair<size_t, size_t> SliceSnapshot::GetCurrentSnapshotProgress() const {
-  return {stats_.loop_serialized, stats_.keys_total};
+RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
+  return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total};
 }
 
 }  // namespace dfly

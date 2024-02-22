@@ -1807,25 +1807,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("dispatch_queue_entries", m.facade_stats.conn_stats.dispatch_queue_entries);
   }
 
-  bool has_save_controller = false;
-  size_t save_buffer_bytes = 0;
-  size_t current_snap_keys = 0;
-  size_t total_snap_keys = 0;
-  double perc = 0;
-  {
-    lock_guard lk{save_mu_};
-    if (save_controller_) {
-      has_save_controller = true;
-      save_buffer_bytes = save_controller_->GetSaveBuffersSize();
-      auto res = save_controller_->GetCurrentSnapshotProgress();
-      if (res.second != 0) {
-        current_snap_keys = res.first;
-        total_snap_keys = res.second;
-        perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
-      }
-    }
-  }
-
   if (should_enter("MEMORY")) {
     append("used_memory", m.heap_used_bytes);
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
@@ -1886,8 +1867,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
     }
 
-    if (has_save_controller) {
-      append("save_buffer_bytes", save_buffer_bytes);
+    {
+      lock_guard lk{save_mu_};
+      if (save_controller_) {
+        append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
+      }
     }
   }
 
@@ -1946,6 +1930,21 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("PERSISTENCE", true)) {
+    size_t current_snap_keys = 0;
+    size_t total_snap_keys = 0;
+    double perc = 0;
+    {
+      lock_guard lk{save_mu_};
+      if (save_controller_) {
+        auto res = save_controller_->GetCurrentSnapshotProgress();
+        if (res.total_keys != 0) {
+          current_snap_keys = res.current_keys;
+          total_snap_keys = res.total_keys;
+          perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
+        }
+      }
+    }
+
     append("current_snapshot_perc", perc);
     append("current_save_keys_processed", current_snap_keys);
     append("current_save_keys_total", total_snap_keys);

@@ -112,7 +112,12 @@ class RdbSaver {
   // Get total size of all rdb serializer buffers and items currently placed in channel
   size_t GetTotalBuffersSize() const;
 
-  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
+  struct SnapshotStats {
+    size_t current_keys = 0;
+    size_t total_keys = 0;
+  };
+
+  SnapshotStats GetCurrentSnapshotProgress() const;
 
   // Fetch global data to be serialized in summary part of a snapshot / full sync.
   static GlobalData GetGlobalData(const Service* service);

@@ -131,7 +131,7 @@ size_t RdbSnapshot::GetSaveBuffersSize() {
   return saver_->GetTotalBuffersSize();
 }
 
-std::pair<size_t, size_t> RdbSnapshot::GetCurrentSnapshotProgress() const {
+RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
   CHECK(saver_);
   return saver_->GetCurrentSnapshotProgress();
 }
@@ -201,12 +201,12 @@ size_t SaveStagesController::GetSaveBuffersSize() {
   return total_bytes.load(memory_order_relaxed);
 }
 
-std::pair<size_t, size_t> SaveStagesController::GetCurrentSnapshotProgress() const {
+RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const {
   if (snapshots_.size() == 0) {
     return {0, 0};
   }
 
-  std::vector<std::pair<size_t, size_t>> results(snapshots_.size());
+  std::vector<RdbSaver::SnapshotStats> results(snapshots_.size());
   auto fetch = [this, &results](ShardId sid) {
     if (auto& snapshot = snapshots_[sid].first; snapshot) {
       results[sid] = snapshot->GetCurrentSnapshotProgress();
@@ -215,10 +215,11 @@ std::pair<size_t, size_t> SaveStagesController::GetCurrentSnapshotProgress() con
 
   if (use_dfs_format_) {
     shard_set->RunBriefInParallel([&](EngineShard* es) { fetch(es->shard_id()); });
-    std::pair<size_t, size_t> init{0, 0};
-    return std::accumulate(results.begin(), results.end(), init, [](auto init, auto pr) {
-      return std::pair<size_t, size_t>{init.first + pr.first, init.second + pr.second};
-    });
+    RdbSaver::SnapshotStats init{0, 0};
+    return std::accumulate(
+        results.begin(), results.end(), init, [](auto init, auto pr) -> RdbSaver::SnapshotStats {
+          return {init.current_keys + pr.current_keys, init.total_keys + pr.total_keys};
+        });
   }
   fetch(0);
   return results[0];

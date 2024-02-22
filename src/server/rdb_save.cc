@@ -1049,7 +1049,7 @@ class RdbSaver::Impl {
 
   size_t GetTotalBuffersSize() const;
 
-  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
+  RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
   error_code Flush() {
     return aligned_buf_ ? aligned_buf_->Flush() : error_code{};
@@ -1267,8 +1267,8 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
   return channel_bytes.load(memory_order_relaxed) + serializer_bytes.load(memory_order_relaxed);
 }
 
-std::pair<size_t, size_t> RdbSaver::Impl::GetCurrentSnapshotProgress() const {
-  std::vector<std::pair<size_t, size_t>> results(shard_snapshots_.size());
+RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
+  std::vector<RdbSaver::SnapshotStats> results(shard_snapshots_.size());
 
   auto cb = [this, &results](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
@@ -1281,10 +1281,11 @@ std::pair<size_t, size_t> RdbSaver::Impl::GetCurrentSnapshotProgress() const {
   }
 
   shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
-  std::pair<size_t, size_t> init{0, 0};
-  return std::accumulate(results.begin(), results.end(), init, [](auto init, auto pr) {
-    return std::pair<size_t, size_t>{init.first + pr.first, init.second + pr.second};
-  });
+  RdbSaver::SnapshotStats init{0, 0};
+  return std::accumulate(
+      results.begin(), results.end(), init, [](auto init, auto pr) -> RdbSaver::SnapshotStats {
+        return {init.current_keys + pr.current_keys, init.total_keys + pr.total_keys};
+      });
 }
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
@@ -1485,7 +1486,7 @@ size_t RdbSaver::GetTotalBuffersSize() const {
   return impl_->GetTotalBuffersSize();
 }
 
-std::pair<size_t, size_t> RdbSaver::GetCurrentSnapshotProgress() const {
+RdbSaver::SnapshotStats RdbSaver::GetCurrentSnapshotProgress() const {
   return impl_->GetCurrentSnapshotProgress();
 }
 

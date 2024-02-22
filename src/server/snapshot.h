@@ -127,7 +127,7 @@ class SliceSnapshot {
   size_t GetTotalBufferCapacity() const;   // In bytes
   size_t GetTotalChannelCapacity() const;  // In bytes
 
-  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
+  RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
  private:
   DbSlice* db_slice_;
