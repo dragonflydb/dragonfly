@@ -168,9 +168,11 @@ std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
   return {};
 }
 
-SaveInfo SaveStagesController::RunSaveSteps() {
+void SaveStagesController::RunSaveSteps() {
   RunStage(&SaveStagesController::SaveCb);
+}
 
+SaveInfo Finalize() {
   RunStage(&SaveStagesController::CloseCb);
 
   FinalizeFileMovement();

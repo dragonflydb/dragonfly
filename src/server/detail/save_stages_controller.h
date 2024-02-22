@@ -75,7 +75,9 @@ struct SaveStagesController : public SaveStagesInputs {
 
   ~SaveStagesController();
 
-  SaveInfo RunSaveSteps();
+  void WaitAllSnapshots();
+
+  SaveInfo Finalize();
   size_t GetSaveBuffersSize();
   uint32_t GetCurrentSaveDuration();
 
