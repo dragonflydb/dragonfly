@@ -1811,10 +1811,12 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   bool has_save_controller = false;
+  size_t save_buffer_bytes = 0;
   {
     lock_guard lk{save_mu_};
     if (save_controller_) {
       has_save_controller = true;
+      save_buffer_bytes = save_controller_->GetSaveBuffersSize();
     }
   }
 
@@ -1879,7 +1881,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     }
 
     if (has_save_controller) {
-      append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
+      append("save_buffer_bytes", save_buffer_bytes);
     }
   }
 
@@ -1950,7 +1952,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       total = 0;
     }
 
-    append("current_fork_perc", perc);
+    append("current_snapshot_perc", perc);
     append("current_save_keys_processed", current);
     append("current_save_keys_total", total);
 
