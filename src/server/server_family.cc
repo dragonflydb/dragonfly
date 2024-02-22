@@ -1706,9 +1706,6 @@ Metrics ServerFamily::GetMetrics() const {
     result.qps += uint64_t(ss->MovingSum6());
     result.facade_stats += *tl_facade_stats;
 
-    result.current_save_stats.keys_processed += ss->current_save_stats.keys_processed;
-    result.current_save_stats.keys_total += ss->current_save_stats.keys_total;
-
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
       MergeDbSliceStats(shard->db_slice().GetStats(), &result);
@@ -1812,11 +1809,20 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   bool has_save_controller = false;
   size_t save_buffer_bytes = 0;
+  size_t current_snap_keys = 0;
+  size_t total_snap_keys = 0;
+  double perc = 0;
   {
     lock_guard lk{save_mu_};
     if (save_controller_) {
       has_save_controller = true;
       save_buffer_bytes = save_controller_->GetSaveBuffersSize();
+      auto res = save_controller_->GetCurrentSnapshotProgress();
+      if (res.second != 0) {
+        current_snap_keys = res.first;
+        total_snap_keys = res.second;
+        perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
+      }
     }
   }
 
@@ -1940,22 +1946,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("PERSISTENCE", true)) {
-    auto save_info = GetLastSaveInfo();
-
-    size_t current = m.current_save_stats.keys_processed;
-    size_t total = m.current_save_stats.keys_total;
-    double perc = 0;
-    if (has_save_controller && total != 0) {
-      perc = (static_cast<double>(current) / total) * 100;
-    } else {
-      current = 0;
-      total = 0;
-    }
-
     append("current_snapshot_perc", perc);
-    append("current_save_keys_processed", current);
-    append("current_save_keys_total", total);
+    append("current_save_keys_processed", current_snap_keys);
+    append("current_save_keys_total", total_snap_keys);
 
+    auto save_info = GetLastSaveInfo();
     // when last success save
     append("last_success_save", save_info.save_time);
     append("last_saved_file", save_info.file_name);

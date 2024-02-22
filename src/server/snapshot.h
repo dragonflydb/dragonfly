@@ -57,8 +57,7 @@ class SliceSnapshot {
 
   using RecordChannel = SizeTrackingChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
 
-  SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode,
-                bool save_mode = false);
+  SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -128,6 +127,8 @@ class SliceSnapshot {
   size_t GetTotalBufferCapacity() const;   // In bytes
   size_t GetTotalChannelCapacity() const;  // In bytes
 
+  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
+
  private:
   DbSlice* db_slice_;
   DbTableArray db_array_;
@@ -152,11 +153,12 @@ class SliceSnapshot {
   uint64_t rec_id_ = 0;
 
   struct Stats {
-    size_t loop_serialized = 0, skipped = 0, side_saved = 0;
+    size_t loop_serialized = 0;
+    size_t skipped = 0;
+    size_t side_saved = 0;
     size_t savecb_calls = 0;
+    size_t keys_total = 0;
   } stats_;
-
-  bool save_mode_;
 };
 
 }  // namespace dfly

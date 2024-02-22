@@ -1034,8 +1034,7 @@ class RdbSaver::Impl {
 
   ~Impl();
 
-  void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard,
-                         bool save_mode = false);
+  void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
   void StartIncrementalSnapshotting(Context* cntx, EngineShard* shard, LSN start_lsn);
 
   void StopSnapshotting(EngineShard* shard);
@@ -1049,6 +1048,8 @@ class RdbSaver::Impl {
   void Cancel();
 
   size_t GetTotalBuffersSize() const;
+
+  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
 
   error_code Flush() {
     return aligned_buf_ ? aligned_buf_->Flush() : error_code{};
@@ -1208,9 +1209,9 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 }
 
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
-                                       EngineShard* shard, bool save_mode) {
+                                       EngineShard* shard) {
   auto& s = GetSnapshot(shard);
-  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_, save_mode);
+  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_);
 
   s->Start(stream_journal, cll);
 }
@@ -1264,6 +1265,26 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
   VLOG(2) << "channel_bytes:" << channel_bytes.load(memory_order_relaxed)
           << " serializer_bytes: " << serializer_bytes.load(memory_order_relaxed);
   return channel_bytes.load(memory_order_relaxed) + serializer_bytes.load(memory_order_relaxed);
+}
+
+std::pair<size_t, size_t> RdbSaver::Impl::GetCurrentSnapshotProgress() const {
+  std::vector<std::pair<size_t, size_t>> results(shard_snapshots_.size());
+
+  auto cb = [this, &results](ShardId sid) {
+    auto& snapshot = shard_snapshots_[sid];
+    results[sid] = snapshot->GetCurrentSnapshotProgress();
+  };
+
+  if (shard_snapshots_.size() == 1) {
+    cb(0);
+    return results[0];
+  }
+
+  shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+  std::pair<size_t, size_t> init{0, 0};
+  return std::accumulate(results.begin(), results.end(), init, [](auto init, auto pr) {
+    return std::pair<size_t, size_t>{init.first + pr.first, init.second + pr.second};
+  });
 }
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
@@ -1344,8 +1365,8 @@ RdbSaver::~RdbSaver() {
 }
 
 void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation* cll,
-                                    EngineShard* shard, bool save_mode) {
-  impl_->StartSnapshotting(stream_journal, cll, shard, save_mode);
+                                    EngineShard* shard) {
+  impl_->StartSnapshotting(stream_journal, cll, shard);
 }
 
 void RdbSaver::StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn) {
@@ -1462,6 +1483,10 @@ void RdbSaver::Cancel() {
 
 size_t RdbSaver::GetTotalBuffersSize() const {
   return impl_->GetTotalBuffersSize();
+}
+
+std::pair<size_t, size_t> RdbSaver::GetCurrentSnapshotProgress() const {
+  return impl_->GetCurrentSnapshotProgress();
 }
 
 void SerializerBase::AllocateCompressorOnce() {

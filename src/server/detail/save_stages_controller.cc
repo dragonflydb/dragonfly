@@ -7,6 +7,8 @@
 
 #include <absl/strings/match.h>
 
+#include <numeric>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/detail/snapshot_storage.h"
@@ -129,6 +131,11 @@ size_t RdbSnapshot::GetSaveBuffersSize() {
   return saver_->GetTotalBuffersSize();
 }
 
+std::pair<size_t, size_t> RdbSnapshot::GetCurrentSnapshotProgress() const {
+  CHECK(saver_);
+  return saver_->GetCurrentSnapshotProgress();
+}
+
 error_code RdbSnapshot::Close() {
   if (is_linux_file_) {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
@@ -137,7 +144,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, cntx_.GetCancellation(), shard, true);
+  saver_->StartSnapshotInShard(false, cntx_.GetCancellation(), shard);
   started_ = true;
 }
 
@@ -192,6 +199,29 @@ size_t SaveStagesController::GetSaveBuffersSize() {
   }
 
   return total_bytes.load(memory_order_relaxed);
+}
+
+std::pair<size_t, size_t> SaveStagesController::GetCurrentSnapshotProgress() const {
+  if (snapshots_.size() == 0) {
+    return {0, 0};
+  }
+
+  std::vector<std::pair<size_t, size_t>> results(snapshots_.size());
+  auto fetch = [this, &results](ShardId sid) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot) {
+      results[sid] = snapshot->GetCurrentSnapshotProgress();
+    }
+  };
+
+  if (use_dfs_format_) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) { fetch(es->shard_id()); });
+    std::pair<size_t, size_t> init{0, 0};
+    return std::accumulate(results.begin(), results.end(), init, [](auto init, auto pr) {
+      return std::pair<size_t, size_t>{init.first + pr.first, init.second + pr.second};
+    });
+  }
+  fetch(0);
+  return results[0];
 }
 
 // In the new version (.dfs) we store a file for every shard and one more summary file.

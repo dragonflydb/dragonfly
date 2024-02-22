@@ -49,6 +49,8 @@ class RdbSnapshot {
   error_code Close();
   size_t GetSaveBuffersSize();
 
+  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
+
   const RdbTypeFreqMap& freq_map() const {
     return freq_map_;
   }
@@ -77,6 +79,7 @@ struct SaveStagesController : public SaveStagesInputs {
   SaveInfo Save();
   size_t GetSaveBuffersSize();
   uint32_t GetCurrentSaveDuration();
+  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
 
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.

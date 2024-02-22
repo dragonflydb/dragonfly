@@ -15,7 +15,6 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
-#include "server/server_state.h"
 
 namespace dfly {
 
@@ -31,9 +30,8 @@ size_t SliceSnapshot::DbRecord::size() const {
   return HeapSize(value);
 }
 
-SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode,
-                             bool save_mode)
-    : db_slice_(slice), dest_(dest), compression_mode_(compression_mode), save_mode_(save_mode) {
+SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode)
+    : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
   db_array_ = slice->databases();
   tl_slice_snapshots.insert(this);
 }
@@ -183,13 +181,8 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   }
 
   PrimeTable::Cursor cursor;
-  if (save_mode_) {
-    auto* tlocal = ServerState::tlocal();
-    tlocal->current_save_stats.keys_total = 0;
-    tlocal->current_save_stats.keys_processed = 0;
-    for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-      tlocal->current_save_stats.keys_total += db_slice_->DbSize(db_indx);
-    }
+  for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
+    stats_.keys_total += db_slice_->DbSize(db_indx);
   }
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
@@ -251,12 +244,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
   }
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, it, snapshot_version_);
 
-  size_t keys_processed = SerializeBucket(current_db_, it);
-  stats_.loop_serialized += keys_processed;
-  if (save_mode_) {
-    auto* tlocal = ServerState::tlocal();
-    tlocal->current_save_stats.keys_processed += keys_processed;
-  }
+  stats_.loop_serialized += SerializeBucket(current_db_, it);
   return false;
 }
 
@@ -374,6 +362,10 @@ size_t SliceSnapshot::GetTotalBufferCapacity() const {
 
 size_t SliceSnapshot::GetTotalChannelCapacity() const {
   return dest_->GetSize();
+}
+
+std::pair<size_t, size_t> SliceSnapshot::GetCurrentSnapshotProgress() const {
+  return {stats_.loop_serialized, stats_.keys_total};
 }
 
 }  // namespace dfly

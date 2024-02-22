@@ -89,8 +89,7 @@ class RdbSaver {
   // TODO: to implement break functionality to allow stopping early.
   // if save_mode is true we store the per-thread progress of the snapshot. This is
   // used by bgsave
-  void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard,
-                            bool save_mode = false);
+  void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
   // Send only the incremental snapshot since start_lsn.
   void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);
@@ -114,6 +113,8 @@ class RdbSaver {
 
   // Get total size of all rdb serializer buffers and items currently placed in channel
   size_t GetTotalBuffersSize() const;
+
+  std::pair<size_t, size_t> GetCurrentSnapshotProgress() const;
 
   // Fetch global data to be serialized in summary part of a snapshot / full sync.
   static GlobalData GetGlobalData(const Service* service);

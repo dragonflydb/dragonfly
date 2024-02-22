@@ -269,8 +269,6 @@ class ServerState {  // public struct - to allow initialization.
 
   struct CurrentSaveStats {
     // snapshot related
-    size_t keys_processed = 0;
-    size_t keys_total = 0;
   };
 
   CurrentSaveStats current_save_stats;
