@@ -22,7 +22,7 @@ class DebugCmd {
     std::string_view type{"STRING"};
     uint32_t elements = 1;
 
-    std::optional<ClusterConfig::SlotRange> slot_range;
+    std::optional<SlotRange> slot_range;
   };
 
  public:

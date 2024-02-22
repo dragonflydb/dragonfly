@@ -133,7 +133,7 @@ bool RestoreStreamer::ShouldWrite(std::string_view key) const {
 }
 
 bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
-  return my_slots_.contains(slot_id);
+  return my_slots_.Contains(slot_id);
 }
 
 bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {

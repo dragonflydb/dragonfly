@@ -22,7 +22,7 @@ class ClusterSlotMigration : private ProtocolClient {
   };
 
   ClusterSlotMigration(ClusterFamily* cl_fm, std::string host_ip, uint16_t port, Service* se,
-                       std::vector<ClusterConfig::SlotRange> slots);
+                       SlotRanges slots);
   ~ClusterSlotMigration();
 
   // Initiate connection with source node and create migration fiber
@@ -46,7 +46,7 @@ class ClusterSlotMigration : private ProtocolClient {
 
   void Stop();
 
-  const std::vector<ClusterConfig::SlotRange>& GetSlots() const {
+  const SlotRanges& GetSlots() const {
     return slots_;
   }
 
@@ -65,7 +65,7 @@ class ClusterSlotMigration : private ProtocolClient {
   Service& service_;
   Mutex flows_op_mu_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
-  std::vector<ClusterConfig::SlotRange> slots_;
+  SlotRanges slots_;
   uint32_t source_shards_num_ = 0;
   uint32_t sync_id_ = 0;
   uint32_t local_sync_id_ = 0;
