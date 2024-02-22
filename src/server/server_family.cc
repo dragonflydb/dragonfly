@@ -1306,8 +1306,6 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     last_save_info_.failed_duration_sec = save_info.duration_sec;
   };
 
-  absl::Cleanup clean([this]() { save_controller_.reset(); });
-
   {
     std::lock_guard lk(save_mu_);
     if (save_controller_) {
