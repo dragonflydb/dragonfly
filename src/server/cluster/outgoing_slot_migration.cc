@@ -44,8 +44,7 @@ class OutgoingMigration::SliceSlotMigration {
 };
 
 OutgoingMigration::OutgoingMigration(std::uint32_t flows_num, std::string ip, uint16_t port,
-                                     std::vector<ClusterConfig::SlotRange> slots,
-                                     Context::ErrHandler err_handler)
+                                     SlotRanges slots, Context::ErrHandler err_handler)
     : host_ip_(ip), port_(port), slots_(slots), cntx_(err_handler), slot_migrations_(flows_num) {
 }
 
@@ -53,13 +52,11 @@ OutgoingMigration::~OutgoingMigration() = default;
 
 void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal,
                                   io::Sink* dest) {
-  SlotSet sset = ToSlotSet(slots_);
-
   const auto shard_id = slice->shard_id();
 
   std::lock_guard lck(flows_mu_);
   slot_migrations_[shard_id] =
-      std::make_unique<SliceSlotMigration>(slice, std::move(sset), sync_id, journal, &cntx_, dest);
+      std::make_unique<SliceSlotMigration>(slice, slots_, sync_id, journal, &cntx_, dest);
 }
 
 void OutgoingMigration::Finalize(uint32_t shard_id) {

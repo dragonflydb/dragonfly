@@ -4,6 +4,8 @@ extern "C" {
 #include "redis/crc16.h"
 }
 
+#include <absl/container/flat_hash_set.h>
+
 #include <jsoncons/json.hpp>
 #include <shared_mutex>
 #include <string_view>
@@ -152,11 +154,7 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
         shard.master.id == my_id || any_of(shard.replicas.begin(), shard.replicas.end(),
                                            [&](const Node& node) { return node.id == my_id; });
     if (owned_by_me) {
-      for (const auto& slot_range : shard.slot_ranges) {
-        for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
-          result->my_slots_.set(i);
-        }
-      }
+      result->my_slots_.Set(shard.slot_ranges, true);
     }
   }
 
@@ -175,13 +173,13 @@ template <typename T> optional<T> ReadNumeric(const JsonType& obj) {
   return obj.as<T>();
 }
 
-optional<vector<ClusterConfig::SlotRange>> GetClusterSlotRanges(const JsonType& slots) {
+optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
   if (!slots.is_array()) {
     LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges is not an array " << slots;
     return nullopt;
   }
 
-  vector<ClusterConfig::SlotRange> ranges;
+  SlotRanges ranges;
 
   for (const auto& range : slots.array_range()) {
     if (!range.is_object()) {
@@ -301,22 +299,17 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
 std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithChanges(const std::vector<SlotRange>& slots,
                                                                bool enable) const {
   auto new_config = std::make_shared<ClusterConfig>(*this);
-
-  auto slot_set = ToSlotSet(slots);
-
-  for (const auto s : slot_set) {
-    new_config->my_slots_.set(s, enable);
-  }
+  new_config->my_slots_.Set(slots, enable);
   return new_config;
 }
 
 bool ClusterConfig::IsMySlot(SlotId id) const {
-  if (id >= my_slots_.size()) {
+  if (id > ClusterConfig::kMaxSlotNum) {
     DCHECK(false) << "Requesting a non-existing slot id " << id;
     return false;
   }
 
-  return my_slots_.test(id);
+  return my_slots_.Contains(id);
 }
 
 bool ClusterConfig::IsMySlot(std::string_view key) const {
@@ -324,7 +317,7 @@ bool ClusterConfig::IsMySlot(std::string_view key) const {
 }
 
 ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
-  CHECK_LT(id, my_slots_.size()) << "Requesting a non-existing slot id " << id;
+  CHECK_LE(id, ClusterConfig::kMaxSlotNum) << "Requesting a non-existing slot id " << id;
 
   for (const auto& shard : config_) {
     for (const auto& range : shard.slot_ranges) {
@@ -342,23 +335,8 @@ ClusterConfig::ClusterShards ClusterConfig::GetConfig() const {
   return config_;
 }
 
-SlotSet ClusterConfig::GetOwnedSlots() const {
-  SlotSet set;
-  for (SlotId id = 0; id <= kMaxSlotNum; ++id) {
-    if (IsMySlot(id)) {
-      set.insert(id);
-    }
-  }
-  return set;
-}
-
-SlotSet ToSlotSet(const std::vector<ClusterConfig::SlotRange>& slots) {
-  SlotSet sset;
-  for (const auto& slot_range : slots) {
-    for (auto i = slot_range.start; i <= slot_range.end; ++i)
-      sset.insert(i);
-  }
-  return sset;
+const SlotSet& ClusterConfig::GetOwnedSlots() const {
+  return my_slots_;
 }
 
 }  // namespace dfly
