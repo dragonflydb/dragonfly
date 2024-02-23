@@ -1397,7 +1397,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "MGET");
       break;
     case MemcacheParser::FLUSHALL:
-      strcpy(cmd_name, "FLUSHDB");
+      strcpy(cmd_name, "FLUSHALL");
       break;
     case MemcacheParser::QUIT:
       strcpy(cmd_name, "QUIT");
