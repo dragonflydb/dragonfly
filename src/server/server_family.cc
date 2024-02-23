@@ -1300,12 +1300,6 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
 
-  auto set_last_save_error = [this](const auto& save_info) mutable {
-    last_save_info_.last_error = save_info.error;
-    last_save_info_.last_error_time = save_info.save_time;
-    last_save_info_.failed_duration_sec = save_info.duration_sec;
-  };
-
   {
     std::lock_guard lk(save_mu_);
     if (save_controller_) {
@@ -1319,8 +1313,8 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     auto res = save_controller_->InitResourcesAndStart();
 
     if (res) {
-      CHECK_EQ(res->error, true);
-      set_last_save_error(*res);
+      DCHECK_EQ(res->error, true);
+      last_save_info_.SetLastSaveError(*res);
       save_controller_.reset();
       return res->error;
     }
@@ -1334,7 +1328,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     save_info = save_controller_->Finalize();
 
     if (save_info.error) {
-      set_last_save_error(save_info);
+      last_save_info_.SetLastSaveError(save_info);
     } else {
       last_save_info_.save_time = save_info.save_time;
       last_save_info_.success_duration_sec = save_info.duration_sec;

@@ -154,8 +154,7 @@ SaveStagesController::~SaveStagesController() {
 std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
-    SaveInfo save = GetSaveInfo();
-    return std::optional<SaveInfo>(std::move(save));
+    return GetSaveInfo();
   }
 
   InitResources();
