@@ -65,6 +65,17 @@ inline void Evaluate(const json::Path& expr, const JsonType& obj, ExprCallback c
   });
 }
 
+inline JsonType Evaluate(const JsonExpression& expr, const JsonType& obj) {
+  return expr.evaluate(obj);
+}
+
+inline JsonType Evaluate(const json::Path& expr, const JsonType& obj) {
+  JsonType res(json_array_arg);
+  json::EvaluatePath(expr, obj,
+                     [&res](optional<string_view>, const JsonType& val) { res.push_back(val); });
+  return res;
+}
+
 inline OpStatus JsonReplaceVerifyNoOp(JsonType&) {
   return OpStatus::OK;
 }
@@ -418,7 +429,7 @@ void SendJsonValue(RedisReplyBuilder* rb, const JsonType& j) {
 }
 
 OpResult<string> OpJsonGet(const OpArgs& op_args, string_view key,
-                           const vector<pair<string_view, optional<JsonExpression>>>& expressions,
+                           const vector<pair<string_view, optional<JsonPathV2>>>& expressions,
                            bool should_format, const OptString& indent, const OptString& new_line,
                            const OptString& space) {
   OpResult<JsonType*> result = GetJson(op_args, key);
@@ -456,16 +467,17 @@ OpResult<string> OpJsonGet(const OpArgs& op_args, string_view key,
     }
   }
 
-  auto eval_wrapped = [&json_entry](const optional<JsonExpression>& expr) {
-    return expr ? expr->evaluate(json_entry) : json_entry;
+  auto eval_wrapped = [&json_entry](const optional<JsonPathV2>& expr) -> JsonType {
+    return expr ? visit([&](auto& arg) { return Evaluate(arg, json_entry); }, *expr) : json_entry;
   };
 
   JsonType out{json_object_arg};  // see https://github.com/danielaparker/jsoncons/issues/482
   if (expressions.size() == 1) {
     out = eval_wrapped(expressions[0].second);
   } else {
-    for (auto& [expr_str, expr] : expressions)
+    for (const auto& [expr_str, expr] : expressions) {
       out[expr_str] = eval_wrapped(expr);
+    }
   }
 
   if (should_format) {
@@ -1826,7 +1838,9 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   OptString indent;
   OptString new_line;
   OptString space;
-  vector<pair<string_view, optional<JsonExpression>>> expressions;
+
+  // '.' corresponds to the legacy, non-array format and is passed as nullopt.
+  vector<pair<string_view, optional<JsonPathV2>>> expressions;
 
   while (parser.HasNext()) {
     if (parser.Check("SPACE").IgnoreCase().ExpectTail(1)) {
@@ -1842,17 +1856,12 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
       continue;
     }
 
-    optional<JsonExpression> expr;
+    optional<JsonPathV2> expr;
     string_view expr_str = parser.Next();
 
     if (expr_str != ".") {
-      io::Result<JsonExpression> res = ParseJsonPath(expr_str);
-      if (!res) {
-        LOG(WARNING) << "path '" << expr_str
-                     << "': Invalid JSONPath syntax: " << res.error().message();
-        return cntx->SendError(kSyntaxErr);
-      }
-      expr.emplace(std::move(*res));
+      JsonPathV2 expression = PARSE_PATHV2(expr_str);
+      expr.emplace(std::move(expression));
     }
 
     expressions.emplace_back(expr_str, std::move(expr));
