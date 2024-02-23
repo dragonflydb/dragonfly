@@ -74,6 +74,7 @@ struct SaveStagesController : public SaveStagesInputs {
   // Objects of this class are used concurrently. Call this function
   // in a mutually exlusive context to avoid data races.
   // Also call this function before any call to `WaitAllSnapshots`
+  // Returns empty optional on success and SaveInfo on failure
   std::optional<SaveInfo> InitResourcesAndStart();
 
   ~SaveStagesController();
