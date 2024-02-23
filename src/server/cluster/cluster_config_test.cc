@@ -114,6 +114,7 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
                .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}}}});
   EXPECT_NE(config, nullptr);
   SlotSet owned_slots = config->GetOwnedSlots();
+  EXPECT_EQ(owned_slots.ToSlotRanges().size(), 1);
   EXPECT_EQ(owned_slots.Count(), 5'000);
 
   {

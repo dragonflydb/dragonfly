@@ -65,6 +65,7 @@ class SlotSet {
     return slots_->all();
   }
 
+  // Get SlotSet that are absent in the slots
   SlotSet GetRemovedSlots(SlotSet slots) {
     slots.slots_->flip();
     *slots.slots_ &= *slots_;
@@ -73,23 +74,18 @@ class SlotSet {
 
   SlotRanges ToSlotRanges() const {
     SlotRanges res;
-    bool current_val = false;
 
-    for (SlotId i = 0; i <= kMaxSlot; ++i) {
-      if (slots_->test(i) == current_val) {
+    for (SlotId i = 0; i < kSlotsNumber; ++i) {
+      if (!slots_->test(i)) {
         continue;
       } else {
-        if (!current_val) {
-          res.emplace_back(SlotRange{i, i});
-        } else {
-          res.back().end = i - 1;
+        auto& range = res.emplace_back(SlotRange{i, i});
+        for (++i; i < kSlotsNumber && slots_->test(i); ++i) {
+          range.end = i;
         }
       }
     }
 
-    if (current_val) {
-      res.back().end = kMaxSlot;
-    }
     return res;
   }
 
