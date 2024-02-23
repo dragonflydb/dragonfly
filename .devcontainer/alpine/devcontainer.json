@@ -1,5 +1,5 @@
 {
-  "name": "helio",
+  "name": "alpine-dev",
   "image": "ghcr.io/romange/alpine-dev",
   "customizations": {
     "vscode": {
@@ -10,11 +10,13 @@
         "twxs.cmake"
       ],
       "settings": {
-        "cmake.buildDirectory": "${workspaceFolder}/build-alpine"
+        "cmake.buildDirectory": "/build",
+        "cmake.configureArgs": []
       }
     }
   },
   "mounts": [
-    "source=alpine-vol,target=/root,type=volume"
-  ]
+    "source=alpine-vol,target=/build,type=volume"
+  ],
+  "postCreateCommand": ".devcontainer/alpine/post-create.sh ${containerWorkspaceFolder}"
 }

@@ -141,6 +141,19 @@ set_target_properties(TRDP::fast_float PROPERTIES
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
+find_package(Flatbuffers)
+if (TARGET flatbuffers::flatbuffers)
+    get_target_property(FLATBUF_PATH flatbuffers::flatbuffers LOCATION)
+    set(FLATBUF_TARGET flatbuffers::flatbuffers)
+    Message("-- Flatbuffers found at ${FLATBUF_PATH}")
+elseif (TARGET flatbuffers::flatbuffers_shared)
+    # alpine linux has shared library
+    get_target_property(FLATBUF_PATH flatbuffers::flatbuffers_shared LOCATION)
+    set(FLATBUF_TARGET flatbuffers::flatbuffers_shared)
+    Message("-- Flatbuffers found at ${FLATBUF_PATH}")
+else()
+    Message("-- Flatbuffers not found, please install via libflatbuffers-dev")
+endif()
 
 option(ENABLE_GIT_VERSION "Build with Git metadata" OFF)
 
