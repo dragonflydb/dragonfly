@@ -391,7 +391,7 @@ class Connection : public util::Connection {
   ConnectionStats* stats_ = nullptr;
 
   util::HttpListenerBase* http_listener_;
-  SSL_CTX* ctx_;
+  SSL_CTX* ssl_ctx_;
 
   ServiceInterface* service_;
 
