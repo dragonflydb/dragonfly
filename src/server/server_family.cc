@@ -1306,19 +1306,29 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
         new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
+
+    auto res = save_controller_->InitResourcesAndStart();
+
+    if (res) {
+      DCHECK_EQ(res->error, true);
+      last_save_info_.SetLastSaveError(*res);
+      save_controller_.reset();
+      return res->error;
+    }
   }
 
-  detail::SaveInfo save_info = save_controller_->Save();
+  save_controller_->WaitAllSnapshots();
+  detail::SaveInfo save_info;
 
   {
     std::lock_guard lk(save_mu_);
+    save_info = save_controller_->Finalize();
 
     if (save_info.error) {
-      last_save_info_.last_error = save_info.error;
-      last_save_info_.last_error_time = save_info.save_time;
-      last_save_info_.failed_duration_sec = save_info.duration_sec;
+      last_save_info_.SetLastSaveError(save_info);
     } else {
       last_save_info_.save_time = save_info.save_time;
       last_save_info_.success_duration_sec = save_info.duration_sec;
