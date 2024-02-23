@@ -149,7 +149,7 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 SaveStagesController::~SaveStagesController() {
 }
 
-SaveInfo SaveStagesController::Save() {
+std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();
@@ -162,8 +162,14 @@ SaveInfo SaveStagesController::Save() {
   else
     SaveRdb();
 
-  RunStage(&SaveStagesController::SaveCb);
+  return {};
+}
 
+void SaveStagesController::WaitAllSnapshots() {
+  RunStage(&SaveStagesController::SaveCb);
+}
+
+SaveInfo SaveStagesController::Finalize() {
   RunStage(&SaveStagesController::CloseCb);
 
   FinalizeFileMovement();

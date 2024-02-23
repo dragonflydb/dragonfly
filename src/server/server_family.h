@@ -104,6 +104,12 @@ struct Metrics {
 
 struct LastSaveInfo {
   // last success save info
+  void SetLastSaveError(const detail::SaveInfo& save_info) {
+    last_error = save_info.error;
+    last_error_time = save_info.save_time;
+    failed_duration_sec = save_info.duration_sec;
+  }
+
   time_t save_time = 0;  // epoch time in seconds.
   uint32_t success_duration_sec = 0;
   std::string file_name;                                      //
