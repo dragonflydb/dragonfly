@@ -304,11 +304,14 @@ Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command cmd_in,
   backing = make_unique<char[]>(backing_size);
 
   // Copy everything into backing
-  memcpy(backing.get(), cmd.key.data(), cmd.key.size());
-  memcpy(backing.get() + cmd.key.size(), value.data(), value.size());
+  if (!cmd.key.empty())
+    memcpy(backing.get(), cmd.key.data(), cmd.key.size());
+  if (!value.empty())
+    memcpy(backing.get() + cmd.key.size(), value.data(), value.size());
   size_t offset = cmd.key.size() + value.size();
   for (const auto& ext_key : cmd.keys_ext) {
-    memcpy(backing.get() + offset, ext_key.data(), ext_key.size());
+    if (!ext_key.empty())
+      memcpy(backing.get() + offset, ext_key.data(), ext_key.size());
     offset += ext_key.size();
   }
 
