@@ -292,16 +292,16 @@ void Connection::PipelineMessage::SetArgs(const RespVec& args) {
 
 Connection::MCPipelineMessage::MCPipelineMessage(MemcacheParser::Command cmd_in,
                                                  std::string_view value_in)
-    : cmd{std::move(cmd_in)}, value{value_in} {
+    : cmd{std::move(cmd_in)}, value{value_in}, backing_size{0} {
   // Note: The process of laundering string_views should be placed in an utility function,
   // but there are no other uses like this so far.
 
   // Compute total size and create backing
-  size_t total_size = cmd.key.size() + value.size();
+  backing_size = cmd.key.size() + value.size();
   for (const auto& ext_key : cmd.keys_ext)
-    total_size += ext_key.size();
+    backing_size += ext_key.size();
 
-  backing = make_unique<char[]>(total_size);
+  backing = make_unique<char[]>(backing_size);
 
   // Copy everything into backing
   memcpy(backing.get(), cmd.key.data(), cmd.key.size());
@@ -371,7 +371,8 @@ size_t Connection::MessageHandle::UsedMemory() const {
       return 0;
     }
     size_t operator()(const MCPipelineMessagePtr& msg) {
-      return 0;
+      return sizeof(MCPipelineMessage) + msg->backing_size +
+             msg->cmd.keys_ext.size() * sizeof(string_view);
     }
   };
 

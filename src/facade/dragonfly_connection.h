@@ -103,6 +103,7 @@ class Connection : public util::Connection {
 
     MemcacheParser::Command cmd;
     std::string_view value;
+    size_t backing_size;
     std::unique_ptr<char[]> backing;  // backing for cmd and value
   };
 
