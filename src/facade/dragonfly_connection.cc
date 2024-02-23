@@ -567,6 +567,7 @@ void Connection::HandleRequests() {
       // Must be done atomically before the premption point in Accept so that at any
       // point in time, the socket_ is defined.
       {
+        FiberAtomicGuard fg;
         unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
         tls_sock->InitSSL(ssl_ctx_);
         SetSocket(tls_sock.release());
