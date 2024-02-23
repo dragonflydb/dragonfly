@@ -391,7 +391,7 @@ class Connection : public util::Connection {
   ConnectionStats* stats_ = nullptr;
 
   util::HttpListenerBase* http_listener_;
-  SSL_CTX* ctx_;
+  SSL_CTX* ssl_ctx_;
 
   ServiceInterface* service_;
 
@@ -415,11 +415,7 @@ class Connection : public util::Connection {
   // Needed for access from different threads by EnsureAsyncMemoryBudget().
   QueueBackpressure* queue_backpressure_;
 
-  // Connection migration vars, see RequestAsyncMigration() above.
-  bool migration_enabled_;
   util::fb2::ProactorBase* migration_request_ = nullptr;
-
-  bool skip_next_squashing_ = false;  // Forcefully skip next squashing
 
   // Pooled pipeline messages per-thread
   // Aggregated while handling pipelines, gradually released while handling regular commands.
@@ -430,6 +426,11 @@ class Connection : public util::Connection {
 
   // a flag indicating whether the client has turned on client tracking.
   bool tracking_enabled_ = false;
+  bool skip_next_squashing_ = false;  // Forcefully skip next squashing
+
+  // Connection migration vars, see RequestAsyncMigration() above.
+  bool migration_enabled_ = false;
+  bool is_http_ = false;
 };
 
 }  // namespace facade

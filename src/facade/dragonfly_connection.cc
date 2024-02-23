@@ -447,7 +447,11 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
-    : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service), name_{} {
+    : io_buf_(kMinReadSize),
+      http_listener_(http_listener),
+      ssl_ctx_(ctx),
+      service_(service),
+      name_{} {
   static atomic_uint32_t next_id{1};
 
   protocol_ = protocol;
@@ -491,7 +495,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
 Connection::~Connection() {
 #ifdef DFLY_USE_SSL
-  SSL_CTX_free(ctx_);
+  SSL_CTX_free(ssl_ctx_);
 #endif
 }
 
@@ -557,13 +561,18 @@ void Connection::HandleRequests() {
 
   FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
-  if (ctx_) {
+  if (ssl_ctx_) {
     const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
     if (!(IsPrivileged() && no_tls_on_admin_port)) {
-      unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
-      tls_sock->InitSSL(ctx_);
-      FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
-      SetSocket(tls_sock.release());
+      // Must be done atomically before the premption point in Accept so that at any
+      // point in time, the socket_ is defined.
+      {
+        FiberAtomicGuard fg;
+        unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
+        tls_sock->InitSSL(ssl_ctx_);
+        SetSocket(tls_sock.release());
+      }
+      FiberSocketBase::AcceptResult aresult = socket_->Accept();
 
       if (!aresult) {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
@@ -582,6 +591,7 @@ void Connection::HandleRequests() {
   if (http_res) {
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
+      is_http_ = true;
       HttpConnection http_conn{http_listener_};
       http_conn.SetSocket(peer);
       auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
@@ -589,6 +599,9 @@ void Connection::HandleRequests() {
       if (!ec) {
         http_conn.HandleRequests();
       }
+
+      // Release the ownership of the socket from http_conn so it would stay with
+      // this connection.
       http_conn.ReleaseSocket();
     } else {
       cc_.reset(service_->CreateContext(peer, this));
@@ -612,7 +625,12 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
 }
 
 std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() const {
-  CHECK(service_ && socket_);
+  if (!socket_) {
+    LOG(DFATAL) << "unexpected null socket_ "
+                << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_);
+    return {};
+  }
+
   CHECK_LT(unsigned(phase_), NUM_PHASES);
 
   string before;
@@ -636,7 +654,12 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   static_assert(PHASE_NAMES[SHUTTING_DOWN] == "shutting_down");
 
   absl::StrAppend(&before, "id=", id_, " addr=", re, " laddr=", le);
-  absl::StrAppend(&before, " fd=", socket_->native_handle(), " name=", name_);
+  absl::StrAppend(&before, " fd=", socket_->native_handle());
+  if (is_http_) {
+    absl::StrAppend(&before, " http=true");
+  } else {
+    absl::StrAppend(&before, " name=", name_);
+  }
 
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
