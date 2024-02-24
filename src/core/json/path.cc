@@ -432,8 +432,10 @@ JsonType PathSegment::GetResult() const {
 }
 
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback) {
-  if (path.empty())
+  if (path.empty()) {  // root node
+    callback(nullopt, json);
     return;
+  }
 
   if (path.front().type() != SegmentType::FUNCTION) {
     Dfs().Traverse(path, json, std::move(callback));
