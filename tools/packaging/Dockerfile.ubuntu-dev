@@ -17,7 +17,7 @@ FROM ubuntu:20.04
 RUN --mount=type=tmpfs,target=/var/cache/apt \
     --mount=type=tmpfs,target=/var/lib/apt/lists \
     apt update && \
-    apt install -q -y --no-install-recommends netcat-openbsd ca-certificates redis-tools
+    apt install -q -y --no-install-recommends netcat-openbsd ca-certificates redis-tools net-tools
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
 RUN mkdir /data && chown dfly:dfly /data

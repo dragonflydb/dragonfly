@@ -4,7 +4,7 @@ FROM gcr.io/cadvisor/cadvisor:v0.46.0 as libpfm_donor
 FROM alpine:3 as builder
 
 # "openssl-libs-static" fixes "Could NOT find OpenSSL, try to set the path to OpenSSL root folder in the"
-RUN apk add autoconf-archive automake bash bison boost-dev cmake coreutils \
+RUN apk add autoconf-archive automake bash bison boost-dev cmake coreutils net-tools \
         curl ccache git gcc gdb g++ libunwind-dev libtool make ninja \
         openssl-dev openssl-libs-static patch zip zstd-static
 
