@@ -1,4 +1,5 @@
 import dataclasses
+import os
 import time
 import subprocess
 import aiohttp
@@ -190,7 +191,8 @@ class DflyInstance:
             self._port = None
 
         all_args = self.format_args(self.args)
-        logging.debug(f"Starting instance with arguments {all_args} from {self.params.path}")
+        real_path = os.path.realpath(self.params.path)
+        logging.debug(f"Starting instance with arguments {' '.join(all_args)} from {real_path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
@@ -315,6 +317,8 @@ class DflyInstanceFactory:
     def create(self, existing_port=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
+        args.setdefault("jsonpathv2", None)
+
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1"
         args.setdefault("vmodule", vmod)
 

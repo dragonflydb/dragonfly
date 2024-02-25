@@ -513,7 +513,11 @@ TEST_F(JsonFamilyTest, Del) {
   EXPECT_EQ(resp, R"({"a":{},"b":{"a":1},"c":{"a":1,"b":2},"d":{},"e":[]})");
 
   resp = Run({"JSON.DEL", "json", "$..*"});
-  EXPECT_THAT(resp, IntArg(8));
+
+  // TODO: legacy jsoncons implementation returns, 8 but in practive it should return 5.
+  // redis-stack returns 5 as well.
+  // Once we drop jsoncons path, we can enforce here equality.
+  EXPECT_GE(resp.GetInt(), 5);
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"({})");
