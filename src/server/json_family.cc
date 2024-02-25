@@ -7,6 +7,11 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
+
+#ifndef __USE_GNU  // needed to flatbuffers to compile with musl libc.
+#define FLATBUFFERS_LOCALE_INDEPENDENT 0
+#endif
+
 #include <flatbuffers/flexbuffers.h>
 #include <flatbuffers/idl.h>
 
