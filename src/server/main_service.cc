@@ -1604,7 +1604,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
   DCHECK(cntx->transaction);
-  DVLOG(1) << "CallFromScript " << ArgS(ca.args, 0);
+  DVLOG(2) << "CallFromScript " << ArgS(ca.args, 0);
 
   InterpreterReplier replier(ca.translator);
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
