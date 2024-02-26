@@ -97,8 +97,6 @@ class TieredStorage {
   struct PerDb;
   std::vector<PerDb*> db_arr_;
 
-  // absl::flat_hash_map<uint32_t, uint8_t> page_refcnt_;
-
   absl::flat_hash_map<uint32_t, std::pair<unsigned, unsigned> > page_refcnt_;
   util::fb2::EventCount throttle_ec_;
   TieredStats stats_;
