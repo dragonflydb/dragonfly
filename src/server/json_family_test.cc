@@ -363,8 +363,11 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   resp = Run({"JSON.NUMINCRBY", "json", "$.d[*]", "1"});
   EXPECT_EQ(resp, "[2,3,4]");
 
+  resp = Run({"JSON.NUMINCRBY", "json", "$.d[2]", "1"});
+  EXPECT_EQ(resp, "[5]");
+
   resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([[],[2],[2,3],[2,3,4]])");
+  EXPECT_EQ(resp, R"([[],[2],[2,3],[2,3,5]])");
 
   json = R"(
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
