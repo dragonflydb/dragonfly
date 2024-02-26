@@ -47,6 +47,8 @@ using namespace std;
 %token
   LBRACKET "["
   RBRACKET "]"
+  LPARENT  "("
+  RPARENT  ")"
   ROOT "$"
   DOT  "."
   WILDCARD "*"
@@ -66,13 +68,14 @@ using namespace std;
 // https://danielaparker.github.io/JsonCons.Net/articles/JsonPath/Specification.html
 
 jsonpath: ROOT { /* skip adding root */ } opt_relative_location
+         | function_expr opt_relative_location
 
 opt_relative_location:
         | relative_location
 
 relative_location: DOT relative_path
         | DESCENT { driver->AddSegment(PathSegment{SegmentType::DESCENT}); } relative_path
-        | LBRACKET bracket_index RBRACKET { driver->AddSegment($2); }
+        | LBRACKET bracket_index RBRACKET { driver->AddSegment($2); } opt_relative_location
 
 relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
         | WILDCARD { driver->AddWildcard(); } opt_relative_location
@@ -84,7 +87,7 @@ identifier: UNQ_STR
 bracket_index: WILDCARD { $$ = PathSegment{SegmentType::WILDCARD}; }
               | UINT { $$ = PathSegment(SegmentType::INDEX, $1); }
 
-
+function_expr: UNQ_STR { driver->AddFunction($1); } LPARENT ROOT relative_location RPARENT
 %%
 
 

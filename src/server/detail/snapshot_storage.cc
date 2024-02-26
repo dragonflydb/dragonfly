@@ -376,6 +376,7 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   return keys;
 }
 
+#ifdef __linux__
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
   if (res) {
@@ -384,6 +385,7 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
 
   return res;
 }
+#endif
 
 void SubstituteFilenamePlaceholders(fs::path* filename, const FilenameSubstitutions& fns) {
   *filename = absl::StrReplaceAll(

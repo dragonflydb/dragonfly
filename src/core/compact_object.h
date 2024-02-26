@@ -9,10 +9,8 @@
 #include <optional>
 
 #include "base/pmr/memory_resource.h"
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "core/small_string.h"
-
-typedef struct redisObject robj;
 
 namespace dfly {
 
@@ -133,10 +131,6 @@ class CompactObj {
   using MemoryResource = detail::RobjWrapper::MemoryResource;
 
   CompactObj() {  // By default - empty string.
-  }
-
-  explicit CompactObj(robj* o) {
-    ImportRObj(o);
   }
 
   explicit CompactObj(std::string_view str) {
@@ -273,18 +267,9 @@ class CompactObj {
     u_.r_obj.Init(u_.r_obj.type(), u_.r_obj.encoding(), ptr);
   }
 
-  // Takes ownership over o.
-  void ImportRObj(robj* o);
-
-  robj* AsRObj() const;
-
   // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
   void InitRobj(unsigned type, unsigned encoding, void* obj_inner);
-
-  // Syncs 'this' instance with the object that was previously returned by AsRObj().
-  // Requires: AsRObj() has been called before in the same thread in fiber-atomic section.
-  void SyncRObj();
 
   // For STR object.
   void SetInt(int64_t val);

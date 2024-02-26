@@ -4,10 +4,6 @@
 
 #include "server/db_slice.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/cleanup/cleanup.h>
 
 #include "base/flags.h"
@@ -706,7 +702,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   auto del_entry_cb = [&](PrimeTable::iterator it) {
     std::string_view key = it->first.GetSlice(&tmp);
     SlotId sid = ClusterConfig::KeySlot(key);
-    if (slot_ids.contains(sid) && it.GetVersion() < next_version) {
+    if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
       PerformDeletion(it, db_arr_[0].get());
     }
     return true;
@@ -1449,7 +1445,7 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
 void DbSlice::InvalidateSlotWatches(const SlotSet& slot_ids) {
   for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
     SlotId sid = ClusterConfig::KeySlot(key);
-    if (!slot_ids.contains(sid)) {
+    if (!slot_ids.Contains(sid)) {
       continue;
     }
     for (auto conn_ptr : conn_list) {

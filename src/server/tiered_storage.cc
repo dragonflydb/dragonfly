@@ -4,10 +4,6 @@
 
 #include "server/tiered_storage.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <mimalloc.h>
 
 #include "absl/cleanup/cleanup.h"

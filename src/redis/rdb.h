@@ -34,7 +34,6 @@
 #include <stdio.h>
 #include <time.h>
 
-#include "object.h"
 #include "redis_aux.h"
 
 /* The current RDB version. When the format changes in a way that is no longer

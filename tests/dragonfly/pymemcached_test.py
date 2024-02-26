@@ -1,73 +1,124 @@
-import pytest
-import pymemcache
+from pymemcache.client.base import Client as MCClient
 from . import dfly_args
 from .instance import DflyInstance
 import socket
 
+DEFAULT_ARGS = {"memcached_port": 12111, "proactor_threads": 4}
 
-@dfly_args({"memcached_port": 11211})
-def test_add_get(memcached_connection):
-    assert memcached_connection.add(b"key", b"data", noreply=False)
-    assert memcached_connection.get(b"key") == b"data"
+# Generic basic tests
 
 
-@dfly_args({"memcached_port": 11211})
-def test_add_set(memcached_connection):
-    assert memcached_connection.add(b"key", b"data", noreply=False)
-    memcached_connection.set(b"key", b"other")
-    assert memcached_connection.get(b"key") == b"other"
+@dfly_args(DEFAULT_ARGS)
+def test_basic(memcached_client: MCClient):
+    assert not memcached_client.default_noreply
+
+    # set -> replace -> add -> get
+    assert memcached_client.set("key1", "value1")
+    assert memcached_client.replace("key1", "value2")
+    assert not memcached_client.add("key1", "value3")
+    assert memcached_client.get("key1") == b"value2"
+
+    # add -> get
+    assert memcached_client.add("key2", "value1")
+    assert memcached_client.get("key2") == b"value1"
+
+    # delete
+    assert memcached_client.delete("key1")
+    assert not memcached_client.delete("key3")
+    assert memcached_client.get("key1") == None
+
+    # prepend append
+    assert memcached_client.set("key4", "B")
+    assert memcached_client.prepend("key4", "A")
+    assert memcached_client.append("key4", "C")
+    assert memcached_client.get("key4") == b"ABC"
+
+    # incr
+    memcached_client.set("key5", 0)
+    assert memcached_client.incr("key5", 1) == 1
+    assert memcached_client.incr("key5", 1) == 2
+    assert memcached_client.decr("key5", 1) == 1
 
 
-@dfly_args({"memcached_port": 11211})
-def test_set_add(memcached_connection):
-    memcached_connection.set(b"key", b"data")
-    # stuck here
-    assert not memcached_connection.add(b"key", b"other", noreply=False)
-    # expects to see NOT_STORED
-    memcached_connection.set(b"key", b"other")
-    assert memcached_connection.get(b"key") == b"other"
+# Noreply (and pipeline) tests
 
 
-@dfly_args({"memcached_port": 11211})
-def test_mixed_reply(memcached_connection):
-    memcached_connection.set(b"key", b"data", noreply=True)
-    memcached_connection.add(b"key", b"other", noreply=False)
-    memcached_connection.add(b"key", b"final", noreply=True)
-
-    assert memcached_connection.get(b"key") == b"data"
-
-
-@dfly_args({"memcached_port": 11211})
-def test_version(memcached_connection: pymemcache.Client):
+@dfly_args(DEFAULT_ARGS)
+def test_noreply_pipeline(memcached_client: MCClient):
     """
-    php-memcached client expects version to be in the format of "n.n.n",
-    so we return 1.5.0 emulating an old memcached server. Our real version is being returned in the stats command. Also verified manually that php client parses correctly the version string
-    that ends with "DF".
+    With the noreply option the python client doesn't wait for replies,
+    so all the commands are pipelined. Assert pipelines work correctly and the
+    succeeding regular command receives a reply (it should join the pipeline as last).
     """
-    assert b"1.5.0 DF" == memcached_connection.version()
-    stats = memcached_connection.stats()
-    version = stats[b"version"].decode("utf-8")
-    assert version.startswith("v") or version == "dev"
+    keys = [f"k{i}" for i in range(100)]
+    values = [f"d{i}" for i in range(len(keys))]
+
+    for k, v in zip(keys, values):
+        memcached_client.set(k, v, noreply=True)
+
+    # quick follow up before the pipeline finishes
+    assert memcached_client.get("k10") == b"d10"
+    # check all commands were executed
+    assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
 
 
-@dfly_args({"memcached_port": 11211})
-def test_length_in_set_command(df_server: DflyInstance):
+@dfly_args(DEFAULT_ARGS)
+def test_noreply_alternating(memcached_client: MCClient):
+    """
+    Assert alternating noreply works correctly, will cause many dispatch queue emptyings.
+    """
+    for i in range(200):
+        if i % 2 == 0:
+            memcached_client.set(f"k{i}", "D1", noreply=True)
+            memcached_client.set(f"k{i}", "D2", noreply=True)
+            memcached_client.set(f"k{i}", "D3", noreply=True)
+        assert memcached_client.add(f"k{i}", "DX", noreply=False) == (i % 2 != 0)
+
+
+# Raw connection tests
+
+
+@dfly_args(DEFAULT_ARGS)
+def test_length_in_set_command(df_server: DflyInstance, memcached_client: MCClient):
+    """
+    Test parser correctly reads value based on length and complains about bad chunks
+    """
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect(("127.0.0.1", 11211))
+    client.connect(("127.0.0.1", int(df_server["memcached_port"])))
 
-    command = b"set foo 0 0 4\r\nother\r\n"
-    client.sendall(command)
-    response = client.recv(256)
-    assert response == b"CLIENT_ERROR bad data chunk\r\n"
+    cases = [b"NOTFOUR", b"FOUR", b"F4\r\n", b"\r\n\r\n"]
 
-    command = b"set foo 0 0 4\r\not\r\n\r\n"
-    client.sendall(command)
-    response = client.recv(256)
-    assert response == b"STORED\r\n"
+    # TODO: \r\n hangs
 
-    command = b"set foo 0 0 4\r\n\r\n\r\n\r\n"
-    client.sendall(command)
-    response = client.recv(256)
-    assert response == b"STORED\r\n"
+    for case in cases:
+        print("case", case)
+        client.sendall(b"set foo 0 0 4\r\n" + case + b"\r\n")
+        response = client.recv(256)
+        if len(case) == 4:
+            assert response == b"STORED\r\n"
+        else:
+            assert response == b"CLIENT_ERROR bad data chunk\r\n"
 
     client.close()
+
+
+# Auxiliary tests
+
+
+@dfly_args(DEFAULT_ARGS)
+def test_large_request(memcached_client):
+    assert memcached_client.set(b"key1", b"d" * 4096, noreply=False)
+    assert memcached_client.set(b"key2", b"d" * 4096 * 2, noreply=False)
+
+
+@dfly_args(DEFAULT_ARGS)
+def test_version(memcached_client: MCClient):
+    """
+    php-memcached client expects version to be in the format of "n.n.n", so we return 1.5.0 emulating an old memcached server.
+    Our real version is being returned in the stats command.
+    Also verified manually that php client parses correctly the version string that ends with "DF".
+    """
+    assert b"1.5.0 DF" == memcached_client.version()
+    stats = memcached_client.stats()
+    version = stats[b"version"].decode("utf-8")
+    assert version.startswith("v") or version == "dev"

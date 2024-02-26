@@ -7,7 +7,6 @@
 #include <absl/strings/str_cat.h>
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/stream.h"
 #include "redis/zmalloc.h"
 }
@@ -621,13 +620,11 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
     add_res = std::move(*op_res);
   }
 
-  robj* stream_obj = nullptr;
   PrimeIterator& it = add_res.it;
 
   if (add_res.is_new) {
-    stream_obj = createStreamObject();
-
-    it->second.ImportRObj(stream_obj);
+    stream* s = streamNew();
+    it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
   } else if (it->second.ObjType() != OBJ_STREAM) {
     return OpStatus::WRONG_TYPE;
   }
@@ -1130,8 +1127,8 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
       if (!res_it)
         return res_it.status();
 
-      robj* stream_obj = createStreamObject();
-      res_it->it->second.ImportRObj(stream_obj);
+      stream* s = streamNew();
+      res_it->it->second.InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
     } else {
       return res_it.status();
     }

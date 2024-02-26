@@ -8,7 +8,7 @@ Keys of every type are sorted lexicographically to ensure consistent order.
 -- import:utillib --
 
 -- inputs
-local requested_types = ARGV
+local type = ARGV[1]
 
 local OUT_HASH = 0
 
@@ -19,16 +19,11 @@ local function process(type)
     -- sort to provide consistent order
     table.sort(keys)
     for _, key in ipairs(keys) do
-        -- add key to hash
-        OUT_HASH = dragonfly.ihash(OUT_HASH, key)
         -- hand hash over to callback
         OUT_HASH = hfunc(key, OUT_HASH)
     end
 end
 
-for _, type in ipairs(requested_types) do
-    process(string.lower(type))
-end
-
+process(string.lower(type))
 
 return OUT_HASH

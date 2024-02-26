@@ -8,10 +8,6 @@
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"

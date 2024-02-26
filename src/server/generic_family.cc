@@ -6,7 +6,6 @@
 
 extern "C" {
 #include "redis/crc64.h"
-#include "redis/object.h"
 #include "redis/util.h"
 }
 

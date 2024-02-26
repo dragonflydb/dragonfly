@@ -3,19 +3,16 @@
 //
 #pragma once
 
-#include <jsoncons/json.hpp>
 #include <system_error>
 
 extern "C" {
-#include "redis/object.h"
+#include "redis/rdb.h"
 }
 
 #include "base/io_buf.h"
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
-#include "core/json_object.h"
 #include "io/io.h"
-#include "redis/rdb.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 
@@ -144,7 +141,7 @@ class RdbLoaderBase {
 
   std::error_code EnsureRead(size_t min_sz);
 
-  std::error_code EnsureReadInternal(size_t min_sz);
+  std::error_code EnsureReadInternal(size_t min_to_read);
 
   base::IoBuf* mem_buf_ = nullptr;
   base::IoBuf origin_mem_buf_;

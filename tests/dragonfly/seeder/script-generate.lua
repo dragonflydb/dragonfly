@@ -22,19 +22,21 @@ local data_size = tonumber(ARGV[8])
 -- assumes exclusive ownership
 local keys = LU_collect_keys(prefix, type)
 
+LG_funcs.init(data_size)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 
 local function action_add()
     local key = prefix .. tostring(key_counter)
     key_counter = key_counter + 1
+
+    addfunc(key, keys)
     table.insert(keys, key)
-    addfunc(key, data_size)
 end
 
 local function action_mod()
     local key = keys[math.random(#keys)]
-    modfunc(key, data_size)
+    modfunc(key, keys)
 end
 
 local function action_del()
@@ -62,11 +64,6 @@ while true do
         break
     end
 
-    if key_target < 100 and min_dev > 0 then
-        print(real_target, key_target, math.abs(#keys - real_target) / real_target)
-        print()
-    end
-
     -- break if we reached our target deviation
     if min_dev > 0 and math.abs(#keys - real_target) / real_target < min_dev then
         break
@@ -91,7 +88,7 @@ while true do
         -- the add intensity is monotonically decreasing with keycount growing,
         -- the delete intensity is monotonically increasing with keycount growing,
         -- the point where the intensities are equal is the equilibrium point,
-        -- based on the formulas it's ~0.82 * key_target
+        -- based on the formulas it's ~0.956 * key_target
         local i_add = math.max(0, 1 - (#keys / key_target) ^ 16)
         local i_del = (#keys / key_target) ^ 16
 

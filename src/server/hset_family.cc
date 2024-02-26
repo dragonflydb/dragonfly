@@ -6,7 +6,6 @@
 
 extern "C" {
 #include "redis/listpack.h"
-#include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
@@ -1220,8 +1219,24 @@ StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
     lp_elem = lpNext(lp, lp_elem);  // switch to value
     DCHECK(lp_elem);
     string_view value = LpGetView(lp_elem, intbuf[1]);
-    lp_elem = lpNext(lp, lp_elem);       // switch to next key
-    CHECK(sm->AddOrUpdate(key, value));  // must be unique
+    lp_elem = lpNext(lp, lp_elem);  // switch to next key
+
+    // must be unique
+    if (!sm->AddOrUpdate(key, value)) {
+      uint8_t tmpbuf[LP_INTBUF_SIZE];
+
+      uint8_t* it = lpFirst(lp);
+      LOG(ERROR) << "Internal error while converting listpack to stringmap when inserting key: "
+                 << key << " , listpack keys are:";
+      do {
+        string_view key = LpGetView(it, tmpbuf);
+        LOG(ERROR) << "Listpack key: " << key;
+        it = lpNext(lp, it);
+        CHECK(it);  // value must exist
+        it = lpNext(lp, it);
+      } while (it);
+      LOG(ERROR) << "Internal error, report to Dragonfly team! ------------";
+    }
   } while (lp_elem);
 
   return sm;

@@ -20,24 +20,7 @@ MATCHER_P(SegType, value, "") {
 }
 
 void PrintTo(SegmentType st, std::ostream* os) {
-  *os << " segment(";
-  switch (st) {
-    {
-      case SegmentType::IDENTIFIER:
-        *os << "IDENTIFIER";
-        break;
-      case SegmentType::INDEX:
-        *os << "INDEX";
-        break;
-      case SegmentType::WILDCARD:
-        *os << "WILDCARD";
-        break;
-      case SegmentType::DESCENT:
-        *os << "DESCENT";
-        break;
-    }
-  }
-  *os << ")";
+  *os << " segment(" << SegmentName(st) << ")";
 }
 
 class TestDriver : public Driver {
@@ -46,6 +29,12 @@ class TestDriver : public Driver {
     LOG(INFO) << "Error at " << l << ": " << msg;
   }
 };
+
+inline JsonType ValidJson(string_view str) {
+  auto res = ::dfly::JsonFromString(str, pmr::get_default_resource());
+  CHECK(res) << "Failed to parse json: " << str;
+  return *res;
+}
 
 class JsonPathTest : public ::testing::Test {
  protected:
@@ -136,6 +125,39 @@ TEST_F(JsonPathTest, Parser) {
   EXPECT_THAT(path[2], SegType(SegmentType::INDEX));
   EXPECT_EQ("bar", path[1].identifier());
   EXPECT_EQ(1, path[2].index());
+
+  EXPECT_EQ(0, Parse("$.plays[*].game"));
+}
+
+TEST_F(JsonPathTest, Root) {
+  JsonType json = ValidJson(R"({"foo" : 1, "bar": "str" })");
+  ASSERT_EQ(0, Parse("$"));
+  Path path = driver_.TakePath();
+  int called = 0;
+  EvaluatePath(path, json, [&](optional<string_view>, const JsonType& val) {
+    ++called;
+    ASSERT_TRUE(val.is_object());
+    ASSERT_EQ(json, val);
+  });
+  ASSERT_EQ(1, called);
+}
+
+TEST_F(JsonPathTest, Functions) {
+  ASSERT_EQ(0, Parse("max($.plays[*].score)"));
+  Path path = driver_.TakePath();
+  ASSERT_EQ(4, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::FUNCTION));
+  EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
+  EXPECT_THAT(path[2], SegType(SegmentType::WILDCARD));
+  EXPECT_THAT(path[3], SegType(SegmentType::IDENTIFIER));
+  JsonType json = ValidJson(R"({"plays": [{"score": 1}, {"score": 2}]})");
+  int called = 0;
+  EvaluatePath(path, json, [&](auto, const JsonType& val) {
+    ASSERT_TRUE(val.is<int>());
+    ASSERT_EQ(2, val.as<int>());
+    ++called;
+  });
+  ASSERT_EQ(1, called);
 }
 
 TEST_F(JsonPathTest, Descent) {
@@ -158,15 +180,15 @@ TEST_F(JsonPathTest, Descent) {
 
 TEST_F(JsonPathTest, Path) {
   Path path;
-  JsonType json = JsonFromString(R"({"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "a2": [1]},
+  JsonType json = ValidJson(R"({"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "a2": [1]},
       "v13": 3
-      })")
-                      .value();
+      })");
   int called = 0;
 
   // Empty path
   EvaluatePath(path, json, [&](optional<string_view>, const JsonType& val) { ++called; });
-  ASSERT_EQ(0, called);
+  ASSERT_EQ(1, called);
+  called = 0;
 
   path.emplace_back(SegmentType::IDENTIFIER, "v13");
   EvaluatePath(path, json, [&](optional<string_view> key, const JsonType& val) {
@@ -200,7 +222,7 @@ TEST_F(JsonPathTest, Path) {
 }
 
 TEST_F(JsonPathTest, EvalDescent) {
-  JsonType json = JsonFromString(R"(
+  JsonType json = ValidJson(R"(
     {"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "v21": {"f": 3, "a2": [1]}},
       "v13": { "a2" : { "b" : {"f" : 4}}}
       })");
@@ -234,7 +256,7 @@ TEST_F(JsonPathTest, EvalDescent) {
   });
   ASSERT_EQ(4, called);
 
-  json = JsonFromString(R"(
+  json = ValidJson(R"(
     {"a":[7], "inner": {"a": {"b": 2, "c": 1337}}}
   )");
   path.pop_back();
@@ -255,13 +277,53 @@ TEST_F(JsonPathTest, Wildcard) {
   ASSERT_EQ(1, path.size());
   EXPECT_THAT(path[0], SegType(SegmentType::WILDCARD));
 
-  JsonType json = JsonFromString(R"([1, 2, 3])").value();
+  JsonType json = ValidJson(R"([1, 2, 3])");
   vector<int> arr;
   EvaluatePath(path, json, [&](optional<string_view> key, const JsonType& val) {
     ASSERT_FALSE(key);
     arr.push_back(val.as<int>());
   });
   ASSERT_THAT(arr, ElementsAre(1, 2, 3));
+}
+
+TEST_F(JsonPathTest, Mutate) {
+  JsonType json = ValidJson(R"([1, 2, 3, 5, 6])");
+  ASSERT_EQ(0, Parse("$[*]"));
+  Path path = driver_.TakePath();
+  MutateCallback cb = [&](optional<string_view>, JsonType* val) {
+    int intval = val->as<int>();
+    *val = intval + 1;
+    return false;
+  };
+
+  MutatePath(path, cb, &json);
+  vector<int> arr;
+  for (auto& el : json.array_range()) {
+    arr.push_back(el.as<int>());
+  }
+  ASSERT_THAT(arr, ElementsAre(2, 3, 4, 6, 7));
+
+  json = ValidJson(R"(
+    {"a":[7], "inner": {"a": {"bool": true, "c": 42}}}
+  )");
+  ASSERT_EQ(0, Parse("$..a.*"));
+  path = driver_.TakePath();
+  MutatePath(
+      path,
+      [&](optional<string_view> key, JsonType* val) {
+        if (val->is_int64() && !key) {  // array element
+          *val = 42;
+          return false;
+        }
+        if (val->is_bool()) {
+          *val = false;
+          return false;
+        }
+        return true;
+      },
+      &json);
+
+  ASSERT_EQ(R"({"a":[42],"inner":{"a":{"bool":false}}})", json.to_string());
 }
 
 }  // namespace dfly::json

@@ -8,6 +8,7 @@
 #include <absl/flags/flag.h>
 
 #include "base/logging.h"
+#include "server/cluster/cluster_family.h"
 #include "server/cluster/cluster_shard_migration.h"
 #include "server/error.h"
 #include "server/journal/tx_executor.h"
@@ -39,9 +40,12 @@ atomic_uint32_t next_local_sync_id{1};
 
 }  // namespace
 
-ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
-                                           std::vector<ClusterConfig::SlotRange> slots)
-    : ProtocolClient(std::move(host_ip), port), service_(*se), slots_(std::move(slots)) {
+ClusterSlotMigration::ClusterSlotMigration(ClusterFamily* cl_fm, string host_ip, uint16_t port,
+                                           Service* se, SlotRanges slots)
+    : ProtocolClient(std::move(host_ip), port),
+      cluster_family_(cl_fm),
+      service_(*se),
+      slots_(std::move(slots)) {
   local_sync_id_ = next_local_sync_id.fetch_add(1);
 }
 
@@ -140,6 +144,16 @@ void ClusterSlotMigration::MainMigrationFb() {
 
   if (IsFinalized()) {
     state_ = MigrationState::C_FINISHED;
+
+    auto cmd = absl::StrCat("DFLYMIGRATE ACK ", sync_id_);
+    VLOG(1) << "send " << cmd;
+
+    auto err = SendCommandAndReadResponse(cmd);
+    auto success = !err && CheckRespIsSimpleReply("OK");
+
+    LOG_IF(WARNING, !success) << ToSV(LastResponseArgs().front().GetBuf());
+
+    cluster_family_->FinalizeIncomingMigration(local_sync_id_);
   }
 }
 

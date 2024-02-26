@@ -55,6 +55,10 @@ bool CommandId::IsTransactional() const {
   return false;
 }
 
+bool CommandId::IsMultiTransactional() const {
+  return CO::IsTransKind(name()) || CO::IsEvalKind(name());
+}
+
 uint64_t CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
   int64_t before = absl::GetCurrentTimeNanos();
   handler_(args, cntx);

@@ -48,6 +48,8 @@
 "["         return Parser::make_LBRACKET(loc());
 "]"         return Parser::make_RBRACKET(loc());
 "*"         return Parser::make_WILDCARD(loc());
+"("         return Parser::make_LPARENT(loc());
+")"         return Parser::make_RPARENT(loc());
 [0-9]{1,9}  {
               unsigned val;
               CHECK(absl::SimpleAtoi(str(), &val));

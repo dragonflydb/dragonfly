@@ -20,8 +20,8 @@ class OutgoingMigration {
  public:
   OutgoingMigration() = default;
   ~OutgoingMigration();
-  OutgoingMigration(std::uint32_t flows_num, std::string ip, uint16_t port,
-                    std::vector<ClusterConfig::SlotRange> slots, Context::ErrHandler err_handler);
+  OutgoingMigration(std::uint32_t flows_num, std::string ip, uint16_t port, SlotRanges slots,
+                    Context::ErrHandler err_handler);
 
   void StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal, io::Sink* dest);
 
@@ -38,7 +38,7 @@ class OutgoingMigration {
     return port_;
   };
 
-  const std::vector<ClusterConfig::SlotRange>& GetSlotRange() const {
+  const SlotRanges& GetSlots() const {
     return slots_;
   }
 
@@ -50,7 +50,7 @@ class OutgoingMigration {
  private:
   std::string host_ip_;
   uint16_t port_;
-  std::vector<ClusterConfig::SlotRange> slots_;
+  SlotRanges slots_;
   Context cntx_;
   mutable Mutex flows_mu_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_ ABSL_GUARDED_BY(flows_mu_);

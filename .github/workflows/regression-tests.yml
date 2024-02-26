@@ -41,14 +41,18 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           run-only-on-ubuntu-latest: false
           build-folder-name: build
-          filter: ${{ matrix.build-type == 'Release' && 'not slow' || '(not slow) and (not opt_only)' }}
+          # This expression serves as a ternary operator, i.e. if the condition holds it returns
+          # 'not NON_EXISTING_MARK' otherwise not opt_only.
+          # Do not filter anything in Release, but do not run opt_only in Debug. Unfortunately an
+          # empty string creates a 'false' expression, so we use a non existing mark
+          filter: ${{ matrix.build-type == 'Release' && 'not NON_EXISTING_MARK' || 'not opt_only' }}
 
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v3
         with:
           name: logs
-          path: /tmp/dragonfly.*
+          path: /tmp/failed/*
 
   lint-test-chart:
     runs-on: ubuntu-latest

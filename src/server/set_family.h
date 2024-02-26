@@ -9,8 +9,6 @@
 #include "server/table.h"
 
 typedef struct intset intset;
-typedef struct redisObject robj;
-typedef struct dict dict;
 
 namespace dfly {
 
@@ -19,6 +17,7 @@ using facade::OpResult;
 class ConnectionContext;
 class CommandRegistry;
 class EngineShard;
+class StringSet;
 
 class SetFamily {
  public:
@@ -26,10 +25,8 @@ class SetFamily {
 
   static uint32_t MaxIntsetEntries();
 
-  static void ConvertTo(const intset* src, dict* dest);
-
-  // Returns true if succeeded, false on OOM.
-  static bool ConvertToStrSet(const intset* is, size_t expected_len, robj* dest);
+  // Returns nullptr on OOM.
+  static StringSet* ConvertToStrSet(const intset* is, size_t expected_len);
 
   // returns expiry time in seconds since kMemberExpiryBase date.
   // returns -3 if field was not found, -1 if no ttl is associated with the item.

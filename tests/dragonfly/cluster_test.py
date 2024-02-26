@@ -968,9 +968,21 @@ class NodeInfo:
     sync_ids: list
 
 
+@pytest.mark.parametrize(
+    "node_count, segments, keys",
+    [
+        pytest.param(3, 16, 20_000),
+        pytest.param(5, 20, 30_000, marks=[pytest.mark.slow, pytest.mark.opt_only]),
+    ],
+)
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_seeder_factory):
-    node_count = 3
+async def test_cluster_fuzzymigration(
+    df_local_factory: DflyInstanceFactory,
+    df_seeder_factory,
+    node_count: int,
+    segments: int,
+    keys: int,
+):
     instances = [
         df_local_factory.create(
             port=BASE_PORT + i,
@@ -1008,7 +1020,7 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
         ]
 
     # Generate equally sized ranges and distribute by nodes
-    step = 1000
+    step = 16400 // segments
     for slot_range in [(s, min(s + step - 1, 16383)) for s in range(0, 16383, step)]:
         nodes[random.randint(0, node_count - 1)].slots.append(slot_range)
 
@@ -1016,7 +1028,7 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
     await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 
     # Fill instances with some data
-    seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
+    seeder = df_seeder_factory.create(keys=keys, port=nodes[0].instance.port, cluster_mode=True)
     await seeder.run(target_deviation=0.1)
 
     fill_task = asyncio.create_task(seeder.run())
@@ -1093,6 +1105,9 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
         for key, conn in zip(counter_keys, counter_connections)
     ]
 
+    # Generate capture, capture ignores counter keys
+    capture = await seeder.capture()
+
     # Finalize slot migration
     for node in nodes:
         for sync_id in node.sync_ids:
@@ -1104,11 +1119,10 @@ async def test_cluster_fuzzymigration(df_local_factory: DflyInstanceFactory, df_
     for counter in counters:
         counter.cancel()
 
+    # need this sleep to avoid race between finalize and config
+    await asyncio.sleep(0.5)
     # Push new config
     await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
-
-    # Generate capture, capture ignores counter keys
-    capture = await seeder.capture()
 
     # Transfer nodes
     for node in nodes:

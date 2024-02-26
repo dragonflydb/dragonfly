@@ -4,10 +4,6 @@
 
 #include "server/snapshot.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/functional/bind_front.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -50,6 +46,10 @@ size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
     mem += snapshot->GetTotalBufferCapacity() + snapshot->GetTotalChannelCapacity();
   }
   return mem;
+}
+
+bool SliceSnapshot::IsSnaphotInProgress() {
+  return tl_slice_snapshots.size() > 0;
 }
 
 void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {

@@ -6,7 +6,6 @@
 #include "server/acl/acl_commands_def.h"
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/sds.h"
 }
 
@@ -22,10 +21,6 @@ extern "C" {
 #include "server/error.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
-
-/* List related stuff */
-#define LIST_HEAD 0
-#define LIST_TAIL 1
 
 /**
  * The number of entries allowed per internal list node can be specified
@@ -78,24 +73,24 @@ quicklist* GetQL(const PrimeValue& mv) {
 }
 
 void* listPopSaver(unsigned char* data, size_t sz) {
-  return createStringObject((char*)data, sz);
+  return new string((char*)data, sz);
 }
+
+enum InsertParam { INSERT_BEFORE, INSERT_AFTER };
 
 string ListPop(ListDir dir, quicklist* ql) {
   long long vlong;
-  robj* value = NULL;
+  string* pop_str = nullptr;
 
   int ql_where = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
 
   // Empty list automatically removes the key (see below).
   CHECK_EQ(1,
-           quicklistPopCustom(ql, ql_where, (unsigned char**)&value, NULL, &vlong, listPopSaver));
+           quicklistPopCustom(ql, ql_where, (unsigned char**)&pop_str, NULL, &vlong, listPopSaver));
   string res;
-  if (value) {
-    DCHECK(value->encoding == OBJ_ENCODING_EMBSTR || value->encoding == OBJ_ENCODING_RAW);
-    sds s = (sds)(value->ptr);
-    res = string{s, sdslen(s)};
-    decrRefCount(value);
+  if (pop_str) {
+    pop_str->swap(res);
+    delete pop_str;
   } else {
     res = absl::StrCat(vlong);
   }
@@ -256,11 +251,10 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   src_it = src_res->it;
 
   if (dest_res.is_new) {
-    robj* obj = createQuicklistObject();
-    dest_ql = (quicklist*)obj->ptr;
+    dest_ql = quicklistCreate();
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    dest_res.it->second.ImportRObj(obj);
+    dest_res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, dest_ql);
     DCHECK(IsValid(src_it));
   } else {
     if (dest_res.it->second.ObjType() != OBJ_LIST)
@@ -327,11 +321,10 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
 
   if (res.is_new) {
-    robj* o = createQuicklistObject();
-    ql = (quicklist*)o->ptr;
+    ql = quicklistCreate();
     quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
-    res.it->second.ImportRObj(o);
+    res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
   } else {
     if (res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
@@ -549,7 +542,7 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
 }
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
-                       int insert_param) {
+                       InsertParam insert_param) {
   auto& db_slice = op_args.shard->db_slice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
@@ -569,10 +562,10 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
 
   int res = -1;
   if (found) {
-    if (insert_param == LIST_TAIL) {
+    if (insert_param == INSERT_AFTER) {
       quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
     } else {
-      DCHECK_EQ(LIST_HEAD, insert_param);
+      DCHECK_EQ(INSERT_BEFORE, insert_param);
       quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
     }
     res = quicklistCount(ql);
@@ -1047,13 +1040,13 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   string_view param = ArgS(args, 1);
   string_view pivot = ArgS(args, 2);
   string_view elem = ArgS(args, 3);
-  int where;
+  InsertParam where;
 
   ToUpper(&args[1]);
   if (param == "AFTER") {
-    where = LIST_TAIL;
+    where = INSERT_AFTER;
   } else if (param == "BEFORE") {
-    where = LIST_HEAD;
+    where = INSERT_BEFORE;
   } else {
     return cntx->SendError(kSyntaxErr);
   }

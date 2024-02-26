@@ -303,10 +303,11 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   if (str[0] == '-') {
     iovec v[] = {IoVec(str), IoVec(kCRLF)};
     Send(v, ABSL_ARRAYSIZE(v));
-  } else {
-    iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
-    Send(v, ABSL_ARRAYSIZE(v));
+    return;
   }
+
+  iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
+  Send(v, ABSL_ARRAYSIZE(v));
 }
 
 void RedisReplyBuilder::SendProtocolError(std::string_view str) {

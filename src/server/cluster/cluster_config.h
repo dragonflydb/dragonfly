@@ -4,23 +4,16 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_set.h>
-
 #include <array>
-#include <bitset>
 #include <memory>
 #include <string_view>
 #include <vector>
 
-#include "core/json_object.h"
-#include "src/core/fibers.h"
+#include "core/json/json_object.h"
+#include "src/server/cluster/slot_set.h"
 #include "src/server/common.h"
 
 namespace dfly {
-
-using SlotId = uint16_t;
-// TODO consider to use bit set or some more compact way to store SlotId
-using SlotSet = absl::flat_hash_set<SlotId>;
 
 // MigrationState constants are ordered in state changing order
 enum class MigrationState : uint8_t {
@@ -28,7 +21,8 @@ enum class MigrationState : uint8_t {
   C_CONNECTING,
   C_FULL_SYNC,
   C_STABLE_SYNC,
-  C_FINISHED
+  C_FINISHED,
+  C_MAX_INVALID = std::numeric_limits<uint8_t>::max()
 };
 
 class ClusterConfig {
@@ -42,13 +36,8 @@ class ClusterConfig {
     uint16_t port = 0;
   };
 
-  struct SlotRange {
-    SlotId start = 0;
-    SlotId end = 0;
-  };
-
   struct ClusterShard {
-    std::vector<SlotRange> slot_ranges;
+    SlotRanges slot_ranges;
     Node master;
     std::vector<Node> replicas;
   };
@@ -81,18 +70,19 @@ class ClusterConfig {
   static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
                                                          const JsonType& json_config);
 
+  std::shared_ptr<ClusterConfig> CloneWithChanges(const std::vector<SlotRange>& slots,
+                                                  bool enable) const;
+
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
-
-  void RemoveSlots(SlotSet slots);
 
   // Returns the master configured for `id`.
   Node GetMasterNodeForSlot(SlotId id) const;
 
   ClusterShards GetConfig() const;
 
-  SlotSet GetOwnedSlots() const;
+  const SlotSet& GetOwnedSlots() const;
 
  private:
   struct SlotEntry {
@@ -104,10 +94,7 @@ class ClusterConfig {
 
   ClusterShards config_;
 
-  // True bits in `my_slots_` indicate that this slot is owned by this node.
-  std::bitset<kMaxSlotNum + 1> my_slots_;
+  SlotSet my_slots_;
 };
-
-SlotSet ToSlotSet(const std::vector<ClusterConfig::SlotRange>& slots);
 
 }  // namespace dfly
