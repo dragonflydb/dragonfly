@@ -44,7 +44,7 @@ class TieredStorage {
   std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it);
   void Free(PrimeIterator it, DbTableStats* stats);
 
-  void Defrag(DbIndex db_index, PrimeIterator it);
+  void Defrag(DbIndex db_index);
 
   void Shutdown();
 
@@ -97,12 +97,17 @@ class TieredStorage {
   struct PerDb;
   std::vector<PerDb*> db_arr_;
 
-  absl::flat_hash_map<uint32_t, uint8_t> page_refcnt_;
+  // absl::flat_hash_map<uint32_t, uint8_t> page_refcnt_;
+
+  absl::flat_hash_map<uint32_t, std::pair<unsigned, unsigned> > page_refcnt_;
   util::fb2::EventCount throttle_ec_;
   TieredStats stats_;
   size_t max_file_size_;
   size_t allocated_size_ = 0;
   bool shutdown_ = false;
+
+  unsigned int num_pages_to_scan_ = 10;
+  float defrag_bin_util_threshold_ = 0.2;
 };
 
 }  // namespace dfly
