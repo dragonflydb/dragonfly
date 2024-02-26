@@ -570,7 +570,6 @@ std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
     ServerState::tlocal()->SetPauseState(pause_state, true);
   });
 
-  // TODO handle blocking commands
   // Wait for all busy commands to finish running before replying to guarantee
   // that no more (write) operations will occur.
   const absl::Duration kDispatchTimeout = absl::Seconds(1);

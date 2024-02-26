@@ -1349,13 +1349,16 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
   DVLOG(1) << "WaitOnWatch wait for " << tp << " " << DebugId();
-
+  // TBD set connection blocking state
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
   cv_status status = blocking_barrier_.Wait(tp);
 
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
   --stats->num_blocked_clients;
+
+  // TBD set connection pause state
+  ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
 
   OpStatus result = OpStatus::OK;
   if (status == cv_status::timeout) {
