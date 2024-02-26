@@ -2,15 +2,9 @@
 // See LICENSE for licensing terms.
 //
 
+#include "core/flatbuffers.h"
+
 #include <absl/strings/escaping.h>
-
-#ifndef __USE_GNU  // needed to flatbuffers to compile with musl libc.
-#define FLATBUFFERS_LOCALE_INDEPENDENT 0
-#endif
-
-#include <flatbuffers/flatbuffers.h>
-#include <flatbuffers/flexbuffers.h>
-#include <flatbuffers/idl.h>
 
 #include "base/gtest.h"
 #include "base/logging.h"

@@ -8,13 +8,6 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
-#ifndef __USE_GNU  // needed to flatbuffers to compile with musl libc.
-#define FLATBUFFERS_LOCALE_INDEPENDENT 0
-#endif
-
-#include <flatbuffers/flexbuffers.h>
-#include <flatbuffers/idl.h>
-
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
@@ -22,6 +15,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "facade/cmd_arg_parser.h"
