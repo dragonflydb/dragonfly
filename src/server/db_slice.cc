@@ -1241,21 +1241,7 @@ void DbSlice::ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes
 void DbSlice::DefragSecondTierStep(DbIndex db_indx) {
   DCHECK(shard_owner()->tiered_storage());
   FiberAtomicGuard guard;
-  PrimeTable& pt = db_arr_[db_indx]->prime;
-
-  static PrimeTable::Cursor cursor;
-
-  auto cb = [&](PrimeIterator it) {
-    // if it is already in the second tier
-    if (it->first.IsExternal()) {
-      shard_owner()->tiered_storage()->Defrag(db_indx, it);
-    }
-  };
-
-  // Traverse a single segment every time this function is called.
-  for (int i = 0; i < 10; ++i) {
-    cursor = pt.TraverseBySegmentOrder(cursor, cb);
-  }
+  shard_owner()->tiered_storage()->Defrag(db_indx);
 }
 
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {

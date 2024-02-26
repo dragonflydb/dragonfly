@@ -30,6 +30,7 @@ constexpr size_t kBlockAlignment = 4096;
 
 constexpr unsigned kSmallBinLen = 34;
 constexpr unsigned kMaxSmallBin = 2032;
+constexpr unsigned kBytesPerHash = 8;
 
 constexpr unsigned kSmallBins[kSmallBinLen] = {
     72,  80,  88,  96,  104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184,  192,  200,
@@ -163,7 +164,7 @@ class TieredStorage::InflightWriteRequest {
   void Add(const PrimeKey& pk, const PrimeValue& pv);
 
   // returns how many entries were offloaded.
-  unsigned ExternalizeEntries(PerDb::BinRecord* bin_record, DbSlice* db_slice);
+  std::pair<unsigned, unsigned> ExternalizeEntries(PerDb::BinRecord* bin_record, DbSlice* db_slice);
 
   void Undo(PerDb::BinRecord* bin_record, DbSlice* db_slice);
 
@@ -241,8 +242,8 @@ void TieredStorage::InflightWriteRequest::Add(const PrimeKey& pk, const PrimeVal
   next_key_ += key_size;
 }
 
-unsigned TieredStorage::InflightWriteRequest::ExternalizeEntries(PerDb::BinRecord* bin_record,
-                                                                 DbSlice* db_slice) {
+std::pair<unsigned, unsigned> TieredStorage::InflightWriteRequest::ExternalizeEntries(
+    PerDb::BinRecord* bin_record, DbSlice* db_slice) {
   PrimeTable* pt = db_slice->GetTables(db_index_).first;
   DbTableStats* stats = db_slice->MutableStats(db_index_);
   unsigned externalized = 0;
@@ -261,7 +262,7 @@ unsigned TieredStorage::InflightWriteRequest::ExternalizeEntries(PerDb::BinRecor
 
   if (externalized <= entries_.size() / 2) {
     Undo(bin_record, db_slice);
-    return 0;
+    return {0, bin_size};
   }
 
   for (size_t i = 0; i < entries_.size(); ++i) {
@@ -279,7 +280,7 @@ unsigned TieredStorage::InflightWriteRequest::ExternalizeEntries(PerDb::BinRecor
     }
   }
 
-  return externalized;
+  return {externalized, bin_size};
 }
 
 void TieredStorage::InflightWriteRequest::Undo(PerDb::BinRecord* bin_record, DbSlice* db_slice) {
@@ -340,8 +341,8 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
     uint32_t offs_page = offset / kBlockLen;
     auto it = page_refcnt_.find(offs_page);
     CHECK(it != page_refcnt_.end()) << offs_page;
-    CHECK_GT(it->second, 0u);
-    if (--it->second == 0) {
+    CHECK_GT(it->second.first, 0u);
+    if (--it->second.first == 0) {
       alloc_.Free(offs_page * kBlockLen, kBlockLen);
       page_refcnt_.erase(it);
     }
@@ -361,45 +362,59 @@ size_t TieredStorage::GetBinSize(size_t blob_len) {
   return kSmallBins[bin_index];
 }
 
-void TieredStorage::Defrag(DbIndex db_index, PrimeIterator it) {
-  PrimeValue& entry = it->second;
-  CHECK(entry.IsExternal());
-  DCHECK_EQ(entry.ObjType(), OBJ_STRING);
-  auto [offset, len] = entry.GetExternalSlice();
+void TieredStorage::Defrag(DbIndex db_index) {
+  // start scanning from a random position in the ref_cnt_ table.
+  auto refcnt_it = std::next(std::begin(page_refcnt_), rand() % page_refcnt_.size());
 
-  if (offset % kBlockLen > 0) {
-    uint32_t offs_page = offset / kBlockLen;
-    auto refcnt_it = page_refcnt_.find(offs_page);
-
-    // check the utilization of the block.
-    size_t bin_size = GetBinSize(len);
+  for (unsigned int i = 0; i < num_pages_to_scan_; ++i) {
+    // check the utilization of the page.
+    size_t bin_size = refcnt_it->second.second;
     unsigned max_entries = NumEntriesInSmallBin(bin_size);
-    float bin_util = (float)(refcnt_it->second) / (float)max_entries;
-    float defrag_bin_util_threshold = 0.2;
+    float bin_util = (float)(refcnt_it->second.first) / (float)max_entries;
 
     // if bin is underutilized, start defragmentation.
-    if (bin_util < defrag_bin_util_threshold) {
+    if (bin_util < defrag_bin_util_threshold_) {
       // 1. retrieve all the hash values stored in this page.
-      size_t hash_section_len = max_entries * 8;
-      std::vector<char> hash_section(hash_section_len);
+      size_t hash_section_len = max_entries * kBytesPerHash;
+      std::vector<char> page(kBlockLen);
+      uint32_t offs_page = refcnt_it->first;
+      auto ec = Read(offs_page * kBlockLen, kBlockLen, &page[0]);
+      CHECK(!ec) << "Error when reading a page to be defragmented!";
 
-      auto ec = Read(offs_page * kBlockLen, hash_section_len, &hash_section[0]);
-      CHECK(!ec) << "Error when reading hash section of a page!";
-
-      // for each hash function
-      for (unsigned int i = 0; i < max_entries; ++i) {
-        uint64_t key_hash = absl::little_endian::Load64(&hash_section[i * 8]);
+      for (unsigned int j = 0; j < max_entries; ++j) {
+        uint64_t key_hash = absl::little_endian::Load64(&page[j * kBytesPerHash]);
         auto prime_it = db_slice_.GetDBTable(db_index)->prime.FindByHash(key_hash);
 
-        // if the key still exists, load the key into memory and reschedule
+        // if the key still exists, load the key into memory and reschedule offload
         if (!prime_it.is_done()) {
-          string tmp;
-          string_view key = prime_it->first.GetSlice(&tmp);
-          prime_it = Load(db_index, prime_it, key);
-          ScheduleOffload(db_index, prime_it);
+          PrimeValue* entry = &prime_it->second;
+          auto [offset, len] = entry->GetExternalSlice();
+          if (entry->IsExternal()) {
+            std::string value(page.data() + hash_section_len + j * bin_size, len);
+            auto* stats = db_slice_.MutableStats(db_index);
+            entry->SetString(value);
+            size_t heap_size = entry->MallocUsed();
+            stats->AddTypeMemoryUsage(entry->ObjType(), heap_size);
+            ScheduleOffload(db_index, prime_it);
+
+            bool has_expire = entry->HasExpire();
+            entry->Reset();
+            entry->SetExpire(has_expire);
+
+            stats->tiered_entries -= 1;
+            stats->tiered_size -= len;
+          }
         }
       }
+      // remove this entry from page_refcnt_
+      page_refcnt_.erase(refcnt_it);
+      alloc_.Free(offs_page * kBlockLen, kBlockLen);
+    } else {
+      ++refcnt_it;
     }
+
+    if (refcnt_it == std::end(page_refcnt_))
+      refcnt_it = std::begin(page_refcnt_);
   }
 }
 
@@ -430,9 +445,10 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
     ++stats_.aborted_write_cnt;
   } else {
     // Also removes the entries from bin_record.
-    uint16_t entries_serialized = req->ExternalizeEntries(&bin_record, &db_slice_);
+    std::pair<unsigned, unsigned> entries_serialized =
+        req->ExternalizeEntries(&bin_record, &db_slice_);
 
-    if (entries_serialized == 0) {  // aborted
+    if (entries_serialized.first == 0) {  // aborted
       ++stats_.aborted_write_cnt;
       alloc_.Free(req->page_index() * kBlockLen, kBlockLen);
     } else {  // succeeded.
