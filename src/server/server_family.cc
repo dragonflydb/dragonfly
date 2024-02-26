@@ -1940,16 +1940,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("PERSISTENCE", true)) {
-    auto save_info = GetLastSaveInfo();
-
-    // when last success save
-    append("last_success_save", save_info.save_time);
-    append("last_saved_file", save_info.file_name);
-    append("last_success_save_duration_sec", save_info.success_duration_sec);
-
-    size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
-    append("loading", is_loading);
-
+    size_t current_snap_keys = 0;
+    size_t total_snap_keys = 0;
+    double perc = 0;
     bool is_saving = false;
     uint32_t curent_durration_sec = 0;
     {
@@ -1957,9 +1950,27 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       if (save_controller_) {
         is_saving = true;
         curent_durration_sec = save_controller_->GetCurrentSaveDuration();
+        auto res = save_controller_->GetCurrentSnapshotProgress();
+        if (res.total_keys != 0) {
+          current_snap_keys = res.current_keys;
+          total_snap_keys = res.total_keys;
+          perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
+        }
       }
     }
 
+    append("current_snapshot_perc", perc);
+    append("current_save_keys_processed", current_snap_keys);
+    append("current_save_keys_total", total_snap_keys);
+
+    auto save_info = GetLastSaveInfo();
+    // when last success save
+    append("last_success_save", save_info.save_time);
+    append("last_saved_file", save_info.file_name);
+    append("last_success_save_duration_sec", save_info.success_duration_sec);
+
+    size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
+    append("loading", is_loading);
     append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
 

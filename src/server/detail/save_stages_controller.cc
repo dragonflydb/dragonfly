@@ -7,6 +7,8 @@
 
 #include <absl/strings/match.h>
 
+#include <numeric>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/detail/snapshot_storage.h"
@@ -129,6 +131,11 @@ size_t RdbSnapshot::GetSaveBuffersSize() {
   return saver_->GetTotalBuffersSize();
 }
 
+RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
+  CHECK(saver_);
+  return saver_->GetCurrentSnapshotProgress();
+}
+
 error_code RdbSnapshot::Close() {
 #ifdef __linux__
   if (is_linux_file_) {
@@ -200,6 +207,30 @@ size_t SaveStagesController::GetSaveBuffersSize() {
   }
 
   return total_bytes.load(memory_order_relaxed);
+}
+
+RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const {
+  if (snapshots_.size() == 0) {
+    return {0, 0};
+  }
+
+  std::vector<RdbSaver::SnapshotStats> results(snapshots_.size());
+  auto fetch = [this, &results](ShardId sid) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot) {
+      results[sid] = snapshot->GetCurrentSnapshotProgress();
+    }
+  };
+
+  if (use_dfs_format_) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) { fetch(es->shard_id()); });
+    RdbSaver::SnapshotStats init{0, 0};
+    return std::accumulate(
+        results.begin(), results.end(), init, [](auto init, auto pr) -> RdbSaver::SnapshotStats {
+          return {init.current_keys + pr.current_keys, init.total_keys + pr.total_keys};
+        });
+  }
+  fetch(0);
+  return results[0];
 }
 
 // In the new version (.dfs) we store a file for every shard and one more summary file.

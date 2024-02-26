@@ -182,6 +182,10 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
 
   PrimeTable::Cursor cursor;
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
+    stats_.keys_total += db_slice_->DbSize(db_indx);
+  }
+
+  for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     if (cll->IsCancelled())
       return;
 
@@ -358,6 +362,10 @@ size_t SliceSnapshot::GetTotalBufferCapacity() const {
 
 size_t SliceSnapshot::GetTotalChannelCapacity() const {
   return dest_->GetSize();
+}
+
+RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
+  return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total};
 }
 
 }  // namespace dfly
