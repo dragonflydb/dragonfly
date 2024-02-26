@@ -6,14 +6,14 @@ import redis
 import subprocess
 import time
 
-'''
+"""
 To install: pip install -r requirements.txt
-'''
+"""
 
 
 class Node:
     def __init__(self, port):
-        self.id = ''
+        self.id = ""
         self.port = port
         self.admin_port = port + 10_000
 
@@ -25,34 +25,42 @@ class Master:
 
 
 def start_node(node, threads):
-    f = open(f'/tmp/dfly.cluster.node.{node.port}.log', 'w')
-    print(
-        f'- Log file for node {node.port}: {f.name}')
-    subprocess.Popen(['../build-dbg/dragonfly', f'--port={node.port}',
-                      f'--admin_port={node.admin_port}', '--cluster_mode=yes', f'--proactor_threads={threads}',
-                      '--dbfilename=', f'--logtostderr'], stderr=f)
+    f = open(f"/tmp/dfly.cluster.node.{node.port}.log", "w")
+    print(f"- Log file for node {node.port}: {f.name}")
+    subprocess.Popen(
+        [
+            "../build-opt/dragonfly",
+            f"--port={node.port}",
+            f"--admin_port={node.admin_port}",
+            "--cluster_mode=yes",
+            f"--proactor_threads={threads}",
+            "--dbfilename=",
+            f"--logtostderr",
+            "--proactor_affinity_mode=off",
+        ],
+        stderr=f,
+    )
 
 
 def send_command(node, command):
-    client = redis.Redis(decode_responses=True,
-                         host="localhost", port=node.admin_port)
+    client = redis.Redis(decode_responses=True, host="localhost", port=node.admin_port)
 
     for i in range(0, 5):
         try:
             result = client.execute_command(*command)
             client.close()
             return result
-        except:
+        except Exception as e:
+            print(e)
             time.sleep(0.1 * i)
 
-    print(
-        f'Unable to connect to localhost:{node.admin_port} after 5 attempts!')
+    print(f"Unable to run command {command} against localhost:{node.admin_port} after 5 attempts!")
 
 
 def update_id(node):
-    id = send_command(node, ['dflycluster', 'myid'])
+    id = send_command(node, ["dflycluster", "myid"])
     node.id = id
-    print(f'- ID for {node.port}: {id}')
+    print(f"- ID for {node.port}: {id}")
 
 
 def build_config_from_list(masters):
@@ -60,23 +68,14 @@ def build_config_from_list(masters):
     slots_per_node = math.floor(total_slots / len(masters))
 
     def build_node(node):
-        return {
-            "id": node.id,
-            "ip": "localhost",
-            "port": node.port
-        }
+        return {"id": node.id, "ip": "localhost", "port": node.port}
 
     config = []
     for i, master in enumerate(masters):
         c = {
-            "slot_ranges": [
-                {
-                    "start": i * slots_per_node,
-                    "end": (i+1) * slots_per_node - 1
-                }
-            ],
+            "slot_ranges": [{"start": i * slots_per_node, "end": (i + 1) * slots_per_node - 1}],
             "master": build_node(master.node),
-            "replicas": [build_node(replica) for replica in master.replicas]
+            "replicas": [build_node(replica) for replica in master.replicas],
         }
 
         config.append(c)
@@ -97,19 +96,18 @@ def get_nodes_from_config(config):
 def push_config(config):
     def push_to_node(node, config):
         config_str = json.dumps(config, indent=2)
-        response = send_command(node, ['dflycluster', 'config', config_str])
-        print(f'- Push to {node.port}: {response}')
+        response = send_command(node, ["dflycluster", "config", config_str])
+        print(f"- Push to {node.port}: {response}")
 
     for node in get_nodes_from_config(config):
         push_to_node(node, config)
 
 
 def create(args):
-    print(f'Setting up a Dragonfly cluster:')
-    print(f'- Master nodes: {args.num_masters}')
-    print(
-        f'- Ports: {args.first_port}...{args.first_port + args.num_masters - 1}')
-    print(f'- Replicas for each master: {args.replicas_per_master}')
+    print(f"Setting up a Dragonfly cluster:")
+    print(f"- Master nodes: {args.num_masters}")
+    print(f"- Ports: {args.first_port}...{args.first_port + args.num_masters - 1}")
+    print(f"- Replicas for each master: {args.replicas_per_master}")
     print()
 
     next_port = args.first_port
@@ -129,28 +127,26 @@ def create(args):
         for replica in master.replicas:
             nodes.append(replica)
 
-    print('Starting nodes...')
+    print("Starting nodes...")
     for node in nodes:
         start_node(node, args.threads)
     print()
 
     if args.replicas_per_master > 0:
-        print('Configuring replication...')
+        print("Configuring replication...")
         for master in masters:
             for replica in master.replicas:
-                response = send_command(
-                    replica, ['replicaof', 'localhost', master.node.port])
-                print(
-                    f'- {replica.port} replicating {master.node.port}: {response}')
+                response = send_command(replica, ["replicaof", "localhost", master.node.port])
+                print(f"- {replica.port} replicating {master.node.port}: {response}")
         print()
 
-    print(f'Getting IDs...')
+    print(f"Getting IDs...")
     for n in nodes:
         update_id(n)
     print()
 
     config = build_config_from_list(masters)
-    print(f'Pushing config:\n{config}\n')
+    print(f"Pushing config:\n{config}\n")
     push_config(config)
     print()
 
@@ -161,49 +157,44 @@ def build_config_from_existing(args):
 
     def build_node(node_list):
         d = list_to_dict(node_list)
-        return {
-            "id": d["id"],
-            "ip": d["endpoint"],
-            "port": d["port"]
-        }
+        return {"id": d["id"], "ip": d["endpoint"], "port": d["port"]}
 
     def build_slots(slot_list):
         slots = []
         for i in range(0, len(slot_list), 2):
-            slots.append(
-                {
-                    "start": slot_list[i],
-                    "end": slot_list[i+1]
-                }
-            )
+            slots.append({"start": slot_list[i], "end": slot_list[i + 1]})
         return slots
 
-    client = redis.Redis(decode_responses=True,
-                         host="localhost", port=args.first_port)
+    client = redis.Redis(decode_responses=True, host="localhost", port=args.first_port)
     existing = client.execute_command("cluster", "shards")
     config = []
     for shard_list in existing:
         shard = list_to_dict(shard_list)
-        config.append({
-            "slot_ranges": build_slots(shard["slots"]),
-            "master": build_node(shard["nodes"][0]),
-            "replicas": [build_node(replica) for replica in shard["nodes"][1::]]
-        })
+        config.append(
+            {
+                "slot_ranges": build_slots(shard["slots"]),
+                "master": build_node(shard["nodes"][0]),
+                "replicas": [build_node(replica) for replica in shard["nodes"][1::]],
+            }
+        )
     return config
+
+
+def find_node(config, port):
+    new_owner = None
+    for shard in config:
+        if shard["master"]["port"] == port:
+            new_owner = shard
+            break
+    else:
+        print(f"Can't find master with port {port} (hint: use flag --target_port).")
+        exit(-1)
+    return new_owner
 
 
 def move(args):
     config = build_config_from_existing(args)
-
-    new_owner = None
-    for shard in config:
-        if shard["master"]["port"] == args.target_port:
-            new_owner = shard
-            break
-    else:
-        print(
-            f"Can't find master with port {args.target_port} (hint: use flag --target_port).")
-        exit(-1)
+    new_owner = find_node(config, args.target_port)
 
     def remove_slot(slot, from_range, from_shard):
         if from_range["start"] == slot:
@@ -215,10 +206,10 @@ def move(args):
             if from_range["start"] > from_range["end"]:
                 from_shard["slot_ranges"].remove(from_range)
         else:
-            assert slot > from_range["start"] and slot < from_range[
-                "end"], f'{slot} {from_range["start"]} {from_range["end"]}'
-            from_shard["slot_ranges"].append(
-                {"start": slot + 1, "end": from_range["end"]})
+            assert (
+                slot > from_range["start"] and slot < from_range["end"]
+            ), f'{slot} {from_range["start"]} {from_range["end"]}'
+            from_shard["slot_ranges"].append({"start": slot + 1, "end": from_range["end"]})
             from_range["end"] = slot - 1
 
     def add_slot(slot, to_shard):
@@ -262,7 +253,7 @@ def move(args):
                 break
         return new_range
 
-    for slot in range(args.slot_start, args.slot_end+1):
+    for slot in range(args.slot_start, args.slot_end + 1):
         shard, slot_range = find_slot(slot, config)
         if shard == None:
             continue
@@ -274,8 +265,55 @@ def move(args):
     for shard in config:
         shard["slot_ranges"] = pack(shard["slot_ranges"])
 
-    print(f'Pushing new config:\n{json.dumps(config, indent=2)}\n')
+    print(f"Pushing new config:\n{json.dumps(config, indent=2)}\n")
     push_config(config)
+
+
+def migrate(args):
+    config = build_config_from_existing(args)
+    target = find_node(config, args.target_port)
+    target_node = Node(target["master"]["port"])
+
+    # Find source node
+    source = None
+    for node in config:
+        slots = node["slot_ranges"]
+        for slot in slots:
+            if slot["start"] >= args.slot_start and slot["end"] <= args.slot_end:
+                source = node
+                break
+    if source == None:
+        print("Unsupported slot range migration (currently only 1-node migration supported)")
+        exit(-1)
+    source_node = Node(source["master"]["port"])
+
+    # do migration
+    sync_id = send_command(
+        target_node,
+        [
+            "DFLYCLUSTER",
+            "START-SLOT-MIGRATION",
+            "127.0.0.1",
+            source["master"]["port"] + 10_000,
+            args.slot_start,
+            args.slot_end,
+        ],
+    )
+
+    # wait for migration finish
+    sync_status = []
+    while True:
+        sync_status = send_command(target_node, ["DFLYCLUSTER", "SLOT-MIGRATION-STATUS"])
+        assert len(sync_status) == 1
+        if sync_status[0].endswith("STABLE_SYNC"):
+            break
+
+    print("Reached stable sync: ", sync_status)
+    res = send_command(source_node, ["DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", sync_id])
+    assert res == "OK"
+
+    # Push new config to all nodes
+    move(args)
 
 
 def print_config(args):
@@ -290,7 +328,8 @@ def shutdown(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='''
+    parser = argparse.ArgumentParser(
+        description="""
 Local Cluster Manager
 
 Example usage:
@@ -306,30 +345,43 @@ Connect to cluster and shutdown all nodes:
 
 Connect to cluster and move slots 10-20 to master with port 7002:
   ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --new_owner=7002
-''')
-    parser.add_argument('--action', default='',
-                        help='Which action to take? create: start a new instance, move=move slots')
-    parser.add_argument('--num_masters', type=int, default=3,
-                        help='Number of master nodes in cluster')
-    parser.add_argument('--replicas_per_master', type=int, default=0,
-                        help='How many replicas for each master')
-    parser.add_argument('--first_port', type=int,
-                        default=7001, help="First master's port")
-    parser.add_argument('--threads', type=int, default=2,
-                        help="Threads per node")
-    parser.add_argument('--slot_start', type=int,
-                        default=0, help="First slot to move (inclusive)")
-    parser.add_argument('--slot_end', type=int,
-                        default=100, help="Last slot to move (inclusive)")
-    parser.add_argument('--target_port', type=int, default=0,
-                        help="Master port to take ownership over slots in range "
-                        "[--slot_start, --slot_end]")
+
+Migrate slots 10-20 to master with port 7002
+  ./cluster_mgr.py --action=migrate --slot_start=10 --slot_end=20 --new_owner=7002
+"""
+    )
+    parser.add_argument(
+        "--action",
+        default="",
+        help="Which action to take? create: start a new instance, move=move slots",
+    )
+    parser.add_argument(
+        "--num_masters", type=int, default=3, help="Number of master nodes in cluster"
+    )
+    parser.add_argument(
+        "--replicas_per_master", type=int, default=0, help="How many replicas for each master"
+    )
+    parser.add_argument("--first_port", type=int, default=7001, help="First master's port")
+    parser.add_argument("--threads", type=int, default=2, help="Threads per node")
+    parser.add_argument("--slot_start", type=int, default=0, help="First slot to move (inclusive)")
+    parser.add_argument("--slot_end", type=int, default=100, help="Last slot to move (inclusive)")
+    parser.add_argument(
+        "--target_port",
+        type=int,
+        default=0,
+        help="Master port to take ownership over slots in range " "[--slot_start, --slot_end]",
+    )
     args = parser.parse_args()
 
-    actions = {'create': create, 'shutdown': shutdown,
-               'move': move, 'print': print_config}
+    actions = {
+        "create": create,
+        "shutdown": shutdown,
+        "move": move,
+        "print": print_config,
+        "migrate": migrate,
+    }
     action = actions.get(args.action.lower())
-    if (action):
+    if action:
         action(args)
     else:
         print(f'Error - unknown action "{args.action}"')

@@ -233,12 +233,10 @@ class Transaction {
   void StartMultiGlobal(DbIndex dbid);
 
   // Start multi in LOCK_AHEAD mode with given keys.
-  void StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys);
+  void StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys, bool skip_scheduling = false);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
-
-  void InitTxTime();
 
   // Report which shards had write commands that executed on stub transactions
   // and thus did not mark itself in MultiData::shard_journal_write.
@@ -249,6 +247,12 @@ class Transaction {
 
   // Set new command for multi transaction.
   void MultiSwitchCmd(const CommandId* cid);
+
+  // Copy txid, time and unique slot from parent
+  void MultiUpdateWithParent(const Transaction* parent);
+
+  // Set squasher role
+  void MultiBecomeSquasher();
 
   // Returns locking arguments needed for DbSlice to Acquire/Release transactional locks.
   // Runs in the shard thread.
@@ -297,6 +301,14 @@ class Transaction {
     return multi_->mode;
   }
 
+  // Whether the transaction is multi and runs in an atomic mode.
+  // This, instead of just IsMulti(), should be used to check for the possibility of
+  // different optimizations, because they can safely be applied to non-atomic multi
+  // transactions as well.
+  bool IsAtomicMulti() const {
+    return multi_ && (multi_->mode == LOCK_AHEAD || multi_->mode == GLOBAL);
+  }
+
   bool IsGlobal() const;
 
   // If blocking tx was woken up on this shard, get wake key.
@@ -342,6 +354,9 @@ class Transaction {
   // Send journal EXEC opcode after a series of MULTI commands on the currently active shard
   void FIX_ConcludeJournalExec();
 
+  // Print in-dept failure state for debugging.
+  std::string DEBUG_PrintFailState(ShardId sid) const;
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
@@ -370,8 +385,13 @@ class Transaction {
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;
 
+    // Irrational stats purely for debugging purposes.
+    struct Stats {
+      unsigned total_runs = 0;  // total number of runs
+    } stats;
+
     // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
-    char pad[64 - 4 * sizeof(uint32_t)];
+    char pad[64 - 4 * sizeof(uint32_t) - sizeof(Stats)];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
@@ -389,12 +409,14 @@ class Transaction {
     // Set if the multi command is concluding to avoid ambiguity with COORD_CONCLUDING
     bool concluding = false;
 
+    unsigned cmd_seq_num = 0;  // used for debugging purposes.
+
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
     // executing multi-command. For every write to a shard journal, the corresponding index in the
     // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
-    unsigned cmd_seq_num = 0;  // used for debugging purposes.
+    unsigned shard_journal_cnt;
   };
 
   enum CoordinatorState : uint8_t {
@@ -507,8 +529,13 @@ class Transaction {
   // Run callback inline as part of multi stub.
   OpStatus RunSquashedMultiCb(RunnableType cb);
 
-  void UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys, EngineShard* shard,
-                          uint32_t shard_journals_cnt);
+  // Set time_now_ms_
+  void InitTxTime();
+
+  // If journaling is enabled, report final exec opcode to finish the chain of commands.
+  void MultiReportJournalOnShard(EngineShard* shard) const;
+
+  void UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys, EngineShard* shard);
 
   // In a multi-command transaction, we determine the number of shard journals that we wrote entries
   // to by updating the shard_journal_write vector during command execution. The total number of
@@ -523,14 +550,6 @@ class Transaction {
 
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
-  }
-
-  // Whether the transaction is multi and runs in an atomic mode.
-  // This, instead of just IsMulti(), should be used to check for the possibility of
-  // different optimizations, because they can safely be applied to non-atomic multi
-  // transactions as well.
-  bool IsAtomicMulti() const {
-    return multi_ && multi_->mode != NON_ATOMIC;
   }
 
   bool IsActiveMulti() const {
@@ -614,6 +633,12 @@ class Transaction {
   // Result of callbacks. Usually written by single shard only, lock below for multishard oom error
   OpStatus local_result_ = OpStatus::OK;
   absl::base_internal::SpinLock local_result_mu_;
+
+  // Stats purely for debugging purposes
+  struct Stats {
+    size_t schedule_attempts = 0;
+    ShardId coordinator_index = 0;
+  } stats_;
 
  private:
   struct TLTmpSpace {

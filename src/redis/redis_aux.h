@@ -1,7 +1,6 @@
 #ifndef __REDIS_AUX_H
 #define __REDIS_AUX_H
 
-#include "dict.h"
 #include "sds.h"
 
 /* redis.h auxiliary definitions */
@@ -36,10 +35,6 @@
 
 #define CONFIG_RUN_ID_SIZE 40U
 
-/* Hash table types */
-extern dictType setDictType;
-extern dictType hashDictType;
-
 /* To improve the quality of the LRU approximation we take a set of keys
  * that are good candidate for eviction across performEvictions() calls.
  *
@@ -52,6 +47,7 @@ extern dictType hashDictType;
  *
  * Empty entries have the key pointer set to NULL. */
 
+typedef struct dict dict;
 
 uint64_t dictSdsHash(const void* key);
 int dictSdsKeyCompare(dict* privdata, const void* key1, const void* key2);
@@ -80,6 +76,33 @@ extern Server server;
 
 void InitRedisTables();
 
-typedef struct redisObject robj;
+const char *strEncoding(int encoding);
+
+
+/* The actual Redis Object */
+#define OBJ_STRING 0U    /* String object. */
+#define OBJ_LIST 1U      /* List object. */
+#define OBJ_SET 2U       /* Set object. */
+#define OBJ_ZSET 3U      /* Sorted set object. */
+#define OBJ_HASH 4U      /* Hash object. */
+#define OBJ_MODULE 5U    /* Module object. */
+#define OBJ_STREAM 6U    /* Stream object. */
+
+/* Objects encoding. Some kind of objects like Strings and Hashes can be
+ * internally represented in multiple ways. The 'encoding' field of the object
+ * is set to one of this fields for this object. */
+#define OBJ_ENCODING_RAW 0U     /* Raw representation */
+#define OBJ_ENCODING_INT 1U     /* Encoded as integer */
+#define OBJ_ENCODING_HT 2U      /* Encoded as hash table */
+#define OBJ_ENCODING_ZIPMAP 3U  /* Encoded as zipmap */
+#define OBJ_ENCODING_LINKEDLIST 4U /* No longer used: old list encoding. */
+#define OBJ_ENCODING_ZIPLIST 5U /* Encoded as ziplist */
+#define OBJ_ENCODING_INTSET 6U  /* Encoded as intset */
+#define OBJ_ENCODING_SKIPLIST 7U  /* Encoded as skiplist */
+#define OBJ_ENCODING_EMBSTR 8U  /* Embedded sds string encoding */
+#define OBJ_ENCODING_QUICKLIST 9U /* Encoded as linked list of ziplists */
+#define OBJ_ENCODING_STREAM 10U /* Encoded as a radix tree of listpacks */
+#define OBJ_ENCODING_LISTPACK 11 /* Encoded as a listpack */
+#define OBJ_ENCODING_COMPRESS_INTERNAL 15U  /* Kept as lzf compressed, to pass compressed blob to another thread */
 
 #endif /* __REDIS_AUX_H */

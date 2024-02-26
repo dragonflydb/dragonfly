@@ -74,7 +74,8 @@ template <typename T> T CmdArgParser::Num(size_t idx) {
 
 template float CmdArgParser::Num<float>(size_t);
 template double CmdArgParser::Num<double>(size_t);
-template uint64_t CmdArgParser::Num<uint64_t>(size_t);
+template unsigned long CmdArgParser::Num<unsigned long>(size_t);
+template unsigned long long CmdArgParser::Num<unsigned long long>(size_t);
 template int64_t CmdArgParser::Num<int64_t>(size_t);
 template uint32_t CmdArgParser::Num<uint32_t>(size_t);
 template int32_t CmdArgParser::Num<int32_t>(size_t);

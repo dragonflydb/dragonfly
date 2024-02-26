@@ -276,6 +276,9 @@ TEST_F(JsonFamilyTest, Toggle) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(R"([true,false,1,null,"foo",[],{}])", resp);
+
   resp = Run({"JSON.TOGGLE", "json", "$.*"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(),

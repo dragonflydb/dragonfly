@@ -4,10 +4,6 @@
 
 #include "server/string_family.h"
 
-extern "C" {
-#include "redis/object.h"
-}
-
 #include <absl/container/inlined_vector.h>
 
 #include <algorithm>

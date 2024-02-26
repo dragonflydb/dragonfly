@@ -9,6 +9,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/detail/snapshot_storage.h"
 #include "server/main_service.h"
 #include "server/script_mgr.h"
 #include "server/transaction.h"
@@ -124,13 +125,16 @@ error_code RdbSnapshot::SaveBody() {
 }
 
 size_t RdbSnapshot::GetSaveBuffersSize() {
+  CHECK(saver_);
   return saver_->GetTotalBuffersSize();
 }
 
 error_code RdbSnapshot::Close() {
+#ifdef __linux__
   if (is_linux_file_) {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
   }
+#endif
   return static_cast<io::WriteFile*>(io_sink_.get())->Close();
 }
 
@@ -147,55 +151,54 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 SaveStagesController::~SaveStagesController() {
 }
 
-GenericError SaveStagesController::Save() {
-  if (auto err = BuildFullPath(); err)
-    return err;
+std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
+  if (auto err = BuildFullPath(); err) {
+    shared_err_ = err;
+    return GetSaveInfo();
+  }
 
-  if (auto err = InitResources(); err)
-    return err;
+  InitResources();
 
-  // The stages below report errors to shared_err_
   if (use_dfs_format_)
     SaveDfs();
   else
     SaveRdb();
 
-  is_saving_->store(true, memory_order_relaxed);
-  {
-    lock_guard lk{*save_mu_};
-    *save_bytes_cb_ = [this]() { return GetSaveBuffersSize(); };
-  }
+  return {};
+}
 
+void SaveStagesController::WaitAllSnapshots() {
   RunStage(&SaveStagesController::SaveCb);
-  {
-    lock_guard lk{*save_mu_};
-    *save_bytes_cb_ = nullptr;
-  }
+}
 
-  is_saving_->store(false, memory_order_relaxed);
-
+SaveInfo SaveStagesController::Finalize() {
   RunStage(&SaveStagesController::CloseCb);
 
   FinalizeFileMovement();
 
-  UpdateSaveInfo();
-
-  return *shared_err_;
+  return GetSaveInfo();
 }
 
 size_t SaveStagesController::GetSaveBuffersSize() {
   std::atomic<size_t> total_bytes{0};
-  if (use_dfs_format_) {
-    auto cb = [this, &total_bytes](ShardId sid) {
-      total_bytes.fetch_add(snapshots_[sid].first->GetSaveBuffersSize(), memory_order_relaxed);
-    };
-    shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
 
-  } else {
-    // When rdb format save is running, there is only one rdb saver instance, it is running on the
-    // connection thread that runs the save command.
-    total_bytes.store(snapshots_.front().first->GetSaveBuffersSize(), memory_order_relaxed);
+  auto add_snapshot_bytes = [this, &total_bytes](ShardId sid) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot && snapshot->HasStarted()) {
+      total_bytes.fetch_add(snapshot->GetSaveBuffersSize(), memory_order_relaxed);
+    }
+  };
+
+  if (snapshots_.size() > 0) {
+    if (use_dfs_format_) {
+      shard_set->RunBriefInParallel([&](EngineShard* es) { add_snapshot_bytes(es->shard_id()); });
+
+    } else {
+      // When rdb format save is running, there is only one rdb saver instance, it is running on the
+      // connection thread that runs the save command.
+      add_snapshot_bytes(0);
+    }
   }
+
   return total_bytes.load(memory_order_relaxed);
 }
 
@@ -264,14 +267,18 @@ void SaveStagesController::SaveRdb() {
   trans_->ScheduleSingleHop(std::move(cb));
 }
 
-void SaveStagesController::UpdateSaveInfo() {
-  auto seconds = (absl::Now() - start_time_) / absl::Seconds(1);
+uint32_t SaveStagesController::GetCurrentSaveDuration() {
+  return (absl::Now() - start_time_) / absl::Seconds(1);
+}
+
+SaveInfo SaveStagesController::GetSaveInfo() {
+  SaveInfo info;
+  info.save_time = absl::ToUnixSeconds(start_time_);
+  info.duration_sec = GetCurrentSaveDuration();
+
   if (shared_err_) {
-    lock_guard lk{*save_mu_};
-    last_save_info_->last_error = *shared_err_;
-    last_save_info_->last_error_time = absl::ToUnixSeconds(start_time_);
-    last_save_info_->failed_duration_sec = seconds;
-    return;
+    info.error = *shared_err_;
+    return info;
   }
 
   fs::path resulting_path = full_path_;
@@ -281,23 +288,22 @@ void SaveStagesController::UpdateSaveInfo() {
     resulting_path.replace_extension();  // remove .tmp
 
   LOG(INFO) << "Saving " << resulting_path << " finished after "
-            << strings::HumanReadableElapsedTime(seconds);
+            << strings::HumanReadableElapsedTime(info.duration_sec);
 
-  lock_guard lk{*save_mu_};
-  last_save_info_->freq_map.clear();
+  info.freq_map.clear();
   for (const auto& k_v : rdb_name_map_) {
-    last_save_info_->freq_map.emplace_back(k_v);
+    info.freq_map.emplace_back(k_v);
   }
-  last_save_info_->save_time = absl::ToUnixSeconds(start_time_);
-  last_save_info_->file_name = resulting_path.generic_string();
-  last_save_info_->success_duration_sec = seconds;
+
+  info.file_name = resulting_path.generic_string();
+
+  return info;
 }
 
-GenericError SaveStagesController::InitResources() {
+void SaveStagesController::InitResources() {
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
     snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
-  return {};
 }
 
 // Remove .tmp extension or delete files in case of error
@@ -348,9 +354,11 @@ void SaveStagesController::CloseCb(unsigned index) {
   if (auto& snapshot = snapshots_[index].first; snapshot) {
     shared_err_ = snapshot->Close();
 
-    lock_guard lk{rdb_name_map_mu_};
+    unique_lock lk{rdb_name_map_mu_};
     for (const auto& k_v : snapshot->freq_map())
       rdb_name_map_[RdbTypeName(k_v.first)] += k_v.second;
+    lk.unlock();
+    snapshot.reset();
   }
 
   if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)

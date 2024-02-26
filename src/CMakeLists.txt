@@ -119,6 +119,14 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  flatbuffers
+  URL https://github.com/google/flatbuffers/archive/refs/tags/v23.5.26.tar.gz
+  CMAKE_PASS_FLAGS "-DFLATBUFFERS_BUILD_TESTS=OFF -DFLATBUFFERS_LIBCXX_WITH_CLANG=OFF
+                    -DFLATBUFFERS_BUILD_FLATC=OFF"
+)
+
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
@@ -140,7 +148,6 @@ set_target_properties(TRDP::fast_float PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
-
 
 option(ENABLE_GIT_VERSION "Build with Git metadata" OFF)
 
@@ -187,8 +194,6 @@ endfunction()
 
 # the output file resides in the build directory.
 configure_file(server/version.cc.in "${CMAKE_CURRENT_SOURCE_DIR}/server/version.cc" @ONLY)
-
-add_definitions(-DUSE_FB2)
 
 add_subdirectory(redis)
 add_subdirectory(core)

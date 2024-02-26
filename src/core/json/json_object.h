@@ -10,6 +10,8 @@
 #include <optional>
 #include <string_view>
 
+#include "base/pmr/memory_resource.h"
+
 namespace dfly {
 
 // This is temporary, there is an issue right now with jsoncons about using jsonpath
@@ -18,7 +20,7 @@ namespace dfly {
 using JsonType = jsoncons::pmr::json;
 
 // Build a json object from string. If the string is not legal json, will return nullopt
-std::optional<JsonType> JsonFromString(std::string_view input);
+std::optional<JsonType> JsonFromString(std::string_view input, PMR_NS::memory_resource* mr);
 
 inline auto MakeJsonPathExpr(std::string_view path, std::error_code& ec)
     -> jsoncons::jsonpath::jsonpath_expression<JsonType> {

@@ -122,9 +122,13 @@ class TieredStorage {
  public:
   static constexpr size_t kMinBlobLen = size_t(-1);  // infinity.
 
-  explicit TieredStorage(DbSlice* db_slice) {
+  TieredStorage(DbSlice* db_slice, size_t max_file_size) {
   }
   ~TieredStorage() {
+  }
+
+  static bool CanExternalizeEntry(PrimeIterator it) {
+    return false;
   }
 
   std::error_code Open(const std::string& path) {
@@ -135,19 +139,35 @@ class TieredStorage {
     return {};
   }
 
+  PrimeIterator Load(DbIndex db_index, PrimeIterator it, std::string_view key) {
+    return {};
+  }
+
   // Schedules unloading of the item, pointed by the iterator.
   std::error_code ScheduleOffload(DbIndex db_index, PrimeIterator it) {
     return {};
   }
 
+  IoMgrStats GetDiskStats() const {
+    return IoMgrStats{};
+  }
+
+  void CancelAllIos(DbIndex db_index) {
+  }
+
   void CancelIo(DbIndex db_index, PrimeIterator it) {
   }
 
-  static bool EligibleForOffload(std::string_view val) {
+  static bool EligibleForOffload(size_t) {
     return false;
   }
 
-  void Free(size_t offset, size_t len) {
+  std::error_code ScheduleOffloadWithThrottle(DbIndex db_index, PrimeIterator it,
+                                              std::string_view key) {
+    return {};
+  }
+
+  void Free(PrimeIterator it, DbTableStats* stats) {
   }
 
   void Shutdown() {

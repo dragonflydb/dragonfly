@@ -24,7 +24,7 @@ MATCHER_P(NodeMatches, expected, "") {
 class ClusterConfigTest : public ::testing::Test {
  protected:
   JsonType ParseJson(string_view json_str) {
-    optional<JsonType> opt_json = JsonFromString(json_str);
+    optional<JsonType> opt_json = JsonFromString(json_str, PMR_NS::get_default_resource());
     CHECK(opt_json.has_value());
     return opt_json.value();
   }
@@ -88,7 +88,7 @@ TEST_F(ClusterConfigTest, ConfigSetOk) {
   EXPECT_NE(config, nullptr);
   EXPECT_THAT(config->GetMasterNodeForSlot(0),
               NodeMatches(Node{.id = "other", .ip = "192.168.0.100", .port = 7000}));
-  EXPECT_THAT(config->GetOwnedSlots(), UnorderedElementsAre());
+  EXPECT_TRUE(config->GetOwnedSlots().Empty());
 }
 
 TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
@@ -114,14 +114,15 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
                .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}}}});
   EXPECT_NE(config, nullptr);
   SlotSet owned_slots = config->GetOwnedSlots();
-  EXPECT_EQ(owned_slots.size(), 5'000);
+  EXPECT_EQ(owned_slots.ToSlotRanges().size(), 1);
+  EXPECT_EQ(owned_slots.Count(), 5'000);
 
   {
     for (int i = 0; i <= 5'000; ++i) {
       EXPECT_THAT(config->GetMasterNodeForSlot(i),
                   NodeMatches(Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000}));
       EXPECT_FALSE(config->IsMySlot(i));
-      EXPECT_FALSE(owned_slots.contains(i));
+      EXPECT_FALSE(owned_slots.Contains(i));
     }
   }
   {
@@ -129,7 +130,7 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
       EXPECT_THAT(config->GetMasterNodeForSlot(i),
                   NodeMatches(Node{.id = kMyId, .ip = "192.168.0.102", .port = 7002}));
       EXPECT_TRUE(config->IsMySlot(i));
-      EXPECT_TRUE(owned_slots.contains(i));
+      EXPECT_TRUE(owned_slots.Contains(i));
     }
   }
   {
@@ -137,7 +138,7 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
       EXPECT_THAT(config->GetMasterNodeForSlot(i),
                   NodeMatches(Node{.id = "other-master3", .ip = "192.168.0.104", .port = 7004}));
       EXPECT_FALSE(config->IsMySlot(i));
-      EXPECT_FALSE(owned_slots.contains(i));
+      EXPECT_FALSE(owned_slots.Contains(i));
     }
   }
 }

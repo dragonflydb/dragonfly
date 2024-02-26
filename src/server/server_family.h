@@ -12,6 +12,7 @@
 #include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "server/channel_store.h"
+#include "server/detail/save_stages_controller.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
 #include "server/server_state.h"
@@ -105,6 +106,12 @@ struct Metrics {
 
 struct LastSaveInfo {
   // last success save info
+  void SetLastSaveError(const detail::SaveInfo& save_info) {
+    last_error = save_info.error;
+    last_error_time = save_info.save_time;
+    failed_duration_sec = save_info.duration_sec;
+  }
+
   time_t save_time = 0;  // epoch time in seconds.
   uint32_t success_duration_sec = 0;
   std::string file_name;                                      //
@@ -173,9 +180,7 @@ class ServerFamily {
   // future with error_code.
   util::fb2::Future<GenericError> Load(const std::string& file_name);
 
-  bool IsSaving() const {
-    return is_saving_.load(std::memory_order_relaxed);
-  }
+  bool TEST_IsSaving() const;
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
@@ -282,13 +287,7 @@ class ServerFamily {
   time_t start_time_ = 0;  // in seconds, epoch time.
 
   LastSaveInfo last_save_info_ ABSL_GUARDED_BY(save_mu_);
-  std::atomic_bool is_saving_{false};
-  // this field duplicate SaveStagesController::start_save_time_
-  // TODO make SaveStagesController as member of this class
-  std::optional<absl::Time> start_save_time_;
-  // If a save operation is currently in progress, calling this function will provide information
-  // about the memory consumption during the save operation.
-  std::function<size_t()> save_bytes_cb_ = nullptr;
+  std::unique_ptr<detail::SaveStagesController> save_controller_ ABSL_GUARDED_BY(save_mu_);
 
   // Used to override save on shutdown behavior that is usually set
   // be --dbfilename.

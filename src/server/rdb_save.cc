@@ -10,13 +10,13 @@
 #include <lz4frame.h>
 #include <zstd.h>
 
-#include <jsoncons/json.hpp>
 #include <queue>
 
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
+#include "redis/quicklist.h"
 #include "redis/rdb.h"
 #include "redis/stream.h"
 #include "redis/util.h"
@@ -27,7 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/json_object.h"
+#include "core/json/json_object.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -372,7 +372,7 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   CHECK_NE(obj_type, OBJ_STRING);
 
   if (obj_type == OBJ_LIST) {
-    return SaveListObject(pv.AsRObj());
+    return SaveListObject(pv);
   }
 
   if (obj_type == OBJ_SET) {
@@ -388,7 +388,7 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   }
 
   if (obj_type == OBJ_STREAM) {
-    return SaveStreamObject(pv.AsRObj());
+    return SaveStreamObject(pv);
   }
 
   if (obj_type == OBJ_JSON) {
@@ -399,10 +399,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   return make_error_code(errc::function_not_supported);
 }
 
-error_code RdbSerializer::SaveListObject(const robj* obj) {
+error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   /* Save a list value */
-  DCHECK_EQ(OBJ_ENCODING_QUICKLIST, obj->encoding);
-  const quicklist* ql = reinterpret_cast<const quicklist*>(obj->ptr);
+  DCHECK_EQ(OBJ_ENCODING_QUICKLIST, pv.Encoding());
+  const quicklist* ql = reinterpret_cast<const quicklist*>(pv.RObjPtr());
   quicklistNode* node = ql->head;
   DVLOG(2) << "Saving list of length " << ql->len;
 
@@ -451,21 +451,7 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
 }
 
 error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
-  if (obj.Encoding() == kEncodingStrMap) {
-    dict* set = (dict*)obj.RObjPtr();
-
-    RETURN_ON_ERR(SaveLen(dictSize(set)));
-
-    dictIterator* di = dictGetIterator(set);
-    dictEntry* de;
-    auto cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
-
-    while ((de = dictNext(di)) != NULL) {
-      sds ele = (sds)de->key;
-
-      RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
-    }
-  } else if (obj.Encoding() == kEncodingStrMap2) {
+  if (obj.Encoding() == kEncodingStrMap2) {
     StringSet* set = (StringSet*)obj.RObjPtr();
 
     RETURN_ON_ERR(SaveLen(set->SizeSlow()));
@@ -552,9 +538,9 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveStreamObject(const robj* obj) {
+error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
   /* Store how many listpacks we have inside the radix tree. */
-  stream* s = (stream*)obj->ptr;
+  stream* s = (stream*)pv.RObjPtr();
   rax* rax = s->rax_tree;
 
   RETURN_ON_ERR(SaveLen(raxSize(rax)));

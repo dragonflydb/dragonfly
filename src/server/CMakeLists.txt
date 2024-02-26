@@ -13,8 +13,12 @@ endif()
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
-if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc)
+
+    add_executable(dfly_bench dfly_bench.cc)
+    cxx_link(dfly_bench dfly_facade fibers2 absl::random_random)
+    cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
 
@@ -65,7 +69,7 @@ cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib jsonpath
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
-         TRDP::croncpp)
+         TRDP::croncpp TRDP::flatbuffers)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
@@ -74,6 +78,7 @@ endif()
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
+
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(multi_test dfly_test_lib LABELS DFLY)
@@ -91,7 +96,6 @@ cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
-cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)

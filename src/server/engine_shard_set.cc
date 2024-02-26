@@ -7,7 +7,6 @@
 #include <absl/strings/match.h>
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/zmalloc.h"
 }
 #include <sys/statvfs.h>

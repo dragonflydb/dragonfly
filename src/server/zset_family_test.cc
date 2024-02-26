@@ -222,6 +222,7 @@ TEST_F(ZSetFamilyTest, ByLex) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool"));
 
   EXPECT_EQ(3, CheckedInt({"ZLEXCOUNT", "key", "(foo", "+"}));
+  EXPECT_EQ(0, CheckedInt({"ZLEXCOUNT", "key", "(foo", "[fop"}));
   EXPECT_EQ(3, CheckedInt({"ZREMRANGEBYLEX", "key", "(foo", "+"}));
 
   resp = Run({"zrangebylex", "key", "[a", "+"});

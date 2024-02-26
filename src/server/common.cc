@@ -11,7 +11,6 @@
 #include <system_error>
 
 extern "C" {
-#include "redis/object.h"
 #include "redis/rdb.h"
 #include "redis/util.h"
 }
@@ -76,8 +75,6 @@ const char* GlobalStateName(GlobalState s) {
       return "ACTIVE";
     case GlobalState::LOADING:
       return "LOADING";
-    case GlobalState::SAVING:
-      return "SAVING";
     case GlobalState::SHUTTING_DOWN:
       return "SHUTTING DOWN";
     case GlobalState::TAKEN_OVER:
@@ -101,7 +98,7 @@ const char* ObjTypeName(int type) {
     case OBJ_STREAM:
       return "stream";
     case OBJ_JSON:
-      return "ReJSON-RL";
+      return "rejson-rl";
     default:
       LOG(ERROR) << "Unsupported type " << type;
   }

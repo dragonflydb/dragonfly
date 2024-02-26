@@ -7,9 +7,7 @@
 
 #include <filesystem>
 
-#include "server/detail/snapshot_storage.h"
 #include "server/rdb_save.h"
-#include "server/server_family.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 
 namespace dfly {
@@ -19,16 +17,22 @@ class Service;
 
 namespace detail {
 
+class SnapshotStorage;
+
+struct SaveInfo {
+  time_t save_time = 0;  // epoch time in seconds.
+  uint32_t duration_sec = 0;
+  std::string file_name;
+  std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
+  GenericError error;
+};
+
 struct SaveStagesInputs {
   bool use_dfs_format_;
   std::string_view basename_;
   Transaction* trans_;
   Service* service_;
-  std::atomic_bool* is_saving_;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
-  LastSaveInfo* last_save_info_ ABSL_GUARDED_BY(save_mu_);
-  util::fb2::Mutex* save_mu_;
-  std::function<size_t()>* save_bytes_cb_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
 };
 
@@ -45,7 +49,7 @@ class RdbSnapshot {
   error_code Close();
   size_t GetSaveBuffersSize();
 
-  const RdbTypeFreqMap freq_map() const {
+  const RdbTypeFreqMap& freq_map() const {
     return freq_map_;
   }
 
@@ -67,10 +71,23 @@ class RdbSnapshot {
 
 struct SaveStagesController : public SaveStagesInputs {
   SaveStagesController(SaveStagesInputs&& input);
+  // Objects of this class are used concurrently. Call this function
+  // in a mutually exlusive context to avoid data races.
+  // Also call this function before any call to `WaitAllSnapshots`
+  // Returns empty optional on success and SaveInfo on failure
+  std::optional<SaveInfo> InitResourcesAndStart();
 
   ~SaveStagesController();
 
-  GenericError Save();
+  // Safe to call and no locks required
+  void WaitAllSnapshots();
+
+  // Same semantics as InitResourcesAndStart. Must be used in a mutually exclusive
+  // context. Call this function after you `WaitAllSnapshots`to finalize the chore.
+  // Performs cleanup of the object internally.
+  SaveInfo Finalize();
+  size_t GetSaveBuffersSize();
+  uint32_t GetCurrentSaveDuration();
 
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.
@@ -83,9 +100,9 @@ struct SaveStagesController : public SaveStagesInputs {
   // Save a single rdb file
   void SaveRdb();
 
-  void UpdateSaveInfo();
+  SaveInfo GetSaveInfo();
 
-  GenericError InitResources();
+  void InitResources();
 
   // Remove .tmp extension or delete files in case of error
   void FinalizeFileMovement();
@@ -101,8 +118,6 @@ struct SaveStagesController : public SaveStagesInputs {
   void CloseCb(unsigned index);
 
   void RunStage(void (SaveStagesController::*cb)(unsigned));
-
-  size_t GetSaveBuffersSize();
 
  private:
   absl::Time start_time_;

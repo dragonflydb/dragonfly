@@ -125,21 +125,21 @@ async def test_dbfilenames(
 
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron", "snapshot_cron": "* * * * *"})
-async def test_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
+async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     file = None
     with async_timeout.timeout(65):
         while file is None:
             await asyncio.sleep(1)
-            file = find_main_file(tmp_path, "test-cron-summary.dfs")
+            file = find_main_file(tmp_dir, "test-cron-summary.dfs")
 
-    assert file is not None, os.listdir(tmp_path)
+    assert file is not None, os.listdir(tmp_dir)
 
 
 @pytest.mark.slow
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-cron-set"})
-async def test_set_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
+async def test_set_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     await async_client.config_set("snapshot_cron", "* * * * *")
@@ -148,7 +148,7 @@ async def test_set_cron_snapshot(tmp_path: Path, async_client: aioredis.Redis):
     with async_timeout.timeout(65):
         while file is None:
             await asyncio.sleep(1)
-            file = find_main_file(tmp_path, "test-cron-set-summary.dfs")
+            file = find_main_file(tmp_dir, "test-cron-set-summary.dfs")
 
     assert file is not None
 
@@ -333,3 +333,26 @@ class TestDflySnapshotOnShutdown:
         await self._delete_all_keys(async_client)
         memory_empty = await self._get_info_memory_fields(async_client)
         assert memory_empty == {"object_used_memory": 0}
+
+
+@pytest.mark.parametrize("format", FILE_FORMATS)
+@dfly_args({**BASIC_ARGS, "dbfilename": "info-while-snapshot"})
+async def test_infomemory_while_snapshoting(async_client: aioredis.Redis, format: str):
+    await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
+
+    async def save():
+        await async_client.execute_command("SAVE", format)
+
+    save_finished = False
+
+    async def info_in_loop():
+        while not save_finished:
+            await async_client.execute_command("INFO MEMORY")
+            await asyncio.sleep(0.1)
+
+    save_task = asyncio.create_task(save())
+    info_task = asyncio.create_task(info_in_loop())
+
+    await save_task
+    save_finished = True
+    await info_task
