@@ -789,14 +789,15 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
-  config_registry.Register("dbnum");       // equivalent to databases in redis.
-  config_registry.RegisterMutable("dir");  // TODO: to add validation for dir
+  config_registry.Register("dbnum");  // equivalent to databases in redis.
+  config_registry.Register("dir");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
   config_registry.RegisterMutable("enable_heartbeat_eviction");
+  config_registry.RegisterMutable("dbfilename");
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
