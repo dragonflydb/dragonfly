@@ -63,7 +63,7 @@ jobs:
       run: env
 
     - name: checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
@@ -71,7 +71,7 @@ jobs:
       uses: azure/setup-helm@v3
 
     - name: Setup Go
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
 
     - name: Configure Git
       if: env.IS_PRERELEASE != 'true'

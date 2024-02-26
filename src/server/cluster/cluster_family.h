@@ -76,14 +76,12 @@ class ClusterFamily {
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
   // create a ClusterSlotMigration entity which will execute migration
-  ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port,
-                                     std::vector<ClusterConfig::SlotRange> slots);
+  ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port, SlotRanges slots);
 
   void RemoveFinishedIncomingMigrations();
 
   // store info about migration and create unique session id
-  uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
-                                   std::vector<ClusterConfig::SlotRange> slots);
+  uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port, SlotRanges slots);
 
   std::shared_ptr<OutgoingMigration> GetOutgoingMigration(uint32_t sync_id);
 

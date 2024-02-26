@@ -137,9 +137,11 @@ RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
 }
 
 error_code RdbSnapshot::Close() {
+#ifdef __linux__
   if (is_linux_file_) {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
   }
+#endif
   return static_cast<io::WriteFile*>(io_sink_.get())->Close();
 }
 
@@ -156,7 +158,7 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 SaveStagesController::~SaveStagesController() {
 }
 
-SaveInfo SaveStagesController::Save() {
+std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();
@@ -169,8 +171,14 @@ SaveInfo SaveStagesController::Save() {
   else
     SaveRdb();
 
-  RunStage(&SaveStagesController::SaveCb);
+  return {};
+}
 
+void SaveStagesController::WaitAllSnapshots() {
+  RunStage(&SaveStagesController::SaveCb);
+}
+
+SaveInfo SaveStagesController::Finalize() {
   RunStage(&SaveStagesController::CloseCb);
 
   FinalizeFileMovement();

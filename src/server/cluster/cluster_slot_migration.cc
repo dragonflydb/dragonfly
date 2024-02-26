@@ -41,7 +41,7 @@ atomic_uint32_t next_local_sync_id{1};
 }  // namespace
 
 ClusterSlotMigration::ClusterSlotMigration(ClusterFamily* cl_fm, string host_ip, uint16_t port,
-                                           Service* se, std::vector<ClusterConfig::SlotRange> slots)
+                                           Service* se, SlotRanges slots)
     : ProtocolClient(std::move(host_ip), port),
       cluster_family_(cl_fm),
       service_(*se),
@@ -144,8 +144,6 @@ void ClusterSlotMigration::MainMigrationFb() {
 
   if (IsFinalized()) {
     state_ = MigrationState::C_FINISHED;
-
-    const auto added_slots = ToSlotSet(slots_);
 
     auto cmd = absl::StrCat("DFLYMIGRATE ACK ", sync_id_);
     VLOG(1) << "send " << cmd;

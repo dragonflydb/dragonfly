@@ -642,8 +642,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
         cntx_->SendError(end.status());
         return nullopt;
       }
-      options.slot_range = ClusterConfig::SlotRange{.start = static_cast<SlotId>(start.value()),
-                                                    .end = static_cast<SlotId>(end.value())};
+      options.slot_range = SlotRange{.start = static_cast<SlotId>(start.value()),
+                                     .end = static_cast<SlotId>(end.value())};
 
     } else {
       cntx_->SendError(kSyntaxErr);

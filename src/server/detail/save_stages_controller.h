@@ -73,10 +73,21 @@ class RdbSnapshot {
 
 struct SaveStagesController : public SaveStagesInputs {
   SaveStagesController(SaveStagesInputs&& input);
+  // Objects of this class are used concurrently. Call this function
+  // in a mutually exlusive context to avoid data races.
+  // Also call this function before any call to `WaitAllSnapshots`
+  // Returns empty optional on success and SaveInfo on failure
+  std::optional<SaveInfo> InitResourcesAndStart();
 
   ~SaveStagesController();
 
-  SaveInfo Save();
+  // Safe to call and no locks required
+  void WaitAllSnapshots();
+
+  // Same semantics as InitResourcesAndStart. Must be used in a mutually exclusive
+  // context. Call this function after you `WaitAllSnapshots`to finalize the chore.
+  // Performs cleanup of the object internally.
+  SaveInfo Finalize();
   size_t GetSaveBuffersSize();
   uint32_t GetCurrentSaveDuration();
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;

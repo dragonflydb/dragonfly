@@ -79,10 +79,19 @@ MP::Result ParseValueless(TokensView tokens, MP::Command* res) {
     }
     ++key_pos;
   }
+
+  // We support only `flushall` or `flushall 0`
+  if (key_pos < num_tokens && res->type == MP::FLUSHALL) {
+    int delay = 0;
+    if (key_pos + 1 == num_tokens && absl::SimpleAtoi(tokens[key_pos], &delay) && delay == 0)
+      return MP::OK;
+    return MP::PARSE_ERROR;
+  }
+
   res->key = tokens[key_pos++];
 
-  if (key_pos < num_tokens && base::_in(res->type, {MP::STATS, MP::FLUSHALL}))
-    return MP::PARSE_ERROR;  // we do not support additional arguments for now.
+  if (key_pos < num_tokens && res->type == MP::STATS)
+    return MP::PARSE_ERROR;  // we don't support additional arguments to stats for now
 
   if (res->type == MP::INCR || res->type == MP::DECR) {
     if (key_pos == num_tokens)

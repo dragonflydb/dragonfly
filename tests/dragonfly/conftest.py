@@ -15,6 +15,7 @@ import pymemcache
 import random
 import subprocess
 import shutil
+import time
 from copy import deepcopy
 
 from pathlib import Path
@@ -251,9 +252,13 @@ def port_picker():
     yield PortPicker()
 
 
-@pytest.fixture(scope="class")
-def memcached_connection(df_server: DflyInstance):
-    return pymemcache.Client(f"localhost:{df_server.mc_port}")
+@pytest.fixture(scope="function")
+def memcached_client(df_server: DflyInstance):
+    client = pymemcache.Client(f"localhost:{df_server.mc_port}", default_noreply=False)
+
+    yield client
+
+    client.flush_all()
 
 
 @pytest.fixture(scope="session")
