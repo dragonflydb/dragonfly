@@ -1240,7 +1240,6 @@ void DbSlice::ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes
 
 void DbSlice::DefragSecondTierStep(DbIndex db_indx) {
   DCHECK(shard_owner()->tiered_storage());
-  FiberAtomicGuard guard;
   shard_owner()->tiered_storage()->Defrag(db_indx);
 }
 
