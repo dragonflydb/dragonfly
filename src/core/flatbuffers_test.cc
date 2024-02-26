@@ -2,10 +2,9 @@
 // See LICENSE for licensing terms.
 //
 
+#include "core/flatbuffers.h"
+
 #include <absl/strings/escaping.h>
-#include <flatbuffers/flatbuffers.h>
-#include <flatbuffers/flexbuffers.h>
-#include <flatbuffers/idl.h>
 
 #include "base/gtest.h"
 #include "base/logging.h"

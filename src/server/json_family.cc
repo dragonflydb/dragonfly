@@ -7,8 +7,6 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
-#include <flatbuffers/flexbuffers.h>
-#include <flatbuffers/idl.h>
 
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
@@ -17,6 +15,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "facade/cmd_arg_parser.h"

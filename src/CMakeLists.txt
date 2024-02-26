@@ -119,6 +119,14 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  flatbuffers
+  URL https://github.com/google/flatbuffers/archive/refs/tags/v23.5.26.tar.gz
+  CMAKE_PASS_FLAGS "-DFLATBUFFERS_BUILD_TESTS=OFF -DFLATBUFFERS_LIBCXX_WITH_CLANG=OFF
+                    -DFLATBUFFERS_BUILD_FLATC=OFF"
+)
+
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
@@ -140,20 +148,6 @@ set_target_properties(TRDP::fast_float PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${FAST_FLOAT_INCLUDE_DIR}")
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
-
-find_package(Flatbuffers)
-if (TARGET flatbuffers::flatbuffers)
-    get_target_property(FLATBUF_PATH flatbuffers::flatbuffers LOCATION)
-    set(FLATBUF_TARGET flatbuffers::flatbuffers)
-    Message("-- Flatbuffers found at ${FLATBUF_PATH}")
-elseif (TARGET flatbuffers::flatbuffers_shared)
-    # alpine linux has shared library
-    get_target_property(FLATBUF_PATH flatbuffers::flatbuffers_shared LOCATION)
-    set(FLATBUF_TARGET flatbuffers::flatbuffers_shared)
-    Message("-- Flatbuffers found at ${FLATBUF_PATH}")
-else()
-    Message("-- Flatbuffers not found, please install via libflatbuffers-dev")
-endif()
 
 option(ENABLE_GIT_VERSION "Build with Git metadata" OFF)
 
