@@ -105,8 +105,10 @@ nonstd::expected<json::Path, string> ParsePath(string_view path) {
 }
 
 unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
-  if (path.empty())
-    return 0;
+  if (path.empty()) {
+    callback(nullopt, json);
+    return 1;
+  }
 
   detail::Dfs dfs;
   dfs.Mutate(path, callback, json);
