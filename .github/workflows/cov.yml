@@ -27,7 +27,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - name: Install dependencies
@@ -38,7 +38,7 @@ jobs:
           apt update && apt install -y lcov pip
       - name: Cache build deps
         id: cache-deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.ccache
@@ -78,7 +78,7 @@ jobs:
           echo ls covout
           ls covout/
       - name: Upload coverage
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: build/covout/

@@ -36,6 +36,7 @@ def start_node(node, threads):
             f"--proactor_threads={threads}",
             "--dbfilename=",
             f"--logtostderr",
+            "--proactor_affinity_mode=off",
         ],
         stderr=f,
     )

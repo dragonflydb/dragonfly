@@ -50,7 +50,11 @@
 #elif defined(__APPLE__)
 #include <malloc/malloc.h>
 #define HAVE_MALLOC_SIZE 1
+#ifdef USE_ZMALLOC_MI
+#define zmalloc_size(p) zmalloc_usable_size(p)
+#else
 #define zmalloc_size(p) malloc_size(p)
+#endif
 #define ZMALLOC_LIB "macos"
 #endif
 

@@ -7,6 +7,8 @@
 
 #include <absl/strings/match.h>
 
+#include <numeric>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/detail/snapshot_storage.h"
@@ -125,13 +127,21 @@ error_code RdbSnapshot::SaveBody() {
 }
 
 size_t RdbSnapshot::GetSaveBuffersSize() {
+  CHECK(saver_);
   return saver_->GetTotalBuffersSize();
 }
 
+RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
+  CHECK(saver_);
+  return saver_->GetCurrentSnapshotProgress();
+}
+
 error_code RdbSnapshot::Close() {
+#ifdef __linux__
   if (is_linux_file_) {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
   }
+#endif
   return static_cast<io::WriteFile*>(io_sink_.get())->Close();
 }
 
@@ -148,7 +158,7 @@ SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
 SaveStagesController::~SaveStagesController() {
 }
 
-SaveInfo SaveStagesController::Save() {
+std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
   if (auto err = BuildFullPath(); err) {
     shared_err_ = err;
     return GetSaveInfo();
@@ -161,8 +171,14 @@ SaveInfo SaveStagesController::Save() {
   else
     SaveRdb();
 
-  RunStage(&SaveStagesController::SaveCb);
+  return {};
+}
 
+void SaveStagesController::WaitAllSnapshots() {
+  RunStage(&SaveStagesController::SaveCb);
+}
+
+SaveInfo SaveStagesController::Finalize() {
   RunStage(&SaveStagesController::CloseCb);
 
   FinalizeFileMovement();
@@ -172,18 +188,49 @@ SaveInfo SaveStagesController::Save() {
 
 size_t SaveStagesController::GetSaveBuffersSize() {
   std::atomic<size_t> total_bytes{0};
-  if (use_dfs_format_) {
-    auto cb = [this, &total_bytes](ShardId sid) {
-      total_bytes.fetch_add(snapshots_[sid].first->GetSaveBuffersSize(), memory_order_relaxed);
-    };
-    shard_set->RunBriefInParallel([&](EngineShard* es) { cb(es->shard_id()); });
 
-  } else {
-    // When rdb format save is running, there is only one rdb saver instance, it is running on the
-    // connection thread that runs the save command.
-    total_bytes.store(snapshots_.front().first->GetSaveBuffersSize(), memory_order_relaxed);
+  auto add_snapshot_bytes = [this, &total_bytes](ShardId sid) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot && snapshot->HasStarted()) {
+      total_bytes.fetch_add(snapshot->GetSaveBuffersSize(), memory_order_relaxed);
+    }
+  };
+
+  if (snapshots_.size() > 0) {
+    if (use_dfs_format_) {
+      shard_set->RunBriefInParallel([&](EngineShard* es) { add_snapshot_bytes(es->shard_id()); });
+
+    } else {
+      // When rdb format save is running, there is only one rdb saver instance, it is running on the
+      // connection thread that runs the save command.
+      add_snapshot_bytes(0);
+    }
   }
+
   return total_bytes.load(memory_order_relaxed);
+}
+
+RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const {
+  if (snapshots_.size() == 0) {
+    return {0, 0};
+  }
+
+  std::vector<RdbSaver::SnapshotStats> results(snapshots_.size());
+  auto fetch = [this, &results](ShardId sid) {
+    if (auto& snapshot = snapshots_[sid].first; snapshot) {
+      results[sid] = snapshot->GetCurrentSnapshotProgress();
+    }
+  };
+
+  if (use_dfs_format_) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) { fetch(es->shard_id()); });
+    RdbSaver::SnapshotStats init{0, 0};
+    return std::accumulate(
+        results.begin(), results.end(), init, [](auto init, auto pr) -> RdbSaver::SnapshotStats {
+          return {init.current_keys + pr.current_keys, init.total_keys + pr.total_keys};
+        });
+  }
+  fetch(0);
+  return results[0];
 }
 
 // In the new version (.dfs) we store a file for every shard and one more summary file.

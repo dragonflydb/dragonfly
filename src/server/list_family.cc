@@ -22,10 +22,6 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/transaction.h"
 
-/* List related stuff */
-#define LIST_HEAD 0
-#define LIST_TAIL 1
-
 /**
  * The number of entries allowed per internal list node can be specified
  * as a fixed maximum size or a maximum number of elements.
@@ -79,6 +75,8 @@ quicklist* GetQL(const PrimeValue& mv) {
 void* listPopSaver(unsigned char* data, size_t sz) {
   return new string((char*)data, sz);
 }
+
+enum InsertParam { INSERT_BEFORE, INSERT_AFTER };
 
 string ListPop(ListDir dir, quicklist* ql) {
   long long vlong;
@@ -544,7 +542,7 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
 }
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
-                       int insert_param) {
+                       InsertParam insert_param) {
   auto& db_slice = op_args.shard->db_slice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
@@ -564,10 +562,10 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
 
   int res = -1;
   if (found) {
-    if (insert_param == LIST_TAIL) {
+    if (insert_param == INSERT_AFTER) {
       quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
     } else {
-      DCHECK_EQ(LIST_HEAD, insert_param);
+      DCHECK_EQ(INSERT_BEFORE, insert_param);
       quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
     }
     res = quicklistCount(ql);
@@ -1042,13 +1040,13 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   string_view param = ArgS(args, 1);
   string_view pivot = ArgS(args, 2);
   string_view elem = ArgS(args, 3);
-  int where;
+  InsertParam where;
 
   ToUpper(&args[1]);
   if (param == "AFTER") {
-    where = LIST_TAIL;
+    where = INSERT_AFTER;
   } else if (param == "BEFORE") {
-    where = LIST_HEAD;
+    where = INSERT_BEFORE;
   } else {
     return cntx->SendError(kSyntaxErr);
   }

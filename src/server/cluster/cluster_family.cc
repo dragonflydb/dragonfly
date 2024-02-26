@@ -37,7 +37,6 @@ using CI = CommandId;
 using ClusterShard = ClusterConfig::ClusterShard;
 using ClusterShards = ClusterConfig::ClusterShards;
 using Node = ClusterConfig::Node;
-using SlotRange = ClusterConfig::SlotRange;
 
 constexpr char kIdNotFound[] = "syncid not found";
 
@@ -419,21 +418,11 @@ void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
 }
 
 namespace {
-SlotSet GetDeletedSlots(bool is_first_config, const SlotSet& before, const SlotSet& after) {
-  SlotSet result;
-  for (SlotId id = 0; id <= ClusterConfig::kMaxSlotNum; ++id) {
-    if ((before.contains(id) || is_first_config) && !after.contains(id)) {
-      result.insert(id);
-    }
-  }
-  return result;
-}
-
 // Guards set configuration, so that we won't handle 2 in parallel.
 Mutex set_config_mu;
 
 void DeleteSlots(const SlotSet& slots) {
-  if (slots.empty()) {
+  if (slots.Empty()) {
     return;
   }
 
@@ -448,16 +437,17 @@ void DeleteSlots(const SlotSet& slots) {
 }
 
 void WriteFlushSlotsToJournal(const SlotSet& slots) {
-  if (slots.empty()) {
+  if (slots.Empty()) {
     return;
   }
 
   // Build args
   vector<string> args;
-  args.reserve(slots.size() + 1);
+  args.reserve(slots.Count() + 1);
   args.push_back("FLUSHSLOTS");
-  for (const SlotId slot : slots) {
-    args.push_back(absl::StrCat(slot));
+  for (SlotId slot = 0; slot <= SlotSet::kMaxSlot; ++slot) {
+    if (slots.Contains(slot))
+      args.push_back(absl::StrCat(slot));
   }
 
   // Build view
@@ -510,12 +500,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
-  bool is_first_config = true;
-  SlotSet before;
-  if (tl_cluster_config != nullptr) {
-    is_first_config = false;
-    before = tl_cluster_config->GetOwnedSlots();
-  }
+  SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
 
   // Ignore blocked commands because we filter them with CancelBlockingOnThread
   DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
@@ -544,7 +529,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
-    auto deleted_slots = GetDeletedSlots(is_first_config, before, after);
+    auto deleted_slots = before.GetRemovedSlots(after);
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
@@ -601,13 +586,12 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 
 void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx) {
   SlotSet slots;
-  slots.reserve(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
     unsigned slot;
     if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
       return cntx->SendError(kSyntaxErrType);
     }
-    slots.insert(static_cast<SlotId>(slot));
+    slots.Set(static_cast<SlotId>(slot), true);
   }
 
   DeleteSlots(slots);
@@ -714,7 +698,6 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
   }
 
   // TODO implement blocking on migrated slots only
-  [[maybe_unused]] const auto deleted_slots = ToSlotSet(migration->GetSlots());
 
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
@@ -761,7 +744,7 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
 }
 
 ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
-                                                  std::vector<ClusterConfig::SlotRange> slots) {
+                                                  SlotRanges slots) {
   lock_guard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
@@ -787,7 +770,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   auto port = parser.Next<uint16_t>();
 
-  std::vector<ClusterConfig::SlotRange> slots;
+  SlotRanges slots;
   do {
     auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
     slots.emplace_back(SlotRange{slot_start, slot_end});
@@ -821,7 +804,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
 }
 
 uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
-                                                std::vector<ClusterConfig::SlotRange> slots) {
+                                                SlotRanges slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
   auto err_handler = [](const GenericError& err) {

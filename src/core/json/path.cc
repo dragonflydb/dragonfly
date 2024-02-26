@@ -365,8 +365,9 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
       if (segment.index() >= node->size()) {
         return make_unexpected(OUT_OF_BOUNDS);
       }
-      if (Mutate(cb, nullopt, &node[segment.index()])) {
-        node->erase(node->array_range().begin() + segment.index());
+      auto it = node->array_range().begin() + segment.index();
+      if (Mutate(cb, nullopt, &*it)) {
+        node->erase(it);
       }
     } break;
 
@@ -432,8 +433,10 @@ JsonType PathSegment::GetResult() const {
 }
 
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback) {
-  if (path.empty())
+  if (path.empty()) {  // root node
+    callback(nullopt, json);
     return;
+  }
 
   if (path.front().type() != SegmentType::FUNCTION) {
     Dfs().Traverse(path, json, std::move(callback));
@@ -473,10 +476,12 @@ nonstd::expected<json::Path, string> ParsePath(string_view path) {
   return driver.TakePath();
 }
 
-void MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
+unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
   if (path.empty())
-    return;
-  Dfs().Mutate(path, callback, json);
+    return 0;
+  Dfs dfs;
+  dfs.Mutate(path, callback, json);
+  return dfs.matches();
 }
 
 }  // namespace dfly::json

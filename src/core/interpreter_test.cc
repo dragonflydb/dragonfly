@@ -472,4 +472,11 @@ TEST_F(InterpreterTest, Log) {
   EXPECT_EQ("nil", ser_.res);
 }
 
+TEST_F(InterpreterTest, Robust) {
+  EXPECT_FALSE(Execute(R"(eval "local a = {}
+      setmetatable(a,{__index=function() foo() end})
+      return a")"));
+  EXPECT_EQ("", ser_.res);
+}
+
 }  // namespace dfly

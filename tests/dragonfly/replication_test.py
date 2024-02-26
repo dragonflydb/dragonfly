@@ -1862,8 +1862,8 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     try:
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         assert False
-    except aioredis.ResponseError as e:
-        assert "Can not execute during LOADING" in str(e)
+    except aioredis.BusyLoadingError as e:
+        assert "Dragonfly is loading the dataset in memory" in str(e)
     # Check one we finish loading snapshot replicaof success
     await wait_available_async(c_replica)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")

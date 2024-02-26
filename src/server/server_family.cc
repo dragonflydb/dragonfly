@@ -1306,19 +1306,29 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
         new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
+
+    auto res = save_controller_->InitResourcesAndStart();
+
+    if (res) {
+      DCHECK_EQ(res->error, true);
+      last_save_info_.SetLastSaveError(*res);
+      save_controller_.reset();
+      return res->error;
+    }
   }
 
-  detail::SaveInfo save_info = save_controller_->Save();
+  save_controller_->WaitAllSnapshots();
+  detail::SaveInfo save_info;
 
   {
     std::lock_guard lk(save_mu_);
+    save_info = save_controller_->Finalize();
 
     if (save_info.error) {
-      last_save_info_.last_error = save_info.error;
-      last_save_info_.last_error_time = save_info.save_time;
-      last_save_info_.failed_duration_sec = save_info.duration_sec;
+      last_save_info_.SetLastSaveError(save_info);
     } else {
       last_save_info_.save_time = save_info.save_time;
       last_save_info_.success_duration_sec = save_info.duration_sec;
@@ -1930,16 +1940,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("PERSISTENCE", true)) {
-    auto save_info = GetLastSaveInfo();
-
-    // when last success save
-    append("last_success_save", save_info.save_time);
-    append("last_saved_file", save_info.file_name);
-    append("last_success_save_duration_sec", save_info.success_duration_sec);
-
-    size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
-    append("loading", is_loading);
-
+    size_t current_snap_keys = 0;
+    size_t total_snap_keys = 0;
+    double perc = 0;
     bool is_saving = false;
     uint32_t curent_durration_sec = 0;
     {
@@ -1947,9 +1950,27 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       if (save_controller_) {
         is_saving = true;
         curent_durration_sec = save_controller_->GetCurrentSaveDuration();
+        auto res = save_controller_->GetCurrentSnapshotProgress();
+        if (res.total_keys != 0) {
+          current_snap_keys = res.current_keys;
+          total_snap_keys = res.total_keys;
+          perc = (static_cast<double>(current_snap_keys) / total_snap_keys) * 100;
+        }
       }
     }
 
+    append("current_snapshot_perc", perc);
+    append("current_save_keys_processed", current_snap_keys);
+    append("current_save_keys_total", total_snap_keys);
+
+    auto save_info = GetLastSaveInfo();
+    // when last success save
+    append("last_success_save", save_info.save_time);
+    append("last_saved_file", save_info.file_name);
+    append("last_success_save_duration_sec", save_info.success_duration_sec);
+
+    size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
+    append("loading", is_loading);
     append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
 
@@ -2196,7 +2217,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
 
   // We should not execute replica of command while loading from snapshot.
   if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
-    cntx->SendError("Can not execute during LOADING");
+    cntx->SendError(kLoadingErr);
     return;
   }
 

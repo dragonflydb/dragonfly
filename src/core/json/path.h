@@ -95,7 +95,9 @@ using PathCallback = absl::FunctionRef<void(std::optional<std::string_view>, con
 using MutateCallback = absl::FunctionRef<bool(std::optional<std::string_view>, JsonType*)>;
 
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback);
-void MutatePath(const Path& path, MutateCallback callback, JsonType* json);
+
+// returns number of matches found with the given path.
+unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json);
 nonstd::expected<Path, std::string> ParsePath(std::string_view path);
 
 }  // namespace dfly::json

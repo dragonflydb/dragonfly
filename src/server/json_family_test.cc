@@ -276,6 +276,9 @@ TEST_F(JsonFamilyTest, Toggle) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(R"([true,false,1,null,"foo",[],{}])", resp);
+
   resp = Run({"JSON.TOGGLE", "json", "$.*"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(),
@@ -360,8 +363,11 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   resp = Run({"JSON.NUMINCRBY", "json", "$.d[*]", "1"});
   EXPECT_EQ(resp, "[2,3,4]");
 
+  resp = Run({"JSON.NUMINCRBY", "json", "$.d[2]", "1"});
+  EXPECT_EQ(resp, "[5]");
+
   resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([[],[2],[2,3],[2,3,4]])");
+  EXPECT_EQ(resp, R"([[],[2],[2,3],[2,3,5]])");
 
   json = R"(
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
@@ -510,7 +516,11 @@ TEST_F(JsonFamilyTest, Del) {
   EXPECT_EQ(resp, R"({"a":{},"b":{"a":1},"c":{"a":1,"b":2},"d":{},"e":[]})");
 
   resp = Run({"JSON.DEL", "json", "$..*"});
-  EXPECT_THAT(resp, IntArg(8));
+
+  // TODO: legacy jsoncons implementation returns, 8 but in practive it should return 5.
+  // redis-stack returns 5 as well.
+  // Once we drop jsoncons path, we can enforce here equality.
+  EXPECT_GE(resp.GetInt(), 5);
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"({})");
