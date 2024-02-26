@@ -388,31 +388,34 @@ void TieredStorage::Defrag(DbIndex db_index) {
         // if the key still exists, load the key into memory and reschedule offload
         if (!prime_it.is_done()) {
           PrimeValue* entry = &prime_it->second;
-          auto [offset, len] = entry->GetExternalSlice();
           if (entry->IsExternal()) {
-            std::string value(page.data() + hash_section_len + j * bin_size, len);
-            auto* stats = db_slice_.MutableStats(db_index);
-            entry->SetString(value);
-            size_t heap_size = entry->MallocUsed();
-            stats->AddTypeMemoryUsage(entry->ObjType(), heap_size);
-            ScheduleOffload(db_index, prime_it);
+            auto [offset, len] = entry->GetExternalSlice();
+            // there might be hash collision, so we need to check
+            // if the offset is actually for the current page.
+            if (offset / kBlockLen == offs_page) {
+              std::string value(page.data() + hash_section_len + j * bin_size, len);
+              auto* stats = db_slice_.MutableStats(db_index);
+              entry->SetString(value);
+              size_t heap_size = entry->MallocUsed();
+              stats->AddTypeMemoryUsage(entry->ObjType(), heap_size);
+              ScheduleOffload(db_index, prime_it);
 
-            bool has_expire = entry->HasExpire();
-            entry->Reset();
-            entry->SetExpire(has_expire);
+              bool has_expire = entry->HasExpire();
+              entry->Reset();
+              entry->SetExpire(has_expire);
 
-            stats->tiered_entries -= 1;
-            stats->tiered_size -= len;
+              stats->tiered_entries -= 1;
+              stats->tiered_size -= len;
+            }
           }
         }
       }
       // remove this entry from page_refcnt_
-      page_refcnt_.erase(refcnt_it);
+      auto refcnt_it_erase = refcnt_it;
+      page_refcnt_.erase(refcnt_it_erase);
       alloc_.Free(offs_page * kBlockLen, kBlockLen);
-    } else {
-      ++refcnt_it;
     }
-
+    ++refcnt_it;
     if (refcnt_it == std::end(page_refcnt_))
       refcnt_it = std::begin(page_refcnt_);
   }
