@@ -78,7 +78,9 @@ class ClusterFamily {
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port, SlotRanges slots);
 
-  void RemoveFinishedIncomingMigrations();
+  bool StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
+                           ConnectionContext* cntx);
+  void RemoveFinishedMigrations();
 
   // store info about migration and create unique session id
   uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port, SlotRanges slots);
