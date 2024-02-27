@@ -57,7 +57,8 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
                 kMyId, {{.slot_ranges = {{.start = 0, .end = 16000}},
                          .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-                         .replicas = {}}}),
+                         .replicas = {},
+                         .migrations = {}}}),
             nullptr);
 }
 
@@ -65,10 +66,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
                 kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
                          .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-                         .replicas = {}},
+                         .replicas = {},
+                         .migrations = {}},
                         {.slot_ranges = {{.start = 0, .end = 0}},
                          .master = {.id = "other2", .ip = "192.168.0.101", .port = 7001},
-                         .replicas = {}}}),
+                         .replicas = {},
+                         .migrations = {}}}),
             nullptr);
 }
 
@@ -76,7 +79,8 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidSlotId) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
                 kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF + 1}},
                          .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-                         .replicas = {}}}),
+                         .replicas = {},
+                         .migrations = {}}}),
             nullptr);
 }
 
@@ -84,7 +88,8 @@ TEST_F(ClusterConfigTest, ConfigSetOk) {
   auto config = ClusterConfig::CreateFromConfig(
       kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
                .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-               .replicas = {}}});
+               .replicas = {},
+               .migrations = {}}});
   EXPECT_NE(config, nullptr);
   EXPECT_THAT(config->GetMasterNodeForSlot(0),
               NodeMatches(Node{.id = "other", .ip = "192.168.0.100", .port = 7000}));
@@ -95,7 +100,8 @@ TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
   auto config = ClusterConfig::CreateFromConfig(
       kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
                .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
-               .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}}}});
+               .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
+               .migrations = {}}});
   EXPECT_NE(config, nullptr);
   EXPECT_THAT(config->GetMasterNodeForSlot(0),
               NodeMatches(Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000}));
@@ -105,13 +111,16 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
   auto config = ClusterConfig::CreateFromConfig(
       kMyId, {{.slot_ranges = {{.start = 0, .end = 5'000}},
                .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
-               .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}}},
+               .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
+               .migrations = {}},
               {.slot_ranges = {{.start = 5'001, .end = 10'000}},
                .master = {.id = kMyId, .ip = "192.168.0.102", .port = 7002},
-               .replicas = {{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}}},
+               .replicas = {{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}},
+               .migrations = {}},
               {.slot_ranges = {{.start = 10'001, .end = 0x3FFF}},
                .master = {.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
-               .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}}}});
+               .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}},
+               .migrations = {}}});
   EXPECT_NE(config, nullptr);
   SlotSet owned_slots = config->GetOwnedSlots();
   EXPECT_EQ(owned_slots.ToSlotRanges().size(), 1);
