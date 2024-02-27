@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from argparse import RawTextHelpFormatter
 import json
 import math
 import redis
@@ -163,7 +164,7 @@ def create_locally(args):
     print()
 
 
-def create_remote(args):
+def config_single_remote(args):
     print(
         f"Configuring remote Dragonfly {args.target_host}:{args.target_port} to be a single-server cluster"
     )
@@ -376,30 +377,60 @@ def shutdown(args):
 def main():
     parser = argparse.ArgumentParser(
         description="""
-Local Cluster Manager
+Dragonfly Manual Cluster Manager
+
+This tool helps managing a Dragonfly cluster manually.
+Cluster can either be local or remote:
+- Starting Dragonfly instances must be done locally, binary is assumed to be under ../build-opt
+- Remote Dragonflies must already be started, and initialized with `--cluster_mode=yes`
 
 Example usage:
 
-Create a 3+3 nodes cluster:
-  ./cluster_mgr.py --action=create-locally --num_masters=3 --replicas_per_master=1
+Create a 3 node cluster locally:
+  ./cluster_mgr.py --action=create_locally --num_masters=3
+This will create 3 Dragonfly processes with ports 7001-7003 and admin ports 17001-17003.
+Ports can be overridden with `--first_port`.
 
-Connect to cluster and print current config:
-  ./cluster_mgr.py --action=print
+Create a 6 node cluster locally, 3 of them masters with 1 replica each:
+  ./cluster_mgr.py --action=create_locally --num_masters=3 --replicas_per_master=1
 
-Connect to cluster and shutdown all nodes:
-  ./cluster_mgr.py --action=shutdown
+Connect to existing cluster and print current config:
+  ./cluster_mgr.py --action=print_config
+This will connect to localhost:6379 by default. Override with `--target_host` and `--target_port`
+
+Configure an existing Dragonfly server to be a standalone cluster (owning all slots):
+  ./cluster_mgr.py --action=config_single_remote
+This connects to an *existing* Dragonfly server, and pushes a config telling it to own all slots.
+This will connect to localhost:6379 by default. Override with `--target_host` and `--target_port`
+
+Attach an existing Dragonfly server to an existing cluster (owning no slots):
+  ./cluster_mgr.py --action=attach --attach_host=HOST --attach_port=PORT
+This will connect to existing cluster present at localhost:6379 by default. Override with
+`--target_host` and `--target_port`
+
+To set up a new cluster - start the servers and then use
+  ./cluster_mgr.py --action=create_single_remote ...
+  ./cluster_mgr.py --action=attach ...
+And repeat `--action=attach` for all servers.
+Afterwards, distribute the slots between the servers as desired with `--action=move` or
+`--action=migrate`
 
 Connect to cluster and move slots 10-20 to master with port 7002:
   ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --new_owner=7002
 
 Migrate slots 10-20 to master with port 7002
   ./cluster_mgr.py --action=migrate --slot_start=10 --slot_end=20 --new_owner=7002
-"""
+
+Connect to cluster and shutdown all nodes:
+  ./cluster_mgr.py --action=shutdown
+WARNING: Be careful! This will close all Dragonfly servers connected to the cluster.
+""",
+        formatter_class=RawTextHelpFormatter,
     )
     parser.add_argument(
         "--action",
         default="",
-        help="Which action to take? create-locally: start a new instance, move=move slots",
+        help="Which action to take? See `--help`",
     )
     parser.add_argument(
         "--num_masters", type=int, default=3, help="Number of master nodes in cluster"
@@ -416,29 +447,34 @@ Migrate slots 10-20 to master with port 7002
         "--slot_end", type=int, default=100, help="Last slot to move / migrate (inclusive)"
     )
     parser.add_argument("--target_host", default="localhost", help="Master host/ip")
-    parser.add_argument("--target_port", type=int, default=9999, help="Master port")
+    parser.add_argument("--target_port", type=int, default=6379, help="Master port")
     parser.add_argument(
         "--attach_host", default="localhost", help="New cluster node master host/ip"
     )
     parser.add_argument(
-        "--attach_port", type=int, default=9999, help="New cluster node master port"
+        "--attach_port", type=int, default=6379, help="New cluster node master port"
     )
     args = parser.parse_args()
 
-    actions = {
-        "create-locally": create_locally,
-        "shutdown": shutdown,
-        "create-remote": create_remote,
-        "attach": attach,
-        "move": move,
-        "print": print_config,
-        "migrate": migrate,
-    }
+    actions = dict(
+        [
+            (f.__name__, f)
+            for f in [
+                create_locally,
+                shutdown,
+                config_single_remote,
+                attach,
+                move,
+                print_config,
+                migrate,
+            ]
+        ]
+    )
     action = actions.get(args.action.lower())
     if action:
         action(args)
     else:
-        print(f'Error - unknown action "{args.action}"')
+        print(f'Error - unknown action "{args.action}". See --help')
         exit(-1)
 
 
