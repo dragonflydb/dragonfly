@@ -1011,7 +1011,7 @@ async def test_cluster_fuzzymigration(
                 "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
                 "master": {
                     "id": await get_node_id(node.admin_client),
-                    "ip": "localhost",
+                    "ip": "127.0.0.1",
                     "port": node.instance.port,
                 },
                 "replicas": [],

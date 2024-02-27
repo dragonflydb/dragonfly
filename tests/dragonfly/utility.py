@@ -448,7 +448,7 @@ class DflySeeder:
 
     def _make_client(self, **kwargs):
         if self.cluster_mode:
-            return aioredis.RedisCluster(host="localhost", **kwargs)
+            return aioredis.RedisCluster(host="127.0.0.1", **kwargs)
         else:
             return aioredis.Redis(**kwargs)
 
