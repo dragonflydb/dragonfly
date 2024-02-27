@@ -791,6 +791,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
+  config_registry.Register("port");
+  config_registry.Register("admin_port");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
