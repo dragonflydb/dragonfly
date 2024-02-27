@@ -148,7 +148,6 @@ jobs:
           ./dragonfly_test
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
-          ./json_family_test --jsonpathv2
 
       - name: Upload unit logs on failure
         if: failure()

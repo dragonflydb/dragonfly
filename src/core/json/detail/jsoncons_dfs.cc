@@ -17,11 +17,14 @@ inline bool IsRecursive(jsoncons::json_type type) {
   return type == jsoncons::json_type::object_value || type == jsoncons::json_type::array_value;
 }
 
-void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, const Cb& callback) {
+Dfs Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, const Cb& callback) {
   DCHECK(!path.empty());
+
+  Dfs dfs;
+
   if (path.size() == 1) {
-    PerformStep(path[0], root, callback);
-    return;
+    dfs.PerformStep(path[0], root, callback);
+    return dfs;
   }
 
   using ConstItem = JsonconsDfsItem<true>;
@@ -48,21 +51,26 @@ void Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, con
           // terminal step
           // TODO: to take into account MatchStatus
           // for `json.set foo $.a[10]` or for `json.set foo $.*.b`
-          PerformStep(path[next_seg_id], *next, callback);
+          dfs.PerformStep(path[next_seg_id], *next, callback);
         }
       }
     } else {
       stack.pop_back();
     }
   } while (!stack.empty());
+
+  return dfs;
 }
 
-void Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
-                 JsonType* json) {
+Dfs Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
+                JsonType* json) {
   DCHECK(!path.empty());
+
+  Dfs dfs;
+
   if (path.size() == 1) {
-    MutateStep(path[0], callback, json);
-    return;
+    dfs.MutateStep(path[0], callback, json);
+    return dfs;
   }
 
   using Item = detail::JsonconsDfsItem<false>;
@@ -86,13 +94,15 @@ void Dfs::Mutate(absl::Span<const PathSegment> path, const MutateCallback& callb
         if (next_seg_id + 1 < path.size()) {
           stack.emplace_back(next, next_seg_id);
         } else {
-          MutateStep(path[next_seg_id], callback, next);
+          dfs.MutateStep(path[next_seg_id], callback, next);
         }
       }
     } else {
       stack.pop_back();
     }
   } while (!stack.empty());
+
+  return dfs;
 }
 
 auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node, const Cb& callback)

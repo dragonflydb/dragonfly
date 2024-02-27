@@ -95,8 +95,9 @@ class Dfs {
   using Cb = PathCallback;
 
   // TODO: for some operations we need to know the type of mismatches.
-  void Traverse(absl::Span<const PathSegment> path, const JsonType& json, const Cb& callback);
-  void Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback, JsonType* json);
+  static Dfs Traverse(absl::Span<const PathSegment> path, const JsonType& json, const Cb& callback);
+  static Dfs Mutate(absl::Span<const PathSegment> path, const MutateCallback& callback,
+                    JsonType* json);
 
   unsigned matches() const {
     return matches_;

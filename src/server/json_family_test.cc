@@ -529,6 +529,7 @@ TEST_F(JsonFamilyTest, Del) {
   EXPECT_THAT(resp, IntArg(1));
   resp = Run({"GET", "json"});  // This is legal since the key was removed
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
   resp = Run({"JSON.GET", "json"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
@@ -558,6 +559,12 @@ TEST_F(JsonFamilyTest, Del) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"({})");
+
+  Run({"JSON.SET", "json", "$", R"({"a": 1})"});
+  resp = Run({"JSON.DEL", "json", "$"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(JsonFamilyTest, ObjKeys) {

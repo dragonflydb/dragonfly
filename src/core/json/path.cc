@@ -18,7 +18,10 @@ using nonstd::make_unexpected;
 
 namespace dfly::json {
 
+using detail::Dfs;
+
 namespace {
+
 class JsonPathDriver : public json::Driver {
  public:
   string msg;
@@ -66,7 +69,7 @@ void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback)
   }
 
   if (path.front().type() != SegmentType::FUNCTION) {
-    detail::Dfs().Traverse(path, json, std::move(callback));
+    Dfs::Traverse(path, json, std::move(callback));
     return;
   }
 
@@ -80,8 +83,7 @@ void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback)
   if (path_tail.empty()) {
     LOG(DFATAL) << "Invalid path";  // parser should not allow this.
   } else {
-    detail::Dfs().Traverse(path_tail, json,
-                           [&](auto, const JsonType& val) { func_segment.Evaluate(val); });
+    Dfs::Traverse(path_tail, json, [&](auto, const JsonType& val) { func_segment.Evaluate(val); });
   }
   callback(nullopt, func_segment.GetResult());
 }
@@ -105,11 +107,12 @@ nonstd::expected<json::Path, string> ParsePath(string_view path) {
 }
 
 unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
-  if (path.empty())
-    return 0;
+  if (path.empty()) {
+    callback(nullopt, json);
+    return 1;
+  }
 
-  detail::Dfs dfs;
-  dfs.Mutate(path, callback, json);
+  Dfs dfs = Dfs::Mutate(path, callback, json);
   return dfs.matches();
 }
 
