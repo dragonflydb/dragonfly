@@ -61,6 +61,9 @@ jobs:
 
       - name: Configure & Build
         run: |
+          echo "ulimit is"
+          ulimit -s
+          echo "-----------------------------"
           echo "disk space is:"
           df -h
           echo "-----------------------------"
