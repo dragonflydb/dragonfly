@@ -48,7 +48,7 @@ class OpQueue {
 };
 
 // Manages a pool of queues for asynchronously dispatching storage operations.
-// Operations can be viewed as "instanteneous" - their effects will be observed by all following
+// Operations can be viewed as "instantaneous" - their effects will be observed by all following
 // accesses to the same key, even if they are still pending. Guarantees stable order
 // only relative to single key, otherwise free to reorder arbitrarily.
 class OpManager {
