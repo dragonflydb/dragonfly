@@ -443,14 +443,22 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
       (std::vector<ClusterConfig::MigrationInfo>{
           {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
 
+  EXPECT_TRUE(config1->GetIncomingMigrations().empty());
+
   auto config2 = ClusterConfig::CreateFromConfig("id1", ParseJson(config_str));
   EXPECT_EQ(
       config2->GetIncomingMigrations(),
       (std::vector<ClusterConfig::MigrationInfo>{
           {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+
+  EXPECT_TRUE(config2->GetOutgoingMigrations().empty());
+
+  auto config3 = ClusterConfig::CreateFromConfig("id2", ParseJson(config_str));
+  EXPECT_TRUE(config3->GetIncomingMigrations().empty());
+  EXPECT_TRUE(config3->GetOutgoingMigrations().empty());
 }
 
-TEST_F(ClusterConfigTest, InvalidConfigMigrations) {
+TEST_F(ClusterConfigTest, InvalidConfigMigrationsWithoutIP) {
   auto config = ClusterConfig::CreateFromConfig("id0", ParseJson(R"json(
   [
     {
