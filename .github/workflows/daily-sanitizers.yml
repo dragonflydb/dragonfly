@@ -1,11 +1,8 @@
 name: daily-sanitizers
 
 on:
-  #schedule:
-  #  - cron: '0 4 * * *' # run at 4 AM UTC
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *' # run at 4 AM UTC
 
 jobs:
   build:
