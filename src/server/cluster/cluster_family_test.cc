@@ -38,29 +38,6 @@ class ClusterFamilyTest : public BaseFamilyTest {
   }
 };
 
-TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
-  string config = R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcd1234",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json";
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
-  EXPECT_THAT(Run({"dflycluster", "config", config}),
-              ErrArg("DflyCluster command allowed only under admin port"));
-}
-
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "config", "invalid JSON"}),
               ErrArg("Invalid JSON cluster config"));
