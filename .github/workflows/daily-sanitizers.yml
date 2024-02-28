@@ -46,6 +46,9 @@ jobs:
 
       - name: Configure & Build
         run: |
+          echo "disk space is:"
+          df -h
+          echo "-----------------------------"
           mkdir -p $GITHUB_WORKSPACE/build
           cd $GITHUB_WORKSPACE/build
           cmake .. \
@@ -65,3 +68,10 @@ jobs:
         run: |
             cd $GITHUB_WORKSPACE/build
             ctest -V -L DFLY
+
+      - name: PostFail
+        if: failure()
+        run: |
+          echo "disk space is:"
+          df -h
+          echo "-----------------------------"
