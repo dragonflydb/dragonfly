@@ -317,7 +317,7 @@ def migrate(args):
     for node in config:
         slots = node["slot_ranges"]
         for slot in slots:
-            if slot["start"] >= args.slot_start and slot["end"] <= args.slot_end:
+            if slot["start"] <= args.slot_start and slot["end"] >= args.slot_end:
                 source = node
                 break
     if source == None:
