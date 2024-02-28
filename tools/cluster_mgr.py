@@ -17,7 +17,6 @@ class Node:
         self.id = ""
         self.host = host
         self.port = port
-        self.admin_port = port
 
 
 class Master:
@@ -33,7 +32,6 @@ def start_node(node, threads):
         [
             "../build-opt/dragonfly",
             f"--port={node.port}",
-            f"--admin_port={node.port + 10_000}",
             "--cluster_mode=yes",
             f"--proactor_threads={threads}",
             "--dbfilename=",
@@ -45,7 +43,7 @@ def start_node(node, threads):
 
 
 def send_command(node, command, print_errors=True):
-    client = redis.Redis(decode_responses=True, host=node.host, port=node.admin_port)
+    client = redis.Redis(decode_responses=True, host=node.host, port=node.port)
 
     for i in range(0, 5):
         try:
@@ -58,20 +56,14 @@ def send_command(node, command, print_errors=True):
             time.sleep(0.1 * i)
 
     if print_errors:
-        print(
-            f"Unable to run command {command} against {node.host}:{node.admin_port} after 5 attempts!"
-        )
+        print(f"Unable to run command {command} against {node.host}:{node.port} after 5 attempts!")
 
     return Exception()
 
 
 def update_id(node):
-    node.port = int(send_command(node, ["config", "get", "port"])[1])
-    node.admin_port = int(send_command(node, ["config", "get", "admin_port"])[1])
     node.id = send_command(node, ["dflycluster", "myid"])
     print(f"- ID {node.id}")
-    print(f"- Client port {node.port}")
-    print(f"- Admin port {node.admin_port}")
 
 
 def build_config_from_list(masters):
@@ -341,7 +333,7 @@ def migrate(args):
             "DFLYCLUSTER",
             "START-SLOT-MIGRATION",
             source_node.host,
-            source_node.admin_port,
+            source_node.port,
             args.slot_start,
             args.slot_end,
         ],
@@ -388,7 +380,7 @@ Example usage:
 
 Create a 3 node cluster locally:
   ./cluster_mgr.py --action=create_locally --num_masters=3
-This will create 3 Dragonfly processes with ports 7001-7003 and admin ports 17001-17003.
+This will create 3 Dragonfly processes with ports 7001-7003.
 Ports can be overridden with `--first_port`.
 
 Create a 6 node cluster locally, 3 of them masters with 1 replica each:
