@@ -46,7 +46,6 @@ jobs:
 
       - name: Configure & Build
         run: |
-          apt install libzstd-dev
           mkdir -p $GITHUB_WORKSPACE/build
           cd $GITHUB_WORKSPACE/build
           cmake .. \
