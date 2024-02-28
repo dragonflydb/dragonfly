@@ -1327,7 +1327,9 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     // paired with shardlocal eval
     const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
 
-    if (!is_multi && !is_eval && cid != nullptr) {
+    const bool is_blocking = cid != nullptr && cid->IsBlocking();
+
+    if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
       stored_cmds.emplace_back(cid, tail_args);
       continue;

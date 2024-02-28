@@ -107,6 +107,10 @@ class CommandId : public facade::CommandId {
     return opt_mask_ & CO::WRITE;
   }
 
+  bool IsBlocking() const {
+    return opt_mask_ & CO::BLOCKING;
+  }
+
   static const char* OptName(CO::CommandOpt fl);
 
   CommandId&& SetHandler(Handler f) && {
