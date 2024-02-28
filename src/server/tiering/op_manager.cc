@@ -60,12 +60,14 @@ void OpQueue::Loop() {
     {
       util::FiberAtomicGuard guard;
       for (auto& op : key_ops_[key]) {
+        // We rely on the keystore to provide us operations in valid order
         switch (op.type) {
           case Op::GET:
             DCHECK(value);  // No GET after DEL
             break;
           case Op::DEL:
-            value.emplace();
+            DCHECK(value);  // No DEL after DEL
+            value.reset();
             break;
           case Op::SET:
             value = std::move(op.value);

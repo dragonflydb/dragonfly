@@ -65,10 +65,14 @@ TEST_F(OpQueueTest, SimpleReads) {
   TestStorage storage;
   OpQueue queue{&storage};
 
+  storage.values["a"] = "a-value";
+  storage.values["b"] = "b-value";
+  storage.values["c"] = "c-value";
+
   for (int i = 0; i < 10; i++) {
-    queue.Enqueue("a", Op{Op::GET});
-    queue.Enqueue("b", Op{Op::GET});
-    queue.Enqueue("c", Op{Op::GET});
+    queue.Enqueue("a", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "a-value"); }});
+    queue.Enqueue("b", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "b-value"); }});
+    queue.Enqueue("c", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "c-value"); }});
   }
 
   pp_->at(0)->Await([&queue] {
@@ -97,6 +101,26 @@ TEST_F(OpQueueTest, MixedReadWrite) {
 
   EXPECT_EQ(storage.reads, 1);
   EXPECT_EQ(storage.writes, 1);
+}
+
+TEST_F(OpQueueTest, SimpleDels) {
+  TestStorage storage;
+  OpQueue queue{&storage};
+
+  storage.values["key"] = "old-value";
+
+  queue.Enqueue("key", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "old-value"); }});
+  queue.Enqueue("key", Op{Op::SET, "value"});
+  queue.Enqueue("key", Op{Op::DEL});
+
+  pp_->at(0)->Await([&queue] {
+    queue.Start();
+    queue.TEST_Drain();
+  });
+
+  EXPECT_EQ(storage.reads, 1u);
+  EXPECT_EQ(storage.writes, 0u);  // SET was ignored because DEL followed
+  EXPECT_EQ(storage.deletes, 1u);
 }
 
 TEST_F(OpManagerTest, SimpleReads) {
