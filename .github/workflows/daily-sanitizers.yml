@@ -44,6 +44,21 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
+      - name: Prepare Environment
+        run: |
+          uname -a
+          cmake --version
+          mkdir -p ${GITHUB_WORKSPACE}/build
+
+          echo "===================Before freeing up space ============================================"
+          df -h
+          rm -rf /hostroot/usr/share/dotnet
+          rm -rf /hostroot/usr/local/share/boost
+          rm -rf /hostroot/usr/local/lib/android
+          rm -rf /hostroot/opt/ghc
+          echo "===================After freeing up space ============================================"
+          df -h
+
       - name: Configure & Build
         run: |
           echo "disk space is:"
