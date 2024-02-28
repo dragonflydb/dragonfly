@@ -74,7 +74,8 @@ ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
 ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
-
+ABSL_FLAG(bool, lua_resp2_legacy_float, false,
+          "Return rounded down integers instead of floats for lua scripts with RESP2");
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
@@ -303,7 +304,12 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    rb_->SendDouble(d);
+    if (rb_->IsResp3() || !absl::GetFlag(FLAGS_lua_resp2_legacy_float)) {
+      rb_->SendDouble(d);
+    } else {
+      long val = static_cast<long>(floor(d));
+      rb_->SendLong(val);
+    }
   }
 
   void OnInt(int64_t val) final {

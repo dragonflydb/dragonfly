@@ -25,6 +25,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(double, oom_deny_ratio);
+ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 
 namespace dfly {
 
@@ -704,6 +705,20 @@ TEST_F(DflyEngineTest, Issue752) {
 
 TEST_F(DflyEngineTest, Latency) {
   Run({"latency", "latest"});
+}
+
+TEST_F(DflyEngineTest, EvalBug2664) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_lua_resp2_legacy_float, true);
+
+  auto resp = Run({"eval", "return 42.9", "0"});
+  EXPECT_THAT(resp, IntArg(42));
+
+  resp = Run({"hello", "3"});
+  ASSERT_THAT(resp, ArrLen(14));
+
+  resp = Run({"eval", "return 42.9", "0"});
+  EXPECT_THAT(resp, DoubleArg(42.9));
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.
