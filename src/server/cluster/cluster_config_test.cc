@@ -420,4 +420,54 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingMasterAndReplicaId) {
             nullptr);
 }
 
+TEST_F(ClusterConfigTest, ConfigSetMigrations) {
+  const auto* config_str = R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 8000 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000 },
+      "replicas": [],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "ip": "127.0.0.1", "port" : 9001, "target_id": "id1" }]
+    },
+    {
+      "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+      "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    }
+  ])json";
+
+  auto config1 = ClusterConfig::CreateFromConfig("id0", ParseJson(config_str));
+  EXPECT_EQ(
+      config1->GetOutgoingMigrations(),
+      (std::vector<ClusterConfig::MigrationInfo>{
+          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+
+  auto config2 = ClusterConfig::CreateFromConfig("id1", ParseJson(config_str));
+  EXPECT_EQ(
+      config2->GetIncomingMigrations(),
+      (std::vector<ClusterConfig::MigrationInfo>{
+          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+}
+
+TEST_F(ClusterConfigTest, InvalidConfigMigrations) {
+  auto config = ClusterConfig::CreateFromConfig("id0", ParseJson(R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 8000 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000 },
+      "replicas": [],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "port" : 9001, "target_id": "id1" }]
+    },
+    {
+      "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+      "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    }
+  ])json"));
+
+  EXPECT_EQ(config, nullptr);
+}
+
 }  // namespace dfly

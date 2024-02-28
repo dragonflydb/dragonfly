@@ -41,6 +41,11 @@ class ClusterConfig {
     std::string target_id;
     std::string ip;
     uint16_t port = 0;
+
+    bool operator==(const ClusterConfig::MigrationInfo& r) const {
+      return ip == r.ip && port == r.port && slot_ranges == r.slot_ranges &&
+             target_id == r.target_id;
+    }
   };
 
   struct ClusterShard {
@@ -92,8 +97,8 @@ class ClusterConfig {
 
   const SlotSet& GetOwnedSlots() const;
 
-  const std::vector<MigrationInfo>& GetMigrations() const {
-    return my_migrations_;
+  const std::vector<MigrationInfo>& GetOutgoingMigrations() const {
+    return my_outgoing_migrations_;
   }
 
   const std::vector<MigrationInfo>& GetIncomingMigrations() const {
@@ -111,7 +116,7 @@ class ClusterConfig {
   ClusterShards config_;
 
   SlotSet my_slots_;
-  std::vector<MigrationInfo> my_migrations_;
+  std::vector<MigrationInfo> my_outgoing_migrations_;
   std::vector<MigrationInfo> my_incoming_migrations_;
 };
 
