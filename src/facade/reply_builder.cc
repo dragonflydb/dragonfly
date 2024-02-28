@@ -301,7 +301,7 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   if (tl_facade_stats->reply_stats.err_count.contains(err_type)) {
     tl_facade_stats->reply_stats.err_count[err_type]++;
   } else {
-    tl_facade_stats->reply_stats.err_count[err_type] = 0;
+    tl_facade_stats->reply_stats.err_count[err_type] = 1;
   }
 
   if (str[0] == '-') {
