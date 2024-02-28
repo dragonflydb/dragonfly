@@ -559,8 +559,11 @@ string_view GetRedisMode() {
 std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
                                 facade::Connection* conn, ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress) {
-  // Set global pause state and track commands that are running when the pause state is flipped.
-  // Exlude already paused commands from the busy count.
+  // Track connections and set pause state to be able to wait untill all running transactions read
+  // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
+  // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
+  // state after waking from blocking so if the trasaction was waken by another running
+  //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
   shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {

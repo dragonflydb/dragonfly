@@ -405,7 +405,7 @@ bool DispatchTracker::Wait(absl::Duration duration) {
   if (!res && ignore_blocked_) {
     // We track all connections again because a connection might became blocked between the time
     // we call tracking the last time.
-    bc_ = make_unique<util::fb2::BlockingCounter>(0);
+    bc_.reset(new util::fb2::BlockingCounter(0));
     TrackAll();
     res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
   }
