@@ -1,7 +1,7 @@
 #!/bin/sh
 
 HOST="localhost"
-PORT=$(netstat -tuln | grep -oE ':::[0-9]+' | grep -oE '[0-9]+')
+PORT=$(netstat -tuln | grep -oE ':[0-9]+' | grep -oE '[0-9]+')
 
 # If we're running with TLS enabled, utilise OpenSSL for the check
 if [ -f "/etc/dragonfly/tls/ca.crt" ]
