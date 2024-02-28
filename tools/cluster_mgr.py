@@ -204,10 +204,10 @@ def build_config_from_existing(args):
     return config
 
 
-def find_node(config, port):
+def find_node(config, host, port):
     new_owner = None
     for shard in config:
-        if shard["master"]["port"] == port:
+        if shard["master"]["ip"] == host and shard["master"]["port"] == port:
             new_owner = shard
             break
     else:
@@ -231,7 +231,7 @@ def attach(args):
 
 def move(args):
     config = build_config_from_existing(args)
-    new_owner = find_node(config, args.target_port)
+    new_owner = find_node(config, args.target_host, args.target_port)
 
     def remove_slot(slot, from_range, from_shard):
         if from_range["start"] == slot:
@@ -308,7 +308,7 @@ def move(args):
 
 def migrate(args):
     config = build_config_from_existing(args)
-    target = find_node(config, args.target_port)
+    target = find_node(config, args.target_host, args.target_port)
     target_node = Node(target["master"]["ip"], target["master"]["port"])
     update_id(target_node)
 
@@ -407,11 +407,11 @@ And repeat `--action=attach` for all servers.
 Afterwards, distribute the slots between the servers as desired with `--action=move` or
 `--action=migrate`
 
-Connect to cluster and move slots 10-20 to master with port 7002:
-  ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --new_owner=7002
+Connect to cluster and move slots 10-20 to target:
+  ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --target_host=X --target_port=X
 
-Migrate slots 10-20 to master with port 7002
-  ./cluster_mgr.py --action=migrate --slot_start=10 --slot_end=20 --new_owner=7002
+Migrate slots 10-20 to target:
+  ./cluster_mgr.py --action=migrate --slot_start=10 --slot_end=20 --target_host=X --target_port=X
 
 Connect to cluster and shutdown all nodes:
   ./cluster_mgr.py --action=shutdown
