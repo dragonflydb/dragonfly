@@ -36,7 +36,7 @@ if (NOT APPLE)
   cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
   if (WITH_ASAN OR WITH_USAN)
     get_filename_component(test_name search/search_family_test NAME_WE)
-    target_compile_definitions(test_name PRIVATE SANITIZERS);
+    target_compile_definitions(test_name PRIVATE SANITIZERS)
   endif()
   cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 endif()
