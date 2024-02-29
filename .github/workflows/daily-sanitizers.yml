@@ -1,18 +1,14 @@
 name: daily-sanitizers
 
 on:
-  #schedule:
-  #  - cron: '0 4 * * *' # run at 4 AM UTC
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *' # run at 4 AM UTC
 
 jobs:
   build:
-    runs-on: [ubuntu-latest]
+    runs-on: [self-hosted, linux, ARM64]
     strategy:
       matrix:
-        # Test of these containers
         container: ["ubuntu-dev:22"]
         build-type: [Debug]
         compiler: [{ cxx: g++, c: gcc }]
