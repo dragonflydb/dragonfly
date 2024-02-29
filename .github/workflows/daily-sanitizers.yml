@@ -76,7 +76,7 @@ jobs:
             -DWITH_ASAN=ON \
             -DWITH_USAN=ON
 
-          ninja -j4 src/all
+          ninja src/all
 
       - name: Test
         run: |
