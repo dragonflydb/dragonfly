@@ -298,11 +298,7 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
       err_type = kSyntaxErrType;
   }
 
-  if (tl_facade_stats->reply_stats.err_count.contains(err_type)) {
-    tl_facade_stats->reply_stats.err_count[err_type]++;
-  } else {
-    tl_facade_stats->reply_stats.err_count[err_type] = 1;
-  }
+  tl_facade_stats->reply_stats.err_count[err_type]++;
 
   if (str[0] == '-') {
     iovec v[] = {IoVec(str), IoVec(kCRLF)};

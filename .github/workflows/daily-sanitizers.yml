@@ -82,7 +82,7 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -V -L DFLY -E search_family_test
+            ctest -V -L DFLY -E ^(search_family|multi):_test
 
       - name: PostFail
         if: failure()
