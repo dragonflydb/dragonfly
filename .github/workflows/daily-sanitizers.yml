@@ -80,7 +80,7 @@ jobs:
             -DWITH_ASAN=ON \
             -DWITH_USAN=ON
 
-          ninja src/all
+          ninja -j4 src/all
 
       - name: Test
         run: |
