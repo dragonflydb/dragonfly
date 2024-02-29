@@ -338,12 +338,12 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
     alloc_.Free(offset, len);
   } else {
     uint32_t offs_page = offset / kBlockLen;
-    auto it = page_refcnt_.find(offs_page);
-    CHECK(it != page_refcnt_.end()) << offs_page;
-    CHECK_GT(it->second, 0u);
-    if (--it->second == 0) {
+    auto page_it = page_refcnt_.find(offs_page);
+    CHECK(page_it != page_refcnt_.end()) << offs_page << "," << it->first.ToString();
+    CHECK_GT(page_it->second, 0u);
+    if (--page_it->second == 0) {
       alloc_.Free(offs_page * kBlockLen, kBlockLen);
-      page_refcnt_.erase(it);
+      page_refcnt_.erase(page_it);
     }
   }
 
