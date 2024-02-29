@@ -93,8 +93,8 @@ cxx_test(server_family_test dfly_test_lib LABELS DFLY)
 cxx_test(set_family_test dfly_test_lib LABELS DFLY)
 cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
 if (WITH_ASAN OR WITH_USAN)
-  target_compile_definitions(stream_family_test PRIVATE SANITIZERS);
-  target_compile_definitions(multi_test PRIVATE SANITIZERS);
+  target_compile_definitions(stream_family_test PRIVATE SANITIZERS)
+  target_compile_definitions(multi_test PRIVATE SANITIZERS)
 endif()
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
