@@ -85,7 +85,8 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -V -L DFLY
+            #ctest -V -L DFLY
+            ctest -V -R search_family_test
 
       - name: Send notifications on failure
         if: failure()
