@@ -16,7 +16,8 @@ using absl::SetFlag;
 using absl::StrCat;
 
 ABSL_DECLARE_FLAG(string, tiered_prefix);
-
+ABSL_DECLARE_FLAG(uint32_t, tiered_storage_max_pending_writes);
+ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 namespace dfly {
 
 class TieredStorageTest : public BaseFamilyTest {
@@ -50,7 +51,7 @@ bool TieredStorageTest::WaitUntilTieredEntriesGT(size_t value, int db_index) {
     auto tiered_entries = GetMetrics().db_stats[db_index].tiered_entries;
     return tiered_entries > value;
   };
-  return WaitUntilCondition(std::move(cb));
+  return WaitUntilCondition(std::move(cb), 2000ms);
 }
 
 bool TieredStorageTest::WaitUntilTieredEntriesEQ(size_t value, int db_index) {
@@ -316,6 +317,25 @@ TEST_F(TieredStorageTest, GetValueValidation) {
   }
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
+}
+
+TEST_F(TieredStorageTest, CrashBug) {
+  shard_set->TEST_EnableHeartBeat();
+  max_memory_limit = 300000;
+  absl::FlagSaver fs;
+  // Disable writing to disk
+  absl::SetFlag(&FLAGS_tiered_storage_max_pending_writes, 0);
+
+  const int kKeyNum = 100;
+  FillExternalKeys(kKeyNum);
+  usleep(20000);
+  Metrics m = GetMetrics();
+  EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
+
+  absl::SetFlag(&FLAGS_tiered_storage_max_pending_writes, 1);
+  absl::SetFlag(&FLAGS_tiered_offload_threshold, 0);
+  FillExternalKeys(kKeyNum);
+  EXPECT_TRUE(WaitUntilTieredEntriesGT(0));
 }
 
 }  // namespace dfly

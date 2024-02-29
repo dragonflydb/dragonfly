@@ -402,6 +402,7 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
 }
 
 PrimeIterator TieredStorage::Load(DbIndex db_index, PrimeIterator it, string_view key) {
+  VLOG(2) << "Load:" << key;
   PrimeValue* entry = &it->second;
   CHECK(entry->IsExternal());
   DCHECK_EQ(entry->ObjType(), OBJ_STRING);
@@ -469,7 +470,7 @@ bool TieredStorage::PrepareForOffload(DbIndex db_index, PrimeIterator it) {
     return false;
   }
 
-  VLOG(2) << "ScheduleOffload:" << it->first.ToString();
+  VLOG(2) << "PrepareForOffload:" << it->first.ToString();
   bin_record.pending_entries.insert(it->first.AsRef());
   it->second.SetIoPending(true);
 
@@ -480,6 +481,7 @@ bool TieredStorage::PrepareForOffload(DbIndex db_index, PrimeIterator it) {
 }
 
 void TieredStorage::CancelOffload(DbIndex db_index, PrimeIterator it) {
+  VLOG(2) << "PrepareForOffload:" << it->first.ToString();
   size_t blob_len = it->second.Size();
   if (blob_len > kMaxSmallBin) {
     return;
@@ -521,6 +523,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
 }
 
 error_code TieredStorage::ScheduleOffloadInternal(DbIndex db_index, PrimeIterator it) {
+  VLOG(2) << "PrepareForOffload:" << it->first.ToString();
   size_t blob_len = it->second.Size();
 
   if (blob_len > kMaxSmallBin) {
