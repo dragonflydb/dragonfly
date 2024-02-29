@@ -5,6 +5,7 @@
 #include "server/tiering/op_manager.h"
 
 #include "base/gtest.h"
+#include "base/logging.h"
 #include "util/fibers/pool.h"
 
 namespace dfly::tiering {
@@ -32,29 +33,52 @@ void PoolTestBase::TearDownTestSuite() {
   pp_.reset();
 }
 
-struct TestStorage : public Storage {
-  string Read(string_view key) override {
+struct TestStorage : public Storage, public KeyStorage {
+  string Read(BlobLocator locator) override {
     util::ThisFiber::Yield();
     reads++;
-    return values[key];
+    return values[locator.offset];
   }
 
-  void Write(string_view key, string value) override {
+  BlobLocator Store(string_view value) override {
     util::ThisFiber::Yield();
+    size_t offset = ++offset_counter;
+    values[offset] = value;
     writes++;
-    values[key] = value;
+    return {offset, value.size()};
   }
 
-  void Delete(std::string_view key) override {
-    util::ThisFiber::Yield();
+  void Delete(BlobLocator locator) {
     deletes++;
-    values.erase(key);
+    values.erase(locator.offset);
+  }
+
+  void ReportStored(std::string_view key, BlobLocator locator) override {
+    reports++;
+    offsets[key] = locator.offset;
+  }
+
+  bool ReportFetched(std::string_view key, std::string_view value) override {
+    fetches++;
+    return false;
+  }
+
+  BlobLocator TEST_Insert(string key, string value) {
+    size_t offset = ++offset_counter;
+    values[offset] = value;
+    offsets[key] = offset;
+    return {offset, value.size()};
   }
 
   size_t reads = 0;
   size_t writes = 0;
   size_t deletes = 0;
-  absl::flat_hash_map<string, string> values;
+  size_t fetches = 0;
+  size_t reports = 0;
+  size_t offset_counter = 0;
+
+  absl::flat_hash_map<size_t, string> values;
+  absl::flat_hash_map<string, size_t> offsets;
 };
 
 struct OpQueueTest : public PoolTestBase {};
@@ -63,16 +87,16 @@ struct OpManagerTest : public PoolTestBase {};
 
 TEST_F(OpQueueTest, SimpleReads) {
   TestStorage storage;
-  OpQueue queue{&storage};
+  OpQueue queue{&storage, &storage};
 
-  storage.values["a"] = "a-value";
-  storage.values["b"] = "b-value";
-  storage.values["c"] = "c-value";
+  auto loc_a = storage.TEST_Insert("a", "a-value");
+  auto loc_b = storage.TEST_Insert("a", "b-value");
+  auto loc_c = storage.TEST_Insert("a", "c-value");
 
   for (int i = 0; i < 10; i++) {
-    queue.Enqueue("a", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "a-value"); }});
-    queue.Enqueue("b", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "b-value"); }});
-    queue.Enqueue("c", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "c-value"); }});
+    queue.Enqueue("a", Op{Op::READ, loc_a, [](string_view value) { EXPECT_EQ(value, "a-value"); }});
+    queue.Enqueue("b", Op{Op::READ, loc_b, [](string_view value) { EXPECT_EQ(value, "b-value"); }});
+    queue.Enqueue("c", Op{Op::READ, loc_c, [](string_view value) { EXPECT_EQ(value, "c-value"); }});
   }
 
   pp_->at(0)->Await([&queue] {
@@ -81,88 +105,68 @@ TEST_F(OpQueueTest, SimpleReads) {
   });
 
   EXPECT_EQ(storage.reads, 3u);
+  EXPECT_EQ(storage.fetches, 3u);
   EXPECT_EQ(storage.writes + storage.deletes, 0u);
 }
 
-TEST_F(OpQueueTest, MixedReadWrite) {
+TEST_F(OpQueueTest, ReadDelStore) {
   TestStorage storage;
-  OpQueue queue{&storage};
+  OpQueue queue{&storage, &storage};
 
-  storage.values["key"] = "1";
-  for (int i = 1; i < 10; i++) {
-    queue.Enqueue("key", Op{Op::GET, "", [i](auto value) { EXPECT_EQ(value, to_string(i)); }});
-    queue.Enqueue("key", Op{Op::SET, to_string(i + 1)});
-  }
+  auto loc = storage.TEST_Insert("key", "value-1");
+  queue.Enqueue("key", Op{Op::READ, loc, [](auto value) { EXPECT_EQ(value, "value-1"); }});
+  queue.Enqueue("key", Op{Op::DEL, loc});
+  queue.Enqueue("key", Op{Op::STORE, "value-2"});
 
-  pp_->at(0)->Await([&queue] {
+  pp_->at(0)->Await([&storage, &queue] {
     queue.Start();
     queue.TEST_Drain();
   });
 
   EXPECT_EQ(storage.reads, 1);
+  EXPECT_EQ(storage.deletes, 1);
   EXPECT_EQ(storage.writes, 1);
+  EXPECT_EQ(storage.fetches, 0);
+  EXPECT_EQ(storage.reports, 1);
 }
 
-TEST_F(OpQueueTest, SimpleDels) {
+TEST_F(OpQueueTest, TestDismiss) {
   TestStorage storage;
-  OpQueue queue{&storage};
+  OpQueue queue{&storage, &storage};
 
-  storage.values["key"] = "old-value";
+  queue.Enqueue("key", Op{Op::STORE, "value"});
+  queue.DismissStore("key");
 
-  queue.Enqueue("key", Op{Op::GET, "", [](string_view value) { EXPECT_EQ(value, "old-value"); }});
-  queue.Enqueue("key", Op{Op::SET, "value"});
-  queue.Enqueue("key", Op{Op::DEL});
-
-  pp_->at(0)->Await([&queue] {
+  pp_->at(0)->Await([&storage, &queue] {
     queue.Start();
     queue.TEST_Drain();
   });
 
-  EXPECT_EQ(storage.reads, 1u);
-  EXPECT_EQ(storage.writes, 0u);  // SET was ignored because DEL followed
-  EXPECT_EQ(storage.deletes, 1u);
+  EXPECT_EQ(storage.writes, 0);
+  EXPECT_EQ(storage.reports, 0);
 }
 
 TEST_F(OpManagerTest, SimpleReads) {
   TestStorage storage;
-  OpManager manager{&storage, 5};
+  OpManager manager{&storage, &storage, 5};
 
   std::vector<Future<std::string>> futures;
   for (size_t i = 0; i < 10; i++) {
     string key = to_string(i);
-    storage.values[key] = to_string(i + 1);
-    futures.emplace_back(manager.Read(key));
-    futures.emplace_back(manager.Read(key));  // no-op read
+    auto loc = storage.TEST_Insert(key, to_string(i));
+    futures.emplace_back(manager.Read(key, loc));
+    futures.emplace_back(manager.Read(key, loc));  // no-op read
   }
 
   pp_->at(0)->Await([&manager, &futures] {
     manager.Start();
     for (size_t i = 0; i < futures.size(); i++)
-      EXPECT_EQ(futures[i].Get(), to_string(i / 2 + 1));
+      EXPECT_EQ(futures[i].Get(), to_string(i / 2));
     manager.Stop();
   });
 
   EXPECT_EQ(storage.reads, 10);
-}
-
-TEST_F(OpManagerTest, MixedReadWrite) {
-  TestStorage storage;
-  OpManager manager{&storage, 1};
-
-  pp_->at(0)->Await([&manager, &storage] {
-    manager.Start();
-
-    for (size_t i = 0; i < 10; i++) {
-      string key = to_string(i);
-      string value = "v1" + to_string(i);
-      manager.Write(key, value);
-      EXPECT_EQ(manager.Read(key).Get(), value);
-    }
-
-    EXPECT_EQ(storage.reads, 0u);
-
-    manager.Stop();
-  });
+  EXPECT_EQ(storage.fetches, 10);
 }
 
 }  // namespace dfly::tiering

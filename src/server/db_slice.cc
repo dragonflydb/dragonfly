@@ -469,25 +469,6 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
     return OpStatus::WRONG_TYPE;
   }
 
-  if (TieredStorage* tiered = shard_owner()->tiered_storage();
-      tiered && load_mode == LoadExternalMode::kLoad) {
-    if (res.it->second.IsExternal()) {
-      // Load reads data from disk therefore we will preempt in this function.
-      // We will update the iterator if it changed during the preemption
-      res.it = tiered->Load(cntx.db_index, res.it, key);
-      if (!IsValid(res.it)) {
-        return OpStatus::KEY_NOTFOUND;
-      }
-      events_.ram_misses++;
-    } else {
-      if (res.it->second.HasIoPending()) {
-        tiered->CancelIo(cntx.db_index, res.it);
-      }
-      events_.ram_hits++;
-    }
-    res.it->first.SetTouched(true);
-  }
-
   FiberAtomicGuard fg;
   if (res.it->second.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
@@ -742,9 +723,9 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 
     CreateDb(index);
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
-    if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
-      tiered->CancelAllIos(index);
-    }
+    //if (TieredStorage* tiered = shard_owner()->tiered_storage(); tiered) {
+    //  tiered->CancelAllIos(index);
+    //}
   }
   CHECK(fetched_items_.empty());
   auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
@@ -1205,32 +1186,6 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 void DbSlice::ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes) {
   VLOG(1) << "ScheduleForOffloadStep increase_goal_bytes:"
           << strings::HumanReadableNumBytes(increase_goal_bytes);
-  DCHECK(shard_owner()->tiered_storage());
-  FiberAtomicGuard guard;
-  PrimeTable& pt = db_arr_[db_indx]->prime;
-
-  static PrimeTable::Cursor cursor;
-
-  size_t offloaded_bytes = 0;
-  auto cb = [&](PrimeIterator it) {
-    // TBD check we did not lock it for future transaction
-
-    // If the item is cold (not touched) and can be externalized, schedule it for offload.
-    if (increase_goal_bytes > offloaded_bytes && !(it->first.WasTouched()) &&
-        TieredStorage::CanExternalizeEntry(it)) {
-      shard_owner()->tiered_storage()->ScheduleOffload(db_indx, it);
-      if (it->second.HasIoPending()) {
-        offloaded_bytes += it->second.Size();
-        VLOG(2) << "ScheduleOffload bytes:" << offloaded_bytes;
-      }
-    }
-    it->first.SetTouched(false);
-  };
-
-  // Traverse a single segment every time this function is called.
-  for (int i = 0; i < 60; ++i) {
-    cursor = pt.TraverseBySegmentOrder(cursor, cb);
-  }
 }
 
 void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
@@ -1500,23 +1455,6 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   }
 }
 
-void DbSlice::RemoveFromTiered(PrimeIterator it, DbIndex index) {
-  DbTable* table = GetDBTable(index);
-  RemoveFromTiered(it, table);
-}
-
-void DbSlice::RemoveFromTiered(PrimeIterator it, DbTable* table) {
-  DbTableStats& stats = table->stats;
-  PrimeValue& pv = it->second;
-  if (pv.IsExternal()) {
-    TieredStorage* tiered = shard_owner()->tiered_storage();
-    tiered->Free(it, &stats);
-  }
-  if (pv.HasIoPending()) {
-    TieredStorage* tiered = shard_owner()->tiered_storage();
-    tiered->CancelIo(table->index, it);
-  }
-}
 
 void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, DbTable* table) {
   std::string tmp;
@@ -1535,7 +1473,7 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, DbTab
 
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
-  RemoveFromTiered(del_it, table);
+  //RemoveFromTiered(del_it, table);
 
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();

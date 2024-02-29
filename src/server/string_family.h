@@ -92,6 +92,9 @@ class StringFamily {
 
   static void ClThrottle(CmdArgList args, ConnectionContext* cntx);
 
+  static void MvpSet(CmdArgList args, ConnectionContext* cntx);
+  static void MvpGet(CmdArgList args, ConnectionContext* cntx);
+
   // These functions are used internally, they do not implement any specific command
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
   static void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx);

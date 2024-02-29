@@ -55,7 +55,6 @@ extern "C" {
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
-#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
 #include "strings/human_readable.h"
@@ -1720,11 +1719,6 @@ Metrics ServerFamily::GetMetrics() const {
       result.heap_used_bytes += shard->UsedMemory();
       MergeDbSliceStats(shard->db_slice().GetStats(), &result);
       result.shard_stats += shard->stats();
-
-      if (shard->tiered_storage()) {
-        result.tiered_stats += shard->tiered_storage()->GetStats();
-        result.disk_stats += shard->tiered_storage()->GetDiskStats();
-      }
 
       if (shard->search_indices())
         result.search_stats += shard->search_indices()->GetStats();

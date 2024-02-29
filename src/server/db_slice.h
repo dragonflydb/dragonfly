@@ -231,6 +231,7 @@ class DbSlice {
     AddOrFindResult& operator=(ItAndUpdater&& o);
   };
 
+  // PLZ COMMENTS?
   OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
   OpResult<AddOrFindResult> AddOrFindAndFetch(const Context& cntx, std::string_view key);
 
@@ -267,8 +268,7 @@ class DbSlice {
   void ActivateDb(DbIndex db_ind);
 
   bool Del(DbIndex db_ind, PrimeIterator it);
-  void RemoveFromTiered(PrimeIterator it, DbIndex index);
-
+ 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
   /**
@@ -442,10 +442,12 @@ class DbSlice {
     kMutableStats,
   };
 
+  // PLZ comment??
   enum class LoadExternalMode {
     kLoad,
     kDontLoad,
   };
+
   OpResult<ItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                   std::optional<unsigned> req_obj_type, UpdateStatsMode stats_mode,
                                   LoadExternalMode load_mode);
@@ -458,7 +460,6 @@ class DbSlice {
   uint64_t NextVersion() {
     return version_++;
   }
-  void RemoveFromTiered(PrimeIterator it, DbTable* table);
 
  private:
   ShardId shard_id_;

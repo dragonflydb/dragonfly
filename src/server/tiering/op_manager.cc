@@ -4,6 +4,8 @@
 
 #include "server/tiering/op_manager.h"
 
+#include <absl/cleanup/cleanup.h>
+
 #include <optional>
 
 #include "base/logging.h"
@@ -16,7 +18,7 @@ void OpQueue::Start() {
 }
 
 void OpQueue::Stop() {
-  cancelled_ = true;
+  worker_stopped_ = true;
   waker_.notify();
   worker_.JoinIfNeeded();
 }
@@ -29,76 +31,106 @@ void OpQueue::TEST_Drain() {
 
 void OpQueue::Enqueue(std::string_view key, Op op) {
   auto [it, inserted] = key_ops_.try_emplace(key);
-
-  // DEL can only be followed by SET because we expect the keystore to track item validity
-  DCHECK(it->second.empty() || it->second.back().type != Op::DEL || op.type == Op::SET);
-
   it->second.push_back(std::move(op));
-
   if (inserted) {
     key_queue_.emplace_back(key);
     waker_.notify();
   }
 }
 
-void OpQueue::Loop() {
-  while (true) {
-    waker_.await([this] { return !key_queue_.empty() || cancelled_; });
-    if (cancelled_)
-      return;
-
-    const auto& key = key_queue_.front();
-    std::optional<std::string> value;
-
-    // Any write invalidates the stored value, so read only if necessary.
-    // Note: this is a suspension point, key_ops_ can grow!
-    if (key_ops_[key].front().type == Op::GET)
-      value = storage_->Read(key);
-
-    // Atomically fulfill all pending operations
-    bool updated = false;
-    {
-      util::FiberAtomicGuard guard;
-      for (auto& op : key_ops_[key]) {
-        // We rely on the keystore to provide us operations in valid order
-        switch (op.type) {
-          case Op::GET:
-            DCHECK(value);  // No GET after DEL
-            break;
-          case Op::DEL:
-            DCHECK(value);  // No DEL after DEL
-            value.reset();
-            break;
-          case Op::SET:
-            value = std::move(op.value);
-            break;
-        }
-
-        updated |= op.type != Op::GET;
-        if (op.callback)
-          op.callback(value ? std::string_view(*value) : "");
-      }
-    }
-
-    // Remove all executed operations
-    key_ops_.erase(key);
-
-    // If value was updated, issue operation to storage
-    if (updated) {
-      if (value)
-        storage_->Write(key, *value);
-      else
-        storage_->Delete(key);
-    }
-
-    key_queue_.pop_front();
+void OpQueue::DismissStore(std::string_view key) {
+  // If the STORE operation is still enqueued, remove it from queue,
+  // otherwise it must be handled currently, so dismiss it.
+  if (auto it = key_ops_.find(key); it != key_ops_.end()) {
+    auto& back = it->second.back();
+    DCHECK_EQ(back.type, Op::STORE);
+    if (back.callback)
+      back.callback("");
+    it->second.pop_back();
+  } else {
+    DCHECK_EQ(key_queue_.front(), key);
+    operation_dismissed_ = true;
   }
 }
 
-OpManager::OpManager(Storage* storage, unsigned num_queues) {
+void OpQueue::Loop() {
+  while (true) {
+    waker_.await([this] { return !key_queue_.empty() || worker_stopped_; });
+    if (worker_stopped_)
+      return;
+
+    const auto& key = key_queue_.front();
+    absl::Cleanup cleanup = [this] {
+      key_queue_.pop_front();
+      operation_dismissed_ = false;
+    };
+
+    VLOG(0) << "Handling " << key;
+
+    std::optional<BlobLocator> locator;
+    std::optional<std::string> value;
+
+    // Perform read while allowing for more entries to be enqueued
+    {
+      const auto& operations = key_ops_[key];
+      if (!operations.empty() && operations.front().type == Op::READ) {
+        locator = std::get<BlobLocator>(operations.front().value);
+        value = storage_->Read(*locator);
+      }
+    }
+
+    std::vector<Op> operations = std::move(key_ops_.extract(key).mapped());
+    if (operations.empty())
+      continue;
+
+    // Resolve all reads
+    auto it = operations.begin();
+    for (; it != operations.end() && it->type == Op::READ; ++it) {
+      DCHECK(value);
+      it->callback(*value);
+    }
+
+    // If only reads are present, report as fetched and continue
+    if (it == operations.end()) {
+      DCHECK(locator && value);
+      if (key_storage_->ReportFetched(key, *value))
+        storage_->Delete(*locator);
+      continue;
+    }
+
+    DCHECK_LE(std::distance(it, operations.end()), 2);  // No more than DEL - STORE
+
+    // Resolve delete
+    if (it != operations.end() && it->type == Op::DEL) {
+      storage_->Delete(std::get<BlobLocator>(it->value));
+      if (it->callback)
+        it->callback("");
+      ++it;
+    }
+
+    if (it == operations.end())
+      continue;
+
+    DCHECK_EQ(std::distance(it, operations.end()), 1);  // STORE can't follow STORE
+    DCHECK_EQ(it->type, Op::STORE);
+
+    *locator = storage_->Store(std::move(std::get<std::string>(it->value)));
+    if (it->callback)
+      it->callback("");
+
+    if (operation_dismissed_) {
+      storage_->Delete(*locator);  // Dismissed while suspended
+    } else {
+      VLOG(0) << "Reporing stored " << key << " at " << locator->offset;
+      key_storage_->ReportStored(key, *locator);
+    }
+  }
+}
+
+OpManager::OpManager(Storage* storage, KeyStorage* key_storage, unsigned num_queues) {
   queues_.reserve(num_queues);
   for (size_t i = 0; i < num_queues; i++)
-    queues_.emplace_back(std::make_unique<OpQueue>(storage));
+    queues_.emplace_back(std::make_unique<OpQueue>(storage, key_storage));
 }
 
 void OpManager::Start() {
@@ -111,25 +143,29 @@ void OpManager::Stop() {
     queue->Stop();
 }
 
-Future<std::string> OpManager::Read(std::string_view key) {
+Future<std::string> OpManager::Read(std::string_view key, BlobLocator locator) {
   Future<std::string> future;
   auto cb = [future](std::string_view value) mutable { future.Resolve(std::string{value}); };
-  GetQueue(key)->Enqueue(key, {Op::GET, "", std::move(cb)});
+  GetQueue(key)->Enqueue(key, {Op::READ, locator, std::move(cb)});
   return future;
 }
 
-Future<void> OpManager::Write(std::string_view key, std::string value) {
+Future<void> OpManager::Store(std::string_view key, std::string value) {
   Future<void> future;
   auto cb = [future](std::string_view) mutable { future.Resolve(); };
-  GetQueue(key)->Enqueue(key, {Op::SET, std::move(value), std::move(cb)});
+  GetQueue(key)->Enqueue(key, {Op::STORE, std::move(value), std::move(cb)});
   return future;
 }
 
-Future<void> OpManager::Delete(std::string_view key) {
+Future<void> OpManager::Delete(std::string_view key, BlobLocator locator) {
   Future<void> future;
   auto cb = [future](std::string_view) mutable { future.Resolve(); };
-  GetQueue(key)->Enqueue(key, {Op::DEL, "", std::move(cb)});
+  GetQueue(key)->Enqueue(key, {Op::DEL, locator, std::move(cb)});
   return future;
+}
+
+void OpManager::DismissStore(std::string_view key) {
+  GetQueue(key)->DismissStore(key);
 }
 
 OpQueue* OpManager::GetQueue(std::string_view key) {

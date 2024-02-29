@@ -22,27 +22,32 @@ namespace dfly::tiering {
 // to single key.
 class OpQueue {
  public:
-  explicit OpQueue(Storage* storage) : storage_{storage} {
+  explicit OpQueue(Storage* storage, KeyStorage* key_storage)
+      : storage_{storage}, key_storage_{key_storage} {
   }
 
   void Start();       // Start worker fiber
   void Stop();        // Request stop, doesn't unblock storage operation
   void TEST_Drain();  // Wait for queue to drain before stopping
 
-  // Enqueue operation asynchronously. Callback is invoked once the operation was processed,
-  // it does not guarantee the value was flushed to storage (or ever will if skipped).
+  // Enqueue operation, assumes valid order relative to key storage events.
   void Enqueue(std::string_view key, Op op);
+
+  // Dismiss STORE operation that is enqueued (or in progress).
+  void DismissStore(std::string_view key);
 
  private:
   void Loop();  // worker fiber loop
 
  private:
   Storage* storage_;
+  KeyStorage* key_storage_;
 
-  bool cancelled_ = false;
+  bool worker_stopped_ = false;
   util::fb2::EventCount waker_;
   util::fb2::Fiber worker_;
 
+  bool operation_dismissed_ = false;
   std::deque<std::string> key_queue_;
   absl::flat_hash_map<std::string, std::vector<Op>> key_ops_;
 };
@@ -53,18 +58,23 @@ class OpQueue {
 // only relative to single key, otherwise free to reorder arbitrarily.
 class OpManager {
  public:
-  OpManager(Storage* storage, unsigned num_queues);
+  OpManager(Storage* storage, KeyStorage* key_storage, unsigned num_queues);
 
   void Start();
   void Stop();
 
-  Future<std::string> Read(std::string_view key);
+  // Enqueue read operation that resolves to stored value. Locator must be valid.
+  Future<std::string> Read(std::string_view key, BlobLocator locator);
 
-  // Resolving does NOT guarantee that the write/delete operation actually was executed by the
-  // storage. It might happen later or be skipped at all. Use it only for backpressure.
-  using Backpressure = Future<void>;
-  Backpressure Write(std::string_view key, std::string value);
-  Backpressure Delete(std::string_view key);
+  // Equeue store operation, resolves when stored or cancelled.
+  // Can be dismissed until stored event is emitted to the key storage.
+  Future<void> Store(std::string_view key, std::string value);
+
+  // Enqueue delete operaton, resolved when deleted.
+  Future<void> Delete(std::string_view key, BlobLocator locator);
+
+  // Dismiss enqueued store.
+  void DismissStore(std::string_view key);
 
  private:
   OpQueue* GetQueue(std::string_view key);

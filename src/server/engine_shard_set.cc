@@ -406,7 +406,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
       exit(1);
     }
 
-    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_, max_file_size));
+    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
     error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
   }
@@ -627,14 +627,6 @@ void EngineShard::Heartbeat() {
     if (db_slice_.memory_budget() < eviction_redline) {
       db_slice_.FreeMemWithEvictionStep(i, eviction_redline - db_slice_.memory_budget());
     }
-
-    if (tiered_storage_) {
-      size_t offload_bytes = 0;
-      if (UsedMemory() > tiering_redline) {
-        offload_bytes = UsedMemory() - tiering_redline;
-      }
-      db_slice_.ScheduleForOffloadStep(i, offload_bytes);
-    }
   }
 
   // Journal entries for expired entries are not writen to socket in the loop above.
@@ -823,7 +815,9 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
 
   string file_prefix = GetFlag(FLAGS_tiered_prefix);
   size_t max_shard_file_size = 0;
-  if (!file_prefix.empty()) {
+  if (!file_prefix.empty())
+    is_tiering_enabled_ = true;
+  /*if (!file_prefix.empty()) {
     size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;
     size_t max_file_size_limit = GetFsLimit();
     if (max_file_size == 0) {
@@ -845,7 +839,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
     }
     is_tiering_enabled_ = true;
     LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
-  }
+  }*/
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {

@@ -37,7 +37,7 @@ using namespace facade;
 using CI = CommandId;
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
-[[maybe_unused]] constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
+//[[maybe_unused]] constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
 size_t CopyValueToBuffer(const PrimeValue& pv, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
@@ -605,10 +605,10 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
     it->first.SetSticky(true);
   }
 
-  if (shard->tiered_storage() &&
-      TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
-    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it, key);
-  }
+  // if (shard->tiered_storage() &&
+  //     TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
+  //   shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it, key);
+  // }
 
   if (manual_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
@@ -662,8 +662,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
   }
 
-  db_slice.RemoveFromTiered(it, op_args_.db_cntx.db_index);
-  // overwrite existing entry.
+  // db_slice.RemoveFromTiered(it, op_args_.db_cntx.db_index);
+  //  overwrite existing entry.
   prime_value.SetString(value);
   DCHECK(!prime_value.HasIoPending());
 
@@ -831,21 +831,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
     OpResult<PrimeConstIterator> res;
 
-    // A temporary code that allows running dragonfly without filling up memory store
-    // when reading data from disk.
-    if (TieredStorage* tiered = shard->tiered_storage();
-        tiered && absl::GetFlag(FLAGS_tiered_skip_prefetch)) {
-      res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
-      if (res && (*res)->second.IsExternal()) {
-        auto [offset, size] = (*res)->second.GetExternalSlice();
-        string blob(size, '\0');
-        auto ec = tiered->Read(offset, size, blob.data());
-        CHECK(!ec) << "TBD";
-        return blob;
-      }
-    } else {
-      res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
-    }
+    res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
 
     if (!res) {
       return res.status();
@@ -1481,6 +1467,71 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void StringFamily::MvpGet(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+
+  std::variant<string, tiering::Future<string>> value;
+  auto res = cntx->transaction->ScheduleSingleHop([key, &value](auto* tx, auto* es) -> OpStatus {
+    auto op_args = tx->GetOpArgs(es);
+
+    OpResult<PrimeConstIterator> it_res =
+        es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+    if (!it_res.ok())
+      return it_res.status();
+
+    const CompactObj& co = it_res.value()->second;
+    if (co.IsExternal()) {
+      value = es->tiered_storage()->Fetch(key, co);
+    } else {
+      co.GetString(&get<string>(value));
+    }
+    return OpStatus::OK;
+  });
+
+  if (res != OpStatus::OK)
+    return cntx->SendError(res);
+
+  if (holds_alternative<string>(value))
+    cntx->SendSimpleString(get<string>(value));
+  else
+    cntx->SendSimpleString(get<tiering::Future<string>>(value).Get());
+}
+
+void StringFamily::MvpSet(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view value = ArgS(args, 1);
+
+  auto res = cntx->transaction->ScheduleSingleHop([key, value](auto* tx, auto* es) -> OpStatus {
+    auto op_args = tx->GetOpArgs(es);
+    OpResult<DbSlice::AddOrFindResult> it_res = es->db_slice().AddOrFind(op_args.db_cntx, key);
+    if (!it_res.ok())
+      return it_res.status();
+
+    CompactObj& co = it_res.value().it->second;
+
+    // Dismiss if io pending
+    if (co.HasIoPending()) {
+      es->tiered_storage()->Dismiss(key);
+    }
+
+    // Delete if offloaded
+    if (co.IsExternal()) {
+      es->tiered_storage()->Delete(key, co);
+    }
+
+    // Store string
+    co.SetString(value);
+
+    // Schedule offload
+    co.SetIoPending(true);
+    es->tiered_storage()->Store(key, value);
+
+    return OpStatus::OK;
+  });
+
+  cntx->SendStored();
+}
+
 void StringFamily::Init(util::ProactorPool* pp) {
 }
 
@@ -1551,7 +1602,10 @@ void StringFamily::Register(CommandRegistry* registry) {
              GetRange)  // Alias for GetRange
       << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, acl::kSetRange}.HFUNC(SetRange)
       << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::kClThrottle}.HFUNC(
-             ClThrottle);
+             ClThrottle)
+
+      << CI{"MVPSET", CO::WRITE, 3, 1, 1, acl::kSet}.HFUNC(MvpSet)
+      << CI{"MVPGET", CO::READONLY, 2, 1, 1, acl::kGet}.HFUNC(MvpGet);
 }
 
 }  // namespace dfly
