@@ -1,8 +1,11 @@
 name: daily-sanitizers
 
 on:
-  schedule:
-    - cron: '0 4 * * *' # run at 4 AM UTC
+  #schedule:
+  #  - cron: '0 4 * * *' # run at 4 AM UTC
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -82,11 +85,16 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -V -L DFLY -E "^(search_family|multi)_test"
+            ctest -V -L DFLY
 
-      - name: PostFail
+      - name: Send notifications on failure
         if: failure()
         run: |
-          echo "disk space is:"
-          df -h
-          echo "-----------------------------"
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ inputs.gspace-secret }}' \
+            -d '{"text": "'"${message}"'"}'

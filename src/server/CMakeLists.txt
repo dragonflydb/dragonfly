@@ -34,6 +34,10 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
 if (NOT APPLE)
   SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc search/aggregator.cc)
   cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+  if (WITH_ASAN OR WITH_USAN)
+    get_filename_component(test_name search/search_family_test NAME_WE)
+    target_compile_definitions(test_name PRIVATE SANITIZERS);
+  endif()
   cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 endif()
 
@@ -88,6 +92,10 @@ cxx_test(list_family_test dfly_test_lib LABELS DFLY)
 cxx_test(server_family_test dfly_test_lib LABELS DFLY)
 cxx_test(set_family_test dfly_test_lib LABELS DFLY)
 cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
+if (WITH_ASAN OR WITH_USAN)
+  target_compile_definitions(stream_family_test PRIVATE SANITIZERS);
+  target_compile_definitions(multi_test PRIVATE SANITIZERS);
+endif()
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
