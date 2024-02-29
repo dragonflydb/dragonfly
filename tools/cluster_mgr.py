@@ -18,6 +18,10 @@ class Node:
         self.host = host
         self.port = port
 
+    def update_id(node):
+        node.id = send_command(node, ["dflycluster", "myid"])
+        print(f"- ID {node.id}")
+
 
 class Master:
     def __init__(self, host, port):
@@ -61,11 +65,6 @@ def send_command(node, command, print_errors=True):
     return Exception()
 
 
-def update_id(node):
-    node.id = send_command(node, ["dflycluster", "myid"])
-    print(f"- ID {node.id}")
-
-
 def build_config_from_list(masters):
     total_slots = 16384
     slots_per_node = math.floor(total_slots / len(masters))
@@ -94,7 +93,7 @@ def get_nodes_from_config(config):
         for replica in shard["replicas"]:
             nodes.append(Node(replica["ip"], replica["port"]))
     for node in nodes:
-        update_id(node)
+        node.update_id()
     return nodes
 
 
@@ -147,7 +146,7 @@ def create_locally(args):
 
     print(f"Getting IDs...")
     for n in nodes:
-        update_id(n)
+        n.update_id()
     print()
 
     config = build_config_from_list(masters)
@@ -162,7 +161,7 @@ def config_single_remote(args):
     )
 
     master = Master(args.target_host, args.target_port)
-    update_id(master.node)
+    master.node.update_id()
 
     test = send_command(master.node, ["get", "x"], print_errors=False)
     if type(test) is not Exception:
@@ -219,7 +218,7 @@ def find_node(config, host, port):
 def attach(args):
     print(f"Attaching remote Dragonfly {args.attach_host}:{args.attach_port} to cluster")
     newcomer = Master(args.attach_host, args.attach_port)
-    update_id(newcomer.node)
+    newcomer.node.update_id()
 
     newcomer_config = build_config_from_list([newcomer])
     newcomer_config[0]["slot_ranges"] = []
@@ -310,7 +309,7 @@ def migrate(args):
     config = build_config_from_existing(args)
     target = find_node(config, args.target_host, args.target_port)
     target_node = Node(target["master"]["ip"], target["master"]["port"])
-    update_id(target_node)
+    target_node.update_id()
 
     # Find source node
     source = None
@@ -324,7 +323,7 @@ def migrate(args):
         print("Unsupported slot range migration (currently only 1-node migration supported)")
         exit(-1)
     source_node = Node(source["master"]["ip"], source["master"]["port"])
-    update_id(source_node)
+    source_node.update_id()
 
     # do migration
     sync_id = send_command(
