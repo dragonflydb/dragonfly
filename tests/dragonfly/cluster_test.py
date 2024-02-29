@@ -794,10 +794,27 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     )
     assert "NO_STATE" == status
 
-    res = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "5200", "5259"
+    migation_config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
+          "replicas": [],
+          "migrations": [{{ "slot_ranges": [ {{ "start": 5200, "end": 5259 }} ]
+                         , "ip": "127.0.0.1", "port" : {nodes[0].admin_port}, "target_id": "{node_ids[1]}" }}]
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes_admin,
     )
-    assert 1 == res
 
     while (
         await c_nodes_admin[1].execute_command(
@@ -829,9 +846,15 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         assert e.args[0] == "Can't start the migration, another one is in progress"
 
     await push_config(
-        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
         c_nodes_admin,
     )
+
+    status = await c_nodes_admin[0].execute_command("DFLYCLUSTER SLOT-MIGRATION-STATUS")
+    assert ["out 127.0.0.1:30002 STABLE_SYNC"] == status
+
+    status = await c_nodes_admin[1].execute_command("DFLYCLUSTER SLOT-MIGRATION-STATUS")
+    assert ["in 127.0.0.1:31001 STABLE_SYNC"] == status
 
     await close_clients(*c_nodes, *c_nodes_admin)
 
