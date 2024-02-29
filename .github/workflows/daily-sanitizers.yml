@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: [self-hosted, linux, ARM64]
+    runs-on: [ubuntu-latest]
     strategy:
       matrix:
         # Test of these containers
@@ -91,7 +91,7 @@ jobs:
         if: failure()
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n Job Link: ${job_link}\\n"
+          message="Daily sanitizers failed.\\n The commit is: ${{github.sha}}.\\n Job Link: ${job_link}\\n"
 
           curl -s \
             -X POST \
