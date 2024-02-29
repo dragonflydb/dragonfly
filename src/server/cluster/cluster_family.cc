@@ -42,7 +42,6 @@ constexpr char kIdNotFound[] = "syncid not found";
 
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
-constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only under admin port";
 
 thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
@@ -381,10 +380,6 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsEnabledOrEmulated()) {
     return cntx->SendError(kClusterDisabled);
-  }
-
-  if (cntx->conn() && !cntx->conn()->IsPrivileged()) {
-    return cntx->SendError(kDflyClusterCmdPort);
   }
 
   ToUpper(&args[0]);
