@@ -147,7 +147,7 @@ error_code RdbSnapshot::Close() {
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
   saver_->StartSnapshotInShard(false, cntx_.GetCancellation(), shard);
-  started_ = true;
+  started_shards_.fetch_add(1, memory_order_relaxed);
 }
 
 SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
