@@ -2547,10 +2547,7 @@ void Service::RegisterCommands() {
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
-
-#ifndef __APPLE__
   SearchFamily::Register(&registry_);
-#endif
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);

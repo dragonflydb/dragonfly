@@ -1298,7 +1298,6 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
       script_bodies.push_back(std::move(data.body));
   }
 
-#ifndef __APPLE__
   {
     shard_set->Await(0, [&] {
       auto* indices = EngineShard::tlocal()->search_indices();
@@ -1309,7 +1308,6 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
       }
     });
   }
-#endif
 
   return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices)};
 }
