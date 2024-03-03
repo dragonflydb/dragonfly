@@ -1025,6 +1025,13 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
+
+  if (m.events.insertion_rejections | m.coordinator_stats.oom_error_cmd_cnt) {
+    AppendMetricValue("oom_errors_total", m.events.insertion_rejections, {"type"}, {"insert"},
+                      &resp->body());
+    AppendMetricValue("oom_errors_total", m.coordinator_stats.oom_error_cmd_cnt, {"type"}, {"cmd"},
+                      &resp->body());
+  }
   if (sdata_res.has_value()) {
     size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());

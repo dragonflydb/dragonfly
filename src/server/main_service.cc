@@ -968,7 +968,19 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
                                                      const ConnectionContext* cntx,
                                                      CmdArgList tail_args) {
-  // TODO: Move OOM check here
+  ServerState& etl = *ServerState::tlocal();
+
+  if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
+    uint64_t start_ns = absl::GetCurrentTimeNanos();
+
+    uint64_t used_memory = etl.GetUsedMemory(start_ns);
+    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
+    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
+      etl.stats.oom_error_cmd_cnt++;
+      return facade::ErrorReply{kOutOfMemory};
+    }
+  }
+
   return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
                                    tail_args);
 }
@@ -1134,16 +1146,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return cntx->SendSimpleString("QUEUED");
-  }
-
-  if (cid->opt_mask() & CO::DENYOOM && etl.is_master) {
-    uint64_t start_ns = absl::GetCurrentTimeNanos();
-
-    uint64_t used_memory = etl.GetUsedMemory(start_ns);
-    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
-    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
-      return cntx->reply_builder()->SendError(kOutOfMemory);
-    }
   }
 
   // Create command transaction
