@@ -29,6 +29,10 @@ ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
           "The maximum number of dashtable segments to scan in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
 
+ABSL_FLAG(double, table_growth_margin, 1.1,
+          "Prevents table from growing if number of free slots x average object size x this ratio "
+          "is larger than memory budget.");
+
 namespace dfly {
 
 using namespace std;
@@ -139,8 +143,9 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
   size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
-  bool res = mem_budget_ >
-             int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available * 1.1);
+  bool res =
+      mem_budget_ > int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available *
+                                                        GetFlag(FLAGS_table_growth_margin));
   VLOG(2) << "available: " << new_available << ", res: " << res;
 
   return res;
