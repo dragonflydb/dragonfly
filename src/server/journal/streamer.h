@@ -62,6 +62,7 @@ class RestoreStreamer : public JournalStreamer {
   void Cancel() override;
 
   void SendFinalize();
+  void SendFullSyncCut();
 
   bool IsSnapshotFinished() const {
     return snapshot_finished_;
@@ -82,7 +83,6 @@ class RestoreStreamer : public JournalStreamer {
   uint64_t snapshot_version_ = 0;
   SlotSet my_slots_;
   uint32_t sync_id_;
-  Fiber snapshot_fb_;
   Cancellation fiber_cancellation_;
   bool snapshot_finished_ = false;
 };

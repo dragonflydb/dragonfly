@@ -65,39 +65,38 @@ void RestoreStreamer::Start(io::Sink* dest) {
 
   JournalStreamer::Start(dest);
 
-  DCHECK(!snapshot_fb_.IsJoinable());
-  snapshot_fb_ = fb2::Fiber("slot-snapshot", [this] {
-    PrimeTable::Cursor cursor;
-    uint64_t last_yield = 0;
-    PrimeTable* pt = &db_slice_->databases()[0]->prime;
+  PrimeTable::Cursor cursor;
+  uint64_t last_yield = 0;
+  PrimeTable* pt = &db_slice_->databases()[0]->prime;
 
-    do {
-      if (fiber_cancellation_.IsCancelled())
-        return;
+  do {
+    if (fiber_cancellation_.IsCancelled())
+      return;
 
-      bool written = false;
-      cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
-        if (WriteBucket(it)) {
-          written = true;
-        }
-      });
-      if (written) {
-        NotifyWritten(true);
+    bool written = false;
+    cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+      if (WriteBucket(it)) {
+        written = true;
       }
-      ++last_yield;
+    });
+    if (written) {
+      NotifyWritten(true);
+    }
+    ++last_yield;
 
-      if (last_yield >= 100) {
-        ThisFiber::Yield();
-        last_yield = 0;
-      }
-    } while (cursor);
+    if (last_yield >= 100) {
+      ThisFiber::Yield();
+      last_yield = 0;
+    }
+  } while (cursor);
+}
 
-    VLOG(2) << "FULL-SYNC-CUT for " << sync_id_ << " : " << db_slice_->shard_id();
-    WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_),
-                                                   absl::StrCat(db_slice_->shard_id())}));
-    NotifyWritten(true);
-    snapshot_finished_ = true;
-  });
+void RestoreStreamer::SendFullSyncCut() {
+  VLOG(2) << "FULL-SYNC-CUT for " << sync_id_ << " : " << db_slice_->shard_id();
+  WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_),
+                                                 absl::StrCat(db_slice_->shard_id())}));
+  NotifyWritten(true);
+  snapshot_finished_ = true;
 }
 
 void RestoreStreamer::SendFinalize() {
@@ -110,12 +109,10 @@ void RestoreStreamer::SendFinalize() {
 }
 
 RestoreStreamer::~RestoreStreamer() {
-  CHECK(!snapshot_fb_.IsJoinable());
 }
 
 void RestoreStreamer::Cancel() {
   fiber_cancellation_.Cancel();
-  snapshot_fb_.JoinIfNeeded();
   db_slice_->UnregisterOnChange(snapshot_version_);
   JournalStreamer::Cancel();
 }

@@ -47,6 +47,8 @@ class OutgoingMigration {
   // SliceSlotMigration manages state and data transfering for the corresponding shard
   class SliceSlotMigration;
 
+  void SyncFb();
+
  private:
   std::string host_ip_;
   uint16_t port_;
@@ -54,6 +56,8 @@ class OutgoingMigration {
   Context cntx_;
   mutable Mutex flows_mu_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_ ABSL_GUARDED_BY(flows_mu_);
+
+  Fiber main_sync_fb_;
 };
 
 }  // namespace dfly

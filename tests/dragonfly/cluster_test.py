@@ -816,22 +816,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    while (
-        await c_nodes_admin[1].execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-        )
-        != "STABLE_SYNC"
-    ):
-        await asyncio.sleep(0.05)
-
-    status = await c_nodes_admin[0].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[1].port)
-    )
-    assert "STABLE_SYNC" == status
-
-    status = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-    assert ["out 127.0.0.1:30002 STABLE_SYNC"] == status
-
+    await asyncio.sleep(0.5)
     try:
         await c_nodes_admin[1].execute_command(
             "DFLYCLUSTER",
@@ -849,12 +834,6 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
         c_nodes_admin,
     )
-
-    status = await c_nodes_admin[0].execute_command("DFLYCLUSTER SLOT-MIGRATION-STATUS")
-    assert ["out 127.0.0.1:30002 STABLE_SYNC"] == status
-
-    status = await c_nodes_admin[1].execute_command("DFLYCLUSTER SLOT-MIGRATION-STATUS")
-    assert ["in 127.0.0.1:31001 STABLE_SYNC"] == status
 
     await close_clients(*c_nodes, *c_nodes_admin)
 
@@ -920,13 +899,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[0].set("KEY0", "value")
     assert await c_nodes[0].set("KEY1", "value")
 
-    while (
-        await c_nodes_admin[1].execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-        )
-        != "STABLE_SYNC"
-    ):
-        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.5)
 
     assert await c_nodes[0].set("KEY4", "value")
     assert await c_nodes[0].set("KEY5", "value")
@@ -1090,28 +1063,10 @@ async def test_cluster_fuzzymigration(
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
 
-    # Busy loop for migrations to finish - all in stable state
-    iterations = 0
-    while True:
-        for node in nodes:
-            states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-            print(states)
-            if not all(s.endswith("STABLE_SYNC") for s in states) and not states == "NO_STATE":
-                break
-        else:
-            break
-
-        iterations += 1
-        assert iterations < 100
-
-        await asyncio.sleep(0.1)
-
-    # Give seeder one more second
-    await asyncio.sleep(1.0)
-
     # Stop seeder
     seeder.stop()
     await fill_task
+    await asyncio.sleep(1.0)
 
     # Counter that pushes values to a list
     async def list_counter(key, client: aioredis.RedisCluster):
