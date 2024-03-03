@@ -27,7 +27,7 @@ ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
           "The maximum number of dashtable segments to scan in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
 
-ABSL_FLAG(double, oom_capacity_ratio, 1.1,
+ABSL_FLAG(double, table_growth_margin, 1.1,
           "Return OOM if the capacity of the table after growing multiplied by the ratio "
           "will exceed memory limit.");
 
@@ -143,7 +143,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
   bool res =
       mem_budget_ > int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available *
-                                                        GetFlag(FLAGS_oom_capacity_ratio));
+                                                        GetFlag(FLAGS_table_growth_margin));
   VLOG(2) << "available: " << new_available << ", res: " << res;
 
   return res;

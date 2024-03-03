@@ -804,7 +804,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_segment_to_consider");
   config_registry.RegisterMutable("enable_heartbeat_eviction");
   config_registry.RegisterMutable("dbfilename");
-  config_registry.RegisterMutable("oom_capacity_ratio");
+  config_registry.RegisterMutable("table_growth_margin");
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
