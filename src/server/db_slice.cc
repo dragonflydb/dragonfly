@@ -28,8 +28,8 @@ ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
           "when heartbeat based eviction is triggered under memory pressure.");
 
 ABSL_FLAG(double, table_growth_margin, 1.1,
-          "Return OOM if the capacity of the table after growing multiplied by the ratio "
-          "will exceed memory limit.");
+          "Prevents table from growing if number of free slots x average object size x this ratio "
+          "is larger than memory budget.");
 
 namespace dfly {
 
