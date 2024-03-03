@@ -1142,6 +1142,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
+      etl.stats.oom_error_cmd_cnt++;
       return cntx->reply_builder()->SendError(kOutOfMemory);
     }
   }
