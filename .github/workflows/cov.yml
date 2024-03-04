@@ -25,11 +25,22 @@ jobs:
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /:/hostroot
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Delete Space
+        run: |
+          df -h
+          rm -rf /hostroot/usr/share/dotnet
+          rm -rf /hostroot/usr/local/share/boost
+          rm -rf /hostroot/usr/local/lib/android
+          rm -rf /hostroot/opt/ghc
+          echo "***************After Deletion***************************"
+          df -h
       - name: Install dependencies
         run: |
           uname -a
