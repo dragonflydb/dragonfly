@@ -15,6 +15,10 @@ using SlotId = uint16_t;
 struct SlotRange {
   SlotId start = 0;
   SlotId end = 0;
+
+  bool operator==(const SlotRange& r) const {
+    return start == r.start && end == r.end;
+  }
 };
 
 using SlotRanges = std::vector<SlotRange>;

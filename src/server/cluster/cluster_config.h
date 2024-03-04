@@ -36,10 +36,23 @@ class ClusterConfig {
     uint16_t port = 0;
   };
 
+  struct MigrationInfo {
+    std::vector<SlotRange> slot_ranges;
+    std::string target_id;
+    std::string ip;
+    uint16_t port = 0;
+
+    bool operator==(const ClusterConfig::MigrationInfo& r) const {
+      return ip == r.ip && port == r.port && slot_ranges == r.slot_ranges &&
+             target_id == r.target_id;
+    }
+  };
+
   struct ClusterShard {
     SlotRanges slot_ranges;
     Node master;
     std::vector<Node> replicas;
+    std::vector<MigrationInfo> migrations;
   };
 
   using ClusterShards = std::vector<ClusterShard>;
@@ -84,6 +97,14 @@ class ClusterConfig {
 
   const SlotSet& GetOwnedSlots() const;
 
+  const std::vector<MigrationInfo>& GetOutgoingMigrations() const {
+    return my_outgoing_migrations_;
+  }
+
+  const std::vector<MigrationInfo>& GetIncomingMigrations() const {
+    return my_incoming_migrations_;
+  }
+
  private:
   struct SlotEntry {
     const ClusterShard* shard = nullptr;
@@ -95,6 +116,8 @@ class ClusterConfig {
   ClusterShards config_;
 
   SlotSet my_slots_;
+  std::vector<MigrationInfo> my_outgoing_migrations_;
+  std::vector<MigrationInfo> my_incoming_migrations_;
 };
 
 }  // namespace dfly

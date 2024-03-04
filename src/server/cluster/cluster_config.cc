@@ -155,6 +155,13 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
                                            [&](const Node& node) { return node.id == my_id; });
     if (owned_by_me) {
       result->my_slots_.Set(shard.slot_ranges, true);
+      result->my_outgoing_migrations_ = shard.migrations;
+    } else {
+      for (const auto& m : shard.migrations) {
+        if (my_id == m.target_id) {
+          result->my_incoming_migrations_.push_back(m);
+        }
+      }
     }
   }
 
@@ -236,6 +243,36 @@ optional<ClusterConfig::Node> ParseClusterNode(const JsonType& json) {
   return node;
 }
 
+optional<std::vector<ClusterConfig::MigrationInfo>> ParseMigrations(const JsonType& json) {
+  std::vector<ClusterConfig::MigrationInfo> res;
+  if (json.is_null()) {
+    return res;
+  }
+
+  if (!json.is_array()) {
+    LOG(INFO) << "no migrations found: " << json;
+    return nullopt;
+  }
+
+  for (const auto& element : json.array_range()) {
+    auto target_id = element.at_or_null("target_id");
+    auto ip = element.at_or_null("ip");
+    auto port = ReadNumeric<uint16_t>(element.at_or_null("port"));
+    auto slots = GetClusterSlotRanges(element.at_or_null("slot_ranges"));
+
+    if (!target_id.is_string() || !ip.is_string() || !port || !slots) {
+      LOG(WARNING) << kInvalidConfigPrefix << "invalid migration json " << json;
+      return nullopt;
+    }
+
+    res.emplace_back(ClusterConfig::MigrationInfo{.slot_ranges = std::move(*slots),
+                                                  .target_id = target_id.as_string(),
+                                                  .ip = ip.as_string(),
+                                                  .port = *port});
+  }
+  return res;
+}
+
 optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType& json) {
   ClusterConfig::ClusterShards config;
 
@@ -277,6 +314,12 @@ optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType
       }
       shard.replicas.push_back(std::move(node).value());
     }
+
+    auto migrations = ParseMigrations(element.at_or_null("migrations"));
+    if (!migrations) {
+      return nullopt;
+    }
+    shard.migrations = std::move(*migrations);
 
     config.push_back(std::move(shard));
   }

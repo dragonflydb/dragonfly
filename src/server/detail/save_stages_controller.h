@@ -56,13 +56,15 @@ class RdbSnapshot {
   }
 
   bool HasStarted() const {
-    return started_ || (saver_ && saver_->Mode() == SaveMode::SUMMARY);
+    return started_shards_.load(std::memory_order_relaxed) > 0 ||
+           (saver_ && saver_->Mode() == SaveMode::SUMMARY);
   }
 
  private:
-  bool started_ = false;
   bool is_linux_file_ = false;
   SnapshotStorage* snapshot_storage_ = nullptr;
+
+  std::atomic_uint32_t started_shards_ = 0;
 
   unique_ptr<io::Sink> io_sink_;
   unique_ptr<RdbSaver> saver_;

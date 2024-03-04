@@ -392,6 +392,7 @@ DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
       issuer_{issuer},
       ignore_paused_{ignore_paused},
       ignore_blocked_{ignore_blocked} {
+  bc_ = make_unique<util::fb2::BlockingCounter>(0);
 }
 
 void DispatchTracker::TrackOnThread() {
@@ -400,7 +401,15 @@ void DispatchTracker::TrackOnThread() {
 }
 
 bool DispatchTracker::Wait(absl::Duration duration) {
-  return bc_.WaitFor(absl::ToChronoMilliseconds(duration));
+  bool res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
+  if (!res && ignore_blocked_) {
+    // We track all connections again because a connection might became blocked between the time
+    // we call tracking the last time.
+    bc_.reset(new util::fb2::BlockingCounter(0));
+    TrackAll();
+    res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
+  }
+  return res;
 }
 
 void DispatchTracker::TrackAll() {
@@ -410,7 +419,7 @@ void DispatchTracker::TrackAll() {
 
 void DispatchTracker::Handle(unsigned thread_index, util::Connection* conn) {
   if (auto* fconn = static_cast<facade::Connection*>(conn); fconn != issuer_)
-    fconn->SendCheckpoint(bc_, ignore_paused_, ignore_blocked_);
+    fconn->SendCheckpoint(*bc_, ignore_paused_, ignore_blocked_);
 }
 
 }  // namespace facade

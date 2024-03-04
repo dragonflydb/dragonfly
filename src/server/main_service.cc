@@ -74,7 +74,8 @@ ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
 ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
-
+ABSL_FLAG(bool, lua_resp2_legacy_float, false,
+          "Return rounded down integers instead of floats for lua scripts with RESP2");
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
@@ -303,7 +304,12 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnDouble(double d) final {
-    rb_->SendDouble(d);
+    if (rb_->IsResp3() || !absl::GetFlag(FLAGS_lua_resp2_legacy_float)) {
+      rb_->SendDouble(d);
+    } else {
+      long val = static_cast<long>(floor(d));
+      rb_->SendLong(val);
+    }
   }
 
   void OnInt(int64_t val) final {
@@ -798,6 +804,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_segment_to_consider");
   config_registry.RegisterMutable("enable_heartbeat_eviction");
   config_registry.RegisterMutable("dbfilename");
+  config_registry.RegisterMutable("table_growth_margin");
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
@@ -961,7 +968,19 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
                                                      const ConnectionContext* cntx,
                                                      CmdArgList tail_args) {
-  // TODO: Move OOM check here
+  ServerState& etl = *ServerState::tlocal();
+
+  if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
+    uint64_t start_ns = absl::GetCurrentTimeNanos();
+
+    uint64_t used_memory = etl.GetUsedMemory(start_ns);
+    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
+    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
+      etl.stats.oom_error_cmd_cnt++;
+      return facade::ErrorReply{kOutOfMemory};
+    }
+  }
+
   return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
                                    tail_args);
 }
@@ -1127,16 +1146,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
     return cntx->SendSimpleString("QUEUED");
-  }
-
-  if (cid->opt_mask() & CO::DENYOOM && etl.is_master) {
-    uint64_t start_ns = absl::GetCurrentTimeNanos();
-
-    uint64_t used_memory = etl.GetUsedMemory(start_ns);
-    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
-    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
-      return cntx->reply_builder()->SendError(kOutOfMemory);
-    }
   }
 
   // Create command transaction
@@ -1327,7 +1336,9 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     // paired with shardlocal eval
     const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
 
-    if (!is_multi && !is_eval && cid != nullptr) {
+    const bool is_blocking = cid != nullptr && cid->IsBlocking();
+
+    if (!is_multi && !is_eval && !is_blocking && cid != nullptr) {
       stored_cmds.reserve(args_list.size());
       stored_cmds.emplace_back(cid, tail_args);
       continue;
@@ -2539,10 +2550,7 @@ void Service::RegisterCommands() {
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
-
-#ifndef __APPLE__
   SearchFamily::Register(&registry_);
-#endif
 
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);

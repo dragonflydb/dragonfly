@@ -28,7 +28,7 @@ ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 14 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 15 * 8, "Stats size mismatch");
 
   for (int i = 0; i < NUM_TX_TYPES; ++i) {
     this->tx_type_cnt[i] += other.tx_type_cnt[i];
@@ -44,6 +44,7 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   this->multi_squash_exec_reply_usec += other.multi_squash_exec_reply_usec;
 
   this->blocked_on_interpreter += other.blocked_on_interpreter;
+  this->oom_error_cmd_cnt += other.oom_error_cmd_cnt;
 
   if (this->tx_width_freq_arr.size() > 0) {
     DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());

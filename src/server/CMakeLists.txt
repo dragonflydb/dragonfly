@@ -31,15 +31,8 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc
             )
 
-if (NOT APPLE)
-  SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc search/aggregator.cc)
-  cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
-  if (WITH_ASAN OR WITH_USAN)
-    get_filename_component(test_name search/search_family_test NAME_WE)
-    target_compile_definitions(${test_name} PRIVATE SANITIZERS)
-  endif()
-  cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
-endif()
+SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc
+    search/aggregator.cc)
 
 add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
@@ -111,6 +104,8 @@ cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
+cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 
 
 

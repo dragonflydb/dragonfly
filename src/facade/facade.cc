@@ -160,7 +160,7 @@ ostream& operator<<(ostream& os, const facade::RespExpr& e) {
       os << "i" << get<int64_t>(e.u);
       break;
     case RespExpr::DOUBLE:
-      os << "d" << get<int64_t>(e.u);
+      os << "d" << get<double>(e.u);
       break;
     case RespExpr::STRING:
       os << "'" << ToSV(get<RespExpr::Buffer>(e.u)) << "'";
