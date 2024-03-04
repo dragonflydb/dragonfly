@@ -221,7 +221,7 @@ void TieredStorage::InflightWriteRequest::Add(const PrimeKey& pk, const PrimeVal
   unsigned bin_size = kSmallBins[bin_index_];
   unsigned max_entries = NumEntriesInSmallBin(bin_size);
 
-  char* next_hash = block_start_ + entries_.size();
+  char* next_hash = block_start_ + entries_.size() * 8;
   char* next_data = block_start_ + max_entries * 8 + entries_.size() * bin_size;
 
   DCHECK_LE(pv.Size(), bin_size);
@@ -270,7 +270,7 @@ unsigned TieredStorage::InflightWriteRequest::ExternalizeEntries(PerDb::BinRecor
 
     if (it != bin_record->enqueued_entries.end() && it->second == this) {
       PrimeIterator pit = pt->Find(pkey);
-      size_t item_offset = page_index_ * 4096 + offset + i * bin_size;
+      size_t item_offset = size_t(page_index_) * 4096 + offset + i * bin_size;
       CHECK(!pit.is_done());
 
       ExternalizeEntry(item_offset, stats, &pit->second);
