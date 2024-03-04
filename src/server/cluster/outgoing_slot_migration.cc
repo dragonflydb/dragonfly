@@ -30,10 +30,6 @@ class OutgoingMigration::SliceSlotMigration {
     sync_fb_.JoinIfNeeded();
   }
 
-  void SendFullSyncCut() {
-    streamer_.SendFullSyncCut();
-  }
-
   void Finalize() {
     streamer_.SendFinalize();
     state_.store(MigrationState::C_FINISHED, memory_order_relaxed);

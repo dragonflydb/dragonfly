@@ -62,7 +62,6 @@ class RestoreStreamer : public JournalStreamer {
   void Cancel() override;
 
   void SendFinalize();
-  void SendFullSyncCut();
 
   bool IsSnapshotFinished() const {
     return snapshot_finished_;

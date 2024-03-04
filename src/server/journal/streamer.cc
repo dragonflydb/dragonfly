@@ -91,14 +91,6 @@ void RestoreStreamer::Start(io::Sink* dest) {
   } while (cursor);
 }
 
-void RestoreStreamer::SendFullSyncCut() {
-  VLOG(2) << "FULL-SYNC-CUT for " << sync_id_ << " : " << db_slice_->shard_id();
-  WriteCommand(make_pair("DFLYMIGRATE", ArgSlice{"FULL-SYNC-CUT", absl::StrCat(sync_id_),
-                                                 absl::StrCat(db_slice_->shard_id())}));
-  NotifyWritten(true);
-  snapshot_finished_ = true;
-}
-
 void RestoreStreamer::SendFinalize() {
   VLOG(2) << "DFLYMIGRATE FINALIZE for " << sync_id_ << " : " << db_slice_->shard_id();
   journal::Entry entry(journal::Op::FIN, 0 /*db_id*/, 0 /*slot_id*/);
