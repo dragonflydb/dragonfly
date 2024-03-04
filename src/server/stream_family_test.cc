@@ -419,8 +419,6 @@ TEST_F(StreamFamilyTest, XReadGroupInvalidArgs) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
-// todo: ASAN fails heres on arm
-#ifndef SANITIZERS
 TEST_F(StreamFamilyTest, Issue854) {
   auto resp = Run({"xgroup", "help"});
   EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
@@ -428,7 +426,6 @@ TEST_F(StreamFamilyTest, Issue854) {
   resp = Run({"eval", "redis.call('xgroup', 'help')", "0"});
   EXPECT_THAT(resp, ErrArg("is not allowed"));
 }
-#endif
 
 TEST_F(StreamFamilyTest, XGroupConsumer) {
   Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
