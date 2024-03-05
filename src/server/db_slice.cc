@@ -764,6 +764,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
         db_ptr.reset();
       }
     }
+    flush_db_arr.clear();
     mi_heap_collect(ServerState::tlocal()->data_heap(), true);
   };
 
