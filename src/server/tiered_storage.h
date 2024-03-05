@@ -7,6 +7,8 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <queue>
+
 #include "core/external_alloc.h"
 #include "core/fibers.h"
 #include "server/common.h"
@@ -104,8 +106,10 @@ class TieredStorage {
   size_t allocated_size_ = 0;
   bool shutdown_ = false;
 
-  unsigned int num_pages_to_scan_ = 10;
   float defrag_bin_util_threshold_ = 0.2;
+
+  // a queue of indicies of pages that need to be defragmented.
+  std::queue<unsigned> pages_to_defrag_;
 };
 
 }  // namespace dfly

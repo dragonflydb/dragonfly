@@ -74,7 +74,7 @@ static_assert(CheckBins());
 static_assert(SmallToBin(kMaxSmallBin) == kSmallBinLen - 1);
 
 constexpr unsigned NumEntriesInSmallBin(unsigned bin_size) {
-  return kBlockLen / (bin_size + 8);  // 8 for the hash value.
+  return kBlockLen / (bin_size + kBytesPerHash);
 }
 
 static_assert(NumEntriesInSmallBin(72) == 51);
@@ -222,8 +222,8 @@ void TieredStorage::InflightWriteRequest::Add(const PrimeKey& pk, const PrimeVal
   unsigned bin_size = kSmallBins[bin_index_];
   unsigned max_entries = NumEntriesInSmallBin(bin_size);
 
-  char* next_hash = block_start_ + entries_.size() * 8;
-  char* next_data = block_start_ + max_entries * 8 + entries_.size() * bin_size;
+  char* next_hash = block_start_ + entries_.size() * kBytesPerHash;
+  char* next_data = block_start_ + max_entries * kBytesPerHash + entries_.size() * bin_size;
 
   DCHECK_LE(pv.Size(), bin_size);
   DCHECK_LE(next_data + bin_size, block_start_ + kBlockLen);
@@ -250,7 +250,7 @@ std::pair<unsigned, unsigned> TieredStorage::InflightWriteRequest::ExternalizeEn
 
   unsigned bin_size = kSmallBins[bin_index_];
   unsigned max_entries = NumEntriesInSmallBin(bin_size);
-  size_t offset = max_entries * 8;
+  size_t offset = max_entries * kBytesPerHash;
 
   for (size_t i = 0; i < entries_.size(); ++i) {
     string_view pkey = entries_[i];
@@ -339,12 +339,21 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
     alloc_.Free(offset, len);
   } else {
     uint32_t offs_page = offset / kBlockLen;
-    auto it = page_refcnt_.find(offs_page);
-    CHECK(it != page_refcnt_.end()) << offs_page;
-    CHECK_GT(it->second.first, 0u);
-    if (--it->second.first == 0) {
+    auto page_it = page_refcnt_.find(offs_page);
+    CHECK(page_it != page_refcnt_.end()) << offs_page;
+    CHECK_GT(page_it->second.first, 0u);
+
+    if (--page_it->second.first == 0) {
       alloc_.Free(offs_page * kBlockLen, kBlockLen);
-      page_refcnt_.erase(it);
+      page_refcnt_.erase(page_it);
+    } else {
+      unsigned int max_entries = NumEntriesInSmallBin(page_it->second.second);
+      float bin_util = (float)(page_it->second.first) / (float)max_entries;
+      // otherwise if the page has low utilization, put the page into
+      // background periodic defragmentation candidate queue
+      if (bin_util <= defrag_bin_util_threshold_) {
+        pages_to_defrag_.push(offs_page);
+      }
     }
   }
 
@@ -363,61 +372,63 @@ size_t TieredStorage::GetBinSize(size_t blob_len) {
 }
 
 void TieredStorage::Defrag(DbIndex db_index) {
-  // start scanning from a random position in the ref_cnt_ table.
-  auto refcnt_it = std::next(std::begin(page_refcnt_), rand() % page_refcnt_.size());
+  // going through all the candidates that have been inserted from the Free() function
+  // the Free() function is the only source which reduced page bin utilization.
+  for (; !pages_to_defrag_.empty(); pages_to_defrag_.pop()) {
+    unsigned int offs_page = pages_to_defrag_.front();
+    // check if this page still exists
+    auto page_it = page_refcnt_.find(offs_page);
+    if (page_it == page_refcnt_.end())
+      continue;
 
-  for (unsigned int i = 0; i < num_pages_to_scan_; ++i) {
-    // check the utilization of the page.
-    size_t bin_size = refcnt_it->second.second;
-    unsigned max_entries = NumEntriesInSmallBin(bin_size);
-    float bin_util = (float)(refcnt_it->second.first) / (float)max_entries;
+    // the page exists, now check if this is still under utilized as this page
+    // could have been freed and reused
+    unsigned int bin_size = page_it->second.second;
+    unsigned int max_entries = NumEntriesInSmallBin(bin_size);
+    float bin_util = (float)(page_it->second.first) / (float)max_entries;
+    if (bin_util > defrag_bin_util_threshold_)
+      continue;
 
-    // if bin is underutilized, start defragmentation.
-    if (bin_util < defrag_bin_util_threshold_) {
-      // 1. retrieve all the hash values stored in this page.
-      size_t hash_section_len = max_entries * kBytesPerHash;
-      std::vector<char> page(kBlockLen);
-      uint32_t offs_page = refcnt_it->first;
-      auto ec = Read(offs_page * kBlockLen, kBlockLen, &page[0]);
-      CHECK(!ec) << "Error when reading a page to be defragmented!";
+    // retrieve all the hash values stored in this page.
+    size_t hash_section_len = max_entries * kBytesPerHash;
+    std::vector<char> page(kBlockLen);
+    auto ec = Read(offs_page * kBlockLen, kBlockLen, &page[0]);
+    CHECK(!ec) << "Error when reading a page to be defragmented!";
 
-      for (unsigned int j = 0; j < max_entries; ++j) {
-        uint64_t key_hash = absl::little_endian::Load64(&page[j * kBytesPerHash]);
-        auto prime_it = db_slice_.GetDBTable(db_index)->prime.FindByHash(key_hash);
+    // move each of the key's value from the temporary buffer into its in memory data structure.
+    for (unsigned int j = 0; j < max_entries; ++j) {
+      uint64_t key_hash = absl::little_endian::Load64(&page[j * kBytesPerHash]);
+      auto prime_it = db_slice_.GetDBTable(db_index)->prime.FindByHash(key_hash);
 
-        // if the key still exists, load the key into memory and reschedule offload
-        if (!prime_it.is_done()) {
-          PrimeValue* entry = &prime_it->second;
-          if (entry->IsExternal()) {
-            auto [offset, len] = entry->GetExternalSlice();
-            // there might be hash collision, so we need to check
-            // if the offset is actually for the current page.
-            if (offset / kBlockLen == offs_page) {
-              std::string value(page.data() + hash_section_len + j * bin_size, len);
-              auto* stats = db_slice_.MutableStats(db_index);
-              entry->SetString(value);
-              size_t heap_size = entry->MallocUsed();
-              stats->AddTypeMemoryUsage(entry->ObjType(), heap_size);
-              ScheduleOffload(db_index, prime_it);
+      // if the key still exists, load the key into memory and reschedule offload
+      if (!prime_it.is_done()) {
+        PrimeValue* entry = &prime_it->second;
+        if (entry->IsExternal()) {
+          auto [offset, len] = entry->GetExternalSlice();
+          // there might be hash collision, so we need to check
+          // if the offset is actually for the current page.
+          if (offset / kBlockLen == offs_page) {
+            std::string value(page.data() + hash_section_len + j * bin_size, len);
+            auto* stats = db_slice_.MutableStats(db_index);
+            entry->SetString(value);
+            size_t heap_size = entry->MallocUsed();
+            stats->AddTypeMemoryUsage(entry->ObjType(), heap_size);
+            ScheduleOffload(db_index, prime_it);
 
-              bool has_expire = entry->HasExpire();
-              entry->Reset();
-              entry->SetExpire(has_expire);
+            bool has_expire = entry->HasExpire();
+            entry->Reset();
+            entry->SetExpire(has_expire);
 
-              stats->tiered_entries -= 1;
-              stats->tiered_size -= len;
-            }
+            stats->tiered_entries -= 1;
+            stats->tiered_size -= len;
           }
         }
       }
-      // remove this entry from page_refcnt_
-      auto refcnt_it_erase = refcnt_it;
-      page_refcnt_.erase(refcnt_it_erase);
-      alloc_.Free(offs_page * kBlockLen, kBlockLen);
     }
-    ++refcnt_it;
-    if (refcnt_it == std::end(page_refcnt_))
-      refcnt_it = std::begin(page_refcnt_);
+
+    // remove this entry from page_refcnt_
+    page_refcnt_.erase(page_it);
+    alloc_.Free(offs_page * kBlockLen, kBlockLen);
   }
 }
 
