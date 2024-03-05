@@ -798,6 +798,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
   config_registry.RegisterMutable("masterauth");
+  config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
@@ -1133,6 +1134,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
+    // We need to skip this because ACK's should not be replied to
+    // Bonus points because this allows to continue replication with ACL users who got
+    // their access revoked and reinstated
+    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
+      return;
+    }
     dfly_cntx->SendError(std::move(*err));
     return;
   }
@@ -1235,6 +1242,12 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(!cid->Validate(tail_args));
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
+    // We need to skip this because ACK's should not be replied to
+    // Bonus points because this allows to continue replication with ACL users who got
+    // their access revoked and reinstated
+    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(tail_args, 0), "ACK")) {
+      return true;
+    }
     cntx->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }

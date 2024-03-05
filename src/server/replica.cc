@@ -858,12 +858,22 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
   std::string ack_cmd;
   auto next_ack_tp = std::chrono::steady_clock::now();
 
+  // TODO: refactor to separate fiber + rename + add test
+  ProtocolClient acl_client(server());
+
+  VLOG(1) << "Connecting with acl client";
+  auto ec = acl_client.ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_);
+  if (ec) {
+    LOG(INFO) << "Failed to connect with acl client " << kConnErr;
+    cntx->Cancel();
+  }
+
   uint64_t current_offset;
   while (!cntx->IsCancelled()) {
     // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
     current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
-    VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
+    LOG(INFO) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
     force_ping_ = false;
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
@@ -872,6 +882,13 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
       break;
     }
     ack_offs_ = current_offset;
+    if (auto ec = acl_client.SendCommandAndReadResponse(StrCat("REPLCONF acl-check ", "0")); ec) {
+      cntx->Cancel();
+      LOG(INFO) << "Error in REPLCONF acl-check " << ec.message();
+    } else if (!acl_client.CheckRespIsSimpleReply("OK")) {
+      cntx->Cancel();
+      LOG(INFO) << "Error with REPLCONF " << ToSV(acl_client.LastResponseArgs().front().GetBuf());
+    }
 
     waker_.await_until(
         [&]() {
