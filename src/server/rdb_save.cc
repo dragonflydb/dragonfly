@@ -762,6 +762,10 @@ size_t SerializerBase::GetTotalBufferCapacity() const {
   return mem_buf_.Capacity();
 }
 
+size_t SerializerBase::GetTempBufferSize() const {
+  return tmp_buf_.size();
+}
+
 error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
   mem_buf_.Reserve(mem_buf_.InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf_.AppendBuffer();
@@ -1253,7 +1257,8 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
   auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
     channel_bytes.fetch_add(snapshot->GetTotalChannelCapacity(), memory_order_relaxed);
-    serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
+    serializer_bytes.store(snapshot->GetTotalBufferCapacity() + snapshot->GetTempBuffersSize(),
+                           memory_order_relaxed);
   };
 
   if (shard_snapshots_.size() == 1) {
@@ -1547,6 +1552,10 @@ void SerializerBase::CompressBlob() {
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
   ++compression_stats_->compressed_blobs;
+}
+
+size_t RdbSerializer::GetTempBufferSize() const {
+  return SerializerBase::GetTempBufferSize() + tmp_str_.size();
 }
 
 }  // namespace dfly

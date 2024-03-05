@@ -364,6 +364,14 @@ size_t SliceSnapshot::GetTotalChannelCapacity() const {
   return dest_->GetSize();
 }
 
+size_t SliceSnapshot::GetTempBuffersSize() const {
+  if (serializer_ == nullptr) {
+    return 0;
+  }
+
+  return serializer_->GetTempBufferSize();
+}
+
 RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
   return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total};
 }

@@ -152,6 +152,7 @@ class SerializerBase {
   virtual std::error_code FlushToSink(io::Sink* s);
 
   size_t GetTotalBufferCapacity() const;
+  virtual size_t GetTempBufferSize() const;
 
   std::error_code WriteRaw(const ::io::Bytes& buf);
 
@@ -218,6 +219,8 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveValue(const PrimeValue& pv);
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
+
+  size_t GetTempBufferSize() const override;
 
  private:
   std::error_code SaveObject(const PrimeValue& pv);

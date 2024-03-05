@@ -126,6 +126,7 @@ class SliceSnapshot {
 
   size_t GetTotalBufferCapacity() const;   // In bytes
   size_t GetTotalChannelCapacity() const;  // In bytes
+  size_t GetTempBuffersSize() const;       // In bytes
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
