@@ -136,7 +136,9 @@ void MemoryCmd::Run(CmdArgList args) {
     shard_set->pool()->Await([](auto* pb) {
       mi_heap_collect(ServerState::tlocal()->data_heap(), true);
       mi_heap_collect(mi_heap_get_backing(), true);
+#ifdef __GLIBC__
       malloc_trim(0);  // trims the memory (reduces RSS usage) from the malloc allocator.
+#endif
     });
     return cntx_->SendSimpleString("OK");
   }
@@ -295,7 +297,14 @@ void MemoryCmd::MallocStats(CmdArgList args) {
   }
 
   string report;
+
+#if __GLIBC__  // MUSL/alpine do not have mallinfo routines.
+#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)
   struct mallinfo2 malloc_info = mallinfo2();
+#else
+  struct mallinfo malloc_info = mallinfo();  // buggy because 32-bit stats may overflow.
+#endif
+
   absl::StrAppend(&report, "___ Begin malloc stats ___\n");
   absl::StrAppend(&report, "arena: ", malloc_info.arena, ", ordblks: ", malloc_info.ordblks,
                   ", smblks: ", malloc_info.smblks, "\n");
@@ -304,6 +313,7 @@ void MemoryCmd::MallocStats(CmdArgList args) {
   absl::StrAppend(&report, "fsmblks: ", malloc_info.fsmblks, ", uordblks: ", malloc_info.uordblks,
                   ", fordblks: ", malloc_info.fordblks, ", keepcost: ", malloc_info.keepcost, "\n");
   absl::StrAppend(&report, "___ End malloc stats ___\n\n");
+#endif
 
   absl::StrAppend(&report, "___ Begin mimalloc stats ___\n");
   mi_stats_print_out(MiStatsCallback, &report);
