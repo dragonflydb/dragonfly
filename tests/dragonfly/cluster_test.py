@@ -1063,7 +1063,9 @@ async def test_cluster_fuzzymigration(
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
 
-    # Stop seeder
+    # some more time fo seeder
+    await asyncio.sleep(1.0)
+
     seeder.stop()
     await fill_task
     await asyncio.sleep(1.0)
