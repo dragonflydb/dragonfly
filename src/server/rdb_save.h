@@ -151,7 +151,7 @@ class SerializerBase {
   // Flush internal buffer to sink.
   virtual std::error_code FlushToSink(io::Sink* s);
 
-  size_t GetTotalBufferCapacity() const;
+  size_t GetBufferCapacity() const;
   virtual size_t GetTempBufferSize() const;
 
   std::error_code WriteRaw(const ::io::Bytes& buf);

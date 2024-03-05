@@ -124,9 +124,10 @@ class SliceSnapshot {
     return type_freq_map_;
   }
 
-  size_t GetTotalBufferCapacity() const;   // In bytes
-  size_t GetTotalChannelCapacity() const;  // In bytes
-  size_t GetTempBuffersSize() const;       // In bytes
+  // Get different sizes, in bytes. All disjoint.
+  size_t GetBufferCapacity() const;
+  size_t GetTotalChannelCapacity() const;
+  size_t GetTempBuffersSize() const;
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 

@@ -758,7 +758,7 @@ std::error_code SerializerBase::WriteOpcode(uint8_t opcode) {
   return WriteRaw(::io::Bytes{&opcode, 1});
 }
 
-size_t SerializerBase::GetTotalBufferCapacity() const {
+size_t SerializerBase::GetBufferCapacity() const {
   return mem_buf_.Capacity();
 }
 
@@ -1257,7 +1257,7 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
   auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
     channel_bytes.fetch_add(snapshot->GetTotalChannelCapacity(), memory_order_relaxed);
-    serializer_bytes.store(snapshot->GetTotalBufferCapacity() + snapshot->GetTempBuffersSize(),
+    serializer_bytes.store(snapshot->GetBufferCapacity() + snapshot->GetTempBuffersSize(),
                            memory_order_relaxed);
   };
 
