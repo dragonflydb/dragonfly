@@ -133,7 +133,10 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (sub_cmd == "DECOMMIT") {
-    shard_set->pool()->Await([](auto* pb) { ServerState::tlocal()->DecommitMemory(true, true); });
+    shard_set->pool()->Await([](auto* pb) {
+      ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
+                                            ServerState::kGlibcmalloc);
+    });
     return cntx_->SendSimpleString("OK");
   }
 

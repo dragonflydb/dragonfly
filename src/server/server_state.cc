@@ -152,13 +152,15 @@ bool ServerState::IsPaused() const {
   return (client_pauses_[0] + client_pauses_[1]) > 0;
 }
 
-void ServerState::DecommitMemory(bool data_heap_only, bool decommit_glibcmalloc) {
-  mi_heap_collect(data_heap(), true);
-  if (!data_heap_only) {
+void ServerState::DecommitMemory(uint8_t flags) {
+  if (flags & kDataHeap) {
+    mi_heap_collect(data_heap(), true);
+  }
+  if (flags & kBackingHeap) {
     mi_heap_collect(mi_heap_get_backing(), true);
   }
 
-  if (decommit_glibcmalloc) {
+  if (flags & kGlibcmalloc) {
     // trims the memory (reduces RSS usage) from the malloc allocator. Does not present in
     // MUSL lib.
 #ifdef __GLIBC__

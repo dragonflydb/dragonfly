@@ -726,7 +726,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     }
 
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
-  etl.DecommitMemory(true, false);
+  etl.DecommitMemory(ServerState::kDataHeap);
 }
 
 void DbSlice::FlushSlots(SlotSet slot_ids) {
@@ -765,7 +765,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
       }
     }
     flush_db_arr.clear();
-    ServerState::tlocal()->DecommitMemory(false, true);
+    ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
+                                          ServerState::kGlibcmalloc);
   };
 
   fb2::Fiber("flush_dbs", std::move(cb)).Detach();
