@@ -701,10 +701,6 @@ void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionCont
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
-  if (migration->GetState() != MigrationState::C_STABLE_SYNC) {
-    return cntx->SendError("Migration process is not in STABLE_SYNC state");
-  }
-
   // TODO implement blocking on migrated slots only
 
   bool is_block_active = true;
@@ -742,8 +738,6 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
     MigrationConf(args, cntx);
   } else if (sub_cmd == "FLOW") {
     DflyMigrateFlow(args, cntx);
-  } else if (sub_cmd == "FULL-SYNC-CUT") {
-    DflyMigrateFullSyncCut(args, cntx);
   } else if (sub_cmd == "ACK") {
     DflyMigrateAck(args, cntx);
   } else {
@@ -862,36 +856,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(shard->shard_id() == shard_id);
 
   info->StartFlow(&shard->db_slice(), sync_id, server_family_->journal(), cntx->conn()->socket());
-}
-
-void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx) {
-  CHECK(cntx->slot_migration_id != 0);
-  CmdArgParser parser{args};
-  auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
-
-  if (auto err = parser.Error(); err) {
-    return cntx->SendError(err->MakeReply());
-  }
-
-  VLOG(1) << "Full sync cut "
-          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
-
-  std::lock_guard lck(migration_mu_);
-  auto migration_it = std::find_if(
-      incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-      [cntx](const auto& el) { return cntx->slot_migration_id == el->GetLocalSyncId(); });
-
-  if (migration_it == incoming_migrations_jobs_.end()) {
-    LOG(WARNING) << "Couldn't find migration id";
-    return cntx->SendError(kIdNotFound);
-  }
-
-  (*migration_it)->SetStableSyncForFlow(shard_id);
-  if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
-    LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
-  }
-
-  cntx->SendOk();
 }
 
 void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {

@@ -71,8 +71,6 @@ class ClusterFamily {
   // source for migration
   void DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx);
 
-  void DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx);
-
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
   // create a ClusterSlotMigration entity which will execute migration
