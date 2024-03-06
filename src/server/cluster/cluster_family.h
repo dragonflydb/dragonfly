@@ -100,6 +100,8 @@ class ClusterFamily {
  private:
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
+  std::string id_;
+
   ServerFamily* server_family_ = nullptr;
 };
 

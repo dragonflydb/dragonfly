@@ -174,6 +174,17 @@ Also add keys to each of them that are *not* moved, and see that they are unaffe
 """
 
 
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_id": "inigo montoya"})
+async def test_cluster_id(df_local_factory: DflyInstanceFactory):
+    node = df_local_factory.create(port=BASE_PORT)
+    df_local_factory.start_all([node])
+
+    conn = node.client()
+    assert "inigo montoya" == await get_node_id(conn)
+
+    await close_clients(conn)
+
+
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFactory):
     # Start and configure cluster with 2 nodes

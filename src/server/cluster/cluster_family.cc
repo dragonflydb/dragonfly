@@ -25,6 +25,9 @@
 #include "server/server_state.h"
 
 ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
+ABSL_FLAG(std::string, cluster_id, "",
+          "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
+          "replication ID (random string)");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 
@@ -49,6 +52,12 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
+
+  id_ = absl::GetFlag(FLAGS_cluster_id);
+  if (id_.empty()) {
+    id_ = server_family_->master_replid();
+  }
+
   ClusterConfig::Initialize();
 }
 
@@ -70,7 +79,7 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
 
-    info.master = {.id = server_family_->master_id(),
+    info.master = {.id = id_,
                    .ip = preferred_endpoint,
                    .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
 
@@ -82,7 +91,7 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
   } else {
     info.master = {
         .id = etl.remote_client_id_, .ip = replication_info->host, .port = replication_info->port};
-    info.replicas.push_back({.id = server_family_->master_id(),
+    info.replicas.push_back({.id = id_,
                              .ip = cntx->conn()->LocalBindAddress(),
                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
   }
@@ -254,9 +263,9 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
 
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
   if (ClusterConfig::IsEmulated()) {
-    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, server_family_->master_id(), cntx);
+    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, id_, cntx);
   } else if (tl_cluster_config != nullptr) {
-    return ClusterNodesImpl(tl_cluster_config->GetConfig(), server_family_->master_id(), cntx);
+    return ClusterNodesImpl(tl_cluster_config->GetConfig(), id_, cntx);
   } else {
     return cntx->SendError(kClusterNotConfigured);
   }
@@ -408,7 +417,7 @@ void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(server_family_->master_id());
+  rb->SendBulkString(id_);
 }
 
 namespace {
@@ -483,8 +492,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     return cntx->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  shared_ptr<ClusterConfig> new_config =
-      ClusterConfig::CreateFromConfig(server_family_->master_id(), json.value());
+  shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json.value());
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
     return cntx->SendError("Invalid cluster configuration.");
