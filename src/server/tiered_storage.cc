@@ -346,13 +346,14 @@ void TieredStorage::Free(PrimeIterator it, DbTableStats* stats) {
     if (--page_it->second.first == 0) {
       alloc_.Free(offs_page * kBlockLen, kBlockLen);
       page_refcnt_.erase(page_it);
+      pages_to_defrag_.erase(offs_page);
     } else {
       unsigned int max_entries = NumEntriesInSmallBin(page_it->second.second);
       float bin_util = (float)(page_it->second.first) / (float)max_entries;
       // otherwise if the page has low utilization, put the page into
       // background periodic defragmentation candidate queue
       if (bin_util <= defrag_bin_util_threshold_) {
-        pages_to_defrag_.push(offs_page);
+        pages_to_defrag_.insert(offs_page);
       }
     }
   }
@@ -374,20 +375,13 @@ size_t TieredStorage::GetBinSize(size_t blob_len) {
 void TieredStorage::Defrag(DbIndex db_index) {
   // going through all the candidates that have been inserted from the Free() function
   // the Free() function is the only source which reduced page bin utilization.
-  for (; !pages_to_defrag_.empty(); pages_to_defrag_.pop()) {
-    unsigned int offs_page = pages_to_defrag_.front();
+  for (auto it = pages_to_defrag_.begin(); it != pages_to_defrag_.end(); ++it) {
+    unsigned int offs_page = *it;
+
     // check if this page still exists
     auto page_it = page_refcnt_.find(offs_page);
-    if (page_it == page_refcnt_.end())
-      continue;
-
-    // the page exists, now check if this is still under utilized as this page
-    // could have been freed and reused
     unsigned int bin_size = page_it->second.second;
     unsigned int max_entries = NumEntriesInSmallBin(bin_size);
-    float bin_util = (float)(page_it->second.first) / (float)max_entries;
-    if (bin_util > defrag_bin_util_threshold_)
-      continue;
 
     // retrieve all the hash values stored in this page.
     size_t hash_section_len = max_entries * kBytesPerHash;
@@ -429,6 +423,7 @@ void TieredStorage::Defrag(DbIndex db_index) {
     // remove this entry from page_refcnt_
     page_refcnt_.erase(page_it);
     alloc_.Free(offs_page * kBlockLen, kBlockLen);
+    pages_to_defrag_.erase(it);
   }
 }
 

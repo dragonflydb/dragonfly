@@ -7,8 +7,6 @@
 
 #include <absl/container/flat_hash_map.h>
 
-#include <queue>
-
 #include "core/external_alloc.h"
 #include "core/fibers.h"
 #include "server/common.h"
@@ -99,6 +97,7 @@ class TieredStorage {
   struct PerDb;
   std::vector<PerDb*> db_arr_;
 
+  // this table maps a page offset to its reference count and bin size stored in a pair.
   absl::flat_hash_map<uint32_t, std::pair<unsigned, unsigned> > page_refcnt_;
   util::fb2::EventCount throttle_ec_;
   TieredStats stats_;
@@ -108,8 +107,8 @@ class TieredStorage {
 
   float defrag_bin_util_threshold_ = 0.2;
 
-  // a queue of indicies of pages that need to be defragmented.
-  std::queue<unsigned> pages_to_defrag_;
+  // a set of indicies of pages that need to be defragmented.
+  absl::flat_hash_set<unsigned> pages_to_defrag_;
 };
 
 }  // namespace dfly
