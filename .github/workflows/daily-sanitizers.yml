@@ -14,7 +14,7 @@ jobs:
         build-type: [Debug]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
-    timeout-minutes: 80
+    timeout-minutes: 200
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_CACHE_SIZE: 6G
