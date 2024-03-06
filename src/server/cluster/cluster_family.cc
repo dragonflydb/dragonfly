@@ -396,8 +396,6 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterStartSlotMigration(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
     return DflyClusterSlotMigrationStatus(args, cntx);
-  } else if (sub_cmd == "SLOT-MIGRATION-FINALIZE") {
-    return DflyClusterMigrationFinalize(args, cntx);
   }
 
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -689,47 +687,6 @@ void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionCo
   return rb->SendSimpleString(state_to_str(MigrationState::C_NO_STATE));
 }
 
-void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser{args};
-  auto sync_id = parser.Next<uint32_t>();
-
-  if (auto err = parser.Error(); err) {
-    return cntx->SendError(err->MakeReply());
-  }
-
-  auto migration = GetOutgoingMigration(sync_id);
-  if (!migration)
-    return cntx->SendError(kIdNotFound);
-
-  // TODO implement blocking on migrated slots only
-
-  bool is_block_active = true;
-  auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
-  auto pause_fb_opt =
-      Pause(server_family_->GetListeners(), cntx->conn(), ClientPause::WRITE, is_pause_in_progress);
-
-  if (!pause_fb_opt) {
-    LOG(WARNING) << "Cluster migration finalization time out";
-    return cntx->SendError("Blocking connections time out");
-  }
-
-  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
-    is_block_active = false;
-    pause_fb_opt->JoinIfNeeded();
-  });
-
-  auto cb = [this, &migration](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      // TODO add error processing to move back into STABLE_SYNC state
-      migration->Finalize(shard->shard_id());
-    }
-  };
-
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-
-  return cntx->SendOk();
-}
-
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -823,9 +780,8 @@ uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_
     // Todo add error processing, stop migration process
     // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
   };
-  auto info =
-      make_shared<OutgoingMigration>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(), port,
-                                     std::move(slots), err_handler);
+  auto info = make_shared<OutgoingMigration>(cntx->conn()->RemoteEndpointAddress(), port,
+                                             std::move(slots), err_handler, server_family_);
   auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(info));
   CHECK(inserted);
   return sync_id;
@@ -855,7 +811,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   EngineShard* shard = EngineShard::tlocal();
   DCHECK(shard->shard_id() == shard_id);
 
-  info->StartFlow(&shard->db_slice(), sync_id, server_family_->journal(), cntx->conn()->socket());
+  info->StartFlow(sync_id, server_family_->journal(), cntx->conn()->socket());
 }
 
 void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {

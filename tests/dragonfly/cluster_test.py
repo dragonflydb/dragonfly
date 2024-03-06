@@ -873,9 +873,12 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
+    assert await c_nodes[0].set("KEY0", "value")
+    assert await c_nodes[0].set("KEY1", "value")
     assert await c_nodes[1].set("KEY2", "value")
     assert await c_nodes[1].set("KEY3", "value")
-
+    assert await c_nodes[0].set("KEY4", "value")
+    assert await c_nodes[0].set("KEY5", "value")
     assert await c_nodes[1].set("KEY6", "value")
     assert await c_nodes[1].set("KEY7", "value")
     assert await c_nodes[0].set("KEY8", "value")
@@ -891,25 +894,12 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[1].set("KEY18", "value")
     assert await c_nodes[1].set("KEY19", "value")
 
+    assert await c_nodes[0].execute_command("DBSIZE") == 10
+
     res = await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "3000", "9000"
     )
     assert 1 == res
-
-    assert await c_nodes[0].set("KEY0", "value")
-    assert await c_nodes[0].set("KEY1", "value")
-
-    await asyncio.sleep(0.5)
-
-    assert await c_nodes[0].set("KEY4", "value")
-    assert await c_nodes[0].set("KEY5", "value")
-    assert await c_nodes[0].execute_command("DBSIZE") == 10
-
-    # TODO remove when we add slot blocking
-    await asyncio.sleep(0.5)
-
-    res = await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", "1")
-    assert "OK" == res
 
     await asyncio.sleep(0.5)
 
@@ -1029,6 +1019,24 @@ async def test_cluster_fuzzymigration(
 
     fill_task = asyncio.create_task(seeder.run())
 
+    # some  time fo seeder
+    await asyncio.sleep(0.5)
+
+    # Counter that pushes values to a list
+    async def list_counter(key, client: aioredis.RedisCluster):
+        for i in itertools.count(start=1):
+            await client.lpush(key, i)
+
+    # Start ten counters
+    counter_keys = [f"_counter{i}" for i in range(10)]
+    counter_connections = [
+        aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port) for _ in range(10)
+    ]
+    counters = [
+        asyncio.create_task(list_counter(key, conn))
+        for key, conn in zip(counter_keys, counter_connections)
+    ]
+
     # Generate migration plan
     for node_idx, node in enumerate(nodes):
         random.shuffle(node.slots)
@@ -1063,37 +1071,13 @@ async def test_cluster_fuzzymigration(
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
 
-    # some more time fo seeder
-    await asyncio.sleep(1.0)
-
     seeder.stop()
     await fill_task
+    # wait to be sure that migrations is done
     await asyncio.sleep(1.0)
-
-    # Counter that pushes values to a list
-    async def list_counter(key, client: aioredis.RedisCluster):
-        for i in itertools.count(start=1):
-            await client.lpush(key, i)
-
-    # Start ten counters
-    counter_keys = [f"_counter{i}" for i in range(10)]
-    counter_connections = [
-        aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port) for _ in range(10)
-    ]
-    counters = [
-        asyncio.create_task(list_counter(key, conn))
-        for key, conn in zip(counter_keys, counter_connections)
-    ]
 
     # Generate capture, capture ignores counter keys
     capture = await seeder.capture()
-
-    # Finalize slot migration
-    for node in nodes:
-        for sync_id in node.sync_ids:
-            assert "OK" == await node.admin_client.execute_command(
-                "DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", sync_id
-            )
 
     # Stop counters
     for counter in counters:

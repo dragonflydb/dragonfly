@@ -6,9 +6,12 @@
 
 #include <atomic>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
 #include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "server/journal/streamer.h"
+#include "server/server_family.h"
 
 using namespace std;
 namespace dfly {
@@ -46,17 +49,24 @@ class OutgoingMigration::SliceSlotMigration {
   Fiber sync_fb_;
 };
 
-OutgoingMigration::OutgoingMigration(std::uint32_t flows_num, std::string ip, uint16_t port,
-                                     SlotRanges slots, Context::ErrHandler err_handler)
-    : host_ip_(ip), port_(port), slots_(slots), cntx_(err_handler), slot_migrations_(flows_num) {
+OutgoingMigration::OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots,
+                                     Context::ErrHandler err_handler, ServerFamily* sf)
+    : host_ip_(ip),
+      port_(port),
+      slots_(slots),
+      cntx_(err_handler),
+      slot_migrations_(shard_set->size()),
+      server_family_(sf) {
 }
 
 OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
-void OutgoingMigration::StartFlow(DbSlice* slice, uint32_t sync_id, journal::Journal* journal,
-                                  io::Sink* dest) {
+void OutgoingMigration::StartFlow(uint32_t sync_id, journal::Journal* journal, io::Sink* dest) {
+  EngineShard* shard = EngineShard::tlocal();
+  DbSlice* slice = &shard->db_slice();
+
   const auto shard_id = slice->shard_id();
 
   MigrationState state = MigrationState::C_NO_STATE;
@@ -102,6 +112,33 @@ void OutgoingMigration::SyncFb() {
     migration->WaitForSnapshotFinished();
   }
   VLOG(1) << "Migrations snapshot is finihed";
+
+  // TODO implement blocking on migrated slots only
+
+  bool is_block_active = true;
+  auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
+  auto pause_fb_opt =
+      Pause(server_family_->GetListeners(), nullptr, ClientPause::WRITE, is_pause_in_progress);
+
+  if (!pause_fb_opt) {
+    LOG(WARNING) << "Cluster migration finalization time out";
+  }
+
+  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
+    is_block_active = false;
+    pause_fb_opt->JoinIfNeeded();
+  });
+
+  auto cb = [this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      // TODO add error processing to move back into STABLE_SYNC state
+      Finalize(shard->shard_id());
+    }
+  };
+
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  // TODO add ACK here and config update
 }
 
 }  // namespace dfly
