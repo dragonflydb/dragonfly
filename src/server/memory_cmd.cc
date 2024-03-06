@@ -5,6 +5,7 @@
 #include "server/memory_cmd.h"
 
 #include <absl/strings/str_cat.h>
+#include <malloc.h>
 #include <mimalloc.h>
 
 #include "base/io_buf.h"
@@ -48,8 +49,6 @@ std::string MallocStatsCb(bool backing, unsigned tid) {
   string str;
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  absl::StrAppend(&str, "___ Begin mimalloc statistics ___\n");
-  mi_stats_print_out(MiStatsCallback, &str);
 
   absl::StrAppend(&str, "\nArena statistics from thread:", tid, "\n");
   absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
@@ -69,10 +68,10 @@ std::string MallocStatsCb(bool backing, unsigned tid) {
   }
 
   uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
-  absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
   absl::StrAppend(&str, "total reserved: ", reserved, ", comitted: ", committed, ", used: ", used,
                   " fragmentation waste: ",
                   (100.0 * (committed - used)) / std::max<size_t>(1UL, committed), "%\n");
+  absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
 
   return str;
 }
@@ -135,8 +134,8 @@ void MemoryCmd::Run(CmdArgList args) {
 
   if (sub_cmd == "DECOMMIT") {
     shard_set->pool()->Await([](auto* pb) {
-      mi_heap_collect(ServerState::tlocal()->data_heap(), true);
-      mi_heap_collect(mi_heap_get_backing(), true);
+      ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
+                                            ServerState::kGlibcmalloc);
     });
     return cntx_->SendSimpleString("OK");
   }
@@ -294,10 +293,34 @@ void MemoryCmd::MallocStats(CmdArgList args) {
     return cntx_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
   }
 
-  string res = shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
+  string report;
+
+#if __GLIBC__  // MUSL/alpine do not have mallinfo routines.
+#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)
+  struct mallinfo2 malloc_info = mallinfo2();
+#else
+  struct mallinfo malloc_info = mallinfo();  // buggy because 32-bit stats may overflow.
+#endif
+
+  absl::StrAppend(&report, "___ Begin malloc stats ___\n");
+  absl::StrAppend(&report, "arena: ", malloc_info.arena, ", ordblks: ", malloc_info.ordblks,
+                  ", smblks: ", malloc_info.smblks, "\n");
+  absl::StrAppend(&report, "hblks: ", malloc_info.hblks, ", hblkhd: ", malloc_info.hblkhd,
+                  ", usmblks: ", malloc_info.usmblks, "\n");
+  absl::StrAppend(&report, "fsmblks: ", malloc_info.fsmblks, ", uordblks: ", malloc_info.uordblks,
+                  ", fordblks: ", malloc_info.fordblks, ", keepcost: ", malloc_info.keepcost, "\n");
+  absl::StrAppend(&report, "___ End malloc stats ___\n\n");
+#endif
+
+  absl::StrAppend(&report, "___ Begin mimalloc stats ___\n");
+  mi_stats_print_out(MiStatsCallback, &report);
+
+  string mi_malloc_info =
+      shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
+  report.append(std::move(mi_malloc_info));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
-  return rb->SendVerbatimString(res);
+  return rb->SendVerbatimString(report);
 }
 
 void MemoryCmd::Usage(std::string_view key) {
