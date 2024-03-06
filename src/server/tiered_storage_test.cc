@@ -51,7 +51,7 @@ bool TieredStorageTest::WaitUntilTieredEntriesGT(size_t value, int db_index) {
     auto tiered_entries = GetMetrics().db_stats[db_index].tiered_entries;
     return tiered_entries > value;
   };
-  return WaitUntilCondition(std::move(cb), 2000ms);
+  return WaitUntilCondition(std::move(cb));
 }
 
 bool TieredStorageTest::WaitUntilTieredEntriesEQ(size_t value, int db_index) {
@@ -319,7 +319,7 @@ TEST_F(TieredStorageTest, GetValueValidation) {
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
 }
 
-TEST_F(TieredStorageTest, CrashBug) {
+TEST_F(TieredStorageTest, BackgroundOffload) {
   shard_set->TEST_EnableHeartBeat();
   max_memory_limit = 300000;
   absl::FlagSaver fs;

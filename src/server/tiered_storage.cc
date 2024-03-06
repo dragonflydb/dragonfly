@@ -481,7 +481,7 @@ bool TieredStorage::PrepareForOffload(DbIndex db_index, PrimeIterator it) {
 }
 
 void TieredStorage::CancelOffload(DbIndex db_index, PrimeIterator it) {
-  VLOG(2) << "PrepareForOffload:" << it->first.ToString();
+  VLOG(2) << "CancelOffload:" << it->first.ToString();
   size_t blob_len = it->second.Size();
   if (blob_len > kMaxSmallBin) {
     return;
