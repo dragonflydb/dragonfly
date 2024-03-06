@@ -133,13 +133,7 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (sub_cmd == "DECOMMIT") {
-    shard_set->pool()->Await([](auto* pb) {
-      mi_heap_collect(ServerState::tlocal()->data_heap(), true);
-      mi_heap_collect(mi_heap_get_backing(), true);
-#ifdef __GLIBC__
-      malloc_trim(0);  // trims the memory (reduces RSS usage) from the malloc allocator.
-#endif
-    });
+    shard_set->pool()->Await([](auto* pb) { ServerState::tlocal()->DecommitMemory(true, true); });
     return cntx_->SendSimpleString("OK");
   }
 

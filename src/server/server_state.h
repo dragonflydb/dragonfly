@@ -267,6 +267,12 @@ class ServerState {  // public struct - to allow initialization.
     return slow_log_shard_;
   };
 
+  // Tries to returns as much RSS memory as possible to the OS.
+  // If data_heap_only is true, does it only for data_heap(), otherwise flushes the
+  // backing heap for this thread as well. If decommit_glibcmalloc is true, also
+  // decommits memory allocated by glibc malloc (globally).
+  void DecommitMemory(bool data_heap_only, bool decommit_glibcmalloc);
+
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;
 

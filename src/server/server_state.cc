@@ -152,6 +152,21 @@ bool ServerState::IsPaused() const {
   return (client_pauses_[0] + client_pauses_[1]) > 0;
 }
 
+void ServerState::DecommitMemory(bool data_heap_only, bool decommit_glibcmalloc) {
+  mi_heap_collect(data_heap(), true);
+  if (!data_heap_only) {
+    mi_heap_collect(mi_heap_get_backing(), true);
+  }
+
+  if (decommit_glibcmalloc) {
+    // trims the memory (reduces RSS usage) from the malloc allocator. Does not present in
+    // MUSL lib.
+#ifdef __GLIBC__
+    malloc_trim(0);
+#endif
+  }
+}
+
 Interpreter* ServerState::BorrowInterpreter() {
   stats.blocked_on_interpreter++;
   auto* ptr = interpreter_mgr_.Get();
