@@ -10,11 +10,11 @@ jobs:
     runs-on: [self-hosted, linux, ARM64]
     strategy:
       matrix:
-        container: ["ubuntu-dev:24"]
+        container: ["ubuntu-dev:22"]
         build-type: [Debug]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
-    timeout-minutes: 200
+    timeout-minutes: 90
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_CACHE_SIZE: 6G
