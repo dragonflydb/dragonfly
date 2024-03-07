@@ -60,7 +60,7 @@ struct WrappedStrPtr {
 // Score produced either by KNN (float) or SORT (double / wrapped str)
 using ResultScore = std::variant<std::monostate, float, double, WrappedStrPtr>;
 
-// Values are eitehr sortable as doubles or strings, or not sortable at all.
+// Values are either sortable as doubles or strings, or not sortable at all.
 // Contrary to ResultScore it doesn't include KNN results and is not optimized for smaller struct
 // size.
 using SortableValue = std::variant<std::monostate, double, std::string>;
