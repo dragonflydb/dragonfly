@@ -104,12 +104,12 @@ async def test_replication_all(
         hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
         assert len(set(hashes)) == 1
 
-    check()
+    await check()
     # Stream more data in stable state
     await seeder.run(c_master, target_ops=stream_target)
 
     # Check data after stable state stream
-    check()
+    await check()
 
     await disconnect_clients(c_master, *c_replicas)
 
