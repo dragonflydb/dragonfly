@@ -185,6 +185,7 @@ async def test_cluster_node_id(df_local_factory: DflyInstanceFactory):
     await close_clients(conn)
 
 
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFactory):
     # Start and configure cluster with 2 nodes
     nodes = [
