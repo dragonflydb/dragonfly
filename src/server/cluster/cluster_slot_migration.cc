@@ -124,7 +124,7 @@ void ClusterSlotMigration::Stop() {
 void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "Main migration fiber started " << sync_id_;
 
-  state_ = MigrationState::C_FULL_SYNC;
+  state_ = MigrationState::C_SYNC;
 
   // TODO add reconnection code
   if (auto ec = InitiateSlotsMigration(); ec) {
