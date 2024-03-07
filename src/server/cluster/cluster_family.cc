@@ -25,7 +25,7 @@
 #include "server/server_state.h"
 
 ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
-ABSL_FLAG(std::string, cluster_id, "",
+ABSL_FLAG(std::string, cluster_node_id, "",
           "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
           "replication ID (random string)");
 
@@ -53,7 +53,7 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
 
-  id_ = absl::GetFlag(FLAGS_cluster_id);
+  id_ = absl::GetFlag(FLAGS_cluster_node_id);
   if (id_.empty()) {
     id_ = server_family_->master_replid();
   }

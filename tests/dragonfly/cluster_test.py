@@ -174,8 +174,8 @@ Also add keys to each of them that are *not* moved, and see that they are unaffe
 """
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_id": "inigo montoya"})
-async def test_cluster_id(df_local_factory: DflyInstanceFactory):
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_node_id": "inigo montoya"})
+async def test_cluster_node_id(df_local_factory: DflyInstanceFactory):
     node = df_local_factory.create(port=BASE_PORT)
     df_local_factory.start_all([node])
 
@@ -185,7 +185,6 @@ async def test_cluster_id(df_local_factory: DflyInstanceFactory):
     await close_clients(conn)
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFactory):
     # Start and configure cluster with 2 nodes
     nodes = [
@@ -316,8 +315,11 @@ async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFact
 
 
 # Tests that master commands to the replica are applied regardless of slot ownership
+@pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
+async def test_cluster_replica_sets_non_owned_keys(
+    df_local_factory: DflyInstanceFactory, set_cluster_node_id: bool
+):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
     master = df_local_factory.create(admin_port=BASE_PORT + 1000)
     replica = df_local_factory.create(admin_port=BASE_PORT + 1001)
@@ -581,14 +583,20 @@ async def test_cluster_blocking_command(df_server):
     await close_clients(c_master, c_master_admin)
 
 
+@pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_native_client(
     df_local_factory: DflyInstanceFactory,
     df_seeder_factory: DflySeederFactory,
+    set_cluster_node_id: bool,
 ):
     # Start and configure cluster with 3 masters and 3 replicas
     masters = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        df_local_factory.create(
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            cluster_node_id=f"master{i}" if set_cluster_node_id else "",
+        )
         for i in range(3)
     ]
     df_local_factory.start_all(masters)
@@ -597,7 +605,11 @@ async def test_cluster_native_client(
     master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters_admin))
 
     replicas = [
-        df_local_factory.create(port=BASE_PORT + 100 + i, admin_port=BASE_PORT + i + 1100)
+        df_local_factory.create(
+            port=BASE_PORT + 100 + i,
+            admin_port=BASE_PORT + i + 1100,
+            cluster_node_id=f"replica{i}" if set_cluster_node_id else "",
+        )
         for i in range(3)
     ]
     df_local_factory.start_all(replicas)
