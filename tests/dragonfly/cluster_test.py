@@ -1037,6 +1037,12 @@ async def test_cluster_fuzzymigration(
         for key, conn in zip(counter_keys, counter_connections)
     ]
 
+    seeder.stop()
+    await fill_task
+
+    # Generate capture, capture ignores counter keys
+    capture = await seeder.capture()
+
     # Generate migration plan
     for node_idx, node in enumerate(nodes):
         random.shuffle(node.slots)
@@ -1071,9 +1077,6 @@ async def test_cluster_fuzzymigration(
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
 
-    seeder.stop()
-    await fill_task
-
     iterations = 0
     while True:
         for node in nodes:
@@ -1089,15 +1092,10 @@ async def test_cluster_fuzzymigration(
 
         await asyncio.sleep(0.1)
 
-    # Generate capture, capture ignores counter keys
-    capture = await seeder.capture()
-
     # Stop counters
     for counter in counters:
         counter.cancel()
 
-    # need this sleep to avoid race between finalize and config
-    await asyncio.sleep(0.5)
     # Push new config
     await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 
