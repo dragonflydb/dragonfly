@@ -2103,10 +2103,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  if (scheduled) {
-    VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
+  if (is_transactional)
     cntx->transaction->UnlockMulti();
-  }
 
   cntx->cid = exec_cid_;
   VLOG(1) << "Exec completed";

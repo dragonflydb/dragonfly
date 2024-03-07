@@ -170,7 +170,7 @@ class Transaction {
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
-  explicit Transaction(const Transaction* parent, ShardId shard_id);
+  explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot = std::nullopt);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -338,9 +338,6 @@ class Transaction {
   // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
   // to it must not block.
   void PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args);
-
-  // Mark as squasher. Transaction must be already properly initialized.
-  void MultiBecomeSquasher();
 
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
   // journal command, multiple journal entries may be necessary. In this case, call with set

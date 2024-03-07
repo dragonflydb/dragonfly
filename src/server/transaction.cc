@@ -178,7 +178,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
@@ -194,9 +194,9 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id)
   multi_->shard_journal_write.resize(1);
 
   MultiUpdateWithParent(parent);
-  if (slot_id.has_value()) {
-    unique_slot_checker_.Add(*slot_id);
-  }
+  // if (slot_id.has_value()) {
+  //   unique_slot_checker_.Add(*slot_id);
+  // }
 }
 
 Transaction::~Transaction() {
@@ -447,10 +447,6 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
   DCHECK(cid->IsMultiTransactional());
 
   MultiSwitchCmd(cid);
-<<<<<<< HEAD
-
-=======
->>>>>>> 3228c044 (feat(treansaction): Use single hop in squashing when possible)
   InitBase(db_index_, {});
 
   // Because squashing already determines active shards by partitioning commands,
@@ -928,7 +924,6 @@ void Transaction::Schedule() {
 
   if ((coordinator_state_ & COORD_SCHED) == 0)
     ScheduleInternal();
-  }
 }
 
 // Runs in coordinator thread.
