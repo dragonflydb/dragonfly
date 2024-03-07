@@ -634,8 +634,6 @@ static std::string_view state_to_str(MigrationState state) {
       return "CONNECTING"sv;
     case MigrationState::C_FULL_SYNC:
       return "FULL_SYNC"sv;
-    case MigrationState::C_STABLE_SYNC:
-      return "STABLE_SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
     case MigrationState::C_MAX_INVALID:

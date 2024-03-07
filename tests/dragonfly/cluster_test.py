@@ -1073,8 +1073,21 @@ async def test_cluster_fuzzymigration(
 
     seeder.stop()
     await fill_task
-    # wait to be sure that migrations is done
-    await asyncio.sleep(1.0)
+
+    iterations = 0
+    while True:
+        for node in nodes:
+            states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
+            print(states)
+            if not all(s.endswith("FINISHED") for s in states) and not states == "NO_STATE":
+                break
+        else:
+            break
+
+        iterations += 1
+        assert iterations < 100
+
+        await asyncio.sleep(0.1)
 
     # Generate capture, capture ignores counter keys
     capture = await seeder.capture()
