@@ -632,8 +632,8 @@ static std::string_view state_to_str(MigrationState state) {
       return "NO_STATE"sv;
     case MigrationState::C_CONNECTING:
       return "CONNECTING"sv;
-    case MigrationState::C_FULL_SYNC:
-      return "FULL_SYNC"sv;
+    case MigrationState::C_SYNC:
+      return "SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
     case MigrationState::C_MAX_INVALID:
@@ -778,9 +778,9 @@ uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_
     // Todo add error processing, stop migration process
     // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
   };
-  auto info = make_shared<OutgoingMigration>(cntx->conn()->RemoteEndpointAddress(), port,
-                                             std::move(slots), err_handler, server_family_);
-  auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(info));
+  auto migration = make_shared<OutgoingMigration>(cntx->conn()->RemoteEndpointAddress(), port,
+                                                  std::move(slots), err_handler, server_family_);
+  auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(migration));
   CHECK(inserted);
   return sync_id;
 }
@@ -797,8 +797,8 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->conn()->SetName(absl::StrCat("migration_flow_", sync_id));
 
-  auto info = GetOutgoingMigration(sync_id);
-  if (!info)
+  auto migration = GetOutgoingMigration(sync_id);
+  if (!migration)
     return cntx->SendError(kIdNotFound);
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
@@ -809,7 +809,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   EngineShard* shard = EngineShard::tlocal();
   DCHECK(shard->shard_id() == shard_id);
 
-  info->StartFlow(sync_id, server_family_->journal(), cntx->conn()->socket());
+  migration->StartFlow(sync_id, server_family_->journal(), cntx->conn()->socket());
 }
 
 void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {

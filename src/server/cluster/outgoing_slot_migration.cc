@@ -21,7 +21,7 @@ class OutgoingMigration::SliceSlotMigration {
   SliceSlotMigration(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal,
                      Context* cntx, io::Sink* dest)
       : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
-    state_.store(MigrationState::C_FULL_SYNC, memory_order_relaxed);
+    state_.store(MigrationState::C_SYNC, memory_order_relaxed);
     sync_fb_ = Fiber("slot-snapshot", [this, dest] { streamer_.Start(dest); });
   }
 
@@ -77,7 +77,7 @@ void OutgoingMigration::StartFlow(uint32_t sync_id, journal::Journal* journal, i
     state = GetStateImpl();
   }
 
-  if (state == MigrationState::C_FULL_SYNC) {
+  if (state == MigrationState::C_SYNC) {
     main_sync_fb_ = Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
   }
 }
