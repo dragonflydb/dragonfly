@@ -11,6 +11,7 @@
       ],
       "settings": {
         "cmake.buildDirectory": "/build",
+        "extensions.ignoreRecommendations": true,
         "cmake.configureArgs": []
       }
     }
