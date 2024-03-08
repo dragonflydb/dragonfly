@@ -203,7 +203,7 @@ int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsi
   return ret;
 }
 
-static string ModuleTypeName(uint64_t module_id) {
+string ModuleTypeName(uint64_t module_id) {
   static const char ModuleNameSet[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       "abcdefghijklmnopqrstuvwxyz"

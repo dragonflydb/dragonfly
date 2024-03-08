@@ -178,7 +178,7 @@ class RestoreArgs {
 [[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
   if (HasExpiration()) {
     int64_t ttl = abs_time_ ? expiration_ - now_msec : expiration_;
-    if (ttl > kMaxExpireDeadlineSec * 1000)
+    if (ttl > kMaxExpireDeadlineMs)
       return false;
 
     expiration_ = ttl < 0 ? -1 : ttl + now_msec;
@@ -856,8 +856,8 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
   int_arg = std::max<int64_t>(int_arg, -1);
 
   // to be more compatible with redis, we silently cap the expire time to kMaxExpireDeadlineSec
-  if (int_arg > kMaxExpireDeadlineSec * 1000) {
-    int_arg = kMaxExpireDeadlineSec * 1000;
+  if (int_arg > kMaxExpireDeadlineMs) {
+    int_arg = kMaxExpireDeadlineMs;
   }
 
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
