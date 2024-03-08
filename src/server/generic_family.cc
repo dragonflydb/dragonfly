@@ -1293,7 +1293,7 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
   Transaction* transaction = cntx->transaction;
 
   if (transaction->GetUniqueShardCnt() == 1) {
-    transaction->RenableAutoJournal();  // Safe to use RENAME with single shard
+    transaction->ReviveAutoJournal();  // Safe to use RENAME with single shard
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpRen(t->GetOpArgs(shard), key[0], key[1], skip_exist_dest);
     };

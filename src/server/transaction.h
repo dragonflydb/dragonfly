@@ -342,7 +342,7 @@ class Transaction {
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
   // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.
-  void RenableAutoJournal();
+  void ReviveAutoJournal();
 
   // Clear all state to make transaction re-usable
   void Refurbish();

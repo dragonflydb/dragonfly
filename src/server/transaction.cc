@@ -1282,31 +1282,31 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   ShardId idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
-  TxQueue::Iterator prev_pos = exchange(sd.pq_pos, TxQueue::kEnd);
-  if (prev_pos == TxQueue::kEnd) {
-    DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) == 0);
+  TxQueue::Iterator q_pos = exchange(sd.pq_pos, TxQueue::kEnd);
+  if (q_pos == TxQueue::kEnd) {
+    DCHECK_EQ(sd.local_mask & KEYLOCK_ACQUIRED, 0);
     return false;
   }
 
   TxQueue* txq = shard->txq();
-  TxQueue::Iterator head = txq->Head();
+  bool was_head = txq->Head() == q_pos;
 
-  Transaction* trans = absl::get<Transaction*>(txq->At(prev_pos));
+  Transaction* trans = absl::get<Transaction*>(txq->At(q_pos));
   DCHECK(trans == this) << txq->size() << ' ' << sd.pq_pos << ' ' << trans->DebugId();
-  txq->Remove(prev_pos);
+  txq->Remove(q_pos);
 
   if (IsGlobal()) {
     shard->shard_lock()->Release(LockMode());
   } else {
     auto lock_args = GetLockArgs(shard->shard_id());
     DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
-    DCHECK(lock_args.args.size() > 0);
+    DCHECK(!lock_args.args.empty());
     shard->db_slice().Release(LockMode(), lock_args);
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
 
   // Check if we need to poll the next head
-  return prev_pos == head && !txq->Empty();
+  return was_head && !txq->Empty();
 }
 
 // runs in engine-shard thread.
@@ -1586,7 +1586,7 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
                        unique_slot_checker_.GetUniqueSlotId(), {}, false);
 }
 
-void Transaction::RenableAutoJournal() {
+void Transaction::ReviveAutoJournal() {
   DCHECK(cid_->opt_mask() & CO::NO_AUTOJOURNAL);
   DCHECK_EQ(run_barrier_.DEBUG_Count(), 0u);  // Can't be changed while dispatching
   re_enabled_auto_journal_ = true;

@@ -717,7 +717,7 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
   OpResult<string> result;
 
   if (cntx->transaction->GetUniqueShardCnt() == 1) {
-    cntx->transaction->RenableAutoJournal();  // On single shard we can use the auto journal flow.
+    cntx->transaction->ReviveAutoJournal();  // On single shard we can use the auto journal flow.
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
     };
