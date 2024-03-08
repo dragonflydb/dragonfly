@@ -96,8 +96,8 @@ PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
   return GroupStep{std::vector<std::string>(fields.begin(), fields.end()), std::move(reducers)};
 }
 
-PipelineStep MakeSortStep(std::string field, bool descending) {
-  return [field, descending](std::vector<DocValues> values) -> PipelineResult {
+PipelineStep MakeSortStep(std::string_view field, bool descending) {
+  return [field = std::string(field), descending](std::vector<DocValues> values) -> PipelineResult {
     std::sort(values.begin(), values.end(), [field](const DocValues& l, const DocValues& r) {
       auto it1 = l.find(field);
       auto it2 = r.find(field);
@@ -117,7 +117,7 @@ PipelineStep MakeLimitStep(size_t offset, size_t num) {
   };
 }
 
-PipelineResult Process(std::vector<DocValues> values, absl::Span<PipelineStep> steps) {
+PipelineResult Process(std::vector<DocValues> values, absl::Span<const PipelineStep> steps) {
   for (auto& step : steps) {
     auto result = step(std::move(values));
     if (!result.has_value())
