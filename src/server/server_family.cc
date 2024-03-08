@@ -776,6 +776,8 @@ void ServerFamily::Shutdown() {
 
   JoinSnapshotSchedule();
 
+  bg_save_fb_.JoinIfNeeded();
+
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
       if (GenericError ec = DoSave(); ec) {
@@ -1629,11 +1631,65 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   return mem_cmd.Run(args);
 }
 
+void ServerFamily::BgSaveFb(bool new_version, std::string basename,
+                            boost::intrusive_ptr<Transaction> trans) {
+  GenericError ec = DoSave(new_version, basename, trans.get());
+  if (ec) {
+    LOG(INFO) << "Error in BgSaveFb: " << ec.Format();
+  }
+  {
+    lock_guard lk(bg_save_mu_);
+    bg_save_fb_done_ = true;
+  }
+}
+
+// BGSAVE [DF|RDB] [basename]
+// TODO add missing [SCHEDULE]
+void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 2) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
+
+  if (args.size() >= 1) {
+    ToUpper(&args[0]);
+    string_view sub_cmd = ArgS(args, 0);
+    if (sub_cmd == "DF") {
+      new_version = true;
+    } else if (sub_cmd == "RDB") {
+      new_version = false;
+    } else {
+      return cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+    }
+  }
+
+  string_view basename;
+  if (args.size() == 2) {
+    basename = ArgS(args, 1);
+  }
+
+  {
+    lock_guard lk(bg_save_mu_);
+
+    if (bg_save_fb_.IsJoinable() && !bg_save_fb_done_) {
+      return cntx->SendError("BgSave in process");
+    }
+    if (bg_save_fb_done_) {
+      // non blocking, fiber is in Terminate state
+      bg_save_fb_.Join();
+    }
+    bg_save_fb_done_ = false;
+    bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this, new_version,
+                             std::string(basename), cntx->transaction);
+  }
+  cntx->SendOk();
+}
+
 // SAVE [DF|RDB] [basename]
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
-  string err_detail;
   bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
   if (args.size() > 2) {
     return cntx->SendError(kSyntaxErr);
@@ -2634,7 +2690,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
-      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, acl::kBGSave}.HFUNC(Save)
+      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kBGSave}.HFUNC(BgSave)
       << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
       << CI{"CONFIG", CO::ADMIN, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)

@@ -242,6 +242,7 @@ class ServerFamily {
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
+  void BgSave(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void SlowLog(CmdArgList args, ConnectionContext* cntx);
   void Module(CmdArgList args, ConnectionContext* cntx);
@@ -264,6 +265,8 @@ class ServerFamily {
   void SnapshotScheduling();
 
   void SendInvalidationMessages() const;
+
+  void BgSaveFb(bool new_version, std::string basename, boost::intrusive_ptr<Transaction> trans);
 
   Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
@@ -296,6 +299,10 @@ class ServerFamily {
   util::fb2::Done schedule_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
+
+  Mutex bg_save_mu_;
+  util::fb2::Fiber bg_save_fb_;
+  bool bg_save_fb_done_ = false;
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;
