@@ -607,11 +607,13 @@ async def test_cluster_native_client(
             port=BASE_PORT + 100 + i,
             admin_port=BASE_PORT + i + 1100,
             cluster_node_id=f"replica{i}" if set_cluster_node_id else "",
+            replicaof=f"localhost:{BASE_PORT + i}",
         )
         for i in range(3)
     ]
     df_local_factory.start_all(replicas)
     c_replicas = [replica.client() for replica in replicas]
+    await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
     c_replicas_admin = [replica.admin_client() for replica in replicas]
     replica_ids = await asyncio.gather(*(get_node_id(c) for c in c_replicas_admin))
 
