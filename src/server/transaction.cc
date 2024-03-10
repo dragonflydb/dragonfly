@@ -6,6 +6,8 @@
 
 #include <absl/strings/match.h>
 
+#include <atomic>
+
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -567,7 +569,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
-  CHECK(sd.is_armed.exchange(false)) << DEBUG_PrintFailState(shard->shard_id());
   sd.stats.total_runs++;
 
   // DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
@@ -1033,9 +1034,6 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
   DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
-  CHECK(sd.is_armed.exchange(false, memory_order_relaxed))
-      << DEBUG_PrintFailState(shard->shard_id());
-
   sd.stats.total_runs++;
 
   // Calling the callback in somewhat safe way
@@ -1098,8 +1096,23 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 }
 
 bool Transaction::IsArmedInShard(ShardId sid) const {
-  // Barrier has acquire semantics
   return shard_data_[SidToId(sid)].is_armed.load(memory_order_relaxed);
+}
+
+bool Transaction::DisarmInShard(ShardId sid, uint16_t relevant_flags) {
+  auto& sd = shard_data_[SidToId(sid)];
+
+  if (relevant_flags) {
+    if (sd.is_armed.load(memory_order_acquire) && (sd.local_mask & relevant_flags) > 0) {
+      sd.is_armed.store(false, memory_order_relaxed);
+      return true;
+    }
+    return false;
+  }
+
+  bool expected = true;
+  return sd.is_armed.compare_exchange_strong(expected, false, memory_order_acquire,
+                                             memory_order_relaxed);
 }
 
 bool Transaction::IsActive(ShardId sid) const {
@@ -1156,6 +1169,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   // Fast path. If none of the keys are locked, we can run briefly atomically on the thread
   // without acquiring them at all.
   if (quick_run) {
+    CHECK(sd.is_armed.exchange(false, memory_order_relaxed));
     auto result = RunQuickie(shard);
     local_result_ = result.status;
 

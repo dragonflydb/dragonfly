@@ -448,14 +448,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
-  // Check if the caller was handled by a previous poll.
-  if (trans && !trans->IsArmedInShard(sid))
-    return;
-
-  auto local_mask = trans ? trans->GetLocalMask(sid) : 0;  // safe only when trans is armed
-
   // Blocked transactions are executed immediately after waking up
-  if (local_mask & Transaction::AWAKED_Q) {
+  if (trans && trans->DisarmInShard(sid, Transaction::AWAKED_Q)) {
     CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
         << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs "
@@ -484,7 +478,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     if (trans == continuation_trans_)
       trans = nullptr;
 
-    if (continuation_trans_->IsArmedInShard(sid)) {
+    if (continuation_trans_->DisarmInShard(sid)) {
       if (bool keep = run(continuation_trans_, false); !keep) {
         // if this holds, we can remove this check altogether.
         DCHECK(continuation_trans_ == nullptr);
@@ -506,7 +500,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     VLOG(2) << "Considering head " << head->DebugId() << " isarmed: " << head->IsArmedInShard(sid);
 
     // If the transaction isn't armed yet, it will be handled by a successive poll
-    if (!head->IsArmedInShard(sid))
+    if (!head->DisarmInShard(sid))
       break;
 
     // Avoid processing the caller transaction below if we found it in the queue,
@@ -529,19 +523,12 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   if (trans == nullptr)
     return;
 
-  // If the pointer is valid, we didn't handle it above, so trans is still armed
-  DCHECK(trans->IsArmedInShard(sid));
-
   // OOO means no transaction before us in the txq accesses our keys, so we can run earlier
-  bool is_ooo = local_mask & Transaction::OUT_OF_ORDER;
-
   // Still suspended shards need to run just to finalize and unregister, so we can run anytime
-  bool is_suspended = local_mask & Transaction::SUSPENDED_Q;
-  DCHECK_EQ(local_mask & Transaction::AWAKED_Q, 0);
-
-  if (is_ooo || is_suspended) {
+  if (trans->DisarmInShard(sid, Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q)) {
     DCHECK(trans != head);
 
+    bool is_ooo = trans->GetLocalMask(sid) & Transaction::OUT_OF_ORDER;
     bool keep = run(trans, is_ooo);
     if (is_ooo && !keep) {
       stats_.tx_ooo_total++;

@@ -258,7 +258,10 @@ class Transaction {
 
   // Returns true if the transaction is waiting for shard callbacks and the shard is armed.
   // Safe to read transaction state (and update shard local) until following RunInShard() finishes.
+  // DEPRECATED
   bool IsArmedInShard(ShardId sid) const;
+
+  bool DisarmInShard(ShardId sid, uint16_t relevant_flags = 0);
 
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
