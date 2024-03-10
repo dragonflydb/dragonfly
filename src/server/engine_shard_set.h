@@ -322,15 +322,15 @@ class EngineShardSet {
   // The functions running inside the shard queue run atomically (sequentially)
   // with respect each other on the same shard.
   template <typename U> void AwaitRunningOnShardQueue(U&& func) {
-    util::fb2::BlockingCounter bc{unsigned(shard_queue_.size())};
+    util::fb2::BlockingCounter bc(shard_queue_.size());
     for (size_t i = 0; i < shard_queue_.size(); ++i) {
       Add(i, [&func, bc]() mutable {
         func(EngineShard::tlocal());
-        bc.Dec();
+        bc->Dec();
       });
     }
 
-    bc.Wait();
+    bc->Wait();
   }
 
   // Used in tests
@@ -353,14 +353,14 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
     if (!pred(i))
       continue;
 
-    bc.Add(1);
+    bc->Add(1);
     util::ProactorBase* dest = pp_->at(i);
     dest->DispatchBrief([&func, bc]() mutable {
       func(EngineShard::tlocal());
-      bc.Dec();
+      bc->Dec();
     });
   }
-  bc.Wait();
+  bc->Wait();
 }
 
 template <typename U, typename P> void EngineShardSet::RunBlockingInParallel(U&& func, P&& pred) {
@@ -374,16 +374,16 @@ template <typename U, typename P> void EngineShardSet::RunBlockingInParallel(U&&
     if (!pred(i))
       continue;
 
-    bc.Add(1);
+    bc->Add(1);
     util::ProactorBase* dest = pp_->at(i);
 
     // the "Dispatch" call spawns a fiber underneath.
     dest->Dispatch([&func, bc]() mutable {
       func(EngineShard::tlocal());
-      bc.Dec();
+      bc->Dec();
     });
   }
-  bc.Wait();
+  bc->Wait();
 }
 
 ShardId Shard(std::string_view v, ShardId shard_num);
