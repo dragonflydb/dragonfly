@@ -701,10 +701,12 @@ async def test_cluster_native_client(
     await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
 
     # Make sure that getting a value from a replica works as well.
-    replica_response = await client.execute_command(
-        "get", "key0", target_nodes=aioredis.RedisCluster.REPLICAS
-    )
-    assert "value" in replica_response.values()
+    # We use connections directly to NOT follow 'MOVED' error, as that will redirect to the master.
+    for c in c_replicas:
+        try:
+            assert await c.get("key0")
+        except redis.exceptions.ResponseError as e:
+            assert e.args[0].startswith("MOVED")
 
     # Push new config
     config = f"""
