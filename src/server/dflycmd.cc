@@ -190,7 +190,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
           << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
 
-  if (master_id != sf_->master_id()) {
+  if (master_id != sf_->master_replid()) {
     return rb->SendError(kBadMasterId);
   }
 
