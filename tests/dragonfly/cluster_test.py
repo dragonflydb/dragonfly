@@ -316,11 +316,8 @@ async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFact
 
 
 # Tests that master commands to the replica are applied regardless of slot ownership
-@pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_replica_sets_non_owned_keys(
-    df_local_factory: DflyInstanceFactory, set_cluster_node_id: bool
-):
+async def test_cluster_replica_sets_non_owned_keys(df_local_factory: DflyInstanceFactory):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
     master = df_local_factory.create(admin_port=BASE_PORT + 1000)
     replica = df_local_factory.create(admin_port=BASE_PORT + 1001)
