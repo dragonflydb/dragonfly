@@ -10,6 +10,7 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/functional/function_ref.h>
 
+#include <atomic>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -156,8 +158,8 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,      // Whether its active on this shard (to schedule or execute hops)
-    ARMED = 1 << 1,  // Whether its armed (the hop was prepared)
+    ACTIVE = 1,  // Whether its active on this shard (to schedule or execute hops)
+    // ARMED = 1 << 1,  // Whether its armed (the hop was prepared)
     // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
     OUT_OF_ORDER = 1 << 2,
     // Whether its key locks are acquired, never set for global commands.
@@ -372,14 +374,22 @@ class Transaction {
   };
 
   struct alignas(64) PerShardData {
+    PerShardData() {
+    }
+    PerShardData(PerShardData&& other) noexcept {
+    }
+
+    // State of shard - bitmask with LocalState flags
+    uint16_t local_mask = 0;
+
+    // Set when once the shard is prepared for another hop. Sync point.
+    std::atomic_bool is_armed = false;
+
     uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
     uint32_t arg_count = 0;
 
     // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
     TxQueue::Iterator pq_pos = TxQueue::kEnd;
-
-    // State of shard - bitmask with LocalState flags
-    uint16_t local_mask = 0;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;
@@ -390,7 +400,7 @@ class Transaction {
     } stats;
 
     // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
-    char pad[64 - 4 * sizeof(uint32_t) - sizeof(Stats)];
+    char pad[64 - 5 * sizeof(uint32_t) - sizeof(Stats)];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
@@ -433,22 +443,6 @@ class Transaction {
       args.clear();
       original_index.clear();
     }
-  };
-
-  // Barrier akin to helio's BlockingCounter, but with proper acquire semantics
-  // for polling work from other threads (active, inactive phases). And without heap allocation.
-  class PhasedBarrier {
-   public:
-    void Start(uint32_t count);  // Release: Store count
-    void Wait();                 // Acquire: Wait until count = 0
-
-    bool Active() const;                // Acquire: Return if count > 0. Use for polling for work
-    void Dec(Transaction* keep_alive);  // Release: Decrease count, notify ec on count = 0
-
-    uint32_t DEBUG_Count() const;  // Get current counter value
-   private:
-    std::atomic_uint32_t count_{0};
-    util::fb2::EventCount ec_{};
   };
 
   // "Single claim - single modification" barrier. Multiple threads might try to claim it, only one
@@ -513,6 +507,9 @@ class Transaction {
 
   // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier
   void ExecuteAsync();
+
+  // Finish hop, decrement run barrier
+  void FinishHop();
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc);
@@ -579,14 +576,7 @@ class Transaction {
   }
 
  private:
-  // Main synchronization point for dispatching hop callbacks and waiting for them to finish.
-  // After scheduling, sequential hops are executed as follows:
-  //    coordinator: Prepare hop, then Start(num_shards), dispatch poll jobs and Wait()
-  //    tx queue:    Once IsArmedInShard() /* checks Active() */ -> run in shard and Dec()
-  // As long as barrier is active, any writes by the coordinator are prohibited, so shard threads
-  // can safely read transaction state and modify per-shard state belonging to them.
-  // Inter-thread synchronization is provided by the barriers acquire/release pairs.
-  PhasedBarrier run_barrier_;
+  util::BlockingCounter run_barrier_{0};
 
   // Stores per-shard data: state flags and keys. Index only with SidToId(shard index)!
   // Theoretically, same size as number of shards, but contains only a single element for
