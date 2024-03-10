@@ -53,12 +53,15 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
 
+  ClusterConfig::Initialize();
+
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
   if (id_.empty()) {
     id_ = server_family_->master_replid();
+  } else if (ClusterConfig::IsEmulated()) {
+    LOG(ERROR) << "Setting --cluster_node_id in emulated mode is unsupported";
+    exit(1);
   }
-
-  ClusterConfig::Initialize();
 }
 
 ClusterConfig* ClusterFamily::cluster_config() {
