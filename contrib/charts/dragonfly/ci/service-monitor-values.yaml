@@ -1,6 +1,6 @@
 serviceMonitor:
   enabled: true
-  namespace: dragonfly
+  namespace: ""
   labels:
     release: prometheus-stack
   annotations: {}

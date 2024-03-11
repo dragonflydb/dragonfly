@@ -120,7 +120,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: test-dragonfly-metrics
-  namespace: dragonfly
+  namespace: default
   labels:
     release: prometheus-stack
     app.kubernetes.io/name: dragonfly
