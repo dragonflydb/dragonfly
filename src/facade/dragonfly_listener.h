@@ -43,6 +43,9 @@ class Listener : public util::ListenerInterface {
   // ReconfigureTLS MUST be called from the same proactor as the listener.
   bool ReconfigureTLS();
 
+  // Returns thread-local dynamic memory usage by TLS.
+  static size_t TLSUsedMemoryThreadLocal();
+
   bool IsPrivilegedInterface() const;
   bool IsMainInterface() const;
 
