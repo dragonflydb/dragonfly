@@ -13,6 +13,7 @@
 #include "core/allocation_tracker.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/error.h"
 #include "server/engine_shard_set.h"
 #include "server/main_service.h"
@@ -253,11 +254,15 @@ void MemoryCmd::Stats() {
                        &stats);
 
   atomic<size_t> serialization_memory = 0;
-  shard_set->pool()->AwaitFiberOnAll(
-      [&](auto*) { serialization_memory.fetch_add(SliceSnapshot::GetThreadLocalMemoryUsage()); });
+  atomic<size_t> tls_memory = 0;
+  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
+    serialization_memory.fetch_add(SliceSnapshot::GetThreadLocalMemoryUsage());
+    tls_memory.fetch_add(Listener::TLSUsedMemoryThreadLocal());
+  });
 
   // Serialization stats, including both replication-related serialization and saving to RDB files.
   stats.push_back({"serialization", serialization_memory.load()});
+  stats.push_back({"tls", tls_memory.load()});
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   rb->StartCollection(stats.size(), RedisReplyBuilder::MAP);
