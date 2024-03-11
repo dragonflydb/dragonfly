@@ -106,7 +106,7 @@ class DispatchTracker {
 
   std::vector<facade::Listener*> listeners_;
   facade::Connection* issuer_;
-  std::unique_ptr<util::fb2::BlockingCounter> bc_;
+  util::fb2::BlockingCounter bc_{0};  // tracks number of pending checkpoints
   bool ignore_paused_;
   bool ignore_blocked_;
 };

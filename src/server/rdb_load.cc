@@ -2027,9 +2027,9 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc.Dec(); });
+    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
   }
-  bc.Wait();  // wait for sentinels to report.
+  bc->Wait();  // wait for sentinels to report.
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
