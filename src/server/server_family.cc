@@ -1299,8 +1299,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
-                                  bool ignore_state) {
+GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
+                                               Transaction* trans, bool ignore_state) {
   if (shard_set->IsTieringEnabled()) {
     return GenericError{make_error_code(errc::operation_not_permitted),
                         StrCat("Can not save database in tiering mode")};
@@ -1311,7 +1311,6 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
-
   {
     std::lock_guard lk(save_mu_);
     if (save_controller_) {
@@ -1331,7 +1330,11 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       return res->error;
     }
   }
+  return {};
+}
 
+GenericError ServerFamily::PauseUntilSaved(bool new_version, string_view basename,
+                                           Transaction* trans, bool ignore_state) {
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
@@ -1351,6 +1354,15 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   }
 
   return save_info.error;
+}
+
+GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+                                  bool ignore_state) {
+  if (auto ec = DoSaveCheckAndStart(new_version, basename, trans, ignore_state); ec) {
+    return ec;
+  }
+
+  return PauseUntilSaved(new_version, basename, trans, ignore_state);
 }
 
 bool ServerFamily::TEST_IsSaving() const {
@@ -1633,21 +1645,16 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::BgSaveFb(bool new_version, std::string basename,
                             boost::intrusive_ptr<Transaction> trans) {
-  GenericError ec = DoSave(new_version, basename, trans.get());
+  GenericError ec = PauseUntilSaved(new_version, basename, trans.get());
   if (ec) {
     LOG(INFO) << "Error in BgSaveFb: " << ec.Format();
   }
-  {
-    lock_guard lk(bg_save_mu_);
-    bg_save_fb_done_ = true;
-  }
 }
 
-// BGSAVE [DF|RDB] [basename]
-// TODO add missing [SCHEDULE]
-void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
+std::optional<bool> ServerFamily::ParseSaveArgs(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
-    return cntx->SendError(kSyntaxErr);
+    cntx->SendError(kSyntaxErr);
+    return {};
   }
 
   bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
@@ -1660,8 +1667,20 @@ void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
     } else if (sub_cmd == "RDB") {
       new_version = false;
     } else {
-      return cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+      cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+      return {};
     }
+  }
+
+  return new_version;
+}
+
+// BGSAVE [DF|RDB] [basename]
+// TODO add missing [SCHEDULE]
+void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
+  auto maybe_new_version = ParseSaveArgs(args, cntx);
+  if (!maybe_new_version) {
+    return;
   }
 
   string_view basename;
@@ -1669,20 +1688,14 @@ void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
     basename = ArgS(args, 1);
   }
 
-  {
-    lock_guard lk(bg_save_mu_);
-
-    if (bg_save_fb_.IsJoinable() && !bg_save_fb_done_) {
-      return cntx->SendError("BgSave in process");
-    }
-    if (bg_save_fb_done_) {
-      // non blocking, fiber is in Terminate state
-      bg_save_fb_.Join();
-    }
-    bg_save_fb_done_ = false;
-    bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this, new_version,
-                             std::string(basename), cntx->transaction);
+  if (auto ec = DoSaveCheckAndStart(&maybe_new_version, basename, cntx->transaction); ec) {
+    cntx->SendError(ec.Format());
+    return;
   }
+  bg_save_fb_.JoinIfNeeded();
+  bg_save_fb_ =
+      fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this, *maybe_new_version,
+                 std::string(basename), boost::intrusive_ptr<Transaction>(cntx->transaction));
   cntx->SendOk();
 }
 
@@ -1690,21 +1703,9 @@ void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
 // Allows saving the snapshot of the dataset on disk, potentially overriding the format
 // and the snapshot name.
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
-  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
-  if (args.size() > 2) {
-    return cntx->SendError(kSyntaxErr);
-  }
-
-  if (args.size() >= 1) {
-    ToUpper(&args[0]);
-    string_view sub_cmd = ArgS(args, 0);
-    if (sub_cmd == "DF") {
-      new_version = true;
-    } else if (sub_cmd == "RDB") {
-      new_version = false;
-    } else {
-      return cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
-    }
+  auto maybe_new_version = ParseSaveArgs(args, cntx);
+  if (!maybe_new_version) {
+    return;
   }
 
   string_view basename;
@@ -1712,7 +1713,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     basename = ArgS(args, 1);
   }
 
-  GenericError ec = DoSave(new_version, basename, cntx->transaction);
+  GenericError ec = DoSave(*maybe_new_version, basename, cntx->transaction);
   if (ec) {
     cntx->SendError(ec.Format());
   } else {

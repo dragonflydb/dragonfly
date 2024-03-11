@@ -3,6 +3,7 @@ import os
 import glob
 import asyncio
 import async_timeout
+import redis
 from redis import asyncio as aioredis
 from pathlib import Path
 import boto3
@@ -356,3 +357,20 @@ async def test_infomemory_while_snapshoting(async_client: aioredis.Redis, format
     await save_task
     save_finished = True
     await info_task
+
+
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-bgsave"})
+async def test_bgsave_and_save(async_client: aioredis.Redis):
+    await async_client.execute_command("DEBUG POPULATE 20000")
+
+    await async_client.execute_command("BGSAVE")
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("BGSAVE")
+
+    await asyncio.sleep(2)
+    await async_client.execute_command("BGSAVE")
+    with pytest.raises(redis.exceptions.ResponseError):
+        await async_client.execute_command("SAVE")
+
+    await asyncio.sleep(2)
+    await async_client.execute_command("SAVE")
