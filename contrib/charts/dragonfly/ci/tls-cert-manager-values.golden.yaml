@@ -1,0 +1,138 @@
+---
+# Source: dragonfly/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-dragonfly
+  namespace: default
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: dragonfly/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-dragonfly
+  namespace: default
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: dragonfly
+      protocol: TCP
+      name: dragonfly
+  selector:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+---
+# Source: dragonfly/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-dragonfly
+  namespace: default
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dragonfly
+      app.kubernetes.io/instance: test
+  template:
+    metadata:
+      annotations:
+        checksum/tls-secret: 01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b
+      labels:
+        app.kubernetes.io/name: dragonfly
+        app.kubernetes.io/instance: test
+    spec:
+      serviceAccountName: test-dragonfly
+      containers:
+        - name: dragonfly
+          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.15.0"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: dragonfly
+              containerPort: 6379
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - /usr/local/bin/healthcheck.sh
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - /usr/local/bin/healthcheck.sh
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          args:
+            - "--alsologtostderr"
+            - "--tls"
+            - "--tls_cert_file=/etc/dragonfly/tls/tls.crt"
+            - "--tls_key_file=/etc/dragonfly/tls/tls.key"
+          resources:
+            limits: {}
+            requests: {}
+          volumeMounts:
+            - mountPath: /etc/dragonfly/tls
+              name: tls
+      volumes:
+        - name: tls
+          secret:
+            secretName: 'test-dragonfly-server-tls'
+---
+# Source: dragonfly/templates/certificate.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: test-dragonfly
+  namespace: default
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  commonName: 'test-dragonfly'
+  dnsNames:
+  - '*.test-dragonfly.default.svc.cluster.local'
+  - 'test-dragonfly.default.svc.cluster.local'
+  - 'test-dragonfly.default.svc'
+  - 'test-dragonfly.default'
+  - 'test-dragonfly'
+  - localhost
+  duration: 87600h0m0s
+  ipAddresses:
+  - 127.0.0.1
+  issuerRef:
+    kind: Issuer
+    name: selfsigned
+    group: cert-manager.io
+  secretName: 'test-dragonfly-server-tls'
+  usages:
+  - client auth
+  - server auth
+  - signing
+  - key encipherment
