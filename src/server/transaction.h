@@ -256,18 +256,16 @@ class Transaction {
   // Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  // Returns true if the transaction is waiting for shard callbacks and the shard is armed.
-  // Safe to read transaction state (and update shard local) until following RunInShard() finishes.
-  // DEPRECATED
-  bool IsArmedInShard(ShardId sid) const;
+  // If the transaction is armed, disarm it and return the local mask (ACTIVE is always set).
+  // Otherwise 0 is returned. Sync point (acquire).
+  uint16_t DisarmInShard(ShardId sid);
 
-  bool DisarmInShard(ShardId sid, uint16_t relevant_flags = 0);
+  // Same as DisarmInShard, but the transaction is only disarmed if any of the req_flags is present.
+  // Returns a valid local_mask nonetheless.
+  uint16_t DisarmInShardWhen(ShardId sid, uint16_t req_flags);
 
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
-
-  // Returns the state mask on this shard. Safe only when the transaction is armed (or blocked).
-  uint16_t GetLocalMask(ShardId sid) const;
 
   // If blocking tx was woken up on this shard, get wake key.
   std::optional<std::string_view> GetWakeKey(ShardId sid) const;
@@ -361,6 +359,14 @@ class Transaction {
     return shard_data_[SidToId(sid)].pq_pos;
   }
 
+  bool DEBUG_IsArmedInShard(ShardId sid) const {
+    return shard_data_[SidToId(sid)].is_armed.load(memory_order_relaxed);
+  }
+
+  uint16_t DEBUG_GetLocalMask(ShardId sid) const {
+    return shard_data_[SidToId(sid)].local_mask;
+  }
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
@@ -385,7 +391,7 @@ class Transaction {
     // State of shard - bitmask with LocalState flags
     uint16_t local_mask = 0;
 
-    // Set when once the shard is prepared for another hop. Sync point.
+    // Set when the shard is prepared for another hop. Sync point. Cleared when execution starts.
     std::atomic_bool is_armed = false;
 
     uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
@@ -579,7 +585,8 @@ class Transaction {
   }
 
  private:
-  util::BlockingCounter run_barrier_{0};
+  // Used for waiting for all hop callbacks to run.
+  util::fb2::EmbeddedBlockingCounter run_barrier_{0};
 
   // Stores per-shard data: state flags and keys. Index only with SidToId(shard index)!
   // Theoretically, same size as number of shards, but contains only a single element for

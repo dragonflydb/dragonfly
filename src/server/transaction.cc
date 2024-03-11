@@ -55,7 +55,7 @@ void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
       const Transaction* cont_tx = shard->GetContTx();
       if (cont_tx) {
         absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(), " ",
-                        cont_tx->IsArmedInShard(shard->shard_id()) ? " armed" : "");
+                        cont_tx->DEBUG_IsArmedInShard(shard->shard_id()) ? " armed" : "");
       }
 
       LOG(WARNING) << msg;
@@ -562,7 +562,6 @@ void Transaction::PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdA
 
 // Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
 bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
-  // DCHECK(run_barrier_.Active());
   DCHECK_GT(txid_, 0u);
   CHECK(cb_ptr_) << DebugId();
 
@@ -571,7 +570,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   sd.stats.total_runs++;
 
-  // DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
+  DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
@@ -796,14 +795,14 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
     InitTxTime();
 
-    run_barrier_.Add(1);
+    run_barrier_.Start(1);
     shard_data_[SidToId(unique_shard_id_)].is_armed.store(true, memory_order_release);
 
     auto schedule_cb = [this, &was_ooo] {
       bool run_fast = ScheduleUniqueShard(EngineShard::tlocal());
       if (run_fast) {
         // We didn't decrease the barrier, so the scope is valid UNTIL Dec() below
-        // DCHECK_EQ(run_barrier_.DEBUG_Count(), 1u);
+        DCHECK_EQ(run_barrier_.DEBUG_Count(), 1u);
         was_ooo = true;
         FinishHop();
       }
@@ -931,12 +930,16 @@ void Transaction::ExecuteAsync() {
   DCHECK(!IsAtomicMulti() || multi_->lock_mode.has_value());
   DCHECK_LE(shard_data_.size(), 1024u);
 
-  run_barrier_.Add(unique_shard_cnt_);
+  // Hops can start executing immediately after being armed, so we
+  // initialize the run barrier before arming, as well as copy indices
+  // of active shards to avoid reading concurrently accessed shard data.
+  std::bitset<1024> poll_flags(0);
+  run_barrier_.Start(unique_shard_cnt_);
 
   // Set armed flags on all active shards.
-  std::bitset<1024> poll_flags(0);
+  std::atomic_thread_fence(memory_order_release);  // once to avoid flushing poll_flags in loop
   IterateActiveShards([&poll_flags](auto& sd, auto i) {
-    sd.is_armed.store(true, memory_order_release);
+    sd.is_armed.store(true, memory_order_relaxed);
     poll_flags.set(i, true);
   });
 
@@ -962,7 +965,7 @@ void Transaction::ExecuteAsync() {
 }
 
 void Transaction::FinishHop() {
-  boost::intrusive_ptr<Transaction> guard(this);
+  boost::intrusive_ptr<Transaction> guard(this);  // Keep alive until Dec() fully finishes
   run_barrier_.Dec();
 }
 
@@ -1060,7 +1063,7 @@ Transaction::RunnableResult Transaction::RunQuickie(EngineShard* shard) {
 void Transaction::ExpireBlocking(WaitKeysProvider wcb) {
   DCHECK(!IsGlobal());
   DVLOG(1) << "ExpireBlocking " << DebugId();
-  run_barrier_.Add(unique_shard_cnt_);
+  run_barrier_.Start(unique_shard_cnt_);
 
   auto expire_cb = [this, &wcb] {
     EngineShard* es = EngineShard::tlocal();
@@ -1095,24 +1098,20 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   return res;
 }
 
-bool Transaction::IsArmedInShard(ShardId sid) const {
-  return shard_data_[SidToId(sid)].is_armed.load(memory_order_relaxed);
+uint16_t Transaction::DisarmInShard(ShardId sid) {
+  auto& sd = shard_data_[SidToId(sid)];
+  // NOTE: Maybe compare_exchange is worth it to avoid redundant writes
+  return sd.is_armed.exchange(false, memory_order_acquire) ? sd.local_mask : 0;
 }
 
-bool Transaction::DisarmInShard(ShardId sid, uint16_t relevant_flags) {
+uint16_t Transaction::DisarmInShardWhen(ShardId sid, uint16_t relevant_flags) {
   auto& sd = shard_data_[SidToId(sid)];
-
-  if (relevant_flags) {
-    if (sd.is_armed.load(memory_order_acquire) && (sd.local_mask & relevant_flags) > 0) {
+  if (sd.is_armed.load(memory_order_acquire)) {
+    if (sd.local_mask & relevant_flags)
       sd.is_armed.store(false, memory_order_relaxed);
-      return true;
-    }
-    return false;
+    return sd.local_mask;
   }
-
-  bool expected = true;
-  return sd.is_armed.compare_exchange_strong(expected, false, memory_order_acquire,
-                                             memory_order_relaxed);
+  return 0;
 }
 
 bool Transaction::IsActive(ShardId sid) const {
@@ -1127,19 +1126,13 @@ bool Transaction::IsActive(ShardId sid) const {
   return shard_data_[SidToId(sid)].local_mask & ACTIVE;
 }
 
-uint16_t Transaction::GetLocalMask(ShardId sid) const {
-  DCHECK(IsActive(sid));
-  // DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
-  return shard_data_[SidToId(sid)].local_mask;
-}
-
 IntentLock::Mode Transaction::LockMode() const {
   return cid_->IsReadOnly() ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
 }
 
 OpArgs Transaction::GetOpArgs(EngineShard* shard) const {
   DCHECK(IsActive(shard->shard_id()));
-  // DCHECK((multi_ && multi_->role == SQUASHED_STUB) || (run_barrier_.DEBUG_Count() > 0));
+  DCHECK((multi_ && multi_->role == SQUASHED_STUB) || (run_barrier_.DEBUG_Count() > 0));
   return OpArgs{shard, this, GetDbContext()};
 }
 
@@ -1573,7 +1566,7 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
 
 void Transaction::ReviveAutoJournal() {
   DCHECK(cid_->opt_mask() & CO::NO_AUTOJOURNAL);
-  // DCHECK_EQ(run_barrier_.DEBUG_Count(), 0u);  // Can't be changed while dispatching
+  DCHECK_EQ(run_barrier_.DEBUG_Count(), 0u);  // Can't be changed while dispatching
   re_enabled_auto_journal_ = true;
 }
 
