@@ -42,8 +42,6 @@ class ClusterSlotMigration : private ProtocolClient {
     return state_;
   }
 
-  void SetStableSyncForFlow(uint32_t flow);
-
   void Stop();
 
   const SlotRanges& GetSlots() const {

@@ -43,7 +43,7 @@ SliceSnapshot::~SliceSnapshot() {
 size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
   size_t mem = 0;
   for (SliceSnapshot* snapshot : tl_slice_snapshots) {
-    mem += snapshot->GetTotalBufferCapacity() + snapshot->GetTotalChannelCapacity();
+    mem += snapshot->GetBufferCapacity() + snapshot->GetTotalChannelCapacity();
   }
   return mem;
 }
@@ -352,16 +352,24 @@ void SliceSnapshot::CloseRecordChannel() {
   }
 }
 
-size_t SliceSnapshot::GetTotalBufferCapacity() const {
+size_t SliceSnapshot::GetBufferCapacity() const {
   if (serializer_ == nullptr) {
     return 0;
   }
 
-  return serializer_->GetTotalBufferCapacity();
+  return serializer_->GetBufferCapacity();
 }
 
 size_t SliceSnapshot::GetTotalChannelCapacity() const {
   return dest_->GetSize();
+}
+
+size_t SliceSnapshot::GetTempBuffersSize() const {
+  if (serializer_ == nullptr) {
+    return 0;
+  }
+
+  return serializer_->GetTempBufferSize();
 }
 
 RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {

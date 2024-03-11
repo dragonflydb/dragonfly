@@ -1,6 +1,6 @@
 {
-  "name": "ubuntu20",
-  "image": "ghcr.io/romange/ubuntu-dev:20",
+  "name": "ubuntu22",
+  "image": "ghcr.io/romange/ubuntu-dev:22",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -16,7 +16,7 @@
     }
   },
   "mounts": [
-    "source=ubuntu20-vol,target=/build,type=volume"
+    "source=ubuntu22-vol,target=/build,type=volume"
   ],
-  "postCreateCommand": ".devcontainer/ubuntu20/post-create.sh ${containerWorkspaceFolder}"
+  "postCreateCommand": ".devcontainer/ubuntu22/post-create.sh ${containerWorkspaceFolder}"
 }

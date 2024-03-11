@@ -81,7 +81,7 @@ class ChannelStore {
     SubscribeMap* Get() const;
     void Set(SubscribeMap* sm);
 
-    SubscribeMap* operator->();
+    SubscribeMap* operator->() const;
     const SubscribeMap& operator*() const;
 
    private:

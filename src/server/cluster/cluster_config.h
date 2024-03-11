@@ -19,8 +19,7 @@ namespace dfly {
 enum class MigrationState : uint8_t {
   C_NO_STATE,
   C_CONNECTING,
-  C_FULL_SYNC,
-  C_STABLE_SYNC,
+  C_SYNC,
   C_FINISHED,
   C_MAX_INVALID = std::numeric_limits<uint8_t>::max()
 };

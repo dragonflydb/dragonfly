@@ -187,8 +187,8 @@ class ServerFamily {
   void PauseReplication(bool pause);
   std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo();
 
-  const std::string& master_id() const {
-    return master_id_;
+  const std::string& master_replid() const {
+    return master_replid_;
   }
 
   journal::Journal* journal() {
@@ -282,7 +282,7 @@ class ServerFamily {
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
 
-  std::string master_id_;
+  std::string master_replid_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
