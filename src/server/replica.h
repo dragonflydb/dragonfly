@@ -102,6 +102,8 @@ class Replica : ProtocolClient {
   // Send DFLY ${kind} to the master instance.
   std::error_code SendNextPhaseRequest(std::string_view kind);
 
+  void AclCheckFb();
+
  private: /* Utility */
   struct PSyncResponse {
     // string - end of sync token (diskless)
@@ -148,6 +150,7 @@ class Replica : ProtocolClient {
   // In redis replication mode.
   Fiber sync_fb_;
   Fiber acks_fb_;
+  Fiber acl_check_fb_;
   util::fb2::EventCount waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;

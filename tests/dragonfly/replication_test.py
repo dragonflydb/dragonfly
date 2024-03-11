@@ -2064,3 +2064,36 @@ async def test_start_replicating_while_save(df_local_factory):
     assert not await is_saving()
 
     await disconnect_clients(c_master, *[c_replica])
+
+
+@pytest.mark.asyncio
+async def test_user_acl_replication(df_local_factory):
+    master = df_local_factory.create(proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=4)
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    await c_master.execute_command("ACL SETUSER tmp >tmp ON +ping +dfly +replconf")
+    await c_master.execute_command("SET foo bar")
+    assert 1 == await c_master.execute_command("DBSIZE")
+
+    c_replica = replica.client()
+    await c_replica.execute_command("CONFIG SET masteruser tmp")
+    await c_replica.execute_command("CONFIG SET masterauth tmp")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    await wait_available_async(c_replica)
+    await asyncio.sleep(2.0)
+    assert 1 == await c_replica.execute_command("DBSIZE")
+
+    # revoke acl's from tmp
+    await c_master.execute_command("ACL SETUSER tmp -replconf")
+    await asyncio.sleep(2.0)
+    await c_master.execute_command("SET bar foo")
+
+    assert 1 == await c_replica.execute_command("DBSIZE")
+
+    # reinstate and let replication continue
+    await c_master.execute_command("ACL SETUSER tmp +replconf")
+    await asyncio.sleep(2.0)
+    assert 2 == await c_replica.execute_command("DBSIZE")
