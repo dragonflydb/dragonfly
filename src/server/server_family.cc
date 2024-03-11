@@ -5,7 +5,7 @@
 #include "server/server_family.h"
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/random/random.h>  // for master_id_ generation.
+#include <absl/random/random.h>  // for master_replid_ generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_replace.h>
@@ -615,8 +615,8 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 
   {
     absl::InsecureBitGen eng;
-    master_id_ = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
-    DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_id_.size());
+    master_replid_ = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
+    DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid_.size());
   }
 
   if (auto ec =
@@ -2036,7 +2036,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
                                           ",state=", r.state, ",lag=", r.lsn_lag));
       }
-      append("master_replid", master_id_);
+      append("master_replid", master_replid_);
     } else {
       append("role", "replica");
 
@@ -2273,7 +2273,7 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   }
 
   // Create a new replica and assing it
-  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
+  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_replid());
   replica_ = new_replica;
 
   // TODO: disconnect pending blocked clients (pubsub, blocking commands)
@@ -2385,7 +2385,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
         auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
         rb->StartArray(4);
-        rb->SendSimpleString(master_id_);
+        rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
         rb->SendLong(replica_info->flows.size());
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));

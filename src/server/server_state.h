@@ -267,6 +267,13 @@ class ServerState {  // public struct - to allow initialization.
     return slow_log_shard_;
   };
 
+  // Tries to returns as much RSS memory as possible to the OS.
+  // Decommits 3 possible heaps according to the flags.
+  // For decommit_glibcmalloc the heap is global for the process, for others it's specific only
+  // for this thread.
+  enum { kDataHeap = 1, kBackingHeap = 2, kGlibcmalloc = 4 };
+  void DecommitMemory(uint8_t flags);
+
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;
 

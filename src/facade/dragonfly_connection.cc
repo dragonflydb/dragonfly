@@ -476,7 +476,7 @@ void Connection::DispatchOperations::operator()(const MigrationRequestMessage& m
 void Connection::DispatchOperations::operator()(CheckpointMessage msg) {
   VLOG(2) << "Decremented checkpoint at " << self->DebugInfo();
 
-  msg.bc.Dec();
+  msg.bc->Dec();
 }
 
 void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) {
@@ -1458,7 +1458,7 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, boo
 
   VLOG(2) << "Sent checkpoint to " << DebugInfo();
 
-  bc.Add(1);
+  bc->Add(1);
   SendAsync({CheckpointMessage{bc}});
 }
 

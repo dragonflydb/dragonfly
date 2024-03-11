@@ -38,14 +38,14 @@ ChannelStore::UpdatablePointer::UpdatablePointer(const UpdatablePointer& other) 
 }
 
 ChannelStore::SubscribeMap* ChannelStore::UpdatablePointer::Get() const {
-  return ptr.load(memory_order_relaxed);
+  return ptr.load(memory_order_acquire);  // sync pointed memory
 }
 
 void ChannelStore::UpdatablePointer::Set(ChannelStore::SubscribeMap* sm) {
-  ptr.store(sm, memory_order_relaxed);
+  ptr.store(sm, memory_order_release);  // sync pointed memory
 }
 
-ChannelStore::SubscribeMap* ChannelStore::UpdatablePointer::operator->() {
+ChannelStore::SubscribeMap* ChannelStore::UpdatablePointer::operator->() const {
   return Get();
 }
 

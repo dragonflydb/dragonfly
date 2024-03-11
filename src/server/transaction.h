@@ -158,12 +158,13 @@ class Transaction {
   enum LocalMask : uint16_t {
     ACTIVE = 1,      // Whether its active on this shard (to schedule or execute hops)
     ARMED = 1 << 1,  // Whether its armed (the hop was prepared)
-    OUT_OF_ORDER =
-        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
-    KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
-    SUSPENDED_Q = 1 << 4,       // Whether it suspended (by WatchInShard())
-    AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
-    UNLOCK_MULTI = 1 << 6,      // Whether this shard executed UnlockMultiShardCb
+    // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
+    OUT_OF_ORDER = 1 << 2,
+    // Whether its key locks are acquired, never set for global commands.
+    KEYLOCK_ACQUIRED = 1 << 3,
+    SUSPENDED_Q = 1 << 4,   // Whether it suspended (by WatchInShard())
+    AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
+    UNLOCK_MULTI = 1 << 6,  // Whether this shard executed UnlockMultiShardCb
   };
 
  public:
@@ -220,11 +221,6 @@ class Transaction {
   // Must be called from coordinator thread.
   void CancelBlocking(std::function<OpStatus(ArgSlice)>);
 
-  // In some cases for non auto-journaling commands we want to enable the auto journal flow.
-  void RenableAutoJournal() {
-    renabled_auto_journal_.store(true, std::memory_order_relaxed);
-  }
-
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
@@ -267,6 +263,12 @@ class Transaction {
 
   // Returns the state mask on this shard. Safe only when the transaction is armed (or blocked).
   uint16_t GetLocalMask(ShardId sid) const;
+
+  // If blocking tx was woken up on this shard, get wake key.
+  std::optional<std::string_view> GetWakeKey(ShardId sid) const;
+
+  // Get OpArgs for specific shard
+  OpArgs GetOpArgs(EngineShard* shard) const;
 
   uint32_t GetLocalTxqPos(ShardId sid) const {
     return shard_data_[SidToId(sid)].pq_pos;
@@ -311,13 +313,6 @@ class Transaction {
 
   bool IsGlobal() const;
 
-  // If blocking tx was woken up on this shard, get wake key.
-  std::optional<std::string_view> GetWakeKey(ShardId sid) const;
-
-  OpArgs GetOpArgs(EngineShard* shard) const {
-    return OpArgs{shard, this, GetDbContext()};
-  }
-
   DbContext GetDbContext() const {
     return DbContext{.db_index = db_index_, .time_now_ms = time_now_ms_};
   }
@@ -346,6 +341,10 @@ class Transaction {
                          bool multi_commands, bool allow_await) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
+  // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.
+  void ReviveAutoJournal();
+
+  // Clear all state to make transaction re-usable
   void Refurbish();
 
   // Get keys multi transaction was initialized with, normalized and unique
@@ -377,7 +376,7 @@ class Transaction {
     uint32_t arg_count = 0;
 
     // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
-    uint32_t pq_pos = TxQueue::kEnd;
+    TxQueue::Iterator pq_pos = TxQueue::kEnd;
 
     // State of shard - bitmask with LocalState flags
     uint16_t local_mask = 0;
@@ -603,8 +602,8 @@ class Transaction {
   // Stores the full undivided command.
   CmdArgList full_args_;
 
-  // True if NO_AUTOJOURNAL command asked to enable auto journal
-  std::atomic<bool> renabled_auto_journal_ = false;
+  // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
+  bool re_enabled_auto_journal_ = false;
 
   // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
   std::vector<uint32_t> reverse_index_;
@@ -659,10 +658,6 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
     return res.status();
   });
   return res;
-}
-
-inline uint16_t trans_id(const Transaction* ptr) {
-  return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args);

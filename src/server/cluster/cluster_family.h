@@ -54,7 +54,6 @@ class ClusterFamily {
  private:  // Slots migration section
   void DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
-  void DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
@@ -70,8 +69,6 @@ class ClusterFamily {
   // this method assocciate connection and shard that will be the data
   // source for migration
   void DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx);
-
-  void DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx);
 
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
@@ -99,6 +96,8 @@ class ClusterFamily {
 
  private:
   ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
+
+  std::string id_;
 
   ServerFamily* server_family_ = nullptr;
 };
