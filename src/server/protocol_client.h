@@ -51,6 +51,7 @@ class ProtocolClient {
   uint64_t LastIoTime() const;
   void TouchIoTime();
 
+ protected:
   struct ServerContext {
     std::string host;
     uint16_t port;
@@ -125,7 +126,7 @@ class ProtocolClient {
   std::unique_ptr<util::FiberSocketBase> sock_;
   Mutex sock_mu_;
 
- public:
+ protected:
   Context cntx_;  // context for tasks in replica.
 
   std::string last_cmd_;

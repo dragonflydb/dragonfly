@@ -150,6 +150,7 @@ void Replica::Stop() {
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  acl_check_fb_.JoinIfNeeded();
 }
 
 void Replica::Pause(bool pause) {
@@ -904,7 +905,7 @@ void Replica::AclCheckFb() {
   while (!cntx_.IsCancelled()) {
     acl_client.CheckAclRoundTrip();
     // We poll for ACL changes every second
-    ThisFiber::SleepFor(std::chrono::seconds(1));
+    ThisFiber::SleepFor(std::chrono::milliseconds(200));
   }
 }
 
