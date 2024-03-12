@@ -739,15 +739,15 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
           return builder->SendStored();
         }
       }
-      if (!is_ms && int_arg >= kMaxExpireDeadlineSec) {
-        return builder->SendError(InvalidExpireTime("set"));
-      }
-
-      if (!is_ms) {
+      if (is_ms) {
+        if (int_arg > kMaxExpireDeadlineMs) {
+          int_arg = kMaxExpireDeadlineMs;
+        }
+      } else {
+        if (int_arg > kMaxExpireDeadlineSec) {
+          int_arg = kMaxExpireDeadlineSec;
+        }
         int_arg *= 1000;
-      }
-      if (int_arg >= kMaxExpireDeadlineSec * 1000) {
-        return builder->SendError(InvalidExpireTime("set"));
       }
       sparams.expire_after_ms = int_arg;
     } else if (cur_arg == "NX" && !(sparams.flags & SetCmd::SET_IF_EXISTS)) {
@@ -1147,22 +1147,29 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   string_view key = ArgS(args, 0);
   string_view ex = ArgS(args, 1);
   string_view value = ArgS(args, 2);
-  int32_t unit_vals;
+  int64_t unit_vals;
 
   if (!absl::SimpleAtoi(ex, &unit_vals)) {
     return cntx->SendError(kInvalidIntErr);
   }
 
-  if (unit_vals < 1 || unit_vals >= kMaxExpireDeadlineSec) {
+  if (unit_vals < 1) {
     return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  if (seconds)
+  if (seconds) {
+    if (unit_vals > kMaxExpireDeadlineSec) {
+      unit_vals = kMaxExpireDeadlineSec;
+    }
     sparams.expire_after_ms = uint64_t(unit_vals) * 1000;
-  else
+  } else {
+    if (unit_vals > kMaxExpireDeadlineMs) {
+      unit_vals = kMaxExpireDeadlineMs;
+    }
     sparams.expire_after_ms = unit_vals;
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     SetCmd sg(t->GetOpArgs(shard), true);
