@@ -531,6 +531,10 @@ void DebugCmd::Replica(CmdArgList args) {
 }
 
 void DebugCmd::Load(string_view filename) {
+  if (!ServerState::tlocal()->is_master) {
+    return cntx_->SendError("Replica cannot load data");
+  }
+
   auto new_state = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state.first != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";

@@ -1072,7 +1072,11 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
 }
 
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
-  DCHECK(it->second.HasExpire());
+  if (!it->second.HasExpire()) {
+    LOG(ERROR) << "Invalid call to ExpireIfNeeded";
+    return {it, ExpireIterator{}};
+  }
+
   auto& db = db_arr_[cntx.db_index];
 
   auto expire_it = db->expire.Find(it->first);
