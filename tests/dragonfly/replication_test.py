@@ -2083,7 +2083,6 @@ async def test_user_acl_replication(df_local_factory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
     await wait_available_async(c_replica)
-    await check_all_replicas_finished([c_replica], c_master, 5)
     assert 1 == await c_replica.execute_command("DBSIZE")
 
     # revoke acl's from tmp
@@ -2091,10 +2090,11 @@ async def test_user_acl_replication(df_local_factory):
     async with async_timeout.timeout(5):
         while True:
             role = await c_replica.execute_command("INFO REPLICATION")
+            # fancy of way of extracting the field master_link_status
             is_down = role.split("\r\n")[4].split(":")[1]
             if is_down == "down":
                 break
-            asyncio.sleep(1)
+            await asyncio.sleep(1)
 
     await c_master.execute_command("SET bar foo")
 
