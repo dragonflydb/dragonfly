@@ -282,8 +282,8 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   */
   auto masterauth = absl::GetFlag(FLAGS_masterauth);
   auto masteruser = absl::GetFlag(FLAGS_masteruser);
+  ResetParser(false);
   if (!masterauth.empty()) {
-    ResetParser(false);
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
                                   : StrCat("AUTH ", masteruser, " ", masterauth);
     RETURN_ON_ERR(SendCommandAndReadResponse(cmd));

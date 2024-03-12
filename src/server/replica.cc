@@ -625,7 +625,11 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
-  acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
+
+  acl_check_fb_.JoinIfNeeded();
+  if (master_context_.version >= DflyVersion::VER3) {
+    acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
+  }
 
   JoinDflyFlows();
   acl_check_fb_.JoinIfNeeded();
@@ -890,7 +894,11 @@ class AclCheckerClient : public ProtocolClient {
 
 void Replica::AclCheckFb() {
   // We need a new client with a different socket for acl-checks
-  // because acks should not be replied to
+  // instead of using the ACK's fiber. This is because acks should
+  // not be replied (which makes them unusable for periodic ACL checks).
+  // Also there are N ACK fibers per replica instance while we only need
+  // one fiber to periodically check for ACL changes. Therefore,
+  // we decouple the logic via AclCheckFb.
   AclCheckerClient acl_client(server(), &cntx_);
 
   while (!cntx_.IsCancelled()) {
@@ -912,7 +920,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
     // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
     current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
-    LOG(INFO) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
+    VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
     force_ping_ = false;
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
