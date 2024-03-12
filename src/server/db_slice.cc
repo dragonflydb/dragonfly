@@ -15,6 +15,7 @@
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "strings/human_readable.h"
+#include "util/fibers/stacktrace.h"
 
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
@@ -1071,20 +1072,28 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
 }
 
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
-  DCHECK(it->second.HasExpire());
+  if (!it->second.HasExpire()) {
+    LOG(ERROR) << "Invalid call to ExpireIfNeeded";
+    return {it, ExpireIterator{}};
+  }
+
   auto& db = db_arr_[cntx.db_index];
 
   auto expire_it = db->expire.Find(it->first);
 
-  CHECK(IsValid(expire_it));
+  if (IsValid(expire_it)) {
+    // TODO: to employ multi-generation update of expire-base and the underlying values.
+    time_t expire_time = ExpireTime(expire_it);
 
-  // TODO: to employ multi-generation update of expire-base and the underlying values.
-  time_t expire_time = ExpireTime(expire_it);
-
-  // Never do expiration on replica or if expiration is disabled.
-  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
-    return {it, expire_it};
-
+    // Never do expiration on replica or if expiration is disabled.
+    if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
+      return {it, expire_it};
+  } else {
+    LOG(ERROR) << "Internal error, entry " << it->first.ToString()
+               << " not found in expire table, db_index: " << cntx.db_index
+               << ", expire table size: " << db->expire.size()
+               << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
+  }
   string tmp_key_buf;
   string_view tmp_key;
 

@@ -19,6 +19,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "server/debugcmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -109,10 +110,6 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
-  /*if (sub_cmd == "JOURNAL" && args.size() >= 2) {
-    return Journal(args, cntx);
-  }*/
-
   if (sub_cmd == "THREAD") {
     return Thread(args, cntx);
   }
@@ -141,6 +138,11 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return ReplicaOffset(args, cntx);
   }
 
+  if (sub_cmd == "LOAD" && args.size() == 2) {
+    DebugCmd debug_cmd{sf_, cntx};
+    debug_cmd.Load(ArgS(args, 1));
+    return;
+  }
   cntx->SendError(kSyntaxErr);
 }
 

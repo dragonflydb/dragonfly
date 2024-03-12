@@ -260,9 +260,13 @@ TEST_F(RdbTest, ReloadTtl) {
 TEST_F(RdbTest, ReloadExpired) {
   Run({"set", "key", "val"});
   Run({"expire", "key", "2"});
-  sleep(2);
-  Run({"debug", "reload"});
-  auto resp = Run({"get", "key"});
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  AdvanceTime(2000);
+  resp = Run({"debug", "load", save_info.file_name});
+  ASSERT_EQ(resp, "OK");
+  resp = Run({"get", "key"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
