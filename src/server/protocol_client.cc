@@ -28,6 +28,7 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
+#include "util/fibers/dns_resolve.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
@@ -91,51 +92,6 @@ static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
   return ctx;
 }
 #endif
-
-int ResolveDns(std::string_view host, char* dest) {
-  struct addrinfo hints, *servinfo;
-
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_protocol = IPPROTO_TCP;
-  hints.ai_flags = AI_ALL;
-
-  int res = getaddrinfo(host.data(), NULL, &hints, &servinfo);
-  if (res != 0)
-    return res;
-
-  static_assert(INET_ADDRSTRLEN < INET6_ADDRSTRLEN);
-
-  // If possible, we want to use an IPv4 address.
-  char ipv4_addr[INET6_ADDRSTRLEN];
-  bool found_ipv4 = false;
-  char ipv6_addr[INET6_ADDRSTRLEN];
-  bool found_ipv6 = false;
-
-  for (addrinfo* p = servinfo; p != NULL; p = p->ai_next) {
-    CHECK(p->ai_family == AF_INET || p->ai_family == AF_INET6);
-    if (p->ai_family == AF_INET && !found_ipv4) {
-      struct sockaddr_in* ipv4 = (struct sockaddr_in*)p->ai_addr;
-      CHECK(nullptr !=
-            inet_ntop(p->ai_family, (void*)&ipv4->sin_addr, ipv4_addr, INET6_ADDRSTRLEN));
-      found_ipv4 = true;
-      break;
-    } else if (!found_ipv6) {
-      struct sockaddr_in6* ipv6 = (struct sockaddr_in6*)p->ai_addr;
-      CHECK(nullptr !=
-            inet_ntop(p->ai_family, (void*)&ipv6->sin6_addr, ipv6_addr, INET6_ADDRSTRLEN));
-      found_ipv6 = true;
-    }
-  }
-
-  CHECK(found_ipv4 || found_ipv6);
-  memcpy(dest, found_ipv4 ? ipv4_addr : ipv6_addr, INET6_ADDRSTRLEN);
-
-  freeaddrinfo(servinfo);
-
-  return 0;
-}
 
 error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
   auto buf = dest->AppendBuffer();
@@ -214,9 +170,9 @@ ProtocolClient::~ProtocolClient() {
 
 error_code ProtocolClient::ResolveHostDns() {
   char ip_addr[INET6_ADDRSTRLEN];
-  int resolve_res = ResolveDns(server_context_.host, ip_addr);
-  if (resolve_res != 0) {
-    LOG(ERROR) << "Dns error " << gai_strerror(resolve_res) << ", host: " << server_context_.host;
+  auto ec = util::fb2::DnsResolve(server_context_.host, 0, ip_addr, ProactorBase::me());
+  if (ec) {
+    LOG(ERROR) << "Dns error " << ec << ", host: " << server_context_.host;
     return make_error_code(errc::host_unreachable);
   }
 
