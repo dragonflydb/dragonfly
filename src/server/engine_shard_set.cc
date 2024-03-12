@@ -550,7 +550,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // If the transaction concluded, it must remove itself from the tx queue.
     // Otherwise it is required to stay there to keep the relative order.
     if (is_ooo && !trans->IsMulti())
-      DCHECK_EQ(keep, trans->GetLocalTxqPos(sid) != TxQueue::kEnd);
+      DCHECK_EQ(keep, trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd);
   }
 }
 

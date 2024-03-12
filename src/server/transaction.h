@@ -270,10 +270,6 @@ class Transaction {
   // Get OpArgs for specific shard
   OpArgs GetOpArgs(EngineShard* shard) const;
 
-  uint32_t GetLocalTxqPos(ShardId sid) const {
-    return shard_data_[SidToId(sid)].pq_pos;
-  }
-
   TxId txid() const {
     return txid_;
   }
@@ -355,6 +351,10 @@ class Transaction {
 
   // Print in-dept failure state for debugging.
   std::string DEBUG_PrintFailState(ShardId sid) const;
+
+  uint32_t DEBUG_GetTxqPosInShard(ShardId sid) const {
+    return shard_data_[SidToId(sid)].pq_pos;
+  }
 
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
