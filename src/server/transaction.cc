@@ -6,8 +6,6 @@
 
 #include <absl/strings/match.h>
 
-#include <atomic>
-
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
