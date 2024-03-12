@@ -449,7 +449,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   stats_.poll_execution_total++;
 
   uint16_t local_mask = trans ? trans->DisarmInShardWhen(sid, Transaction::AWAKED_Q) : 0;
-  if (trans && local_mask == 0)
+
+  if (trans && local_mask == 0)  // If not armed, it means that this poll task expired
     return;
 
   // Blocked transactions are executed immediately after waking up
@@ -532,7 +533,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     CHECK(trans->DisarmInShard(sid));
 
     bool is_ooo = local_mask & Transaction::OUT_OF_ORDER;
-    bool keep = run(trans, true);
+    bool keep = run(trans, is_ooo);
     if (is_ooo && !keep) {
       stats_.tx_ooo_total++;
     }

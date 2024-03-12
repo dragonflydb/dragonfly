@@ -360,7 +360,7 @@ class Transaction {
   }
 
   bool DEBUG_IsArmedInShard(ShardId sid) const {
-    return shard_data_[SidToId(sid)].is_armed.load(memory_order_relaxed);
+    return shard_data_[SidToId(sid)].is_armed.load(std::memory_order_relaxed);
   }
 
   uint16_t DEBUG_GetLocalMask(ShardId sid) const {
