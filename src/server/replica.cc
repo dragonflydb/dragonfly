@@ -625,7 +625,7 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
-  // acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
+  acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
 
   JoinDflyFlows();
   acl_check_fb_.JoinIfNeeded();

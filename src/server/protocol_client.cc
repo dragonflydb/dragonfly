@@ -33,7 +33,7 @@ extern "C" {
 #include "util/tls/tls_socket.h"
 #endif
 
-ABSL_FLAG(std::string, masteruser, "default", "username for authentication with master");
+ABSL_FLAG(std::string, masteruser, "", "username for authentication with master");
 ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
 ABSL_FLAG(bool, tls_replication, false, "Enable TLS on replication");
 
