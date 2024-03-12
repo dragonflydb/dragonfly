@@ -457,8 +457,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   if (local_mask & Transaction::AWAKED_Q) {
     CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
-        << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs "
-        << trans->GetLocalMask(sid);
+        << "cont_mask: " << continuation_trans_->DEBUG_GetLocalMask(sid) << " vs "
+        << trans->DEBUG_GetLocalMask(sid);
 
     // Commands like BRPOPLPUSH don't conclude immediately
     if (trans->RunInShard(this, false)) {
