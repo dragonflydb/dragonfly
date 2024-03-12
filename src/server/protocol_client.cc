@@ -34,7 +34,7 @@ extern "C" {
 #endif
 
 ABSL_FLAG(std::string, masteruser, "default", "username for authentication with master");
-ABSL_FLAG(std::string, masterauth, "default", "password for authentication with master");
+ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
 ABSL_FLAG(bool, tls_replication, false, "Enable TLS on replication");
 
 ABSL_DECLARE_FLAG(std::string, tls_cert_file);
@@ -284,7 +284,9 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   auto masteruser = absl::GetFlag(FLAGS_masteruser);
   if (!masterauth.empty()) {
     ResetParser(false);
-    RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("AUTH ", masteruser, " ", masterauth)));
+    auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
+                                  : StrCat("AUTH ", masteruser, " ", masterauth);
+    RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
     PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
   return error_code{};
