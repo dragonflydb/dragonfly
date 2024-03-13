@@ -25,6 +25,9 @@
 #include "server/server_state.h"
 
 ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
+ABSL_FLAG(std::string, cluster_node_id, "",
+          "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
+          "replication ID (random string)");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 
@@ -49,7 +52,16 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
+
   ClusterConfig::Initialize();
+
+  id_ = absl::GetFlag(FLAGS_cluster_node_id);
+  if (id_.empty()) {
+    id_ = server_family_->master_replid();
+  } else if (ClusterConfig::IsEmulated()) {
+    LOG(ERROR) << "Setting --cluster_node_id in emulated mode is unsupported";
+    exit(1);
+  }
 }
 
 ClusterConfig* ClusterFamily::cluster_config() {
@@ -70,7 +82,7 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
 
-    info.master = {.id = server_family_->master_id(),
+    info.master = {.id = id_,
                    .ip = preferred_endpoint,
                    .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
 
@@ -82,7 +94,7 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
   } else {
     info.master = {
         .id = etl.remote_client_id_, .ip = replication_info->host, .port = replication_info->port};
-    info.replicas.push_back({.id = server_family_->master_id(),
+    info.replicas.push_back({.id = id_,
                              .ip = cntx->conn()->LocalBindAddress(),
                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
   }
@@ -254,9 +266,9 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
 
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
   if (ClusterConfig::IsEmulated()) {
-    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, server_family_->master_id(), cntx);
+    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, id_, cntx);
   } else if (tl_cluster_config != nullptr) {
-    return ClusterNodesImpl(tl_cluster_config->GetConfig(), server_family_->master_id(), cntx);
+    return ClusterNodesImpl(tl_cluster_config->GetConfig(), id_, cntx);
   } else {
     return cntx->SendError(kClusterNotConfigured);
   }
@@ -396,8 +408,6 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterStartSlotMigration(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
     return DflyClusterSlotMigrationStatus(args, cntx);
-  } else if (sub_cmd == "SLOT-MIGRATION-FINALIZE") {
-    return DflyClusterMigrationFinalize(args, cntx);
   }
 
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -408,7 +418,7 @@ void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(server_family_->master_id());
+  rb->SendBulkString(id_);
 }
 
 namespace {
@@ -483,8 +493,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     return cntx->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  shared_ptr<ClusterConfig> new_config =
-      ClusterConfig::CreateFromConfig(server_family_->master_id(), json.value());
+  shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json.value());
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
     return cntx->SendError("Invalid cluster configuration.");
@@ -634,10 +643,8 @@ static std::string_view state_to_str(MigrationState state) {
       return "NO_STATE"sv;
     case MigrationState::C_CONNECTING:
       return "CONNECTING"sv;
-    case MigrationState::C_FULL_SYNC:
-      return "FULL_SYNC"sv;
-    case MigrationState::C_STABLE_SYNC:
-      return "STABLE_SYNC"sv;
+    case MigrationState::C_SYNC:
+      return "SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
     case MigrationState::C_MAX_INVALID:
@@ -689,51 +696,6 @@ void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionCo
   return rb->SendSimpleString(state_to_str(MigrationState::C_NO_STATE));
 }
 
-void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser{args};
-  auto sync_id = parser.Next<uint32_t>();
-
-  if (auto err = parser.Error(); err) {
-    return cntx->SendError(err->MakeReply());
-  }
-
-  auto migration = GetOutgoingMigration(sync_id);
-  if (!migration)
-    return cntx->SendError(kIdNotFound);
-
-  if (migration->GetState() != MigrationState::C_STABLE_SYNC) {
-    return cntx->SendError("Migration process is not in STABLE_SYNC state");
-  }
-
-  // TODO implement blocking on migrated slots only
-
-  bool is_block_active = true;
-  auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
-  auto pause_fb_opt =
-      Pause(server_family_->GetListeners(), cntx->conn(), ClientPause::WRITE, is_pause_in_progress);
-
-  if (!pause_fb_opt) {
-    LOG(WARNING) << "Cluster migration finalization time out";
-    return cntx->SendError("Blocking connections time out");
-  }
-
-  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
-    is_block_active = false;
-    pause_fb_opt->JoinIfNeeded();
-  });
-
-  auto cb = [this, &migration](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      // TODO add error processing to move back into STABLE_SYNC state
-      migration->Finalize(shard->shard_id());
-    }
-  };
-
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-
-  return cntx->SendOk();
-}
-
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -742,8 +704,6 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
     MigrationConf(args, cntx);
   } else if (sub_cmd == "FLOW") {
     DflyMigrateFlow(args, cntx);
-  } else if (sub_cmd == "FULL-SYNC-CUT") {
-    DflyMigrateFullSyncCut(args, cntx);
   } else if (sub_cmd == "ACK") {
     DflyMigrateAck(args, cntx);
   } else {
@@ -829,10 +789,9 @@ uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_
     // Todo add error processing, stop migration process
     // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
   };
-  auto info =
-      make_shared<OutgoingMigration>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(), port,
-                                     std::move(slots), err_handler);
-  auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(info));
+  auto migration = make_shared<OutgoingMigration>(cntx->conn()->RemoteEndpointAddress(), port,
+                                                  std::move(slots), err_handler, server_family_);
+  auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(migration));
   CHECK(inserted);
   return sync_id;
 }
@@ -849,8 +808,8 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->conn()->SetName(absl::StrCat("migration_flow_", sync_id));
 
-  auto info = GetOutgoingMigration(sync_id);
-  if (!info)
+  auto migration = GetOutgoingMigration(sync_id);
+  if (!migration)
     return cntx->SendError(kIdNotFound);
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
@@ -861,37 +820,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   EngineShard* shard = EngineShard::tlocal();
   DCHECK(shard->shard_id() == shard_id);
 
-  info->StartFlow(&shard->db_slice(), sync_id, server_family_->journal(), cntx->conn()->socket());
-}
-
-void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx) {
-  CHECK(cntx->slot_migration_id != 0);
-  CmdArgParser parser{args};
-  auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
-
-  if (auto err = parser.Error(); err) {
-    return cntx->SendError(err->MakeReply());
-  }
-
-  VLOG(1) << "Full sync cut "
-          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
-
-  std::lock_guard lck(migration_mu_);
-  auto migration_it = std::find_if(
-      incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-      [cntx](const auto& el) { return cntx->slot_migration_id == el->GetLocalSyncId(); });
-
-  if (migration_it == incoming_migrations_jobs_.end()) {
-    LOG(WARNING) << "Couldn't find migration id";
-    return cntx->SendError(kIdNotFound);
-  }
-
-  (*migration_it)->SetStableSyncForFlow(shard_id);
-  if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
-    LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
-  }
-
-  cntx->SendOk();
+  migration->StartFlow(sync_id, server_family_->journal(), cntx->conn()->socket());
 }
 
 void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {

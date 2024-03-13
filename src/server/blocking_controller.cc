@@ -120,16 +120,10 @@ bool BlockingController::DbWatchTable::AddAwakeEvent(string_view key) {
 // Removes tx from its watch queues if tx appears there.
 void BlockingController::FinalizeWatched(ArgSlice args, Transaction* tx) {
   DCHECK(tx);
+  VLOG(1) << "FinalizeBlocking [" << owner_->shard_id() << "]" << tx->DebugId();
 
-  ShardId sid = owner_->shard_id();
-
-  VLOG(1) << "FinalizeBlocking [" << sid << "]" << tx->DebugId();
-
-  uint16_t local_mask = tx->GetLocalMask(sid);
-  bool is_awakened = local_mask & Transaction::AWAKED_Q;
-
-  if (is_awakened)
-    awakened_transactions_.erase(tx);
+  bool removed = awakened_transactions_.erase(tx);
+  DCHECK(!removed || (tx->GetLocalMask(owner_->shard_id()) & Transaction::AWAKED_Q));
 
   auto dbit = watched_dbs_.find(tx->GetDbIndex());
 
@@ -143,9 +137,8 @@ void BlockingController::FinalizeWatched(ArgSlice args, Transaction* tx) {
   // in case those keys still exist.
   for (string_view key : args) {
     bool removed_awakened = wt.UnwatchTx(key, tx);
-    if (removed_awakened) {
-      CHECK(is_awakened) << tx->DebugId() << " " << key << " " << local_mask;
-    }
+    CHECK(!removed_awakened || removed)
+        << tx->DebugId() << " " << key << " " << tx->GetLocalMask(owner_->shard_id());
   }
 
   if (wt.queue_map.empty()) {

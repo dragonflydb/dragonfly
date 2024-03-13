@@ -126,6 +126,10 @@ class ShardDocIndex {
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
                       search::SearchAlgorithm* search_algo) const;
 
+  // Perform search and load requested values - note params might be interpreted differently.
+  std::vector<absl::flat_hash_map<std::string, search::SortableValue>> SearchForAggregator(
+      const OpArgs& op_args, ArgSlice load_fields, search::SearchAlgorithm* search_algo) const;
+
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
 

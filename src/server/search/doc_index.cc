@@ -220,13 +220,44 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto doc_data = params.return_fields ? accessor->Serialize(base_->schema, *params.return_fields)
                                          : accessor->Serialize(base_->schema);
 
-    auto score =
-        search_results.scores.empty() ? std::monostate{} : std::move(search_results.scores[i]);
+    auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
     out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), std::move(score)});
   }
 
   return SearchResult{search_results.total - expired_count, std::move(out),
                       std::move(search_results.profile)};
+}
+
+vector<absl::flat_hash_map<string, search::SortableValue>> ShardDocIndex::SearchForAggregator(
+    const OpArgs& op_args, ArgSlice load_fields, search::SearchAlgorithm* search_algo) const {
+  auto& db_slice = op_args.shard->db_slice();
+  auto search_results = search_algo->Search(&indices_);
+
+  if (!search_results.error.empty())
+    return {};
+
+  // Convert load_fields into return_list required by accessor interface
+  SearchParams::FieldReturnList return_fields;
+  for (string_view load_field : load_fields)
+    return_fields.emplace_back(indices_.GetSchema().LookupAlias(load_field), load_field);
+
+  vector<absl::flat_hash_map<string, search::SortableValue>> out;
+  for (DocId doc : search_results.ids) {
+    auto key = key_index_.Get(doc);
+    auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
+
+    if (!it || !IsValid(*it))  // Item must have expired
+      continue;
+
+    auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
+    auto extracted = indices_.ExtractStoredValues(doc);
+    auto loaded = accessor->Serialize(base_->schema, return_fields);
+
+    out.emplace_back(make_move_iterator(extracted.begin()), make_move_iterator(extracted.end()));
+    out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
+  }
+
+  return out;
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {

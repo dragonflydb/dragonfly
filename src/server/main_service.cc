@@ -1127,8 +1127,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     cntx->paused = false;
   }
 
-  etl.RecordCmd();
-
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
@@ -1245,6 +1243,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   if (!ServerState::tlocal()->Monitors().Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
     DispatchMonitor(cntx, cid, tail_args);
   }
+
+  ServerState::tlocal()->RecordCmd();
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.

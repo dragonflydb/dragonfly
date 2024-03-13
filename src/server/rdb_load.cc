@@ -203,6 +203,25 @@ int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsi
   return ret;
 }
 
+string ModuleTypeName(uint64_t module_id) {
+  static const char ModuleNameSet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      "abcdefghijklmnopqrstuvwxyz"
+      "0123456789-_";
+
+  char name[10];
+
+  name[9] = '\0';
+  char* p = name + 8;
+  module_id >>= 10;
+  for (int j = 0; j < 9; j++) {
+    *p-- = ModuleNameSet[module_id & 63];
+    module_id >>= 6;
+  }
+
+  return string{name};
+}
+
 }  // namespace
 
 class DecompressImpl {
@@ -1978,7 +1997,11 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_MODULE_AUX) {
-      LOG(ERROR) << "Modules are not supported";
+      uint64_t module_id;
+      SET_OR_RETURN(LoadLen(nullptr), module_id);
+      string module_name = ModuleTypeName(module_id);
+
+      LOG(ERROR) << "Modules are not supported, error loading module " << module_name;
       return RdbError(errc::feature_not_supported);
     }
 
@@ -2027,9 +2050,9 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc.Dec(); });
+    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
   }
-  bc.Wait();  // wait for sentinels to report.
+  bc->Wait();  // wait for sentinels to report.
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;

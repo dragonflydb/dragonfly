@@ -156,11 +156,38 @@ bool ConfigureKeepAlive(int fd) {
   return true;
 }
 
+thread_local size_t ssl_allocated_bytes = 0;
+
+void* OverriddenSSLMalloc(size_t size, const char* file, int line) {
+  void* res = mi_malloc(size);
+  ssl_allocated_bytes += mi_malloc_usable_size(res);
+  return res;
+}
+
+void* OverriddenSSLRealloc(void* addr, size_t size, const char* file, int line) {
+  size_t prev_size = mi_malloc_usable_size(addr);
+  void* res = mi_realloc(addr, size);
+  ssl_allocated_bytes += mi_malloc_usable_size(res);
+  ssl_allocated_bytes -= prev_size;
+  return res;
+}
+
+void OverriddenSSLFree(void* addr, const char* file, int line) {
+  ssl_allocated_bytes -= mi_malloc_usable_size(addr);
+  mi_free(addr);
+}
+
+std::once_flag g_set_mem_functions_flag;
+
 }  // namespace
 
 Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
     : service_(si), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
+  call_once(g_set_mem_functions_flag, []() {
+    CRYPTO_set_mem_functions(&OverriddenSSLMalloc, &OverriddenSSLRealloc, &OverriddenSSLFree);
+  });
+
   // Always initialise OpenSSL so we can enable TLS at runtime.
   OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, nullptr);
   if (!ReconfigureTLS()) {
@@ -241,6 +268,10 @@ bool Listener::ReconfigureTLS() {
   }
 
   return true;
+}
+
+size_t Listener::TLSUsedMemoryThreadLocal() {
+  return ssl_allocated_bytes;
 }
 
 void Listener::PreAcceptLoop(util::ProactorBase* pb) {
@@ -392,7 +423,6 @@ DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
       issuer_{issuer},
       ignore_paused_{ignore_paused},
       ignore_blocked_{ignore_blocked} {
-  bc_ = make_unique<util::fb2::BlockingCounter>(0);
 }
 
 void DispatchTracker::TrackOnThread() {
@@ -405,7 +435,7 @@ bool DispatchTracker::Wait(absl::Duration duration) {
   if (!res && ignore_blocked_) {
     // We track all connections again because a connection might became blocked between the time
     // we call tracking the last time.
-    bc_.reset(new util::fb2::BlockingCounter(0));
+    bc_ = BlockingCounter{0};
     TrackAll();
     res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
   }
@@ -419,7 +449,7 @@ void DispatchTracker::TrackAll() {
 
 void DispatchTracker::Handle(unsigned thread_index, util::Connection* conn) {
   if (auto* fconn = static_cast<facade::Connection*>(conn); fconn != issuer_)
-    fconn->SendCheckpoint(*bc_, ignore_paused_, ignore_blocked_);
+    fconn->SendCheckpoint(bc_, ignore_paused_, ignore_blocked_);
 }
 
 }  // namespace facade

@@ -451,7 +451,8 @@ TEST_F(StringFamilyTest, SetEx) {
   ASSERT_THAT(Run({"ttl", "key"}), IntArg(10));
   ASSERT_THAT(Run({"setex", "key", "0", "val"}), ErrArg("invalid expire time"));
   ASSERT_EQ(Run({"setex", "key", StrCat(5 * 365 * 24 * 3600), "val"}), "OK");
-  ASSERT_THAT(Run({"setex", "key", StrCat(1 << 30), "val"}), ErrArg("invalid expire time"));
+  ASSERT_THAT(Run({"setex", "key", StrCat(1 << 30), "val"}), "OK");
+  ASSERT_THAT(Run({"ttl", "key"}), IntArg(kMaxExpireDeadlineSec));
 }
 
 TEST_F(StringFamilyTest, Range) {

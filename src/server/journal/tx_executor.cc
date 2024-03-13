@@ -23,7 +23,7 @@ bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
 
   VLOG(2) << "txid: " << txid << " unique_shard_cnt_: " << shard_cnt
           << " was_insert: " << was_insert;
-  it->second.block.Dec();
+  it->second.block->Dec();
 
   return was_insert;
 }
@@ -45,7 +45,7 @@ void MultiShardExecution::CancelAllBlockingEntities() {
   lock_guard lk{map_mu};
   for (auto& tx_data : tx_sync_execution) {
     tx_data.second.barrier.Cancel();
-    tx_data.second.block.Cancel();
+    tx_data.second.block->Cancel();
   }
 }
 

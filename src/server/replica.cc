@@ -451,7 +451,7 @@ error_code Replica::InitiateDflySync() {
   // Switch to new error handler that closes flow sockets.
   auto err_handler = [this, sync_block](const auto& ge) mutable {
     // Unblock this function.
-    sync_block.Cancel();
+    sync_block->Cancel();
 
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
@@ -519,7 +519,7 @@ error_code Replica::InitiateDflySync() {
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
   VLOG(1) << "Waiting for all full sync cut confirmations";
-  sync_block.Wait();
+  sync_block->Wait();
 
   // Check if we woke up due to cancellation.
   if (cntx_.IsCancelled())
@@ -731,7 +731,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   RdbLoader loader(&service_);
   loader.SetFullSyncCutCb([bc, ran = false]() mutable {
     if (!ran) {
-      bc.Dec();
+      bc->Dec();
       ran = true;
     }
   });
@@ -951,7 +951,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
   // Wait until shards flows got transaction data and inserted to map.
   // This step enforces that replica will execute multi shard commands that finished on master
   // and replica recieved all the commands from all shards.
-  multi_shard_data.block.Wait();
+  multi_shard_data.block->Wait();
   // Check if we woke up due to cancellation.
   if (cntx_.IsCancelled())
     return;
