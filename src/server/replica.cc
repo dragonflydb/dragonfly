@@ -598,13 +598,14 @@ error_code Replica::ConsumeRedisStream() {
 error_code Replica::ConsumeDflyStream() {
   // Set new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) {
+    // Trigger acl-checker
+    waker_.notifyAll();
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
       flow->Cancel();
     }
-
     multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
@@ -627,7 +628,6 @@ error_code Replica::ConsumeDflyStream() {
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
 
-  acl_check_fb_.JoinIfNeeded();
   if (master_context_.version >= DflyVersion::VER3) {
     acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
   }
@@ -905,7 +905,8 @@ void Replica::AclCheckFb() {
   while (!cntx_.IsCancelled()) {
     acl_client.CheckAclRoundTrip();
     // We poll for ACL changes every second
-    ThisFiber::SleepFor(std::chrono::milliseconds(200));
+    waker_.await_until([&]() { return cntx_.IsCancelled(); },
+                       std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
 }
 
