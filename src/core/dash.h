@@ -160,8 +160,8 @@ class DashTable : public detail::DashTableBase {
 
   template <typename U> const_iterator Find(U&& key) const;
   template <typename U> iterator Find(U&& key);
-  const_iterator FindByHash(uint64_t key_hash) const;
-  iterator FindByHash(uint64_t key_hash);
+  const_iterator FindByHash(uint64_t key_hash, uint64_t data_offset) const;
+  iterator FindByHash(uint64_t key_hash, uint64_t data_offset);
 
   // it must be valid.
   void Erase(iterator it);
@@ -324,13 +324,6 @@ class DashTable : public detail::DashTableBase {
 
   auto EqPred() const {
     return [p = &policy_](const auto& a, const auto& b) -> bool { return p->Equal(a, b); };
-  }
-
-  auto EqHashPred() const {
-    // 255UL is kFpMask defined in Segment class of dash_internal.h
-    return [p = &policy_](const auto& a, const auto& b) -> bool {
-      return (uint8_t)((p->HashFn(a) & 255UL) == b);
-    };
   }
 
   Policy policy_;
@@ -715,7 +708,8 @@ auto DashTable<_Key, _Value, Policy>::Find(U&& key) -> iterator {
 }
 
 template <typename _Key, typename _Value, typename Policy>
-auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash) const -> const_iterator {
+auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash, uint64_t data_offset) const
+    -> const_iterator {
   size_t seg_id = SegmentId(key_hash);  // seg_id takes up global_depth_ high bits.
   const auto* target = segment_[seg_id];
 
@@ -723,7 +717,7 @@ auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash) const -> con
   // B - bucket id and F is a fingerprint. Segment id is needed to identify the correct segment.
   // Once identified, the segment instance uses the lower part of hash to locate the key.
   // It uses 8 least significant bits for a fingerprint and few more bits for bucket id.
-  auto seg_it = target->FindIt(key_hash, EqHashPred());
+  auto seg_it = target->FindIt(key_hash, data_offset, EqPred());
 
   if (seg_it.found()) {
     return const_iterator{this, seg_id, seg_it.index, seg_it.slot};
@@ -732,11 +726,12 @@ auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash) const -> con
 }
 
 template <typename _Key, typename _Value, typename Policy>
-auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash) -> iterator {
+auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash, uint64_t data_offset)
+    -> iterator {
   uint32_t segid = SegmentId(key_hash);
   const auto* target = segment_[segid];
 
-  auto seg_it = target->FindIt(key_hash, EqHashPred());
+  auto seg_it = target->FindIt(key_hash, data_offset, EqPred());
   if (seg_it.found()) {
     return iterator{this, segid, seg_it.index, seg_it.slot};
   }

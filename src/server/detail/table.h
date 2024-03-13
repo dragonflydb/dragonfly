@@ -43,6 +43,13 @@ struct PrimeTablePolicy {
   static bool Equal(const PrimeKey& s1, const PrimeKey& s2) {
     return s1 == s2;
   }
+
+  static bool Equal(const PrimeValue& s1, uint64_t data_offset) {
+    if (!s1.IsExternal())
+      return false;
+    auto [offset, size] = s1.GetExternalSlice();
+    return offset == data_offset;
+  }
 };
 
 struct ExpireTablePolicy {

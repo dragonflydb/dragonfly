@@ -392,7 +392,8 @@ void TieredStorage::Defrag(DbIndex db_index) {
     // move each of the key's value from the temporary buffer into its in memory data structure.
     for (unsigned int j = 0; j < max_entries; ++j) {
       uint64_t key_hash = absl::little_endian::Load64(&page[j * kBytesPerHash]);
-      auto prime_it = db_slice_.GetDBTable(db_index)->prime.FindByHash(key_hash);
+      uint64_t data_offset = offs_page * kBlockLen + hash_section_len + j * bin_size;
+      auto prime_it = db_slice_.GetDBTable(db_index)->prime.FindByHash(key_hash, data_offset);
 
       // if the key still exists, load the key into memory and reschedule offload
       if (!prime_it.is_done()) {

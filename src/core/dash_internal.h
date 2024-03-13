@@ -329,7 +329,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     template <typename U, typename Pred>
     SlotId FindByFp(uint8_t fp_hash, bool probe, U&& k, Pred&& pred) const;
 
-    template <typename Pred> SlotId FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const;
+    template <typename Pred>
+    SlotId FindByFp(uint8_t fp_hash, uint64_t data_offset, bool probe, Pred&& pred) const;
 
     bool ShiftRight();
 
@@ -513,7 +514,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   template <typename U, typename Pred> Iterator FindIt(U&& key, Hash_t key_hash, Pred&& cf) const;
 
-  template <typename Pred> Iterator FindIt(Hash_t key_hash, Pred&& cf) const;
+  template <typename Pred> Iterator FindIt(Hash_t key_hash, uint64_t data_offset, Pred&& cf) const;
 
   // Returns valid iterator if succeeded or invalid if not (it's full).
   // Requires: key should be not present in the segment.
@@ -1046,8 +1047,8 @@ auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, 
 
 template <typename Key, typename Value, typename Policy>
 template <typename Pred>
-auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const
-    -> SlotId {
+auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, uint64_t data_offset,
+                                                   bool probe, Pred&& pred) const -> SlotId {
   unsigned mask = this->Find(fp_hash, probe);
   if (!mask)
     return kNanSlot;
@@ -1055,7 +1056,7 @@ auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, 
   unsigned delta = __builtin_ctz(mask);
   mask >>= delta;
   for (unsigned i = delta; i < NUM_SLOTS; ++i) {
-    if ((mask & 1) && pred(key[i], fp_hash)) {
+    if ((mask & 1) && pred(value[i], data_offset)) {
       return i;
     }
     mask >>= 1;
@@ -1205,7 +1206,8 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
 
 template <typename Key, typename Value, typename Policy>
 template <typename Pred>
-auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& cf) const -> Iterator {
+auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, uint64_t data_offset, Pred&& cf) const
+    -> Iterator {
   uint8_t bidx = BucketIndex(key_hash);
   const Bucket& target = bucket_[bidx];
 
@@ -1214,7 +1216,7 @@ auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& cf) const -> It
   __builtin_prefetch(&target);
 
   uint8_t fp_hash = key_hash & kFpMask;
-  SlotId sid = target.FindByFp(fp_hash, false, cf);
+  SlotId sid = target.FindByFp(fp_hash, data_offset, false, cf);
   if (sid != BucketType::kNanSlot) {
     return Iterator{bidx, sid};
   }
@@ -1222,7 +1224,7 @@ auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& cf) const -> It
   uint8_t nid = NextBid(bidx);
   const Bucket& probe = bucket_[nid];
 
-  sid = probe.FindByFp(fp_hash, true, cf);
+  sid = probe.FindByFp(fp_hash, data_offset, true, cf);
 
 #ifdef ENABLE_DASH_STATS
   stats.neighbour_probes++;
@@ -1241,7 +1243,7 @@ auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& cf) const -> It
 
     pos += kRegularBucketCnt;
     const Bucket& bucket = bucket_[pos];
-    return bucket.FindByFp(fp_hash, false, cf);
+    return bucket.FindByFp(fp_hash, data_offset, false, cf);
   };
 
   if (target.HasStashOverflow()) {
