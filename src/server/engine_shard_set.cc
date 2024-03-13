@@ -448,13 +448,13 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
-  uint16_t local_mask = trans ? trans->DisarmInShardWhen(sid, Transaction::AWAKED_Q) : 0;
+  uint16_t trans_mask = trans ? trans->DisarmInShardWhen(sid, Transaction::AWAKED_Q) : 0;
 
-  if (trans && local_mask == 0)  // If not armed, it means that this poll task expired
+  if (trans && trans_mask == 0)  // If not armed, it means that this poll task expired
     return;
 
   // Blocked transactions are executed immediately after waking up
-  if (local_mask & Transaction::AWAKED_Q) {
+  if (trans_mask & Transaction::AWAKED_Q) {
     CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
         << "cont_mask: " << continuation_trans_->DEBUG_GetLocalMask(sid) << " vs "
@@ -528,11 +528,11 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // If trans was already handled, the pointer was cleared. Otherwise we can run it now if:
   // 1. It is OUT_OF_ORDER, so no one before accesses it's keys
   // 2. it is SUSPENDED_Q, so it has only to clean up stale shards after waking up
-  if (trans && (local_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q)) > 0) {
+  if (trans && (trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q)) > 0) {
     DCHECK(trans != head);
-    CHECK(trans->DisarmInShard(sid));
+    CHECK(trans->DisarmInShard(sid));  // We disarmed only if AWAKED_Q was set
 
-    bool is_ooo = local_mask & Transaction::OUT_OF_ORDER;
+    bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
     bool keep = run(trans, is_ooo);
     if (is_ooo && !keep) {
       stats_.tx_ooo_total++;

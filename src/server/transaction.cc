@@ -996,7 +996,7 @@ void Transaction::FIX_ConcludeJournalExec() {
 string Transaction::DEBUG_PrintFailState(ShardId sid) const {
   auto res = StrCat(
       "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
-      ", usecnt:", use_count_.load(memory_order_relaxed), ", runcnt: ", 0,
+      ", usecnt:", use_count_.load(memory_order_relaxed), ", runcnt: ", run_barrier_.DEBUG_Count(),
       ", coordstate: ", coordinator_state_, ", coord native thread: ", stats_.coordinator_index,
       ", schedule attempts: ", stats_.schedule_attempts, ", report from sid: ", sid, "\n");
   std::atomic_thread_fence(memory_order_acquire);
