@@ -717,7 +717,7 @@ auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash, uint64_t dat
   // B - bucket id and F is a fingerprint. Segment id is needed to identify the correct segment.
   // Once identified, the segment instance uses the lower part of hash to locate the key.
   // It uses 8 least significant bits for a fingerprint and few more bits for bucket id.
-  auto seg_it = target->FindIt(key_hash, data_offset, EqPred());
+  auto seg_it = target->FindItTieringOffSet(key_hash, data_offset, EqPred());
 
   if (seg_it.found()) {
     return const_iterator{this, seg_id, seg_it.index, seg_it.slot};
@@ -731,7 +731,7 @@ auto DashTable<_Key, _Value, Policy>::FindByHash(uint64_t key_hash, uint64_t dat
   uint32_t segid = SegmentId(key_hash);
   const auto* target = segment_[segid];
 
-  auto seg_it = target->FindIt(key_hash, data_offset, EqPred());
+  auto seg_it = target->FindItTieringOffSet(key_hash, data_offset, EqPred());
   if (seg_it.found()) {
     return iterator{this, segid, seg_it.index, seg_it.slot};
   }

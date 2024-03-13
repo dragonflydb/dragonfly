@@ -514,7 +514,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   template <typename U, typename Pred> Iterator FindIt(U&& key, Hash_t key_hash, Pred&& cf) const;
 
-  template <typename Pred> Iterator FindIt(Hash_t key_hash, uint64_t data_offset, Pred&& cf) const;
+  template <typename Pred>
+  Iterator FindItTieringOffSet(Hash_t key_hash, uint64_t data_offset, Pred&& cf) const;
 
   // Returns valid iterator if succeeded or invalid if not (it's full).
   // Requires: key should be not present in the segment.
@@ -1206,8 +1207,8 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
 
 template <typename Key, typename Value, typename Policy>
 template <typename Pred>
-auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, uint64_t data_offset, Pred&& cf) const
-    -> Iterator {
+auto Segment<Key, Value, Policy>::FindItTieringOffSet(Hash_t key_hash, uint64_t data_offset,
+                                                      Pred&& cf) const -> Iterator {
   uint8_t bidx = BucketIndex(key_hash);
   const Bucket& target = bucket_[bidx];
 
