@@ -1187,12 +1187,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   // if this is a read command, and client tracking has enabled,
   // start tracking all the updates to the keys in this read command
-  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
+      cid->IsTransactional()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto keys = t->GetShardArgs(shard->shard_id());
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
     };
-
     dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
