@@ -1820,7 +1820,7 @@ async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
     # block the seeder for 4 seconds
     await c_master.execute_command("client pause 4000 write")
     stats = await c_master.info("CommandStats")
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.5)
     stats_after_sleep = await c_master.info("CommandStats")
     # Check no commands are executed except info and replconf called from replica
     for cmd, cmd_stats in stats_after_sleep.items():
