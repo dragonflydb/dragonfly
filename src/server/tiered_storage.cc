@@ -163,7 +163,7 @@ class TieredStorage::InflightWriteRequest {
 
   void Add(const PrimeKey& pk, const PrimeValue& pv);
 
-  // returns how many entries were offloaded.
+  // returns how many entries were offloaded and bin size.
   std::pair<unsigned, unsigned> ExternalizeEntries(PerDb::BinRecord* bin_record, DbSlice* db_slice);
 
   void Undo(PerDb::BinRecord* bin_record, DbSlice* db_slice);
