@@ -271,7 +271,7 @@ class ServerFamily {
   using VersionBasename = std::pair<bool, std::string_view>;
   std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, ConnectionContext* cntx);
 
-  void BgSaveFb(bool new_version, std::string basename, boost::intrusive_ptr<Transaction> trans);
+  void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
   GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
                                    bool ignore_state = false);

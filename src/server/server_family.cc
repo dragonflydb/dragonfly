@@ -1642,8 +1642,7 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   return mem_cmd.Run(args);
 }
 
-void ServerFamily::BgSaveFb(bool new_version, std::string basename,
-                            boost::intrusive_ptr<Transaction> trans) {
+void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
   GenericError ec = WaitUntilSaveFinished(trans.get());
   if (ec) {
     LOG(INFO) << "Error in BgSaveFb: " << ec.Format();
@@ -1695,9 +1694,8 @@ void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
   bg_save_fb_.JoinIfNeeded();
-  bg_save_fb_ =
-      fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this, version, std::string(basename),
-                 boost::intrusive_ptr<Transaction>(cntx->transaction));
+  bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this,
+                           boost::intrusive_ptr<Transaction>(cntx->transaction));
   cntx->SendOk();
 }
 
