@@ -665,7 +665,7 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
 }
 
 void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
-  Mutex stats_mu;
+  util::fb2::Mutex stats_mu;
 
   lock_guard lk_main{mu_};  // prevent state changes
   auto cb = [this, &stats, &stats_mu](EngineShard* shard) {

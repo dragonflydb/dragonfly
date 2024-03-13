@@ -17,6 +17,7 @@
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "util/fibers/fiberqueue_threadpool.h"
+#include "util/fibers/future.h"
 
 void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
                 std::string_view sub_cmd);
@@ -278,7 +279,7 @@ class ServerFamily {
 
   GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
 
-  Fiber snapshot_schedule_fb_;
+  util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
 
   uint32_t stats_caching_task_ = 0;
@@ -288,7 +289,7 @@ class ServerFamily {
   std::vector<facade::Listener*> listeners_;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable Mutex replicaof_mu_, save_mu_;
+  mutable util::fb2::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
 
   std::unique_ptr<ScriptMgr> script_mgr_;

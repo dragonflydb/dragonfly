@@ -164,7 +164,7 @@ class RoundRobinSharder {
   static thread_local vector<ShardId> round_robin_shards_tl_cache_;
   static vector<ShardId> round_robin_shards_ ABSL_GUARDED_BY(mutex_);
   static ShardId next_shard_ ABSL_GUARDED_BY(mutex_);
-  static Mutex mutex_;
+  static fb2::Mutex mutex_;
 };
 
 bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
@@ -193,7 +193,7 @@ thread_local string RoundRobinSharder::round_robin_prefix_;
 thread_local vector<ShardId> RoundRobinSharder::round_robin_shards_tl_cache_;
 vector<ShardId> RoundRobinSharder::round_robin_shards_;
 ShardId RoundRobinSharder::next_shard_;
-Mutex RoundRobinSharder::mutex_;
+fb2::Mutex RoundRobinSharder::mutex_;
 
 }  // namespace
 

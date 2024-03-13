@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include "base/logging.h"
-#include "core/fibers.h"
 #include "facade/reply_capture.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
