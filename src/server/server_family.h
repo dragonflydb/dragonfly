@@ -266,18 +266,17 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  // Helper function for arg checks in BgSave and Save paths
-  // In case of an error an empty optional is returned. Otherwise, we return a bool
-  // denoting the version (true for dfs rdb, false for plain rdb)
-  std::optional<bool> ParseSaveArgs(CmdArgList args, ConnectionContext* cntx);
+  // Helper function to retrieve version(true if format is dfs rdb), and basename from args.
+  // In case of an error an empty optional is returned.
+  using VersionBasename = std::pair<bool, std::string_view>;
+  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, ConnectionContext* cntx);
 
   void BgSaveFb(bool new_version, std::string basename, boost::intrusive_ptr<Transaction> trans);
 
   GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
                                    bool ignore_state = false);
 
-  GenericError PauseUntilSaved(bool new_version, string_view basename, Transaction* trans,
-                               bool ignore_state = false);
+  GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
 
   Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
@@ -311,7 +310,6 @@ class ServerFamily {
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
-  Mutex bg_save_mu_;
   // protected by save_mu_
   util::fb2::Fiber bg_save_fb_;
 

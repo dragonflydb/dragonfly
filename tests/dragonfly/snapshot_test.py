@@ -9,7 +9,7 @@ from pathlib import Path
 import boto3
 
 from . import dfly_args
-from .utility import wait_available_async, chunked
+from .utility import wait_available_async, chunked, is_saving
 
 from .seeder import StaticSeeder
 
@@ -367,10 +367,12 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command("BGSAVE")
 
-    await asyncio.sleep(2)
+    while await is_saving(async_client):
+        await asyncio.sleep(0.1)
     await async_client.execute_command("BGSAVE")
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command("SAVE")
 
-    await asyncio.sleep(2)
+    while await is_saving(async_client):
+        await asyncio.sleep(0.1)
     await async_client.execute_command("SAVE")

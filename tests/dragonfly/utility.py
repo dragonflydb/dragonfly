@@ -646,3 +646,7 @@ class EnvironCntx:
                 os.environ[k] = self.undo[k]
             else:
                 del os.environ[k]
+
+
+async def is_saving(c_client: aioredis.Redis):
+    return "saving:1" in (await c_client.execute_command("INFO PERSISTENCE"))
