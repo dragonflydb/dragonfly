@@ -1364,6 +1364,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
         iores = ReadGeneric(rdbtype);
       }
       break;
+    case RDB_TYPE_MODULE_2:
+      iores = ReadRedisJson();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
 
@@ -1775,6 +1778,49 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
   }    // while (cgroup_num)
 
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+}
+
+auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
+  LOG(ERROR) << "XXX Reading redis json";
+  bool _isencoded;
+  auto json_magic_number = LoadLen(&_isencoded);
+  if (!json_magic_number) {
+    LOG(ERROR) << "XXX Can't load json magic number";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  LOG(ERROR) << "XXX Comparing magic number";
+  uint64_t kJsonModule = 0x45'e2'52'38'df'91'2c'03ULL;
+  if (*json_magic_number != kJsonModule) {
+    LOG(ERROR) << "XXX Can't load json magic number: " << &json_magic_number;
+    return Unexpected(errc::unsupported_operation);
+  }
+
+  LOG(ERROR) << "XXX Reading opcode";
+  auto opcode = FetchInt<uint8_t>();
+  if (!opcode || *opcode != RDB_MODULE_OPCODE_STRING) {
+    LOG(ERROR) << "XXX Can't load json string opcode";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  LOG(ERROR) << "XXX Reading string";
+  RdbVariant dest;
+  error_code ec = ReadStringObj(&dest);
+  if (ec) {
+    LOG(ERROR) << "XXX Can't read string obj " << ec;
+    return make_unexpected(ec);
+  }
+
+  LOG(ERROR) << "XXX Reading EOF byte";
+  opcode = FetchInt<uint8_t>();
+  if (!opcode) {
+    LOG(ERROR) << "XXX Can't read EOF byte";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  LOG(ERROR) << "XXX Unexplained byte: " << int(*opcode);
+
+  LOG(ERROR) << "XXX Returning object " << dest.index();
+  return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
 }
 
 auto RdbLoaderBase::ReadJson() -> io::Result<OpaqueObj> {
