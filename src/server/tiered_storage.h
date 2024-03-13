@@ -106,6 +106,7 @@ class TieredStorage {
   bool shutdown_ = false;
 
   const float defrag_bin_util_threshold_ = 0.2;
+  const size_t num_pages_to_read_per_defrag_run = 10;
 
   // a set of indicies of pages that need to be defragmented.
   absl::flat_hash_set<unsigned> pages_to_defrag_;

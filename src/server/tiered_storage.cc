@@ -373,6 +373,7 @@ size_t TieredStorage::GetBinSize(size_t blob_len) {
 }
 
 void TieredStorage::Defrag(DbIndex db_index) {
+  size_t num_pages_read = 0;
   // going through all the candidates that have been inserted from the Free() function
   // the Free() function is the only source which reduced page bin utilization.
   for (auto it = pages_to_defrag_.begin(); it != pages_to_defrag_.end(); ++it) {
@@ -388,6 +389,7 @@ void TieredStorage::Defrag(DbIndex db_index) {
     std::vector<char> page(kBlockLen);
     auto ec = Read(offs_page * kBlockLen, kBlockLen, &page[0]);
     CHECK(!ec) << "Error when reading a page to be defragmented!";
+    ++num_pages_read;
 
     // move each of the key's value from the temporary buffer into its in memory data structure.
     for (unsigned int j = 0; j < max_entries; ++j) {
@@ -425,6 +427,9 @@ void TieredStorage::Defrag(DbIndex db_index) {
     page_refcnt_.erase(page_it);
     alloc_.Free(offs_page * kBlockLen, kBlockLen);
     pages_to_defrag_.erase(it);
+
+    if (num_pages_read > num_pages_to_read_per_defrag_run)
+      return;
   }
 }
 
