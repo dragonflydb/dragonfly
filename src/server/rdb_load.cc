@@ -2035,8 +2035,9 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), module_id);
       string module_name = ModuleTypeName(module_id);
 
-      LOG(ERROR) << "Modules are not supported, error loading module " << module_name;
-      return RdbError(errc::feature_not_supported);
+      LOG(WARNING) << "WARNING: Skipping data for module " << module_name;
+      RETURN_ON_ERR(SkipModuleData());
+      continue;
     }
 
     if (type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START ||
@@ -2173,6 +2174,50 @@ void RdbLoaderBase::AllocateDecompressOnce(int op_type) {
     decompress_impl_.reset(new Lz4Decompress());
   } else {
     CHECK(false) << "Decompressor allocation should not be done";
+  }
+}
+
+error_code RdbLoaderBase::SkipModuleData() {
+  uint64_t opcode;
+  SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when_opcode'
+  if (opcode != RDB_MODULE_OPCODE_UINT)
+    return RdbError(errc::rdb_file_corrupted);
+  SET_OR_RETURN(LoadLen(nullptr), opcode);  // ignore field 'when'
+
+  while (true) {
+    SET_OR_RETURN(LoadLen(nullptr), opcode);
+
+    switch (opcode) {
+      case RDB_MODULE_OPCODE_EOF:
+        return kOk;  // Module data end
+
+      case RDB_MODULE_OPCODE_SINT:
+      case RDB_MODULE_OPCODE_UINT: {
+        [[maybe_unused]] uint64_t _;
+        SET_OR_RETURN(LoadLen(nullptr), _);
+        break;
+      }
+
+      case RDB_MODULE_OPCODE_STRING: {
+        RdbVariant dest;
+        error_code ec = ReadStringObj(&dest);
+        if (ec) {
+          return ec;
+        }
+        break;
+      }
+
+      case RDB_MODULE_OPCODE_DOUBLE: {
+        [[maybe_unused]] double _;
+        SET_OR_RETURN(FetchBinaryDouble(), _);
+        break;
+      }
+
+      default:
+        // TODO: handle RDB_MODULE_OPCODE_FLOAT
+        LOG(ERROR) << "Unsupported module section: " << opcode;
+        return RdbError(errc::rdb_file_corrupted);
+    }
   }
 }
 
