@@ -514,7 +514,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
             << " isarmed: " << head->DEBUG_IsArmedInShard(sid);
 
     // If the transaction isn't armed yet, it will be handled by a successive poll
-    if (!(head == trans && disarmed) && !head->DisarmInShard(sid))
+    bool should_run = (head == trans && disarmed) || head->DisarmInShard(sid);
+    if (!should_run)
       break;
 
     // Avoid processing the caller transaction below if we found it in the queue,
