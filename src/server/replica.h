@@ -151,7 +151,7 @@ class Replica : ProtocolClient {
   Fiber sync_fb_;
   Fiber acks_fb_;
   Fiber acl_check_fb_;
-  util::fb2::EventCount waker_;
+  util::fb2::EventCount replica_waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
   // A vector of the last executer LSNs when a replication is interrupted.
@@ -217,7 +217,7 @@ class DflyShardReplica : public ProtocolClient {
 
   std::queue<std::pair<TransactionData, bool>> trans_data_queue_;
   static constexpr size_t kYieldAfterItemsInQueue = 50;
-  util::fb2::EventCount waker_;  // waker for trans_data_queue_
+  util::fb2::EventCount shard_replica_waker_;  // waker for trans_data_queue_
   bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;

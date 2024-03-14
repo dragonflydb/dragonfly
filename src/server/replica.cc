@@ -144,7 +144,7 @@ void Replica::Stop() {
     state_mask_.store(0);  // Specifically ~R_ENABLED.
   });
 
-  waker_.notifyAll();
+  replica_waker_.notifyAll();
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
@@ -591,7 +591,7 @@ error_code Replica::ConsumeRedisStream() {
 
     io_buf.ConsumeInput(response->left_in_buffer);
     repl_offs_ += response->total_read;
-    waker_.notify();  // Notify to trigger ACKs.
+    replica_waker_.notify();  // Notify to trigger ACKs.
   }
 }
 
@@ -599,7 +599,7 @@ error_code Replica::ConsumeDflyStream() {
   // Set new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) {
     // Trigger acl-checker
-    waker_.notifyAll();
+    replica_waker_.notifyAll();
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
@@ -805,7 +805,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   }
 
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() {
+    shard_replica_waker_.await([&]() {
       return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
     });
     if (cntx->IsCancelled())
@@ -836,7 +836,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
-    waker_.notify();
+    shard_replica_waker_.notify();
   }
 }
 
@@ -857,7 +857,7 @@ void Replica::RedisStreamAcksFb() {
     }
     ack_offs_ = repl_offs_;
 
-    waker_.await_until(
+    replica_waker_.await_until(
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || cntx_.IsCancelled(); },
         next_ack_tp);
   }
@@ -905,8 +905,8 @@ void Replica::AclCheckFb() {
   while (!cntx_.IsCancelled()) {
     acl_client.CheckAclRoundTrip();
     // We poll for ACL changes every second
-    waker_.await_until([&]() { return cntx_.IsCancelled(); },
-                       std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    replica_waker_.await_until([&]() { return cntx_.IsCancelled(); },
+                               std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
 }
 
@@ -932,7 +932,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
     }
     ack_offs_ = current_offset;
 
-    waker_.await_until(
+    shard_replica_waker_.await_until(
         [&]() {
           return journal_rec_executed_.load(std::memory_order_relaxed) >
                      ack_offs_ + kAckRecordMaxInterval ||
@@ -981,7 +981,8 @@ void DflyShardReplica::InsertTxDataToShardResource(TransactionData&& tx_data) {
 
 void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
+    shard_replica_waker_.await(
+        [&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
     if (cntx->IsCancelled()) {
       return;
     }
@@ -989,7 +990,7 @@ void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
     auto& data = trans_data_queue_.front();
     ExecuteTx(std::move(data.first), data.second, cntx);
     trans_data_queue_.pop();
-    waker_.notify();
+    shard_replica_waker_.notify();
   }
 }
 
@@ -1189,7 +1190,7 @@ void DflyShardReplica::JoinFlow() {
 
 void DflyShardReplica::Cancel() {
   CloseSocket();
-  waker_.notifyAll();
+  shard_replica_waker_.notifyAll();
 }
 
 }  // namespace dfly
