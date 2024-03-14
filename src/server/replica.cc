@@ -144,8 +144,6 @@ void Replica::Stop() {
     state_mask_.store(0);  // Specifically ~R_ENABLED.
   });
 
-  replica_waker_.notifyAll();
-
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
