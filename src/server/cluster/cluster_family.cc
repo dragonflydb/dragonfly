@@ -250,7 +250,8 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
       }
     }
 
-    absl::StrAppend(&result, "\r\n");
+    // Separate lines with only \n, not \r\n, see #2726
+    absl::StrAppend(&result, "\n");
   };
 
   for (const auto& shard : config) {
@@ -280,6 +281,7 @@ namespace {
 void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
   std::string msg;
   auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
+    // Separate lines with \r\n, not \n, see #2726
     absl::StrAppend(&msg, a1, ":", a2, "\r\n");
   };
 
