@@ -1786,9 +1786,16 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
-  uint64_t kJsonModule = 0x45'e2'52'38'df'91'2c'03ULL;
-  if (*json_magic_number != kJsonModule) {
-    LOG(ERROR) << "Unsupported module ID or encoding version " << *json_magic_number;
+  constexpr string_view kJsonModule = "ReJSON-RL"sv;
+  string module_name = ModuleTypeName(*json_magic_number);
+  if (module_name != kJsonModule) {
+    LOG(ERROR) << "Unsupported module: " << module_name;
+    return Unexpected(errc::unsupported_operation);
+  }
+
+  int encver = *json_magic_number & 1023;
+  if (encver != 3) {
+    LOG(ERROR) << "Unsupported ReJSON version: " << encver;
     return Unexpected(errc::unsupported_operation);
   }
 
