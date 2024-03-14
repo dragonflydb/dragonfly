@@ -526,7 +526,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   DCHECK(tl_cluster_config != nullptr);
 
   // TODO rewrite with outgoing migrations
-  if (!StartSlotMigrations(new_config->GetIncomingMigrations(), cntx)) {
+  if (!StartSlotMigrations(new_config->GetOutgoingMigrations(), cntx)) {
     return cntx->SendError("Can't start the migration");
   }
   RemoveFinishedMigrations();
@@ -619,7 +619,7 @@ void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionCon
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  auto* node = AddMigration(std::string(host_ip), port, std::move(slots));
+  auto* node = CreateIncomingMigration(std::string(host_ip), port, std::move(slots));
   if (!node) {
     return cntx->SendError("Can't start the migration, another one is in progress");
   }
@@ -632,7 +632,8 @@ bool ClusterFamily::StartSlotMigrations(const std::vector<ClusterConfig::Migrati
                                         ConnectionContext* cntx) {
   // Add validating and error processing
   for (auto m : migrations) {
-    auto* node = AddMigration(m.ip, m.port, m.slot_ranges);
+    auto sync_id = CreateOutgoingMigration(m.ip, m.port, m.slot_ranges);
+    auto node = GetOutgoingMigration(sync_id);
     if (!node) {
       return false;
     }
@@ -706,6 +707,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
   if (sub_cmd == "CONF") {
     MigrationConf(args, cntx);
+  } else if (sub_cmd == "INIT") {
+    InitMigration(args, cntx);
   } else if (sub_cmd == "FLOW") {
     DflyMigrateFlow(args, cntx);
   } else if (sub_cmd == "ACK") {
@@ -715,8 +718,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
-                                                  SlotRanges slots) {
+ClusterSlotMigration* ClusterFamily::CreateIncomingMigration(std::string host_ip, uint16_t port,
+                                                             SlotRanges slots) {
   lock_guard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
@@ -773,7 +776,8 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto sync_id = CreateOutgoingMigration(cntx, port, std::move(slots));
+  auto sync_id =
+      CreateOutgoingMigration(cntx->conn()->RemoteEndpointAddress(), port, std::move(slots));
 
   cntx->conn()->SetName("slot_migration_ctrl");
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -783,8 +787,33 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   return;
 }
 
-uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
-                                                SlotRanges slots) {
+void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "Create slot migration config " << args;
+  CmdArgParser parser{args};
+  auto [sync_id, port, flows_num] = parser.Next<uint32_t, uint32_t, uint32_t>();
+
+  SlotRanges slots;
+  do {
+    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+    slots.emplace_back(SlotRange{slot_start, slot_end});
+  } while (parser.HasNext());
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  auto* node =
+      CreateIncomingMigration(cntx->conn()->RemoteEndpointAddress(), port, std::move(slots));
+
+  VLOG(1) << "Init migration " << cntx->conn()->RemoteEndpointAddress() << ":" << port;
+  node->Init(sync_id, flows_num);
+
+  // auto sync_id = CreateOutgoingMigration(cntx, port, std::move(slots));
+
+  // cntx->conn()->SetName("slot_migration_ctrl");
+  return cntx->SendOk();
+}
+
+uint32_t ClusterFamily::CreateOutgoingMigration(std::string host, uint16_t port, SlotRanges slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
   auto err_handler = [](const GenericError& err) {
@@ -793,8 +822,8 @@ uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_
     // Todo add error processing, stop migration process
     // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
   };
-  auto migration = make_shared<OutgoingMigration>(cntx->conn()->RemoteEndpointAddress(), port,
-                                                  std::move(slots), err_handler, server_family_);
+  auto migration = make_shared<OutgoingMigration>(host, port, std::move(slots), sync_id,
+                                                  err_handler, server_family_);
   auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(migration));
   CHECK(inserted);
   return sync_id;
@@ -824,7 +853,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   EngineShard* shard = EngineShard::tlocal();
   DCHECK(shard->shard_id() == shard_id);
 
-  migration->StartFlow(sync_id, server_family_->journal(), cntx->conn()->socket());
+  migration->StartFlow(server_family_->journal(), cntx->conn()->socket());
 }
 
 void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {

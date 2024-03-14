@@ -82,6 +82,31 @@ error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
   return {};
 }
 
+error_code ClusterSlotMigration::Init(uint32_t sync_id, uint32_t shards_num) {
+  VLOG(1) << "Init slot migration";
+
+  state_ = MigrationState::C_CONNECTING;
+
+  sync_id_ = sync_id;
+  source_shards_num_ = shards_num;
+
+  VLOG(1) << "Resolving host DNS";
+  error_code ec = ResolveHostDns();
+  if (ec)
+    return ec;
+
+  VLOG(1) << "Connecting to source";
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+  if (ec)
+    return ec;
+
+  ResetParser(false);
+
+  sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
+
+  return ec;
+}
+
 error_code ClusterSlotMigration::Greet() {
   ResetParser(false);
   VLOG(1) << "greeting message handling";

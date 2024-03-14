@@ -886,7 +886,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
           "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
           "replicas": [],
           "migrations": [{{ "slot_ranges": [ {{ "start": 5200, "end": 5259 }} ]
-                         , "ip": "127.0.0.1", "port" : {nodes[0].admin_port}, "target_id": "{node_ids[1]}" }}]
+                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "target_id": "{node_ids[1]}" }}]
         }},
         {{
           "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
@@ -901,24 +901,26 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    await asyncio.sleep(0.5)
-    try:
-        await c_nodes_admin[1].execute_command(
-            "DFLYCLUSTER",
-            "START-SLOT-MIGRATION",
-            "127.0.0.1",
-            str(nodes[0].admin_port),
-            "5000",
-            "5200",
-        )
-        assert False, "Should not be able to start slot migration"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == "Can't start the migration, another one is in progress"
+    assert False, "Should not be able to start slot migration"
 
-    await push_config(
-        config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
-        c_nodes_admin,
-    )
+    # await asyncio.sleep(0.5)
+    # try:
+    #     await c_nodes_admin[1].execute_command(
+    #         "DFLYCLUSTER",
+    #         "START-SLOT-MIGRATION",
+    #         "127.0.0.1",
+    #         str(nodes[0].admin_port),
+    #         "5000",
+    #         "5200",
+    #     )
+    #     assert False, "Should not be able to start slot migration"
+    # except redis.exceptions.ResponseError as e:
+    #     assert e.args[0] == "Can't start the migration, another one is in progress"
+
+    # await push_config(
+    #     config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
+    #     c_nodes_admin,
+    # )
 
     await close_clients(*c_nodes, *c_nodes_admin)
 
