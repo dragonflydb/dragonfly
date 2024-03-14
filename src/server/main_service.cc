@@ -520,7 +520,7 @@ void TxTable(const http::QueryArgs& args, HttpContext* send) {
           Transaction* trx = std::get<Transaction*>(value);
 
           absl::AlphaNum an2(trx->txid());
-          absl::AlphaNum an3(trx->IsArmedInShard(sid));
+          absl::AlphaNum an3(trx->DEBUG_IsArmedInShard(sid));
           SortedTable::Row({sid_an.Piece(), tid.Piece(), an2.Piece(), an3.Piece()}, &mine);
           cur = queue->Next(cur);
         } while (cur != queue->Head());
