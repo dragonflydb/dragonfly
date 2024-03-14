@@ -1102,14 +1102,15 @@ uint16_t Transaction::DisarmInShard(ShardId sid) {
   return sd.is_armed.exchange(false, memory_order_acquire) ? sd.local_mask : 0;
 }
 
-uint16_t Transaction::DisarmInShardWhen(ShardId sid, uint16_t relevant_flags) {
+pair<uint16_t, bool> Transaction::DisarmInShardWhen(ShardId sid, uint16_t relevant_flags) {
   auto& sd = shard_data_[SidToId(sid)];
   if (sd.is_armed.load(memory_order_acquire)) {
-    if (sd.local_mask & relevant_flags)
-      sd.is_armed.store(false, memory_order_relaxed);
-    return sd.local_mask;
+    bool relevant = sd.local_mask & relevant_flags;
+    if (relevant)
+      CHECK(sd.is_armed.exchange(false, memory_order_release));
+    return {sd.local_mask, relevant};
   }
-  return 0;
+  return {0, false};
 }
 
 bool Transaction::IsActive(ShardId sid) const {

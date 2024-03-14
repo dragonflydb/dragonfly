@@ -448,12 +448,19 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
-  uint16_t trans_mask = trans ? trans->DisarmInShardWhen(sid, Transaction::AWAKED_Q) : 0;
+  // If any of the following flags are present, we are guaranteed to run in this function:
+  // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
+  // occupy a place in txq and have highest priority
+  // 2. SUSPENDED_Q -> Suspended shards are run to clean up and finalize blocking keys
+  // 3. OUT_OF_ORDER -> Transactions without conflicting keys can run earlier than their position in
+  // txq is reached
+  uint16_t flags = Transaction::AWAKED_Q | Transaction::SUSPENDED_Q | Transaction::OUT_OF_ORDER;
+  auto [trans_mask, disarmed] =
+      trans ? trans->DisarmInShardWhen(sid, flags) : make_pair(uint16_t(0), false);
 
   if (trans && trans_mask == 0)  // If not armed, it means that this poll task expired
     return;
 
-  // Blocked transactions are executed immediately after waking up
   if (trans_mask & Transaction::AWAKED_Q) {
     CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
@@ -480,10 +487,11 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Check the currently running transaction, we have to handle it first until it concludes
   if (continuation_trans_) {
-    if (trans == continuation_trans_)
+    bool is_self = continuation_trans_ == trans;
+    if (is_self)
       trans = nullptr;
 
-    if (continuation_trans_->DisarmInShard(sid)) {
+    if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
       if (bool keep = run(continuation_trans_, false); !keep) {
         // if this holds, we can remove this check altogether.
         DCHECK(continuation_trans_ == nullptr);
@@ -506,7 +514,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
             << " isarmed: " << head->DEBUG_IsArmedInShard(sid);
 
     // If the transaction isn't armed yet, it will be handled by a successive poll
-    if (!head->DisarmInShard(sid))
+    if (!(head == trans && disarmed) && !head->DisarmInShard(sid))
       break;
 
     // Avoid processing the caller transaction below if we found it in the queue,
@@ -525,12 +533,10 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       continuation_trans_ = head;
   }
 
-  // If trans was already handled, the pointer was cleared. Otherwise we can run it now if:
-  // 1. It is OUT_OF_ORDER, so no one before accesses it's keys
-  // 2. it is SUSPENDED_Q, so it has only to clean up stale shards after waking up
-  if (trans && (trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q)) > 0) {
+  // If we disarmed, but didn't find ourselves in the loop, run now.
+  if (trans && disarmed) {
     DCHECK(trans != head);
-    CHECK(trans->DisarmInShard(sid));  // We disarmed only if AWAKED_Q was set
+    DCHECK(trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q));
 
     bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
     bool keep = run(trans, is_ooo);

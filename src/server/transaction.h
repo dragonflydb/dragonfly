@@ -261,8 +261,8 @@ class Transaction {
   uint16_t DisarmInShard(ShardId sid);
 
   // Same as DisarmInShard, but the transaction is only disarmed if any of the req_flags is present.
-  // Returns a valid local mask nonetheless if the transaction was armed without the required flags.
-  uint16_t DisarmInShardWhen(ShardId sid, uint16_t req_flags);
+  // If the transaction is armed, returns the local mask and a flag whether it was disarmed.
+  std::pair<uint16_t, bool /* disarmed */> DisarmInShardWhen(ShardId sid, uint16_t req_flags);
 
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
