@@ -60,7 +60,7 @@ error_code Journal::Close() {
 
   VLOG(1) << "Journal::Close";
 
-  Mutex ec_mu;
+  fb2::Mutex ec_mu;
   error_code res;
 
   lock_guard lk(state_mu_);

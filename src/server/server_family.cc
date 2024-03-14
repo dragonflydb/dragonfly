@@ -839,7 +839,7 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
   auto& pool = service_.proactor_pool();
 
-  vector<Fiber> load_fibers;
+  vector<fb2::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();
@@ -1755,7 +1755,7 @@ void ServerFamily::ResetStat() {
 
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
-  Mutex mu;
+  util::fb2::Mutex mu;
 
   auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];

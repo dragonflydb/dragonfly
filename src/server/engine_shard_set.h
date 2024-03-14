@@ -243,7 +243,7 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t defrag_task_ = 0;
-  Fiber fiber_periodic_;
+  util::fb2::Fiber fiber_periodic_;
   util::fb2::Done fiber_periodic_done_;
 
   DefragTaskState defrag_state_;

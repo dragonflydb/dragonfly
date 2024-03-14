@@ -1468,7 +1468,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 
 void Connection::LaunchDispatchFiberIfNeeded() {
   if (!dispatch_fb_.IsJoinable()) {
-    dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
+    dispatch_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }
 }

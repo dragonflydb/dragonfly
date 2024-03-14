@@ -15,12 +15,12 @@
 #include <variant>
 
 #include "base/io_buf.h"
-#include "core/fibers.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "facade/resp_expr.h"
 #include "util/connection.h"
+#include "util/fibers/fibers.h"
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;

@@ -185,7 +185,7 @@ class Service : public facade::ServiceInterface {
 
   const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
 
-  mutable Mutex mu_;
+  mutable util::fb2::Mutex mu_;
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
 };
 

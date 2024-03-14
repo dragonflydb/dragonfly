@@ -675,7 +675,7 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, options->total_count - from);
 
-  vector<Fiber> fb_arr(ranges.size());
+  vector<fb2::Fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
     auto range = ranges[i];
 
@@ -844,7 +844,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
 }
 
 void DebugCmd::Watched() {
-  Mutex mu;
+  fb2::Mutex mu;
 
   vector<string> watched_keys;
   vector<string> awaked_trans;

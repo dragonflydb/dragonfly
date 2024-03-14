@@ -36,6 +36,8 @@ namespace {
 
 using namespace std;
 using namespace facade;
+using namespace util;
+
 using CI = CommandId;
 using ClusterShard = ClusterConfig::ClusterShard;
 using ClusterShards = ClusterConfig::ClusterShards;
@@ -423,7 +425,7 @@ void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
 
 namespace {
 // Guards set configuration, so that we won't handle 2 in parallel.
-Mutex set_config_mu;
+util::fb2::Mutex set_config_mu;
 
 void DeleteSlots(const SlotSet& slots) {
   if (slots.Empty()) {
@@ -557,7 +559,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
   if (auto err = parser.Error(); err)
     return rb->SendError(err->MakeReply());
 
-  Mutex mu;
+  fb2::Mutex mu;
 
   auto cb = [&](auto*) {
     EngineShard* shard = EngineShard::tlocal();

@@ -124,7 +124,7 @@ class ProtocolClient {
   base::IoBuf resp_buf_;
 
   std::unique_ptr<util::FiberSocketBase> sock_;
-  Mutex sock_mu_;
+  util::fb2::Mutex sock_mu_;
 
  protected:
   Context cntx_;  // context for tasks in replica.
