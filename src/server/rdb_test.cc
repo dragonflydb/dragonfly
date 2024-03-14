@@ -509,4 +509,29 @@ TEST_F(RdbTest, LoadSmall7) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("einstein", "schrodinger"));
 }
+
+TEST_F(RdbTest, RedisJson) {
+  // RDB file generated via:
+  // ./redis-server --save "" --appendonly no --loadmodule ../lib/rejson.so
+  // and then:
+  // JSON.SET json-str $ '"hello"'
+  // JSON.SET json-arr $ "[1, true, \"hello\", 3.14]"
+  // JSON.SET json-obj $
+  // '{"company":"DragonflyDB","product":"Dragonfly","website":"https://dragondlydb.io","years-active":[2021,2022,2023,2024,"and
+  // more!"]}'
+  io::FileSource fs = GetSource("redis_json.rdb");
+  RdbLoader loader{service_.get()};
+
+  // must run in proactor thread in order to avoid polluting the serverstate
+  // in the main, testing thread.
+  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"JSON.GET", "json-str"}), "\"hello\"");
+  EXPECT_EQ(Run({"JSON.GET", "json-arr"}), "[1,true,\"hello\",3.14]");
+  EXPECT_EQ(Run({"JSON.GET", "json-obj"}),
+            "{\"company\":\"DragonflyDB\",\"product\":\"Dragonfly\",\"website\":\"https://"
+            "dragondlydb.io\",\"years-active\":[2021,2022,2023,2024,\"and more!\"]}");
+}
 }  // namespace dfly

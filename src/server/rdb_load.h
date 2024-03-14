@@ -129,8 +129,10 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams();
+  ::io::Result<OpaqueObj> ReadRedisJson();
   ::io::Result<OpaqueObj> ReadJson();
 
+  std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
   void AllocateDecompressOnce(int op_type);
