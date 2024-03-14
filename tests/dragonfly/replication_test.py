@@ -2022,16 +2022,13 @@ async def test_saving_replica(df_local_factory):
     async def save_replica():
         await c_replica.execute_command("save")
 
-    async def is_saving():
-        return "saving:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
-
     save_task = asyncio.create_task(save_replica())
-    while not await is_saving():  # wait for replica start saving
+    while not await is_saving(c_replica):  # wait for replica start saving
         asyncio.sleep(0.1)
     await c_replica.execute_command("replicaof no one")
-    assert await is_saving()
+    assert await is_saving(c_replica)
     await save_task
-    assert not await is_saving()
+    assert not await is_saving(c_replica)
 
     await disconnect_clients(c_master, *[c_replica])
 
@@ -2052,15 +2049,12 @@ async def test_start_replicating_while_save(df_local_factory):
     async def save_replica():
         await c_replica.execute_command("save")
 
-    async def is_saving():
-        return "saving:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
-
     save_task = asyncio.create_task(save_replica())
-    while not await is_saving():  # wait for server start saving
+    while not await is_saving(c_replica):  # wait for server start saving
         asyncio.sleep(0.1)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    assert await is_saving()
+    assert await is_saving(c_replica)
     await save_task
-    assert not await is_saving()
+    assert not await is_saving(c_replica)
 
     await disconnect_clients(c_master, *[c_replica])

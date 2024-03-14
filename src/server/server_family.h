@@ -242,6 +242,7 @@ class ServerFamily {
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
+  void BgSave(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void SlowLog(CmdArgList args, ConnectionContext* cntx);
   void Module(CmdArgList args, ConnectionContext* cntx);
@@ -264,6 +265,18 @@ class ServerFamily {
   void SnapshotScheduling();
 
   void SendInvalidationMessages() const;
+
+  // Helper function to retrieve version(true if format is dfs rdb), and basename from args.
+  // In case of an error an empty optional is returned.
+  using VersionBasename = std::pair<bool, std::string_view>;
+  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, ConnectionContext* cntx);
+
+  void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
+
+  GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
+                                   bool ignore_state = false);
+
+  GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
 
   Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
@@ -296,6 +309,9 @@ class ServerFamily {
   util::fb2::Done schedule_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
+
+  // protected by save_mu_
+  util::fb2::Fiber bg_save_fb_;
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;
