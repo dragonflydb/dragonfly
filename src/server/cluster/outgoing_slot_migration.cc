@@ -14,6 +14,8 @@
 #include "server/server_family.h"
 
 using namespace std;
+using namespace util;
+
 namespace dfly {
 
 class OutgoingMigration::SliceSlotMigration {
@@ -22,7 +24,7 @@ class OutgoingMigration::SliceSlotMigration {
                      Context* cntx, io::Sink* dest)
       : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
     state_.store(MigrationState::C_SYNC, memory_order_relaxed);
-    sync_fb_ = Fiber("slot-snapshot", [this, dest] { streamer_.Start(dest); });
+    sync_fb_ = fb2::Fiber("slot-snapshot", [this, dest] { streamer_.Start(dest); });
   }
 
   void Cancel() {
@@ -46,7 +48,7 @@ class OutgoingMigration::SliceSlotMigration {
   RestoreStreamer streamer_;
   // Atomic only for simple read operation, writes - from the same thread, reads - from any thread
   atomic<MigrationState> state_ = MigrationState::C_CONNECTING;
-  Fiber sync_fb_;
+  fb2::Fiber sync_fb_;
 };
 
 OutgoingMigration::OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots,
@@ -78,7 +80,7 @@ void OutgoingMigration::StartFlow(uint32_t sync_id, journal::Journal* journal, i
   }
 
   if (state == MigrationState::C_SYNC) {
-    main_sync_fb_ = Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
+    main_sync_fb_ = fb2::Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
   }
 }
 

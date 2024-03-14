@@ -56,11 +56,11 @@ class OutgoingMigration {
   uint16_t port_;
   SlotRanges slots_;
   Context cntx_;
-  mutable Mutex flows_mu_;
+  mutable util::fb2::Mutex flows_mu_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_ ABSL_GUARDED_BY(flows_mu_);
   ServerFamily* server_family_;
 
-  Fiber main_sync_fb_;
+  util::fb2::Fiber main_sync_fb_;
 };
 
 }  // namespace dfly

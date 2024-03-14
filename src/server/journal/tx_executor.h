@@ -31,7 +31,7 @@ class MultiShardExecution {
   void CancelAllBlockingEntities();
 
  private:
-  Mutex map_mu;
+  util::fb2::Mutex map_mu;
   std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
 };
 

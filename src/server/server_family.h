@@ -17,6 +17,7 @@
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "util/fibers/fiberqueue_threadpool.h"
+#include "util/fibers/future.h"
 
 void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
                 std::string_view sub_cmd);
@@ -242,6 +243,7 @@ class ServerFamily {
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
+  void BgSave(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void SlowLog(CmdArgList args, ConnectionContext* cntx);
   void Module(CmdArgList args, ConnectionContext* cntx);
@@ -265,7 +267,19 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  Fiber snapshot_schedule_fb_;
+  // Helper function to retrieve version(true if format is dfs rdb), and basename from args.
+  // In case of an error an empty optional is returned.
+  using VersionBasename = std::pair<bool, std::string_view>;
+  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, ConnectionContext* cntx);
+
+  void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
+
+  GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
+                                   bool ignore_state = false);
+
+  GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
+
+  util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
 
   uint32_t stats_caching_task_ = 0;
@@ -275,7 +289,7 @@ class ServerFamily {
   std::vector<facade::Listener*> listeners_;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable Mutex replicaof_mu_, save_mu_;
+  mutable util::fb2::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
 
   std::unique_ptr<ScriptMgr> script_mgr_;
@@ -296,6 +310,9 @@ class ServerFamily {
   util::fb2::Done schedule_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
+
+  // protected by save_mu_
+  util::fb2::Fiber bg_save_fb_;
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;

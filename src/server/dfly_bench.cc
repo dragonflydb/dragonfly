@@ -15,7 +15,6 @@
 #include "base/init.h"
 #include "base/io_buf.h"
 #include "base/zipf_gen.h"
-#include "core/fibers.h"
 #include "facade/redis_parser.h"
 #include "util/fibers/dns_resolve.h"
 #include "util/fibers/pool.h"
@@ -367,7 +366,7 @@ int main(int argc, char* argv[]) {
   absl::Duration duration = absl::Now() - start_time;
   LOG(INFO) << "Finished. Total time: " << duration;
 
-  dfly::Mutex mutex;
+  fb2::Mutex mutex;
   base::Histogram hist;
   LOG(INFO) << "Resetting all threads";
   pp->AwaitFiberOnAll([&](auto* p) {

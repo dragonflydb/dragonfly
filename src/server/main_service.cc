@@ -1128,8 +1128,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     cntx->paused = false;
   }
 
-  etl.RecordCmd();
-
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
@@ -1197,12 +1195,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   // if this is a read command, and client tracking has enabled,
   // start tracking all the updates to the keys in this read command
-  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
+      cid->IsTransactional()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto keys = t->GetShardArgs(shard->shard_id());
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
     };
-
     dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
@@ -1259,6 +1257,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   if (!ServerState::tlocal()->Monitors().Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
     DispatchMonitor(cntx, cid, tail_args);
   }
+
+  ServerState::tlocal()->RecordCmd();
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.

@@ -38,7 +38,7 @@ struct FlowInfo {
 
   facade::Connection* conn = nullptr;
 
-  Fiber full_sync_fb;                         // Full sync fiber.
+  util::fb2::Fiber full_sync_fb;              // Full sync fiber.
   std::unique_ptr<RdbSaver> saver;            // Saver for full sync phase.
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
@@ -121,7 +121,7 @@ class DflyCmd {
     // Flows describe the state of shard-local flow.
     // They are always indexed by the shard index on the master.
     std::vector<FlowInfo> flows;
-    Mutex mu;  // See top of header for locking levels.
+    util::fb2::Mutex mu;  // See top of header for locking levels.
   };
 
  public:
@@ -223,7 +223,7 @@ class DflyCmd {
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
   ReplicaInfoMap replica_infos_;
 
-  mutable Mutex mu_;  // Guard global operations. See header top for locking levels.
+  mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
 
 }  // namespace dfly

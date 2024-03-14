@@ -776,6 +776,8 @@ void ServerFamily::Shutdown() {
 
   JoinSnapshotSchedule();
 
+  bg_save_fb_.JoinIfNeeded();
+
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
       if (GenericError ec = DoSave(); ec) {
@@ -837,7 +839,7 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
   auto& pool = service_.proactor_pool();
 
-  vector<Fiber> load_fibers;
+  vector<fb2::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();
@@ -1297,8 +1299,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
-                                  bool ignore_state) {
+GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
+                                               Transaction* trans, bool ignore_state) {
   if (shard_set->IsTieringEnabled()) {
     return GenericError{make_error_code(errc::operation_not_permitted),
                         StrCat("Can not save database in tiering mode")};
@@ -1309,7 +1311,6 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
-
   {
     std::lock_guard lk(save_mu_);
     if (save_controller_) {
@@ -1329,7 +1330,10 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       return res->error;
     }
   }
+  return {};
+}
 
+GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore_state) {
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
@@ -1349,6 +1353,15 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   }
 
   return save_info.error;
+}
+
+GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+                                  bool ignore_state) {
+  if (auto ec = DoSaveCheckAndStart(new_version, basename, trans, ignore_state); ec) {
+    return ec;
+  }
+
+  return WaitUntilSaveFinished(trans, ignore_state);
 }
 
 bool ServerFamily::TEST_IsSaving() const {
@@ -1629,15 +1642,21 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   return mem_cmd.Run(args);
 }
 
-// SAVE [DF|RDB] [basename]
-// Allows saving the snapshot of the dataset on disk, potentially overriding the format
-// and the snapshot name.
-void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
-  string err_detail;
-  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
-  if (args.size() > 2) {
-    return cntx->SendError(kSyntaxErr);
+void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
+  GenericError ec = WaitUntilSaveFinished(trans.get());
+  if (ec) {
+    LOG(INFO) << "Error in BgSaveFb: " << ec.Format();
   }
+}
+
+std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename(
+    CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 2) {
+    cntx->SendError(kSyntaxErr);
+    return {};
+  }
+
+  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
 
   if (args.size() >= 1) {
     ToUpper(&args[0]);
@@ -1647,7 +1666,8 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     } else if (sub_cmd == "RDB") {
       new_version = false;
     } else {
-      return cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+      cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+      return {};
     }
   }
 
@@ -1656,7 +1676,41 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     basename = ArgS(args, 1);
   }
 
-  GenericError ec = DoSave(new_version, basename, cntx->transaction);
+  return ServerFamily::VersionBasename{new_version, basename};
+}
+
+// BGSAVE [DF|RDB] [basename]
+// TODO add missing [SCHEDULE]
+void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
+  auto maybe_res = GetVersionAndBasename(args, cntx);
+  if (!maybe_res) {
+    return;
+  }
+
+  const auto [version, basename] = *maybe_res;
+
+  if (auto ec = DoSaveCheckAndStart(version, basename, cntx->transaction); ec) {
+    cntx->SendError(ec.Format());
+    return;
+  }
+  bg_save_fb_.JoinIfNeeded();
+  bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this,
+                           boost::intrusive_ptr<Transaction>(cntx->transaction));
+  cntx->SendOk();
+}
+
+// SAVE [DF|RDB] [basename]
+// Allows saving the snapshot of the dataset on disk, potentially overriding the format
+// and the snapshot name.
+void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
+  auto maybe_res = GetVersionAndBasename(args, cntx);
+  if (!maybe_res) {
+    return;
+  }
+
+  const auto [version, basename] = *maybe_res;
+
+  GenericError ec = DoSave(version, basename, cntx->transaction);
   if (ec) {
     cntx->SendError(ec.Format());
   } else {
@@ -1701,7 +1755,7 @@ void ServerFamily::ResetStat() {
 
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
-  Mutex mu;
+  util::fb2::Mutex mu;
 
   auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
@@ -2637,7 +2691,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
-      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, acl::kBGSave}.HFUNC(Save)
+      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kBGSave}.HFUNC(BgSave)
       << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
       << CI{"CONFIG", CO::ADMIN, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)

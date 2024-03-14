@@ -61,7 +61,7 @@ class Journal {
                    std::optional<SlotId> slot, Entry::Payload payload, bool await);
 
  private:
-  mutable Mutex state_mu_;
+  mutable util::fb2::Mutex state_mu_;
 
   std::atomic_bool lameduck_{false};
 };

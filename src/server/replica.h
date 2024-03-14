@@ -148,9 +148,9 @@ class Replica : ProtocolClient {
   MasterContext master_context_;
 
   // In redis replication mode.
-  Fiber sync_fb_;
-  Fiber acks_fb_;
-  Fiber acl_check_fb_;
+  util::fb2::Fiber sync_fb_;
+  util::fb2::Fiber acks_fb_;
+  util::fb2::Fiber acl_check_fb_;
   util::fb2::EventCount replica_waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
@@ -160,7 +160,7 @@ class Replica : ProtocolClient {
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)
-  Mutex flows_op_mu_;
+  util::fb2::Mutex flows_op_mu_;
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.
@@ -231,13 +231,13 @@ class DflyShardReplica : public ProtocolClient {
   // run out-of-order on the master instance.
   std::atomic_uint64_t journal_rec_executed_ = 0;
 
-  Fiber sync_fb_;
+  util::fb2::Fiber sync_fb_;
 
-  Fiber acks_fb_;
+  util::fb2::Fiber acks_fb_;
   size_t ack_offs_ = 0;
 
   bool force_ping_ = false;
-  Fiber execution_fb_;
+  util::fb2::Fiber execution_fb_;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
   uint32_t flow_id_ = UINT32_MAX;  // Flow id if replica acts as a dfly flow.

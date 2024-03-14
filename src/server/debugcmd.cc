@@ -531,10 +531,14 @@ void DebugCmd::Replica(CmdArgList args) {
 }
 
 void DebugCmd::Load(string_view filename) {
+  if (!ServerState::tlocal()->is_master) {
+    return cntx_->SendError("Replica cannot load data");
+  }
+
   auto new_state = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state.first != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
-    return;
+    return cntx_->SendError("Could not load file");
   }
 
   absl::Cleanup rev_state = [this] {
@@ -561,10 +565,11 @@ void DebugCmd::Load(string_view filename) {
 
   auto fut_ec = sf_.Load(path.generic_string());
   if (fut_ec.valid()) {
-    ec = fut_ec.get();
+    GenericError ec = fut_ec.get();
     if (ec) {
-      LOG(INFO) << "Could not load file " << ec.message();
-      return cntx_->SendError(ec.message());
+      string msg = ec.Format();
+      LOG(WARNING) << "Could not load file " << msg;
+      return cntx_->SendError(msg);
     }
   }
 
@@ -670,7 +675,7 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, options->total_count - from);
 
-  vector<Fiber> fb_arr(ranges.size());
+  vector<fb2::Fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
     auto range = ranges[i];
 
@@ -839,7 +844,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
 }
 
 void DebugCmd::Watched() {
-  Mutex mu;
+  fb2::Mutex mu;
 
   vector<string> watched_keys;
   vector<string> awaked_trans;

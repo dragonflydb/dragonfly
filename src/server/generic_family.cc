@@ -178,7 +178,7 @@ class RestoreArgs {
 [[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
   if (HasExpiration()) {
     int64_t ttl = abs_time_ ? expiration_ - now_msec : expiration_;
-    if (ttl > kMaxExpireDeadlineSec * 1000)
+    if (ttl > kMaxExpireDeadlineMs)
       return false;
 
     expiration_ = ttl < 0 ? -1 : ttl + now_msec;
@@ -743,11 +743,13 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kInvalidIntErr);
   }
 
-  if (int_arg > kMaxExpireDeadlineSec || int_arg < -kMaxExpireDeadlineSec) {
-    return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
+  int_arg = std::max<int64_t>(int_arg, -1);
+
+  // silently cap the expire time to kMaxExpireDeadlineSec which is more than 8 years.
+  if (int_arg > kMaxExpireDeadlineSec) {
+    int_arg = kMaxExpireDeadlineSec;
   }
 
-  int_arg = std::max<int64_t>(int_arg, -1);
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
   if (!expire_options) {
     return;
@@ -851,7 +853,13 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(msec, &int_arg)) {
     return cntx->SendError(kInvalidIntErr);
   }
-  int_arg = std::max<int64_t>(int_arg, 0L);
+  int_arg = std::max<int64_t>(int_arg, -1);
+
+  // to be more compatible with redis, we silently cap the expire time to kMaxExpireDeadlineSec
+  if (int_arg > kMaxExpireDeadlineMs) {
+    int_arg = kMaxExpireDeadlineMs;
+  }
+
   auto expire_options = ParseExpireOptionsOrReply(args.subspan(2), cntx);
   if (!expire_options) {
     return;
