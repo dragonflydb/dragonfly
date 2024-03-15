@@ -56,6 +56,7 @@ HllBufferPtr StringToHllPtr(string_view hll) {
   return {.hll = (unsigned char*)hll.data(), .size = hll.size()};
 }
 
+// call this if promote applied
 void ConvertToDenseIfNeeded(string* hll) {
   if (isValidHLL(StringToHllPtr(*hll)) == HLL_VALID_SPARSE) {
     string new_hll;
@@ -75,17 +76,20 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
   if (res.is_new) {
-    hll.resize(getDenseHllSize());
-    createDenseHll(StringToHllPtr(hll));
+    hll.resize(getSparseHllInitSize());
+    createSparseHll(StringToHllPtr(hll));
+
+    // createDenseHll(StringToHllPtr(hll));
   } else if (res.it->second.ObjType() != OBJ_STRING) {
     return OpStatus::WRONG_TYPE;
   } else {
     res.it->second.GetString(&hll);
-    ConvertToDenseIfNeeded(&hll);
+    // ConvertToDenseIfNeeded(&hll);
   }
 
   int updated = 0;
   for (const auto& value : values) {
+    // now "hll" could be sparse or dense
     int added = pfadd(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
     if (added < 0) {
       return OpStatus::INVALID_VALUE;

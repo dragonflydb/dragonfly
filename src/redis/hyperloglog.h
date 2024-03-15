@@ -26,7 +26,10 @@ struct HllBufferPtr {
 enum HllValidness isValidHLL(struct HllBufferPtr hll_ptr);
 
 size_t getDenseHllSize();
+size_t getSparseHllInitSize();
 
+
+int createSparseHll(struct HllBufferPtr hll_ptr);
 /* Writes into `hll_ptr` an empty dense-encoded HLL.
  * Returns 0 upon success, or a negative number when `hll_ptr.size` is different from
  * getDenseHllSize() */
