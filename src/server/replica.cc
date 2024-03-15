@@ -3,7 +3,10 @@
 //
 #include "server/replica.h"
 
+#include <chrono>
+
 #include "absl/strings/match.h"
+#include "util/fibers/fiber2.h"
 
 extern "C" {
 #include "redis/rdb.h"
@@ -73,6 +76,7 @@ Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
 Replica::~Replica() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  acl_check_fb_.JoinIfNeeded();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -140,12 +144,11 @@ void Replica::Stop() {
     state_mask_.store(0);  // Specifically ~R_ENABLED.
   });
 
-  waker_.notifyAll();
-
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  acl_check_fb_.JoinIfNeeded();
 }
 
 void Replica::Pause(bool pause) {
@@ -586,20 +589,21 @@ error_code Replica::ConsumeRedisStream() {
 
     io_buf.ConsumeInput(response->left_in_buffer);
     repl_offs_ += response->total_read;
-    waker_.notify();  // Notify to trigger ACKs.
+    replica_waker_.notify();  // Notify to trigger ACKs.
   }
 }
 
 error_code Replica::ConsumeDflyStream() {
   // Set new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) {
+    // Trigger acl-checker
+    replica_waker_.notifyAll();
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
       flow->Cancel();
     }
-
     multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
@@ -621,7 +625,13 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
+
+  if (master_context_.version >= DflyVersion::VER3) {
+    acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
+  }
+
   JoinDflyFlows();
+  acl_check_fb_.JoinIfNeeded();
 
   last_journal_LSNs_.emplace();
   for (auto& flow : shard_flows_) {
@@ -793,7 +803,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   }
 
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() {
+    shard_replica_waker_.await([&]() {
       return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
     });
     if (cntx->IsCancelled())
@@ -824,7 +834,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
-    waker_.notify();
+    shard_replica_waker_.notify();
   }
 }
 
@@ -845,9 +855,56 @@ void Replica::RedisStreamAcksFb() {
     }
     ack_offs_ = repl_offs_;
 
-    waker_.await_until(
+    replica_waker_.await_until(
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || cntx_.IsCancelled(); },
         next_ack_tp);
+  }
+}
+
+class AclCheckerClient : public ProtocolClient {
+ public:
+  AclCheckerClient(ServerContext server, Context* cntx)
+      : ProtocolClient(std::move(server)), cntx_(cntx) {
+    Connect();
+  }
+
+  void CheckAclRoundTrip() {
+    if (auto ec = SendCommandAndReadResponse(StrCat("REPLCONF acl-check ", "0")); ec) {
+      cntx_->Cancel();
+      LOG(INFO) << "Error in REPLCONF acl-check: " << ec.message();
+    } else if (!CheckRespIsSimpleReply("OK")) {
+      cntx_->Cancel();
+      LOG(INFO) << "Error: " << ToSV(LastResponseArgs().front().GetBuf());
+    }
+  }
+
+ private:
+  void Connect() {
+    VLOG(1) << "Connecting with acl client";
+    auto ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, cntx_);
+    if (ec) {
+      LOG(INFO) << "Failed to connect with acl client " << ec.message();
+      cntx_->Cancel();
+    }
+  }
+
+  Context* cntx_;
+};
+
+void Replica::AclCheckFb() {
+  // We need a new client with a different socket for acl-checks
+  // instead of using the ACK's fiber. This is because acks should
+  // not be replied (which makes them unusable for periodic ACL checks).
+  // Also there are N ACK fibers per replica instance while we only need
+  // one fiber to periodically check for ACL changes. Therefore,
+  // we decouple the logic via AclCheckFb.
+  AclCheckerClient acl_client(server(), &cntx_);
+
+  while (!cntx_.IsCancelled()) {
+    acl_client.CheckAclRoundTrip();
+    // We poll for ACL changes every second
+    replica_waker_.await_until([&]() { return cntx_.IsCancelled(); },
+                               std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
 }
 
@@ -873,7 +930,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
     }
     ack_offs_ = current_offset;
 
-    waker_.await_until(
+    shard_replica_waker_.await_until(
         [&]() {
           return journal_rec_executed_.load(std::memory_order_relaxed) >
                      ack_offs_ + kAckRecordMaxInterval ||
@@ -922,7 +979,8 @@ void DflyShardReplica::InsertTxDataToShardResource(TransactionData&& tx_data) {
 
 void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
+    shard_replica_waker_.await(
+        [&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
     if (cntx->IsCancelled()) {
       return;
     }
@@ -930,7 +988,7 @@ void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
     auto& data = trans_data_queue_.front();
     ExecuteTx(std::move(data.first), data.second, cntx);
     trans_data_queue_.pop();
-    waker_.notify();
+    shard_replica_waker_.notify();
   }
 }
 
@@ -1130,7 +1188,7 @@ void DflyShardReplica::JoinFlow() {
 
 void DflyShardReplica::Cancel() {
   CloseSocket();
-  waker_.notifyAll();
+  shard_replica_waker_.notifyAll();
 }
 
 }  // namespace dfly

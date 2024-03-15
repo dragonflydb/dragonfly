@@ -520,7 +520,7 @@ void TxTable(const http::QueryArgs& args, HttpContext* send) {
           Transaction* trx = std::get<Transaction*>(value);
 
           absl::AlphaNum an2(trx->txid());
-          absl::AlphaNum an3(trx->IsArmedInShard(sid));
+          absl::AlphaNum an3(trx->DEBUG_IsArmedInShard(sid));
           SortedTable::Row({sid_an.Piece(), tid.Piece(), an2.Piece(), an3.Piece()}, &mine);
           cur = queue->Next(cur);
         } while (cur != queue->Head());
@@ -798,6 +798,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
   config_registry.RegisterMutable("masterauth");
+  config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
@@ -1127,12 +1128,17 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     cntx->paused = false;
   }
 
-  etl.RecordCmd();
-
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
+    // We need to skip this because ACK's should not be replied to
+    // Bonus points because this allows to continue replication with ACL users who got
+    // their access revoked and reinstated
+    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
+      LOG(ERROR) << "Tried to reply to REPLCONF";
+      return;
+    }
     dfly_cntx->SendError(std::move(*err));
     return;
   }
@@ -1189,12 +1195,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   // if this is a read command, and client tracking has enabled,
   // start tracking all the updates to the keys in this read command
-  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
+      cid->IsTransactional()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto keys = t->GetShardArgs(shard->shard_id());
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
     };
-
     dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
@@ -1235,6 +1241,12 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(!cid->Validate(tail_args));
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
+    // We need to skip this because ACK's should not be replied to
+    // Bonus points because this allows to continue replication with ACL users who got
+    // their access revoked and reinstated
+    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(tail_args, 0), "ACK")) {
+      return true;
+    }
     cntx->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
@@ -1245,6 +1257,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   if (!ServerState::tlocal()->Monitors().Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
     DispatchMonitor(cntx, cid, tail_args);
   }
+
+  ServerState::tlocal()->RecordCmd();
 
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.

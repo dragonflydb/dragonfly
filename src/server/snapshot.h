@@ -144,7 +144,7 @@ class SliceSnapshot {
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
-  Fiber snapshot_fb_;  // IterateEntriesFb
+  util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
 
   CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;

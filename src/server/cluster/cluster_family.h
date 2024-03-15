@@ -84,7 +84,7 @@ class ClusterFamily {
 
   std::shared_ptr<OutgoingMigration> GetOutgoingMigration(uint32_t sync_id);
 
-  mutable Mutex migration_mu_;  // guard migrations operations
+  mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
   std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);

@@ -123,7 +123,7 @@ void BlockingController::FinalizeWatched(ArgSlice args, Transaction* tx) {
   VLOG(1) << "FinalizeBlocking [" << owner_->shard_id() << "]" << tx->DebugId();
 
   bool removed = awakened_transactions_.erase(tx);
-  DCHECK(!removed || (tx->GetLocalMask(owner_->shard_id()) & Transaction::AWAKED_Q));
+  DCHECK(!removed || (tx->DEBUG_GetLocalMask(owner_->shard_id()) & Transaction::AWAKED_Q));
 
   auto dbit = watched_dbs_.find(tx->GetDbIndex());
 
@@ -138,7 +138,7 @@ void BlockingController::FinalizeWatched(ArgSlice args, Transaction* tx) {
   for (string_view key : args) {
     bool removed_awakened = wt.UnwatchTx(key, tx);
     CHECK(!removed_awakened || removed)
-        << tx->DebugId() << " " << key << " " << tx->GetLocalMask(owner_->shard_id());
+        << tx->DebugId() << " " << key << " " << tx->DEBUG_GetLocalMask(owner_->shard_id());
   }
 
   if (wt.queue_map.empty()) {

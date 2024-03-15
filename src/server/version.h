@@ -29,8 +29,12 @@ enum class DflyVersion {
   // Supports limited partial sync
   VER2,
 
+  // 1.15 < ver
+  // ACL with user replication
+  VER3,
+
   // Always points to the latest version
-  CURRENT_VER = VER2,
+  CURRENT_VER = VER3,
 };
 
 }  // namespace dfly

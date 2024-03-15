@@ -133,7 +133,7 @@ struct SaveStagesController : public SaveStagesInputs {
   std::vector<std::pair<std::unique_ptr<RdbSnapshot>, std::filesystem::path>> snapshots_;
 
   absl::flat_hash_map<string_view, size_t> rdb_name_map_;
-  Mutex rdb_name_map_mu_;
+  util::fb2::Mutex rdb_name_map_mu_;
 };
 
 GenericError ValidateFilename(const std::filesystem::path& filename, bool new_version);

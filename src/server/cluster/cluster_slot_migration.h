@@ -61,7 +61,7 @@ class ClusterSlotMigration : private ProtocolClient {
  private:
   ClusterFamily* cluster_family_;
   Service& service_;
-  Mutex flows_op_mu_;
+  util::fb2::Mutex flows_op_mu_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   SlotRanges slots_;
   uint32_t source_shards_num_ = 0;
@@ -69,7 +69,7 @@ class ClusterSlotMigration : private ProtocolClient {
   uint32_t local_sync_id_ = 0;
   MigrationState state_ = MigrationState::C_NO_STATE;
 
-  Fiber sync_fb_;
+  util::fb2::Fiber sync_fb_;
 };
 
 }  // namespace dfly

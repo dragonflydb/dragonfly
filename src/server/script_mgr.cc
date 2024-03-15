@@ -183,7 +183,7 @@ void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
 
 void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   absl::flat_hash_map<std::string, base::Histogram> result;
-  Mutex mu;
+  fb2::Mutex mu;
 
   shard_set->pool()->AwaitFiberOnAll([&](auto* pb) {
     auto* ss = ServerState::tlocal();
