@@ -901,26 +901,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    assert False, "Should not be able to start slot migration"
-
-    # await asyncio.sleep(0.5)
-    # try:
-    #     await c_nodes_admin[1].execute_command(
-    #         "DFLYCLUSTER",
-    #         "START-SLOT-MIGRATION",
-    #         "127.0.0.1",
-    #         str(nodes[0].admin_port),
-    #         "5000",
-    #         "5200",
-    #     )
-    #     assert False, "Should not be able to start slot migration"
-    # except redis.exceptions.ResponseError as e:
-    #     assert e.args[0] == "Can't start the migration, another one is in progress"
-
-    # await push_config(
-    #     config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
-    #     c_nodes_admin,
-    # )
+    # TODO add a check for correct results after the same config apply
 
     await close_clients(*c_nodes, *c_nodes_admin)
 
@@ -983,10 +964,27 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
     assert await c_nodes[0].execute_command("DBSIZE") == 10
 
-    res = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "3000", "9000"
+    migation_config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
+          "replicas": [],
+          "migrations": [{{ "slot_ranges": [ {{ "start": 3000, "end": 9000 }} ]
+                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "target_id": "{node_ids[1]}" }}]
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        migation_config.replace("LAST_SLOT_CUTOFF", "9000").replace("NEXT_SLOT_CUTOFF", "9001"),
+        c_nodes_admin,
     )
-    assert 1 == res
 
     await asyncio.sleep(0.5)
 
@@ -1029,13 +1027,22 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
 
 @dataclass
+class MigrationInfo:
+    ip: str
+    port: int
+    slots: list
+    target_id: str
+
+
+@dataclass
 class NodeInfo:
     instance: DflyInstance
     client: aioredis.Redis
     admin_client: aioredis.Redis
     slots: list
     next_slots: list
-    sync_ids: list
+    migrations: list
+    id: str
 
 
 @pytest.mark.skip(reason="Failing on github regression action")
@@ -1071,7 +1078,8 @@ async def test_cluster_fuzzymigration(
             admin_client=instance.admin_client(),
             slots=[],
             next_slots=[],
-            sync_ids=[],
+            migrations=[],
+            id=await get_node_id(instance.admin_client()),
         )
         for instance in instances
     ]
@@ -1081,11 +1089,20 @@ async def test_cluster_fuzzymigration(
             {
                 "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
                 "master": {
-                    "id": await get_node_id(node.admin_client),
+                    "id": node.id,
                     "ip": "127.0.0.1",
                     "port": node.instance.port,
                 },
                 "replicas": [],
+                "migrations": [
+                    {
+                        "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
+                        "target_id": m.target_id,
+                        "ip": m.ip,
+                        "port": m.port,
+                    }
+                    for m in node.migrations
+                ],
             }
             for node in nodes
         ]
@@ -1148,19 +1165,21 @@ async def test_cluster_fuzzymigration(
                 continue
 
             print(node_idx, "migrates to", dest_idx, "slots", dest_slots)
-            sync_id = await nodes[dest_idx].admin_client.execute_command(
-                "DFLYCLUSTER",
-                "START-SLOT-MIGRATION",
-                "127.0.0.1",
-                node.instance.admin_port,
-                *itertools.chain(*dest_slots),
+            node.migrations.append(
+                MigrationInfo(
+                    ip="127.0.0.1",
+                    port=nodes[dest_idx].instance.admin_port,
+                    slots=dest_slots,
+                    target_id=nodes[dest_idx].id,
+                )
             )
 
-            nodes[node_idx].sync_ids.append(sync_id)
             nodes[dest_idx].next_slots.extend(dest_slots)
 
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
+
+    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 
     iterations = 0
     while True:
@@ -1181,6 +1200,11 @@ async def test_cluster_fuzzymigration(
     for counter in counters:
         counter.cancel()
 
+    # clean migrations
+    for node in nodes:
+        node.migrations = []
+
+    # TODO this config should be pushed with new slots
     # Push new config
     await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 

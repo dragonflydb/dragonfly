@@ -181,8 +181,6 @@ std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
   LOG_IF(ERROR, !CheckRespIsSimpleReply("OK")) << facade::ToSV(LastResponseArgs().front().GetBuf());
 
-  // sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
-
   return {};
 }
 

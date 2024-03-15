@@ -408,8 +408,6 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterMyId(args, cntx);
   } else if (sub_cmd == "FLUSHSLOTS") {
     return DflyClusterFlushSlots(args, cntx);
-  } else if (sub_cmd == "START-SLOT-MIGRATION") {
-    return DflyClusterStartSlotMigration(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
     return DflyClusterSlotMigrationStatus(args, cntx);
   }
@@ -607,27 +605,6 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
   return cntx->SendOk();
 }
 
-void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser(args);
-  auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
-  std::vector<SlotRange> slots;
-  do {
-    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
-    slots.emplace_back(SlotRange{slot_start, slot_end});
-  } while (parser.HasNext());
-
-  if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
-
-  auto* node = CreateIncomingMigration(std::string(host_ip), port, std::move(slots));
-  if (!node) {
-    return cntx->SendError("Can't start the migration, another one is in progress");
-  }
-  node->Start(cntx);
-
-  return cntx->SendLong(node->GetSyncId());
-}
-
 bool ClusterFamily::StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
                                         ConnectionContext* cntx) {
   // Add validating and error processing
@@ -807,9 +784,6 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Init migration " << cntx->conn()->RemoteEndpointAddress() << ":" << port;
   node->Init(sync_id, flows_num);
 
-  // auto sync_id = CreateOutgoingMigration(cntx, port, std::move(slots));
-
-  // cntx->conn()->SetName("slot_migration_ctrl");
   return cntx->SendOk();
 }
 
