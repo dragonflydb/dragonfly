@@ -2480,6 +2480,9 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       VLOG(2) << "Received client ACK=" << ack;
       cntx->replication_flow->last_acked_lsn = ack;
       return;
+    } else if (cmd == "ACL-CHECK") {
+      cntx->SendOk();
+      return;
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();
       goto err;
