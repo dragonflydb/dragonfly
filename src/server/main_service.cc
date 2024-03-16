@@ -650,9 +650,9 @@ ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
 
 // Returns the multi mode for that transaction. Returns NOT_DETERMINED if no scheduling
 // is required.
-optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
-                                                const ConnectionState::ExecInfo& exec_info,
-                                                const ScriptMgr& script_mgr) {
+Transaction::MultiMode DeduceExecMode(ExecEvalState state,
+                                      const ConnectionState::ExecInfo& exec_info,
+                                      const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
   bool contains_global = false;
   Transaction::MultiMode multi_mode =
@@ -2079,14 +2079,11 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
   // and scripts
-  optional<Transaction::MultiMode> multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
-  if (!multi_mode)
-    return rb->SendError(
-        "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
+  Transaction::MultiMode multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
 
   bool scheduled = false;
-  if (*multi_mode != Transaction::NOT_DETERMINED) {
-    StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, *multi_mode);
+  if (multi_mode != Transaction::NOT_DETERMINED) {
+    StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, multi_mode);
     scheduled = true;
   }
 
