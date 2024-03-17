@@ -2453,10 +2453,11 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       }
       cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
-      std::string client_id{arg};
-      auto& pool = service_.proactor_pool();
-      pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->remote_client_id_ = arg; });
+      auto info = dfly_cmd_->GetReplicaInfo(cntx);
+      DCHECK(info != nullptr);
+      if (info) {
+        info->id = arg;
+      }
     } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
       unsigned version;
       if (!absl::SimpleAtoi(arg, &version)) {

@@ -52,6 +52,7 @@ class Service;
 class ScriptMgr;
 
 struct ReplicaRoleInfo {
+  std::string id;
   std::string address;
   uint32_t listening_port;
   std::string_view state;

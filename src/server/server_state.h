@@ -245,7 +245,6 @@ class ServerState {  // public struct - to allow initialization.
   Stats stats;
 
   bool is_master = true;
-  std::string remote_client_id_;  // for cluster support
   uint32_t log_slower_than_usec = UINT32_MAX;
 
   acl::UserRegistry* user_registry;
