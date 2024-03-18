@@ -29,7 +29,8 @@ TEST_F(FlatBuffersTest, Basic) {
 
   fbb.Finish();
   auto buffer = fbb.GetBuffer();
-  auto map = flexbuffers::GetRoot(buffer).AsMap();
+  flexbuffers::Reference ref = flexbuffers::GetRoot(buffer);
+  auto map = ref.AsMap();
   EXPECT_EQ("bar", map["foo"].AsString().str());
 }
 
