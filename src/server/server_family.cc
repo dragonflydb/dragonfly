@@ -1023,8 +1023,11 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("comitted_memory", "", GetMallocCurrentCommitted(), MetricType::GAUGE,
+  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes", "", m.worker_fiber_stack_size,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
+
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
 
@@ -1773,6 +1776,8 @@ Metrics ServerFamily::GetMetrics() const {
     result.fiber_switch_delay_usec += fb2::FiberSwitchDelayUsec();
     result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
+    result.worker_fiber_stack_size += fb2::WorkerFibersStackSize();
+    result.worker_fiber_count += fb2::WorkerFibersCount();
 
     result.coordinator_stats.Add(ss->stats);
 
@@ -1888,12 +1893,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("used_memory_peak", ump);
     append("used_memory_peak_human", HumanReadableNumBytes(ump));
 
+    // Virtual memory size, upper bound estimation on the RSS memory used by the fiber stacks.
+    append("fibers_stack_vms", m.worker_fiber_stack_size);
+    append("fibers_count", m.worker_fiber_count);
+
     size_t rss = rss_mem_current.load(memory_order_relaxed);
     append("used_memory_rss", rss);
     append("used_memory_rss_human", HumanReadableNumBytes(rss));
     append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
-
-    append("comitted_memory", GetMallocCurrentCommitted());
 
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
