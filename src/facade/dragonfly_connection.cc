@@ -26,6 +26,8 @@
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
+#include <openssl/err.h>
+
 #include "util/tls/tls_socket.h"
 #endif
 
@@ -613,6 +615,7 @@ void Connection::HandleRequests() {
     if (!(IsPrivileged() && no_tls_on_admin_port)) {
       // Must be done atomically before the premption point in Accept so that at any
       // point in time, the socket_ is defined.
+
       {
         FiberAtomicGuard fg;
         unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
@@ -623,6 +626,15 @@ void Connection::HandleRequests() {
 
       if (!aresult) {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
+        int reason = ERR_GET_REASON(aresult.error().value());
+
+        if (reason == SSL_R_WRONG_VERSION_NUMBER) {
+          // When we connect with plain TCP socket to a TLS port, we get this error during
+          // handshaking. Reply back with plain text message helping the user to understand.
+          peer->Write(
+              io::Buffer("Error accepting a TLS connection, double check "
+                         "if you enabled TLS for your client.\r\n"));
+        }
         return;
       }
       peer = socket_.get();
