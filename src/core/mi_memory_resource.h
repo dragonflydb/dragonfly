@@ -10,6 +10,7 @@
 
 namespace dfly {
 
+// Per thread memory resource that uses mimalloc.
 class MiMemoryResource : public PMR_NS::memory_resource {
  public:
   explicit MiMemoryResource(mi_heap_t* heap) : heap_(heap) {

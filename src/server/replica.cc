@@ -6,7 +6,6 @@
 #include <chrono>
 
 #include "absl/strings/match.h"
-#include "util/fibers/fiber2.h"
 
 extern "C" {
 #include "redis/rdb.h"

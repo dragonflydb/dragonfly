@@ -1,11 +1,15 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #include "server/memory_cmd.h"
 
 #include <absl/strings/str_cat.h>
+
+#ifdef __linux__
 #include <malloc.h>
+#endif
+
 #include <mimalloc.h>
 
 #include "base/io_buf.h"
