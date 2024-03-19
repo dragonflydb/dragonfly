@@ -6,12 +6,12 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
 #include <numeric>
 #include <variant>
 
-#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
@@ -26,8 +26,6 @@
 #include "util/fibers/proactor_base.h"
 
 #ifdef DFLY_USE_SSL
-#include <openssl/err.h>
-
 #include "util/tls/tls_socket.h"
 #endif
 
@@ -615,26 +613,31 @@ void Connection::HandleRequests() {
     if (!(IsPrivileged() && no_tls_on_admin_port)) {
       // Must be done atomically before the premption point in Accept so that at any
       // point in time, the socket_ is defined.
+      uint8_t buf[2];
+      auto read_sz = socket_->Read(io::MutableBytes(buf));
+      if (!read_sz || *read_sz < sizeof(buf)) {
+        VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message();
+        return;
+      }
+      if (buf[0] != 0x16 || buf[1] != 0x03) {
+        VLOG(1) << "Bad TLS header "
+                << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
+                                absl::Hex(buf[1], absl::kZeroPad2));
+        peer->Write(
+            io::Buffer("-ERR Bad TLS header, double check "
+                       "if you enabled TLS for your client.\r\n"));
+      }
 
       {
         FiberAtomicGuard fg;
         unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
-        tls_sock->InitSSL(ssl_ctx_);
+        tls_sock->InitSSL(ssl_ctx_, buf);
         SetSocket(tls_sock.release());
       }
       FiberSocketBase::AcceptResult aresult = socket_->Accept();
 
       if (!aresult) {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
-        int reason = ERR_GET_REASON(aresult.error().value());
-
-        if (reason == SSL_R_WRONG_VERSION_NUMBER) {
-          // When we connect with plain TCP socket to a TLS port, we get this error during
-          // handshaking. Reply back with plain text message helping the user to understand.
-          peer->Write(
-              io::Buffer("Error accepting a TLS connection, double check "
-                         "if you enabled TLS for your client.\r\n"));
-        }
         return;
       }
       peer = socket_.get();
