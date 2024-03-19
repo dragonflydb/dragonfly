@@ -76,7 +76,7 @@ class ReplicaInfo:
     port: int
 
 
-def verify_slots_result(port: int, answer: list, replicas: list[ReplicaInfo]) -> bool:
+def verify_slots_result(port: int, answer: list, replicas) -> bool:
     def is_local_host(ip: str) -> bool:
         return ip == "127.0.0.1" or ip == "localhost"
 
