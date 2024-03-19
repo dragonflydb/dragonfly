@@ -596,7 +596,8 @@ OpResult<ReplicaOfArgs> ReplicaOfArgs::FromParams(string_view host, string_view 
     if (slot_id_end > ClusterConfig::kMaxSlotNum) {
       return facade::OpStatus::INVALID_VALUE;
     }
-    replicaof_args.slot_range = SlotRange(slot_id_start, slot_id_end);
+    replicaof_args.slot_range = SlotRange{.start = static_cast<uint16_t>(slot_id_start),
+                                          .end = static_cast<uint16_t>(slot_id_end)};
   }
   return replicaof_args;
 }
