@@ -114,6 +114,7 @@ class DflyCmd {
     SyncState replica_state;  // always guarded by ReplicaInfo::mu
     Context cntx;
 
+    std::string id;
     std::string address;
     uint32_t listening_port;
     DflyVersion version = DflyVersion::VER0;
@@ -138,6 +139,8 @@ class DflyCmd {
 
   // Create new sync session.
   std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> CreateSyncSession(ConnectionContext* cntx);
+
+  std::shared_ptr<ReplicaInfo> GetReplicaInfo(ConnectionContext* cntx);
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const;
 

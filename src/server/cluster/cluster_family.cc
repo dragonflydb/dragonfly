@@ -89,13 +89,13 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
                    .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
 
     for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
-      info.replicas.push_back({.id = etl.remote_client_id_,
+      info.replicas.push_back({.id = replica.id,
                                .ip = replica.address,
                                .port = static_cast<uint16_t>(replica.listening_port)});
     }
   } else {
-    info.master = {
-        .id = etl.remote_client_id_, .ip = replication_info->host, .port = replication_info->port};
+    // TODO: We currently don't save the master's ID in the replica
+    info.master = {.id = "", .ip = replication_info->host, .port = replication_info->port};
     info.replicas.push_back({.id = id_,
                              .ip = cntx->conn()->LocalBindAddress(),
                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
