@@ -1294,7 +1294,12 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   return operation_result;
 }
 
-io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
+io::Result<JsonPathV2, string> ParsePathV2(string path) {
+  // We expect all valid paths to start with the root selector, otherwise prepend it
+  if (path.rfind("$", 0) == string::npos) {
+    path = "$." + path;
+  }
+
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
     return json::ParsePath(path);
   }
@@ -1307,14 +1312,14 @@ io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
 
 }  // namespace
 
-#define PARSE_PATHV2(path)             \
-  ({                                   \
-    auto result = ParsePathV2(path);   \
-    if (!result) {                     \
-      cntx->SendError(result.error()); \
-      return;                          \
-    }                                  \
-    std::move(*result);                \
+#define PARSE_PATHV2(path)                   \
+  ({                                         \
+    auto result = ParsePathV2(string{path}); \
+    if (!result) {                           \
+      cntx->SendError(result.error());       \
+      return;                                \
+    }                                        \
+    std::move(*result);                      \
   })
 
 void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {

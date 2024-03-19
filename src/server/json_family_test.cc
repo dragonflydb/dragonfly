@@ -69,6 +69,9 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
   resp = Run({"JSON.GET", "json", "//book[0]"});
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 
+  resp = Run({"JSON.GET", "json", "store.book[0].category"});
+  EXPECT_EQ(resp, "[\"Fantasy\"]");
+
   resp = Run({"SET", "xml", xml});
   ASSERT_THAT(resp, "OK");
 
