@@ -85,8 +85,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew update && brew install ninja boost openssl automake gcc zstd bison c-ares \
-              autoconf libtool automake flatbuffers
+          brew uninstall --formula node kotlin harfbuzz sbt selenium-server imagemagick \
+              gradle maven openjdk postgresql r ant mongodb-community@5.0 mongosh \
+              node@18 php composer
+
+          brew update && brew install --force ninja boost openssl automake gcc zstd bison c-ares \
+              autoconf libtool automake
+
           # brew info icu4c
           mkdir -p $GITHUB_WORKSPACE/build
 
