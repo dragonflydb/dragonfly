@@ -67,6 +67,13 @@ void JournalExecutor::FlushAll() {
   Execute(cmd);
 }
 
+void JournalExecutor::FlushSlots(const SlotRange& slot_range) {
+  SlotRanges slot_ranges = {slot_range};
+  SlotSet slot_set(slot_ranges);
+  auto cmd = BuildFromParts("FLUSHSLOTS", slot_set.ToString());
+  Execute(cmd);
+}
+
 void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
   auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
   service_->DispatchCommand(span, &conn_context_);

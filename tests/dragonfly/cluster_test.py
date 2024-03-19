@@ -9,10 +9,62 @@ from dataclasses import dataclass
 from .instance import DflyInstanceFactory, DflyInstance
 from .utility import *
 from .replication_test import check_all_replicas_finished
+from redis.cluster import RedisCluster
+from redis.cluster import ClusterNode
 
 from . import dfly_args
 
 BASE_PORT = 30001
+
+
+class RedisClusterNode:
+    def __init__(self, port):
+        self.port = port
+        self.proc = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            [
+                "redis-server-6.2.11",
+                f"--port {self.port}",
+                "--save ''",
+                "--cluster-enabled yes",
+                f"--cluster-config-file nodes_{self.port}.conf",
+                "--cluster-node-timeout 5000",
+                "--appendonly no",
+                "--protected-mode no",
+                "--repl-diskless-sync yes",
+                "--repl-diskless-sync-delay 0",
+            ]
+        )
+        logging.debug(self.proc.args)
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except Exception as e:
+            pass
+
+
+@pytest.fixture(scope="function")
+def redis_cluster(port_picker):
+    # create redis client with 3 node with default slot configuration
+    # node1 slots 0-5460
+    # node2 slots 5461-10922
+    # node3 slots 10923-16383
+    ports = [port_picker.get_available_port() for i in range(3)]
+    nodes = [RedisClusterNode(port) for port in ports]
+    for node in nodes:
+        node.start()
+        time.sleep(1)
+
+    create_command = f'echo "yes" |redis-cli --cluster create {" ".join([f"127.0.0.1:{port}" for port in ports])}'
+    subprocess.run(create_command, shell=True)
+    time.sleep(1)
+    yield nodes
+    for node in nodes:
+        node.stop()
 
 
 async def push_config(config, admin_connections):
@@ -1227,3 +1279,175 @@ async def test_cluster_fuzzymigration(
     await close_clients(
         cluster_client, *[node.admin_client for node in nodes], *[node.client for node in nodes]
     )
+
+
+def parse_lag(replication_info: str):
+    lags = re.findall("lag=([0-9]+)\r\n", replication_info)
+    assert len(lags) == 1
+    return int(lags[0])
+
+
+async def await_no_lag(client: aioredis.Redis, timeout=10):
+    start = time.time()
+    while (time.time() - start) < timeout:
+        lag = parse_lag(await client.execute_command("info replication"))
+        print("current lag =", lag)
+        if lag == 0:
+            return
+        await asyncio.sleep(0.05)
+
+    raise RuntimeError("Lag did not reduced to 0!")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_replicate_cluster(df_local_factory: DflyInstanceFactory, df_seeder_factory):
+    """
+    Create dragonfly cluster of 2 nodes.
+    Create additional dragonfly server in emulated mode.
+    Replicate the dragonfly cluster into a single dragonfly node.
+    Send traffic before replication start and while replicating.
+    Promote the replica to master and check data consistency between cluster and single node.
+    """
+    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    cluster_nodes = [
+        df_local_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
+    ]
+
+    # Start instances and connect clients
+    df_local_factory.start_all(cluster_nodes + [replica])
+    c_nodes = [node.client() for node in cluster_nodes]
+
+    c_replica = replica.client()
+
+    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes))
+    config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {cluster_nodes[0].port} }},
+          "replicas": []
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {cluster_nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes,
+    )
+
+    # Fill instances with some data
+    seeder = df_seeder_factory.create(keys=2000, port=cluster_nodes[0].port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Start replication
+    first_node = cluster_nodes[0]
+    additional_nodes = cluster_nodes[1:]
+    await c_replica.execute_command("REPLICAOF localhost " + str(first_node.port) + " 0 5259")
+    await asyncio.gather(
+        *(
+            asyncio.create_task(
+                c_replica.execute_command(
+                    "ADDREPLICAOF localhost " + str(node.port) + " 5260 16383"
+                )
+            )
+            for node in additional_nodes
+        )
+    )
+
+    # give seeder time to run.
+    await asyncio.sleep(1.0)
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
+    # wait for replication to finish
+    await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
+
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
+
+    await disconnect_clients(*c_nodes, c_replica)
+
+
+def is_offset_eq_master_repl_offset(replication_info: str):
+    offset = re.findall("offset=([0-9]+),", replication_info)
+    assert len(offset) == 1
+    print("current offset =", offset)
+    master_repl_offset = re.findall("master_repl_offset:([0-9]+)\r\n", replication_info)
+    assert len(master_repl_offset) == 1
+    print("current master_repl_offset =", master_repl_offset)
+    return int(offset[0]) == int(master_repl_offset[0])
+
+
+async def await_eq_offset(client: aioredis.Redis, timeout=20):
+    start = time.time()
+    while (time.time() - start) < timeout:
+        if is_offset_eq_master_repl_offset(await client.execute_command("info replication")):
+            return
+        await asyncio.sleep(0.05)
+
+    raise RuntimeError("offset not equal!")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_replicate_redis_cluster(redis_cluster, df_local_factory, df_seeder_factory):
+    """
+    Create redis cluster of 3 nodes.
+    Create dragonfly server in emulated mode.
+    Replicate the redis cluster into a single dragonfly node.
+    Send traffic before replication start and while replicating.
+    Promote the replica to master and check data consistency between cluster and single dragonfly node.
+    """
+    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+
+    # Start instances and connect clients
+    df_local_factory.start_all([replica])
+
+    redis_cluster_nodes = redis_cluster
+    node_clients = [
+        aioredis.Redis(decode_responses=True, host="localhost", port=node.port)
+        for node in redis_cluster_nodes
+    ]
+
+    c_replica = replica.client()
+
+    seeder = df_seeder_factory.create(
+        keys=2000, port=redis_cluster_nodes[0].port, cluster_mode=True
+    )
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Start replication
+    await c_replica.execute_command(
+        "REPLICAOF localhost " + str(redis_cluster_nodes[0].port) + " 0 5460"
+    )
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(redis_cluster_nodes[1].port) + " 5461 10922"
+    )
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(redis_cluster_nodes[2].port) + " 10923 16383"
+    )
+
+    # give seeder time to run.
+    await asyncio.sleep(0.5)
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
+    # wait for replication to finish
+    await asyncio.gather(*(asyncio.create_task(await_eq_offset(client)) for client in node_clients))
+
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
+
+    await disconnect_clients(c_replica, *node_clients)

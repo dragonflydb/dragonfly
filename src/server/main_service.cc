@@ -2403,17 +2403,33 @@ VarzValue::Map Service::GetVarzStats() {
   return res;
 }
 
-std::pair<GlobalState, bool> Service::SwitchState(GlobalState from, GlobalState to) {
+GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   lock_guard lk(mu_);
-  if (global_state_ != from)
-    return {global_state_, false};
+  // Counting switchs to loading state enables us to do several loading processes (replications)
+  // at the same time. Only when all loading processes finish we exit loading state.
+  // When server is in loading state, calling SwitchState to loading will increase
+  // loading_state_counter_. When server is in loading state, calling SwitchState to active will
+  // decrease loading_state_counter_, if loading_state_counter_ is 0 switch to active.
+  if (global_state_ == to && global_state_ == GlobalState::LOADING) {
+    ++loading_state_counter_;
+    return global_state_;
+  }
+  if (global_state_ == from && global_state_ == GlobalState::LOADING &&
+      loading_state_counter_ > 0) {
+    --loading_state_counter_;
+    return global_state_;
+  }
+
+  if (global_state_ != from) {
+    return global_state_;
+  }
 
   VLOG(1) << "Switching state from " << GlobalStateName(from) << " to " << GlobalStateName(to);
 
   global_state_ = to;
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
-  return {to, true};
+  return to;
 }
 
 GlobalState Service::GetGlobalState() const {
