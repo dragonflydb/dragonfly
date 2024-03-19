@@ -2412,7 +2412,7 @@ void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view por
   // If we are called by "Replicate", cntx->transaction will be null but we do not need
   // to flush anything.
   if (cntx->transaction) {
-    // Drakarys(cntx->transaction, DbSlice::kDbAll);
+    Drakarys(cntx->transaction, DbSlice::kDbAll);
   }
 
   // Create a new replica and assing it
