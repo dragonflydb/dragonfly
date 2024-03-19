@@ -11,7 +11,8 @@
 #include <vector>
 
 #include "base/expected.hpp"
-#include "src/core/json/json_object.h"
+#include "core/flatbuffers.h"
+#include "core/json/json_object.h"
 
 namespace dfly::json {
 
@@ -90,6 +91,8 @@ using Path = std::vector<PathSegment>;
 // Passes the key name for object fields or nullopt for array elements.
 // The second argument is a json value of either object fields or array elements.
 using PathCallback = absl::FunctionRef<void(std::optional<std::string_view>, const JsonType&)>;
+using PathFlatCallback =
+    absl::FunctionRef<void(std::optional<std::string_view>, flexbuffers::Reference)>;
 
 // Returns true if the entry should be deleted, false otherwise.
 using MutateCallback = absl::FunctionRef<bool(std::optional<std::string_view>, JsonType*)>;
