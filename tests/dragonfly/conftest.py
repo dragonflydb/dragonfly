@@ -340,14 +340,15 @@ def copy_failed_logs_and_clean_tmp_folder(report):
     if not path_exists:
         os.makedirs(failed_path)
 
-    last_log_file = open("/tmp/last_test_log_files.txt", "r")
-    files = last_log_file.readlines()
-    logging.error(f"Test failed {report.nodeid} with logs: ")
-    for file in files:
-        # copy to failed folder
-        file = file.rstrip("\n")
-        logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-        shutil.copy(file, failed_path)
+    if os.path.isfile("/tmp/last_test_log_files.txt"):
+        last_log_file = open("/tmp/last_test_log_files.txt", "r")
+        files = last_log_file.readlines()
+        logging.error(f"Test failed {report.nodeid} with logs: ")
+        for file in files:
+            # copy to failed folder
+            file = file.rstrip("\n")
+            logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
+            shutil.copy(file, failed_path)
 
 
 def pytest_exception_interact(node, call, report):
