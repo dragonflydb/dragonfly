@@ -792,10 +792,8 @@ void ServerFamily::Shutdown() {
       stats_caching_task_ = 0;
     }
 
-    if (journal_->EnterLameDuck()) {
-      auto ec = journal_->Close();
-      LOG_IF(ERROR, ec) << "Error closing journal " << ec;
-    }
+    auto ec = journal_->Close();
+    LOG_IF(ERROR, ec) << "Error closing journal " << ec;
 
     unique_lock lk(replicaof_mu_);
     if (replica_) {
