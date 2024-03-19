@@ -2353,7 +2353,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   LOG(INFO) << "Add Replica " << replicaof_args->host << ":" << replicaof_args->port_sv;
 
   auto add_replica = make_unique<Replica>(string(replicaof_args->host), replicaof_args->port,
-                                          &service_, master_id(), replicaof_args->slot_range);
+                                          &service_, master_replid(), replicaof_args->slot_range);
   error_code ec = add_replica->Start(cntx);
   if (!ec) {
     cluster_replicas_.push_back(std::move(add_replica));
