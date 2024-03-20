@@ -303,10 +303,17 @@ std::error_code Replica::HandleCapaDflyResp() {
   }
 
   // If we're syncing a different replication ID, drop the saved LSNs.
-  if (master_context_.master_repl_id != ToSV(LastResponseArgs()[0].GetBuf())) {
+  string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+  if (master_context_.master_repl_id != master_repl_id) {
+    if (!master_context_.master_repl_id.empty()) {
+      LOG(ERROR) << "Encountered different master repl id (" << master_repl_id << " vs "
+                 << master_context_.master_repl_id << ")";
+      state_mask_.store(0);
+      return make_error_code(errc::connection_aborted);
+    }
     last_journal_LSNs_.reset();
   }
-  master_context_.master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+  master_context_.master_repl_id = master_repl_id;
   master_context_.dfly_session_id = ToSV(LastResponseArgs()[1].GetBuf());
   num_df_flows_ = param_num_flows;
 

@@ -2060,6 +2060,13 @@ async def test_start_replicating_while_save(df_local_factory):
     await disconnect_clients(c_master, *[c_replica])
 
 
+async def is_replica_down(conn):
+    role = await conn.execute_command("INFO REPLICATION")
+    # fancy of way of extracting the field master_link_status
+    is_down = role.split("\r\n")[4].split(":")[1]
+    return is_down == "down"
+
+
 @pytest.mark.asyncio
 async def test_user_acl_replication(df_local_factory):
     master = df_local_factory.create(proactor_threads=4)
@@ -2083,10 +2090,7 @@ async def test_user_acl_replication(df_local_factory):
     await c_master.execute_command("ACL SETUSER tmp -replconf")
     async with async_timeout.timeout(5):
         while True:
-            role = await c_replica.execute_command("INFO REPLICATION")
-            # fancy of way of extracting the field master_link_status
-            is_down = role.split("\r\n")[4].split(":")[1]
-            if is_down == "down":
+            if await is_replica_down(c_replica):
                 break
             await asyncio.sleep(1)
 
@@ -2096,3 +2100,42 @@ async def test_user_acl_replication(df_local_factory):
     await c_master.execute_command("ACL SETUSER tmp +replconf")
     await check_all_replicas_finished([c_replica], c_master, 5)
     assert 2 == await c_replica.execute_command("DBSIZE")
+
+
+@pytest.mark.asyncio
+async def test_replica_reconnect(df_local_factory):
+    # Connect replica to master
+    master = df_local_factory.create(proactor_threads=1)
+    replica = df_local_factory.create(proactor_threads=1)
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("set k 12345")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    assert not await is_replica_down(c_replica)
+
+    # kill existing master, create master with different repl_id but same port
+    master_port = master.port
+    master.stop()
+    assert await is_replica_down(c_replica)
+
+    master = df_local_factory.create(proactor_threads=1, port=master_port)
+    df_local_factory.start_all([master])
+
+    # Assert that replica did not reconnected to master with different repl_id
+    assert await c_master.execute_command("get k") == None
+    assert await c_replica.execute_command("get k") == "12345"
+    assert await c_master.execute_command("set k 6789")
+    assert await c_replica.execute_command("get k") == "12345"
+    assert await is_replica_down(c_replica)
+
+    # Force re-replication, assert that it worked
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+    assert await c_replica.execute_command("get k") == "6789"
+
+    await disconnect_clients(c_master, *[c_replica])
