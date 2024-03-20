@@ -765,7 +765,7 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "Create slot migration config " << args;
+  VLOG(1) << "Create incoming migration, args: " << args;
   CmdArgParser parser{args};
   auto [sync_id, port, flows_num] = parser.Next<uint32_t, uint32_t, uint32_t>();
 

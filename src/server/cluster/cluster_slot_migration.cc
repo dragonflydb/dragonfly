@@ -53,35 +53,6 @@ ClusterSlotMigration::~ClusterSlotMigration() {
   sync_fb_.JoinIfNeeded();
 }
 
-error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
-  VLOG(1) << "Starting slot migration";
-
-  auto check_connection_error = [&cntx](error_code ec, const char* msg) -> error_code {
-    if (ec) {
-      cntx->SendError(absl::StrCat(msg, ec.message()));
-    }
-    return ec;
-  };
-
-  VLOG(1) << "Resolving host DNS";
-  error_code ec = ResolveHostDns();
-  RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
-
-  VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
-  RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
-
-  state_ = MigrationState::C_CONNECTING;
-
-  VLOG(1) << "Greeting";
-  ec = Greet();
-  RETURN_ON_ERR(check_connection_error(ec, "couldn't greet source "));
-
-  sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
-
-  return {};
-}
-
 error_code ClusterSlotMigration::Init(uint32_t sync_id, uint32_t shards_num) {
   VLOG(1) << "Init slot migration";
 

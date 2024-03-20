@@ -25,6 +25,7 @@ class OutgoingMigration : private ProtocolClient {
   OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots, uint32_t sync_id,
                     Context::ErrHandler, ServerFamily* sf);
 
+  // start migration process, sends INIT command to the target node
   std::error_code Start(ConnectionContext* cntx);
 
   // should be run for all shards

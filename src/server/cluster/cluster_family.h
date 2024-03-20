@@ -57,6 +57,7 @@ class ClusterFamily {
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
 
+  // DFLYMIGRATE INIT is internal command to create incoming migration object
   void InitMigration(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE CONF initiate first step in slots migration procedure

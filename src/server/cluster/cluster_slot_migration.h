@@ -25,10 +25,10 @@ class ClusterSlotMigration : private ProtocolClient {
                        SlotRanges slots);
   ~ClusterSlotMigration();
 
+  // Initiate connection with source node and create migration fiber
+  // will be refactored in the future
   std::error_code Init(uint32_t sync_id, uint32_t shards_num);
 
-  // Initiate connection with source node and create migration fiber
-  std::error_code Start(ConnectionContext* cntx);
   Info GetInfo() const;
   uint32_t GetSyncId() const {
     return sync_id_;
