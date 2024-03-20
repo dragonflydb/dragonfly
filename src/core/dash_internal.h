@@ -534,7 +534,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Can return upto 3 buckets.
   template <bool UV = Policy::USE_VERSION>
   std::enable_if_t<UV, unsigned> CVCOnBump(uint64_t ver_threshold, unsigned bid, unsigned slot,
-                                           Hash_t hash, uint8_t result_bid[2]) const;
+                                           Hash_t hash, uint8_t result_bid[3]) const;
 
   // Finds a valid entry going from specified indices up.
   Iterator FindValidStartingFrom(unsigned bid, unsigned slot) const;
@@ -1506,45 +1506,21 @@ template <bool UV>
 std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t ver_threshold,
                                                                       unsigned bid, unsigned slot,
                                                                       Hash_t hash,
-                                                                      uint8_t result_bid[2]) const {
+                                                                      uint8_t result_bid[3]) const {
   if (bid < kRegularBucketCnt) {
     // right now we do not migrate entries from nid to bid, only from stash to normal buckets.
     return 0;
   }
 
   // Stash case.
-  if (bucket_[bid].GetVersion() < ver_threshold) {
-    // if we move an entry from a bucket that has lower version
-    // then the destination bucket whatever it is - won't cross ver_threshold,
-    // but we may need to save that entry.
-    result_bid[0] = bid;
-    return 1;
-  }
-
-  // At this point we know that the source (stash) bucket has version >= ver_threshold.
   unsigned result = 0;
-
+  if (bucket_[bid].GetVersion() < ver_threshold) {
+    result_bid[result++] = bid;
+  }
   const uint8_t target_bid = BucketIndex(hash);
   const auto& target = bucket_[target_bid];
-
-  if (!target.IsFull()) {
-    if (target.GetVersion() < ver_threshold)
-      result_bid[result++] = target_bid;
-
-    return result;
-  }
-
   const uint8_t probing_bid = NextBid(target_bid);
   const auto& probing = bucket_[probing_bid];
-
-  if (!probing.IsFull()) {
-    if (probing.GetVersion() < ver_threshold)
-      result_bid[result++] = probing_bid;
-
-    return result;
-  }
-
-  assert(result == 0);
 
   unsigned stash_pos = bid - kRegularBucketCnt;
   uint8_t fp_hash = hash & kFpMask;
