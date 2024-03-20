@@ -576,7 +576,7 @@ void DashTable<_Key, _Value, Policy>::CVCUponBump(uint64_t ver_upperbound, const
   assert(seg_id < segment_.size());
   const SegmentType* target = segment_[seg_id];
 
-  uint8_t bids[2];
+  uint8_t bids[3];
   unsigned num_touched =
       target->CVCOnBump(ver_upperbound, it.bucket_id(), it.slot_id(), key_hash, bids);
 
