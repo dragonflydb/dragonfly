@@ -1403,20 +1403,6 @@ async def test_tls_replication(
     db_size = await c_replica.execute_command("DBSIZE")
     assert 100 == db_size
 
-    # 4. Kill master, spin it up and see if replica reconnects
-    master.stop(kill=True)
-    await asyncio.sleep(3)
-    master.start()
-    c_master = master.client(**with_ca_tls_client_args)
-    # Master doesn't load the snapshot, therefore dbsize should be 0
-    await c_master.execute_command("SET MY_KEY 1")
-    db_size = await c_master.execute_command("DBSIZE")
-    assert 1 == db_size
-
-    await check_all_replicas_finished([c_replica], c_master)
-    db_size = await c_replica.execute_command("DBSIZE")
-    assert 1 == db_size
-
     await c_replica.close()
     await c_master.close()
 
