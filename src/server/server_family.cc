@@ -2410,6 +2410,14 @@ void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view por
   }
   cluster_replicas_.clear();
 
+  // First, switch into the loading state
+  if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+      new_state != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    cntx->SendError("Invalid state");
+    return;
+  }
+
   // If we are called by "Replicate", cntx->transaction will be null but we do not need
   // to flush anything.
   if (cntx->transaction) {

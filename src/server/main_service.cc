@@ -2417,7 +2417,9 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   if (global_state_ == from && global_state_ == GlobalState::LOADING &&
       loading_state_counter_ > 0) {
     --loading_state_counter_;
-    return global_state_;
+    if (loading_state_counter_ > 0) {
+      return global_state_;
+    }
   }
 
   if (global_state_ != from) {
