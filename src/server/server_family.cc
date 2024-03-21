@@ -551,53 +551,49 @@ string_view GetRedisMode() {
 }
 
 struct ReplicaOfArgs {
-  bool no_one = false;
   string_view host;
   string_view port_sv;
-  uint32_t port;
+  uint16_t port;
   std::optional<SlotRange> slot_range;
   static OpResult<ReplicaOfArgs> FromParams(string_view host, string_view port,
                                             std::optional<string_view> slot_start,
                                             std::optional<string_view> slot_end);
+  bool IsReplicaOfNoOne();
 };
 
-OpResult<ReplicaOfArgs> ReplicaOfArgs::FromParams(string_view host, string_view port,
+bool ReplicaOfArgs::IsReplicaOfNoOne() {
+  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_sv, "one")) {
+    return true;
+  }
+  return false;
+}
+
+OpResult<ReplicaOfArgs> ReplicaOfArgs::FromParams(string_view host, string_view port_sv,
                                                   std::optional<string_view> slot_start,
                                                   std::optional<string_view> slot_end) {
   ReplicaOfArgs replicaof_args;
   replicaof_args.host = host;
-  replicaof_args.port_sv = port;
-  if (absl::EqualsIgnoreCase(replicaof_args.host, "no") &&
-      absl::EqualsIgnoreCase(replicaof_args.port_sv, "one")) {
-    replicaof_args.no_one = true;
+  replicaof_args.port_sv = port_sv;
+  if (replicaof_args.IsReplicaOfNoOne()) {
     return replicaof_args;
   }
 
-  if (!absl::SimpleAtoi(replicaof_args.port_sv, &replicaof_args.port) || replicaof_args.port < 1 ||
-      replicaof_args.port > 65535) {
+  uint32_t port;
+  if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
     return facade::OpStatus::INVALID_INT;
   }
+  replicaof_args.port = static_cast<uint16_t>(port);
 
   if (slot_start.has_value()) {
     if (!slot_end.has_value()) {
       return facade::OpStatus::SYNTAX_ERR;
     }
 
-    uint32_t slot_id_start, slot_id_end;
-    if (!absl::SimpleAtoi(*slot_start, &slot_id_start)) {
-      return facade::OpStatus::INVALID_INT;
+    OpResult<SlotRange> slot_range = ClusterConfig::SlotRangeFromStr(*slot_start, *slot_end);
+    if (!slot_range) {
+      return slot_range.status();
     }
-    if (slot_id_start > ClusterConfig::kMaxSlotNum) {
-      return facade::OpStatus::INVALID_VALUE;
-    }
-    if (!absl::SimpleAtoi(*slot_end, &slot_id_end)) {
-      return facade::OpStatus::INVALID_INT;
-    }
-    if (slot_id_end > ClusterConfig::kMaxSlotNum) {
-      return facade::OpStatus::INVALID_VALUE;
-    }
-    replicaof_args.slot_range = SlotRange{.start = static_cast<uint16_t>(slot_id_start),
-                                          .end = static_cast<uint16_t>(slot_id_end)};
+    replicaof_args.slot_range = slot_range.value();
   }
   return replicaof_args;
 }
@@ -846,9 +842,9 @@ void ServerFamily::Shutdown() {
     unique_lock lk(replicaof_mu_);
     if (replica_) {
       replica_->Stop();
-      for (auto& replica : cluster_replicas_) {
-        replica->Stop();
-      }
+    }
+    for (auto& replica : cluster_replicas_) {
+      replica->Stop();
     }
 
     dfly_cmd_->Shutdown();
@@ -2348,7 +2344,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   if (!replicaof_args) {
     return cntx->SendError(replicaof_args.status());
   }
-  if (replicaof_args->no_one) {
+  if (replicaof_args->IsReplicaOfNoOne()) {
     return cntx->SendError("ADDREPLICAOF does not supprot no one");
   }
   LOG(INFO) << "Add Replica " << replicaof_args->host << ":" << replicaof_args->port_sv;
@@ -2381,7 +2377,7 @@ void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view por
   }
 
   // If NO ONE was supplied, just stop the current replica (if it exists)
-  if (replicaof_args->no_one) {
+  if (replicaof_args->IsReplicaOfNoOne()) {
     if (!ServerState::tlocal()->is_master) {
       CHECK(replica_);
 
@@ -2622,9 +2618,7 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
 
   } else {
     unique_lock lk{replicaof_mu_};
-
-    size_t additional_replication = cluster_replicas_.size();
-    rb->StartArray(4 + additional_replication * 3);
+    rb->StartArray(4 + cluster_replicas_.size() * 3);
     rb->SendBulkString("replica");
 
     auto send_replica_info = [rb](Replica::Info rinfo) {

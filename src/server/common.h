@@ -160,6 +160,12 @@ enum class GlobalState : uint8_t {
   TAKEN_OVER,
 };
 
+const char* GlobalStateName(GlobalState gs);
+
+std::ostream& operator<<(std::ostream& os, const GlobalState& state);
+
+std::ostream& operator<<(std::ostream& os, ArgSlice list);
+
 enum class TimeUnit : uint8_t { SEC, MSEC };
 
 inline void ToUpper(const MutableSlice* val) {
@@ -194,8 +200,6 @@ int64_t GetMallocCurrentCommitted();
 // version 5.11 maps to 511 etc.
 // set upon server start.
 extern unsigned kernel_version;
-
-const char* GlobalStateName(GlobalState gs);
 
 template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
   static_assert(std::is_same<uint64_t, decltype(gen())>::value);

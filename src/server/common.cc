@@ -395,4 +395,17 @@ std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag) {
   return strings::HumanReadableNumBytes(flag.value);
 }
 
+std::ostream& operator<<(std::ostream& os, const GlobalState& state) {
+  return os << GlobalStateName(state);
+}
+
+std::ostream& operator<<(std::ostream& os, ArgSlice list) {
+  os << "[";
+  if (!list.empty()) {
+    std::for_each(list.begin(), list.end() - 1, [&os](const auto& val) { os << val << ", "; });
+    os << (*(list.end() - 1));
+  }
+  return os << "]";
+}
+
 }  // namespace dfly

@@ -99,7 +99,7 @@ class SlotSet {
     std::string slots_str;
     for (SlotId i = 0; i < kSlotsNumber; ++i) {
       if (slots_->test(i)) {
-        absl::StrAppend(&slots_str, absl::StrCat(i));
+        absl::StrAppend(&slots_str, absl::StrCat(i, " "));
       }
     }
     return slots_str;

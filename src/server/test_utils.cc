@@ -31,15 +31,6 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 
 namespace dfly {
 
-std::ostream& operator<<(std::ostream& os, ArgSlice list) {
-  os << "[";
-  if (!list.empty()) {
-    std::for_each(list.begin(), list.end() - 1, [&os](const auto& val) { os << val << ", "; });
-    os << (*(list.end() - 1));
-  }
-  return os << "]";
-}
-
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_size
      << ", tiered_entries: " << stats.tiered_entries << "\n";

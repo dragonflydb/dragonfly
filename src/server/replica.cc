@@ -386,10 +386,8 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
     // Set LOADING state.
-    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
-    absl::Cleanup cleanup = [this]() {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    };
+    service_.RequestLoadingState();
+    absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
     if (slot_range_.has_value()) {
       JournalExecutor{&service_}.FlushSlots(slot_range_.value());
@@ -444,14 +442,6 @@ error_code Replica::InitiatePSync() {
 error_code Replica::InitiateDflySync() {
   auto start_time = absl::Now();
 
-  absl::Cleanup cleanup = [this]() {
-    // We do the following operations regardless of outcome.
-    JoinDflyFlows();
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    state_mask_.fetch_and(~R_SYNCING);
-    last_journal_LSNs_.reset();
-  };
-
   // Initialize MultiShardExecution.
   multi_shard_exe_.reset(new MultiShardExecution());
 
@@ -481,10 +471,19 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
+  service_.RequestLoadingState();
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    JoinDflyFlows();
+    service_.RemoveLoadingState();
+    state_mask_.fetch_and(~R_SYNCING);
+    last_journal_LSNs_.reset();
+  };
+
   std::string_view sync_type = "full";
   {
     // Going out of the way to avoid using std::vector<bool>...

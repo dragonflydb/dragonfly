@@ -2405,33 +2405,36 @@ VarzValue::Map Service::GetVarzStats() {
 
 GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   lock_guard lk(mu_);
-  // Counting switchs to loading state enables us to do several loading processes (replications)
-  // at the same time. Only when all loading processes finish we exit loading state.
-  // When server is in loading state, calling SwitchState to loading will increase
-  // loading_state_counter_. When server is in loading state, calling SwitchState to active will
-  // decrease loading_state_counter_, if loading_state_counter_ is 0 switch to active.
-  if (global_state_ == to && global_state_ == GlobalState::LOADING) {
-    ++loading_state_counter_;
-    return global_state_;
-  }
-  if (global_state_ == from && global_state_ == GlobalState::LOADING &&
-      loading_state_counter_ > 0) {
-    --loading_state_counter_;
-    if (loading_state_counter_ > 0) {
-      return global_state_;
-    }
-  }
-
   if (global_state_ != from) {
     return global_state_;
   }
 
   VLOG(1) << "Switching state from " << GlobalStateName(from) << " to " << GlobalStateName(to);
-
   global_state_ = to;
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
   return to;
+}
+
+void Service::RequestLoadingState() {
+  unique_lock lk(mu_);
+  ++loading_state_counter_;
+  if (global_state_ != GlobalState::LOADING) {
+    DCHECK_EQ(global_state_, GlobalState::ACTIVE);
+    lk.unlock();
+    SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  }
+}
+
+void Service::RemoveLoadingState() {
+  unique_lock lk(mu_);
+  DCHECK_EQ(global_state_, GlobalState::LOADING);
+  DCHECK_GT(loading_state_counter_, 0u);
+  --loading_state_counter_;
+  if (loading_state_counter_ == 0) {
+    lk.unlock();
+    SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  }
 }
 
 GlobalState Service::GetGlobalState() const {

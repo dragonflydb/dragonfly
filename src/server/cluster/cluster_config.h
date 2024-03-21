@@ -10,10 +10,13 @@
 #include <vector>
 
 #include "core/json/json_object.h"
+#include "src/facade/op_status.h"
 #include "src/server/cluster/slot_set.h"
 #include "src/server/common.h"
 
 namespace dfly {
+
+using facade::OpResult;
 
 // MigrationState constants are ordered in state changing order
 enum class MigrationState : uint8_t {
@@ -57,6 +60,7 @@ class ClusterConfig {
   using ClusterShards = std::vector<ClusterShard>;
 
   static SlotId KeySlot(std::string_view key);
+  static OpResult<SlotRange> SlotRangeFromStr(std::string_view start, std::string_view end);
 
   static void Initialize();
   static bool IsEnabled();
