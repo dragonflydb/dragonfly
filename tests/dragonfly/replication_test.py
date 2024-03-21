@@ -2107,7 +2107,14 @@ async def test_user_acl_replication(df_local_factory):
 
 @pytest.mark.asyncio
 async def test_replica_reconnect(df_local_factory):
-    # Test that a replica that disconnects from a master will not automatically replicate it after connection reestablishment, if it changed repl-id.
+    """
+    Test replica does not connect to master if master restarted
+    step1: create master and replica
+    step2: stop master and start again with the same port
+    step3: check replica is not replicating the restarted master
+    step4: issue new replicaof command
+    step5: check replica replicates master
+    """
     # Connect replica to master
     master = df_local_factory.create(proactor_threads=1)
     replica = df_local_factory.create(proactor_threads=1)
