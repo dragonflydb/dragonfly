@@ -32,6 +32,14 @@ async def wait_for_replicas_state(*clients, state="stable_sync", timeout=0.05):
         clients = [c for c, role in zip(clients, roles) if role[0] != "replica" or role[3] != state]
 
 
+async def close_proxy(proxy, proxy_task):
+    proxy.close()
+    try:
+        await proxy_task
+    except asyncio.exceptions.CancelledError:
+        pass
+
+
 """
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
@@ -1386,6 +1394,12 @@ async def test_tls_replication(
     db_size = await c_master.execute_command("DBSIZE")
     assert 100 == db_size
 
+    proxy = Proxy(
+        "127.0.0.1", 1114, "127.0.0.1", master.port if not test_admin_port else master.admin_port
+    )
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
     # 2. Spin up a replica and initiate a REPLICAOF
     replica = df_local_factory.create(
         tls_replication="true",
@@ -1394,8 +1408,7 @@ async def test_tls_replication(
     )
     replica.start()
     c_replica = replica.client(**with_ca_tls_client_args)
-    port = master.port if not test_admin_port else master.admin_port
-    res = await c_replica.execute_command("REPLICAOF localhost " + str(port))
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port))
     assert "OK" == res
     await check_all_replicas_finished([c_replica], c_master)
 
@@ -1403,8 +1416,24 @@ async def test_tls_replication(
     db_size = await c_replica.execute_command("DBSIZE")
     assert 100 == db_size
 
+    # 4. Break the connection between master and replica
+    await close_proxy(proxy, proxy_task)
+    await asyncio.sleep(3)
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    # Check replica gets new keys
+    await c_master.execute_command("SET MY_KEY 1")
+    db_size = await c_master.execute_command("DBSIZE")
+    assert 101 == db_size
+
+    await check_all_replicas_finished([c_replica], c_master)
+    db_size = await c_replica.execute_command("DBSIZE")
+    assert 101 == db_size
+
     await c_replica.close()
     await c_master.close()
+    await close_proxy(proxy, proxy_task)
 
 
 # busy wait for 'replica' instance to have replication status 'status'
@@ -1627,11 +1656,7 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            proxy.close()
-            try:
-                await task
-            except asyncio.exceptions.CancelledError:
-                pass
+            await close_proxy(proxy, task)
 
     master.stop()
     replica.stop()
@@ -1674,11 +1699,7 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            proxy.close()
-            try:
-                await task
-            except asyncio.exceptions.CancelledError:
-                pass
+            await close_proxy(proxy, task)
 
     master.stop()
     replica.stop()
@@ -1725,11 +1746,7 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            proxy.close()
-            try:
-                await task
-            except asyncio.exceptions.CancelledError:
-                pass
+            await close_proxy(proxy, task)
 
     master.stop()
     replica.stop()
