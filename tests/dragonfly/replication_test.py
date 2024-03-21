@@ -2118,7 +2118,9 @@ async def test_replica_reconnect(df_local_factory, break_conn):
     """
     # Connect replica to master
     master = df_local_factory.create(proactor_threads=1)
-    replica = df_local_factory.create(proactor_threads=1, replica_break_on_new_master=break_conn)
+    replica = df_local_factory.create(
+        proactor_threads=1, replica_reconnect_on_master_restart=break_conn
+    )
     df_local_factory.start_all([master, replica])
 
     c_master = master.client()
