@@ -2105,8 +2105,9 @@ async def test_user_acl_replication(df_local_factory):
     assert 2 == await c_replica.execute_command("DBSIZE")
 
 
+@pytest.mark.parametrize("break_conn", [False, True])
 @pytest.mark.asyncio
-async def test_replica_reconnect(df_local_factory):
+async def test_replica_reconnect(df_local_factory, break_conn):
     """
     Test replica does not connect to master if master restarted
     step1: create master and replica
@@ -2117,7 +2118,7 @@ async def test_replica_reconnect(df_local_factory):
     """
     # Connect replica to master
     master = df_local_factory.create(proactor_threads=1)
-    replica = df_local_factory.create(proactor_threads=1)
+    replica = df_local_factory.create(proactor_threads=1, replica_break_on_new_master=break_conn)
     df_local_factory.start_all([master, replica])
 
     c_master = master.client()
@@ -2136,13 +2137,21 @@ async def test_replica_reconnect(df_local_factory):
 
     master = df_local_factory.create(proactor_threads=1, port=master_port)
     df_local_factory.start_all([master])
+    await asyncio.sleep(1)  # We sleep for 0.5s in replica.cc before reconnecting
 
     # Assert that replica did not reconnected to master with different repl_id
-    assert await c_master.execute_command("get k") == None
-    assert await c_replica.execute_command("get k") == "12345"
-    assert await c_master.execute_command("set k 6789")
-    assert await c_replica.execute_command("get k") == "12345"
-    assert await is_replicaiton_conn_down(c_replica)
+    if break_conn:
+        assert await c_master.execute_command("get k") == None
+        assert await c_replica.execute_command("get k") == "12345"
+        assert await c_master.execute_command("set k 6789")
+        assert await c_replica.execute_command("get k") == "12345"
+        assert await is_replicaiton_conn_down(c_replica)
+    else:
+        assert await c_master.execute_command("get k") == None
+        assert await c_replica.execute_command("get k") == None
+        assert await c_master.execute_command("set k 6789")
+        assert await c_replica.execute_command("get k") == "6789"
+        assert not await is_replicaiton_conn_down(c_replica)
 
     # Force re-replication, assert that it worked
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
