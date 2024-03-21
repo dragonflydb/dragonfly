@@ -23,13 +23,16 @@ struct HllBufferPtr {
   size_t size;
 };
 
+//createSizeTConfig("hll-sparse-max-bytes", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hll_sparse_max_bytes, 3000, MEMORY_CONFIG, NULL, NULL),
+size_t HLL_SPARSE_MAX_BYTES = 3000;
+
 enum HllValidness isValidHLL(struct HllBufferPtr hll_ptr);
 
 size_t getDenseHllSize();
 size_t getSparseHllInitSize();
 
 
-int createSparseHll(struct HllBufferPtr hll_ptr);
+int initSparseHll(struct HllBufferPtr hll_ptr);
 /* Writes into `hll_ptr` an empty dense-encoded HLL.
  * Returns 0 upon success, or a negative number when `hll_ptr.size` is different from
  * getDenseHllSize() */
@@ -44,7 +47,7 @@ int convertSparseToDenseHll(struct HllBufferPtr in_hll, struct HllBufferPtr out_
 
 /* Adds `value` of size `size`, to `hll_ptr`.
  * If `obj` does not have an underlying type of HLL a negative number is returned. */
-int pfadd(struct HllBufferPtr hll_ptr, unsigned char* value, size_t size);
+int pfadd(sds hll_ptr, unsigned char* value, size_t size);
 
 /* Returns the estimated count of elements for `hll_ptr`.
  * If `hll_ptr` is not a valid dense-encoded HLL, a negative number is returned. */

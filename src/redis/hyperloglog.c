@@ -181,7 +181,7 @@
  * involved in updating the sparse representation is not justified by the
  * memory savings. The exact maximum length of the sparse representation
  * when this implementation switches to the dense representation is
- * configured via the define server.hll_sparse_max_bytes.
+ * configured via the define HLL_SPARSE_MAX_BYTES.
  */
 
 struct hllhdr {
@@ -590,10 +590,72 @@ void hllDenseRegHisto(uint8_t* registers, int* reghisto) {
 
 /* ================== Sparse representation implementation  ================= */
 
+
+/* Convert the HLL with sparse representation given as input in its dense
+ * representation. Both representations are represented by SDS strings, and
+ * the input representation is freed as a side effect.
+ *
+ * The function returns C_OK if the sparse representation was valid,
+ * otherwise C_ERR is returned if the representation was corrupted. */
+int hllSparseToDense(sds* hll_ptr) {
+    sds sparse = *hll_ptr, dense;
+    struct hllhdr *hdr, *oldhdr = (struct hllhdr*)sparse;
+    int idx = 0, runlen, regval;
+    uint8_t *p = (uint8_t*)sparse, *end = p+sdslen(sparse);
+
+    /* If the representation is already the right one return ASAP. */
+    hdr = (struct hllhdr*) sparse;
+    if (hdr->encoding == HLL_DENSE) return C_OK;
+
+    /* Create a string of the right size filled with zero bytes.
+     * Note that the cached cardinality is set to 0 as a side effect
+     * that is exactly the cardinality of an empty HLL. */
+    dense = sdsnewlen(NULL,HLL_DENSE_SIZE);
+    hdr = (struct hllhdr*) dense;
+    *hdr = *oldhdr; /* This will copy the magic and cached cardinality. */
+    hdr->encoding = HLL_DENSE;
+
+    /* Now read the sparse representation and set non-zero registers
+     * accordingly. */
+    p += HLL_HDR_SIZE;
+    while(p < end) {
+        if (HLL_SPARSE_IS_ZERO(p)) {
+            runlen = HLL_SPARSE_ZERO_LEN(p);
+            idx += runlen;
+            p++;
+        } else if (HLL_SPARSE_IS_XZERO(p)) {
+            runlen = HLL_SPARSE_XZERO_LEN(p);
+            idx += runlen;
+            p += 2;
+        } else {
+            runlen = HLL_SPARSE_VAL_LEN(p);
+            regval = HLL_SPARSE_VAL_VALUE(p);
+            if ((runlen + idx) > HLL_REGISTERS) break; /* Overflow. */
+            while(runlen--) {
+                HLL_DENSE_SET_REGISTER(hdr->registers,idx,regval);
+                idx++;
+            }
+            p++;
+        }
+    }
+
+    /* If the sparse representation was valid, we expect to find idx
+     * set to HLL_REGISTERS. */
+    if (idx != HLL_REGISTERS) {
+        sdsfree(dense);
+        return C_ERR;
+    }
+
+    /* Free the old representation and set the new one. */
+    sdsfree(*hll_ptr);
+    hll_ptr = &dense;
+    return C_OK;
+}
+
 /* Low level function to set the sparse HLL register at 'index' to the
  * specified value if the current value is smaller than 'count'.
  *
- * The object 'o' is the String object holding the HLL. The function requires
+ * The object 'hll' is the SDS object holding the HLL. The function requires
  * a reference to the object in order to be able to enlarge the string if
  * needed.
  *
@@ -604,8 +666,8 @@ void hllDenseRegHisto(uint8_t* registers, int* reghisto) {
  * As a side effect the function may promote the HLL representation from
  * sparse to dense: this happens when a register requires to be set to a value
  * not representable with the sparse representation, or when the resulting
- * size would be greater than server.hll_sparse_max_bytes. */
-int hllSparseSet(uint8_t* registers, long index, uint8_t count) {//rewrite without o
+ * size would be greater than HLL_SPARSE_MAX_BYTES. */
+int hllSparseSet(sds hll, long index, uint8_t count) {
     struct hllhdr *hdr;
     uint8_t oldcount, *sparse, *end, *p, *prev, *next;
     long first, span;
@@ -620,22 +682,23 @@ int hllSparseSet(uint8_t* registers, long index, uint8_t count) {//rewrite witho
      * and the following code does the enlarge job.
      * Actually, we use a greedy strategy, enlarge more than 3 bytes to avoid the need
      * for future reallocates on incremental growth. But we do not allocate more than
-     * 'server.hll_sparse_max_bytes' bytes for the sparse representation.
+     * 'HLL_SPARSE_MAX_BYTES' bytes for the sparse representation.
      * If the available size of hyperloglog sds string is not enough for the increment
      * we need, we promote the hypreloglog to dense representation in 'step 3'.
      */
-    if (sdsalloc(registers) < server.hll_sparse_max_bytes && sdsavail(registers) < 3) {
-        size_t newlen = sdslen(registers) + 3;
+
+    if (sdsalloc(hll) < HLL_SPARSE_MAX_BYTES && sdsavail(hll) < 3) {
+        size_t newlen = sdslen(hll) + 3;
         newlen += min(newlen, 300); /* Greediness: double 'newlen' if it is smaller than 300, or add 300 to it when it exceeds 300 */
-        if (newlen > server.hll_sparse_max_bytes)
-            newlen = server.hll_sparse_max_bytes;
-        registers = sdsResize(registers, newlen, 1);
+        if (newlen > HLL_SPARSE_MAX_BYTES)
+            newlen = HLL_SPARSE_MAX_BYTES;
+        hll = sdsResize(hll, newlen); //newer avaiable: sds sdsResize(sds s, size_t size, int would_regrow);
     }
 
     /* Step 1: we need to locate the opcode we need to modify to check
      * if a value update is actually needed. */
-    sparse = p = ((uint8_t*)registers) + HLL_HDR_SIZE;
-    end = p + sdslen(registers) - HLL_HDR_SIZE;
+    sparse = p = ((uint8_t*)hll) + HLL_HDR_SIZE;
+    end = p + sdslen(hll) - HLL_HDR_SIZE;
 
     first = 0;
     prev = NULL; /* Points to previous opcode at the end of the loop. */
@@ -793,10 +856,10 @@ int hllSparseSet(uint8_t* registers, long index, uint8_t count) {//rewrite witho
     int deltalen = seqlen-oldlen;
 
     if (deltalen > 0 &&
-        sdslen(registers) + deltalen > server.hll_sparse_max_bytes) goto promote;
-    serverAssert(sdslen(registers) + deltalen <= sdsalloc(registers));
+        sdslen(hll) + deltalen > HLL_SPARSE_MAX_BYTES) goto promote;
+    serverAssert(sdslen(hll) + deltalen <= sdsalloc(hll));
     if (deltalen && next) memmove(next+deltalen,next,end-next);
-    sdsIncrLen(registers,deltalen);
+    sdsIncrLen(hll,deltalen);
     memcpy(p,seq,seqlen);
     end += deltalen;
 
@@ -826,7 +889,7 @@ updated:
                 if (len <= HLL_SPARSE_VAL_MAX_LEN) {
                     HLL_SPARSE_VAL_SET(p+1,v1,len);
                     memmove(p,p+1,end-p);
-                    sdsIncrLen(registers,-1);
+                    sdsIncrLen(hll,-1);
                     end--;
                     /* After a merge we reiterate without incrementing 'p'
                      * in order to try to merge the just merged value with
@@ -839,16 +902,13 @@ updated:
     }
 
     /* Invalidate the cached cardinality. */
-    hdr = registers;
+    hdr = (struct hllhdr *)hll;
     HLL_INVALIDATE_CACHE(hdr);
     return 1;
 
 promote: /* Promote to dense representation. */
-    // if (hllSparseToDense(o) == C_ERR) return -1; /* Corrupted HLL. */
-    std::string new_hll;
-    new_hll.resize(getDenseHllSize());
-    if (convertSparseToDenseHll()) return -1;
-    hdr = registers;
+    if (hllSparseToDense(&hll) == C_ERR) return -1; /* Corrupted HLL. */
+    hdr = (struct hllhdr *)hll;
 
     /* We need to call hllDenseAdd() to perform the operation after the
      * conversion. However the result must be 1, since if we need to
@@ -868,11 +928,11 @@ promote: /* Promote to dense representation. */
  *
  * This function is actually a wrapper for hllSparseSet(), it only performs
  * the hashing of the element to obtain the index and zeros run length. */
-int hllSparseAdd(uint8_t* registers, unsigned char *ele, size_t elesize) {
+int hllSparseAdd(sds hll, unsigned char *ele, size_t elesize) {
     long index;
     uint8_t count = hllPatLen(ele,elesize,&index);
     /* Update the register if this element produced a longer run of zeroes. */
-    return hllSparseSet(registers,index,count);
+    return hllSparseSet(hll,index,count);
 }
 /* Compute the register histogram in the sparse representation. */
 void hllSparseRegHisto(uint8_t* sparse, int sparselen, int* invalid, int* reghisto) {
@@ -1099,7 +1159,7 @@ robj* createHLLObject(void) {
 
   /* Create the actual object. */
   o = createObject(OBJ_STRING, s);
-  hdr = registers;
+  hdr = o->ptr;
   memcpy(hdr->magic, "HYLL", 4);
   hdr->encoding = HLL_SPARSE;
   return o;
@@ -1147,7 +1207,7 @@ size_t getSparseHllInitSize() {
                      HLL_SPARSE_XZERO_MAX_LEN)*2);
 }
 
-int createSparseHll(struct HllBufferPtr hll_ptr) {
+int initSparseHll(struct HllBufferPtr hll_ptr) {
   if (hll_ptr.size != getSparseHllInitSize()) {
     return C_ERR;
   }
@@ -1237,19 +1297,16 @@ int convertSparseToDenseHll(struct HllBufferPtr in_hll, struct HllBufferPtr out_
   return C_OK;
 }
 
-int pfadd(struct HllBufferPtr hll_ptr, unsigned char* value, size_t size) {
-  // if (isValidHLL(hll_ptr) != HLL_VALID_DENSE)
-  //   return C_ERR;
-  //now the hll can be sparse or dense
-
-  struct hllhdr* hdr = (struct hllhdr*)hll_ptr.hll;
+int pfadd(sds hll, unsigned char* value, size_t size) {
+  struct hllhdr* hdr = (struct hllhdr*)hll;
   int retval;
   switch (hdr->encoding) {
     case HLL_DENSE:
       retval = hllDenseAdd(hdr->registers, value, size);
       break;
     case HLL_SPARSE:
-      retval = hllSparseAdd(hdr->registers, value, size);
+      retval = hllSparseAdd(hll, value, size);
+      break;
     default:
       retval = -1;
       break;

@@ -56,7 +56,6 @@ HllBufferPtr StringToHllPtr(string_view hll) {
   return {.hll = (unsigned char*)hll.data(), .size = hll.size()};
 }
 
-// call this if promote applied
 void ConvertToDenseIfNeeded(string* hll) {
   if (isValidHLL(StringToHllPtr(*hll)) == HLL_VALID_SPARSE) {
     string new_hll;
@@ -77,28 +76,30 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   auto& res = *op_res;
   if (res.is_new) {
     hll.resize(getSparseHllInitSize());
-    createSparseHll(StringToHllPtr(hll));
-
-    // createDenseHll(StringToHllPtr(hll));
+    initSparseHll(StringToHllPtr(hll));
   } else if (res.it->second.ObjType() != OBJ_STRING) {
     return OpStatus::WRONG_TYPE;
   } else {
     res.it->second.GetString(&hll);
-    // ConvertToDenseIfNeeded(&hll);
   }
 
   int updated = 0;
+  // +3 to avoid reallocating if possible.
+  // Each insertion to sparse hll could expand it by 3 bytes at most.
+  sds hll_sds =
+      sdsnewlen(hll.data(), hll.size() + 3 < HLL_SPARSE_MAX_BYTES ? hll.size() + 3 : hll.size());
   for (const auto& value : values) {
-    // now "hll" could be sparse or dense
-    int added = pfadd(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
+    // pfadd might resize the input string. A referance to string.data() makes it unnecessarily
+    // complicated
+    int added = pfadd(hll_sds, (unsigned char*)value.data(), value.size());
     if (added < 0) {
       return OpStatus::INVALID_VALUE;
     }
     updated += added;
   }
-
+  hll = string{hll_sds, sdslen(hll_sds)};
   res.it->second.SetString(hll);
-
+  sdsfree(hll_sds);
   return std::min(updated, 1);
 }
 
@@ -130,7 +131,7 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
         // Even in the case of a read - we still want to convert the hll to dense format, as it
         // could originate in Redis (like in replication or rdb load).
         hll = hll_view;
-        ConvertToDenseIfNeeded(&hll);
+        ConvertToDenseIfNeeded(&hll);  // enhance PFCOUNT as well?
         hll_view = hll;
         break;
       case HLL_INVALID:
