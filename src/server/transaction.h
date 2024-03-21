@@ -520,6 +520,9 @@ class Transaction {
   // Finish hop, decrement run barrier
   void FinishHop();
 
+  // Run actual callback on shard, store result if single shard or OOM was catched
+  void RunCallback(EngineShard* shard);
+
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc);
 
@@ -552,6 +555,9 @@ class Transaction {
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
   // Should be called immediately after the last hop.
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
+
+  // Whether the callback can be run directly on this thread without dispatching on the shard queue
+  bool CanRunInlined() const;
 
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
