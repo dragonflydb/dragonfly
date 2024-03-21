@@ -23,12 +23,6 @@ class JournalSlice {
 
   void Init(unsigned index);
 
-#if 0
-  std::error_code Open(std::string_view dir);
-
-  std::error_code Close();
-#endif
-
   // This is always the LSN of the *next* journal entry.
   LSN cur_lsn() const {
     return lsn_;

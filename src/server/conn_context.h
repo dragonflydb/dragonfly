@@ -8,7 +8,6 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "acl/acl_commands_def.h"
-#include "core/fibers.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
 #include "server/common.h"

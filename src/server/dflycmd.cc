@@ -571,6 +571,20 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
   return *it;
 }
 
+auto DflyCmd::GetReplicaInfo(ConnectionContext* cntx) -> std::shared_ptr<ReplicaInfo> {
+  if (cntx == nullptr) {
+    return nullptr;
+  }
+
+  unique_lock lk(mu_);
+  auto it = replica_infos_.find(cntx->conn_state.replication_info.repl_session_id);
+  if (it == replica_infos_.end()) {
+    return nullptr;
+  }
+
+  return it->second;
+}
+
 void DflyCmd::OnClose(ConnectionContext* cntx) {
   unsigned session_id = cntx->conn_state.replication_info.repl_session_id;
   if (!session_id)
@@ -659,13 +673,14 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
     } else {
       lag = std::numeric_limits<LSN>::max();
     }
-    vec.push_back(ReplicaRoleInfo{info->address, info->listening_port, SyncStateName(state), lag});
+    vec.push_back(
+        ReplicaRoleInfo{info->id, info->address, info->listening_port, SyncStateName(state), lag});
   }
   return vec;
 }
 
 void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
-  Mutex stats_mu;
+  util::fb2::Mutex stats_mu;
 
   lock_guard lk_main{mu_};  // prevent state changes
   auto cb = [this, &stats, &stats_mu](EngineShard* shard) {

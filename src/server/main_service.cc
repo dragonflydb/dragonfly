@@ -520,7 +520,7 @@ void TxTable(const http::QueryArgs& args, HttpContext* send) {
           Transaction* trx = std::get<Transaction*>(value);
 
           absl::AlphaNum an2(trx->txid());
-          absl::AlphaNum an3(trx->IsArmedInShard(sid));
+          absl::AlphaNum an3(trx->DEBUG_IsArmedInShard(sid));
           SortedTable::Row({sid_an.Piece(), tid.Piece(), an2.Piece(), an3.Piece()}, &mine);
           cur = queue->Next(cur);
         } while (cur != queue->Head());
@@ -650,9 +650,9 @@ ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
 
 // Returns the multi mode for that transaction. Returns NOT_DETERMINED if no scheduling
 // is required.
-optional<Transaction::MultiMode> DeduceExecMode(ExecEvalState state,
-                                                const ConnectionState::ExecInfo& exec_info,
-                                                const ScriptMgr& script_mgr) {
+Transaction::MultiMode DeduceExecMode(ExecEvalState state,
+                                      const ConnectionState::ExecInfo& exec_info,
+                                      const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
   bool contains_global = false;
   Transaction::MultiMode multi_mode =
@@ -798,6 +798,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
   config_registry.RegisterMutable("masterauth");
+  config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("tcp_keepalive");
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
@@ -1131,6 +1132,13 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
       exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
 
+    // We need to skip this because ACK's should not be replied to
+    // Bonus points because this allows to continue replication with ACL users who got
+    // their access revoked and reinstated
+    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
+      LOG(ERROR) << "Tried to reply to REPLCONF";
+      return;
+    }
     dfly_cntx->SendError(std::move(*err));
     return;
   }
@@ -1187,12 +1195,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   // if this is a read command, and client tracking has enabled,
   // start tracking all the updates to the keys in this read command
-  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn()) {
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
+      cid->IsTransactional()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto keys = t->GetShardArgs(shard->shard_id());
       return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
     };
-
     dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
@@ -1233,6 +1241,12 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   DCHECK(!cid->Validate(tail_args));
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
+    // We need to skip this because ACK's should not be replied to
+    // Bonus points because this allows to continue replication with ACL users who got
+    // their access revoked and reinstated
+    if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(tail_args, 0), "ACK")) {
+      return true;
+    }
     cntx->SendError(std::move(*err));
     return true;  // return false only for internal error aborts
   }
@@ -2079,14 +2093,11 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
   // and scripts
-  optional<Transaction::MultiMode> multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
-  if (!multi_mode)
-    return rb->SendError(
-        "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
+  Transaction::MultiMode multi_mode = DeduceExecMode(state, exec_info, *script_mgr());
 
   bool scheduled = false;
-  if (*multi_mode != Transaction::NOT_DETERMINED) {
-    StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, *multi_mode);
+  if (multi_mode != Transaction::NOT_DETERMINED) {
+    StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, multi_mode);
     scheduled = true;
   }
 

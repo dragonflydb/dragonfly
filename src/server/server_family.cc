@@ -776,6 +776,8 @@ void ServerFamily::Shutdown() {
 
   JoinSnapshotSchedule();
 
+  bg_save_fb_.JoinIfNeeded();
+
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
       if (GenericError ec = DoSave(); ec) {
@@ -790,10 +792,8 @@ void ServerFamily::Shutdown() {
       stats_caching_task_ = 0;
     }
 
-    if (journal_->EnterLameDuck()) {
-      auto ec = journal_->Close();
-      LOG_IF(ERROR, ec) << "Error closing journal " << ec;
-    }
+    auto ec = journal_->Close();
+    LOG_IF(ERROR, ec) << "Error closing journal " << ec;
 
     unique_lock lk(replicaof_mu_);
     if (replica_) {
@@ -837,7 +837,7 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
   auto& pool = service_.proactor_pool();
 
-  vector<Fiber> load_fibers;
+  vector<fb2::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();
@@ -1021,8 +1021,11 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("comitted_memory", "", GetMallocCurrentCommitted(), MetricType::GAUGE,
+  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes", "", m.worker_fiber_stack_size,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
+
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
 
@@ -1039,6 +1042,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                            << sdata_res.error().message();
   }
+  AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
 
   DbStats total;
   for (const auto& db_stats : m.db_stats) {
@@ -1297,8 +1301,8 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
-GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
-                                  bool ignore_state) {
+GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
+                                               Transaction* trans, bool ignore_state) {
   if (shard_set->IsTieringEnabled()) {
     return GenericError{make_error_code(errc::operation_not_permitted),
                         StrCat("Can not save database in tiering mode")};
@@ -1309,7 +1313,6 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
-
   {
     std::lock_guard lk(save_mu_);
     if (save_controller_) {
@@ -1329,7 +1332,10 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       return res->error;
     }
   }
+  return {};
+}
 
+GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore_state) {
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
@@ -1349,6 +1355,15 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   }
 
   return save_info.error;
+}
+
+GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
+                                  bool ignore_state) {
+  if (auto ec = DoSaveCheckAndStart(new_version, basename, trans, ignore_state); ec) {
+    return ec;
+  }
+
+  return WaitUntilSaveFinished(trans, ignore_state);
 }
 
 bool ServerFamily::TEST_IsSaving() const {
@@ -1629,15 +1644,21 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   return mem_cmd.Run(args);
 }
 
-// SAVE [DF|RDB] [basename]
-// Allows saving the snapshot of the dataset on disk, potentially overriding the format
-// and the snapshot name.
-void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
-  string err_detail;
-  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
-  if (args.size() > 2) {
-    return cntx->SendError(kSyntaxErr);
+void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
+  GenericError ec = WaitUntilSaveFinished(trans.get());
+  if (ec) {
+    LOG(INFO) << "Error in BgSaveFb: " << ec.Format();
   }
+}
+
+std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename(
+    CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 2) {
+    cntx->SendError(kSyntaxErr);
+    return {};
+  }
+
+  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
 
   if (args.size() >= 1) {
     ToUpper(&args[0]);
@@ -1647,7 +1668,8 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     } else if (sub_cmd == "RDB") {
       new_version = false;
     } else {
-      return cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+      cntx->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+      return {};
     }
   }
 
@@ -1656,7 +1678,41 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     basename = ArgS(args, 1);
   }
 
-  GenericError ec = DoSave(new_version, basename, cntx->transaction);
+  return ServerFamily::VersionBasename{new_version, basename};
+}
+
+// BGSAVE [DF|RDB] [basename]
+// TODO add missing [SCHEDULE]
+void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
+  auto maybe_res = GetVersionAndBasename(args, cntx);
+  if (!maybe_res) {
+    return;
+  }
+
+  const auto [version, basename] = *maybe_res;
+
+  if (auto ec = DoSaveCheckAndStart(version, basename, cntx->transaction); ec) {
+    cntx->SendError(ec.Format());
+    return;
+  }
+  bg_save_fb_.JoinIfNeeded();
+  bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this,
+                           boost::intrusive_ptr<Transaction>(cntx->transaction));
+  cntx->SendOk();
+}
+
+// SAVE [DF|RDB] [basename]
+// Allows saving the snapshot of the dataset on disk, potentially overriding the format
+// and the snapshot name.
+void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
+  auto maybe_res = GetVersionAndBasename(args, cntx);
+  if (!maybe_res) {
+    return;
+  }
+
+  const auto [version, basename] = *maybe_res;
+
+  GenericError ec = DoSave(version, basename, cntx->transaction);
   if (ec) {
     cntx->SendError(ec.Format());
   } else {
@@ -1701,7 +1757,7 @@ void ServerFamily::ResetStat() {
 
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
-  Mutex mu;
+  util::fb2::Mutex mu;
 
   auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
@@ -1719,6 +1775,8 @@ Metrics ServerFamily::GetMetrics() const {
     result.fiber_switch_delay_usec += fb2::FiberSwitchDelayUsec();
     result.fiber_longrun_cnt += fb2::FiberLongRunCnt();
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
+    result.worker_fiber_stack_size += fb2::WorkerFibersStackSize();
+    result.worker_fiber_count += fb2::WorkerFibersCount();
 
     result.coordinator_stats.Add(ss->stats);
 
@@ -1744,6 +1802,8 @@ Metrics ServerFamily::GetMetrics() const {
       if (result.tx_queue_len < shard->txq()->size())
         result.tx_queue_len = shard->txq()->size();
     }
+
+    result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };
@@ -1834,12 +1894,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("used_memory_peak", ump);
     append("used_memory_peak_human", HumanReadableNumBytes(ump));
 
+    // Virtual memory size, upper bound estimation on the RSS memory used by the fiber stacks.
+    append("fibers_stack_vms", m.worker_fiber_stack_size);
+    append("fibers_count", m.worker_fiber_count);
+
     size_t rss = rss_mem_current.load(memory_order_relaxed);
     append("used_memory_rss", rss);
     append("used_memory_rss_human", HumanReadableNumBytes(rss));
     append("used_memory_peak_rss", rss_mem_peak.load(memory_order_relaxed));
-
-    append("comitted_memory", GetMallocCurrentCommitted());
 
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
@@ -1869,6 +1931,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
            m.facade_stats.conn_stats.dispatch_queue_subscriber_bytes);
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
+    append("tls_bytes", m.tls_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
@@ -2399,10 +2462,11 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       }
       cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
-      std::string client_id{arg};
-      auto& pool = service_.proactor_pool();
-      pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->remote_client_id_ = arg; });
+      auto info = dfly_cmd_->GetReplicaInfo(cntx);
+      DCHECK(info != nullptr);
+      if (info) {
+        info->id = arg;
+      }
     } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
       unsigned version;
       if (!absl::SimpleAtoi(arg, &version)) {
@@ -2425,6 +2489,9 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       }
       VLOG(2) << "Received client ACK=" << ack;
       cntx->replication_flow->last_acked_lsn = ack;
+      return;
+    } else if (cmd == "ACL-CHECK") {
+      cntx->SendOk();
       return;
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();
@@ -2634,7 +2701,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
-      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, acl::kBGSave}.HFUNC(Save)
+      << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kBGSave}.HFUNC(BgSave)
       << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
       << CI{"CONFIG", CO::ADMIN, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)

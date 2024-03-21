@@ -34,6 +34,7 @@ extern "C" {
 #include "util/tls/tls_socket.h"
 #endif
 
+ABSL_FLAG(std::string, masteruser, "", "username for authentication with master");
 ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
 ABSL_FLAG(bool, tls_replication, false, "Enable TLS on replication");
 
@@ -236,9 +237,12 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
    CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &intv, sizeof(intv)));
   */
   auto masterauth = absl::GetFlag(FLAGS_masterauth);
+  auto masteruser = absl::GetFlag(FLAGS_masteruser);
+  ResetParser(false);
   if (!masterauth.empty()) {
-    ResetParser(false);
-    RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("AUTH ", masterauth)));
+    auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
+                                  : StrCat("AUTH ", masteruser, " ", masterauth);
+    RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
     PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
   return error_code{};

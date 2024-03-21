@@ -7,7 +7,7 @@ cxx_link(dragonfly base dragonfly_lib)
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
   # can cause SIGILL.
-  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2)
+  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS "-march=core2")
 endif()
 
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
@@ -88,7 +88,8 @@ cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
-         testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb LABELS DFLY)
+         testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
+         testdata/redis_json.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)

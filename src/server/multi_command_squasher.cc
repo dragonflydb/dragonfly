@@ -1,7 +1,12 @@
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "server/multi_command_squasher.h"
 
 #include <absl/container/inlined_vector.h>
 
+#include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "server/cluster/unique_slot_checker.h"
 #include "server/command_registry.h"

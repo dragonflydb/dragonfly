@@ -637,7 +637,7 @@ vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
 }
 
 absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
-  Mutex mu;
+  fb2::Mutex mu;
   absl::flat_hash_set<string> result;
 
   auto add_keys = [&](ProactorBase* proactor) {
@@ -671,14 +671,15 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
       << "Timeout of " << timeout << " reached when expecting condition";
 }
 
-Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
+fb2::Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
   TransactionSuspension tx;
   pp_->at(0)->Await([&] { tx.Start(); });
 
-  auto fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [condition, tx = std::move(tx)]() mutable {
-    ExpectConditionWithinTimeout(condition);
-    tx.Terminate();
-  });
+  auto fb =
+      pp_->at(0)->LaunchFiber(fb2::Launch::dispatch, [condition, tx = std::move(tx)]() mutable {
+        ExpectConditionWithinTimeout(condition);
+        tx.Terminate();
+      });
   return fb;
 }
 

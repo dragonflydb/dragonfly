@@ -78,7 +78,7 @@ class ScriptMgr {
   ScriptParams default_params_;
 
   absl::flat_hash_map<ScriptKey, InternalScriptData> db_;
-  mutable Mutex mu_;
+  mutable util::fb2::Mutex mu_;
 };
 
 }  // namespace dfly

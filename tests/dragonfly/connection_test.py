@@ -4,12 +4,12 @@ import pytest
 import asyncio
 import time
 from redis import asyncio as aioredis
-from redis.exceptions import ConnectionError as redis_conn_error
+from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
 import async_timeout
 from dataclasses import dataclass
 
 from . import dfly_args
-from .instance import DflyInstance
+from .instance import DflyInstance, DflyInstanceFactory
 
 BASE_PORT = 1111
 
@@ -564,7 +564,7 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
 @pytest.mark.asyncio
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_factory):
-    server = df_local_factory.create(
+    server: DflyInstance = df_local_factory.create(
         no_tls_on_admin_port="true",
         admin_port=1111,
         port=1211,
@@ -573,13 +573,12 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_
     )
     server.start()
 
-    client = aioredis.Redis(port=server.port, password="XXX")
-    try:
-        await client.execute_command("DBSIZE")
-    except redis_conn_error:
-        pass
+    client = server.client(password="XXX")
+    with pytest.raises((ResponseError)):
+        await client.dbsize()
+    await client.close()
 
-    client = aioredis.Redis(port=server.admin_port, password="XXX")
+    client = server.admin_client(password="XXX")
     assert await client.dbsize() == 0
     await client.close()
 
@@ -605,27 +604,19 @@ async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, d
 
 
 @pytest.mark.asyncio
-async def test_tls_reject(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
-    server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+async def test_tls_reject(
+    with_ca_tls_server_args, with_tls_client_args, df_local_factory: DflyInstanceFactory
+):
+    server: DflyInstance = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
 
-    client = aioredis.Redis(port=server.port, **with_tls_client_args, ssl_cert_reqs=None)
-    try:
+    client = server.client(**with_tls_client_args, ssl_cert_reqs=None)
+    await client.ping()
+    await client.close()
+
+    client = server.client(**with_tls_client_args)
+    with pytest.raises(redis_conn_error):
         await client.ping()
-    except redis_conn_error:
-        pass
-
-    client = aioredis.Redis(port=server.port, **with_tls_client_args)
-    try:
-        assert await client.dbsize() != 0
-    except redis_conn_error:
-        pass
-
-    client = aioredis.Redis(port=server.port, ssl_cert_reqs=None)
-    try:
-        assert await client.dbsize() != 0
-    except redis_conn_error:
-        pass
     await client.close()
 
 
