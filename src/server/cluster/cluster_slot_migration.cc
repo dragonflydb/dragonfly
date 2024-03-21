@@ -78,29 +78,6 @@ error_code ClusterSlotMigration::Init(uint32_t sync_id, uint32_t shards_num) {
   return ec;
 }
 
-error_code ClusterSlotMigration::Greet() {
-  ResetParser(false);
-  VLOG(1) << "greeting message handling";
-  RETURN_ON_ERR(SendCommandAndReadResponse("PING"));
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
-
-  auto port = absl::GetFlag(FLAGS_port);
-  auto cmd = absl::StrCat("DFLYMIGRATE CONF ", port);
-  for (const auto& s : slots_) {
-    absl::StrAppend(&cmd, " ", s.start, " ", s.end);
-  }
-  VLOG(1) << "Migration command: " << cmd;
-  RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
-  // Response is: sync_id, num_shards
-  if (!CheckRespFirstTypes({RespExpr::INT64, RespExpr::INT64}))
-    return make_error_code(errc::bad_message);
-
-  sync_id_ = get<int64_t>(LastResponseArgs()[0].u);
-  source_shards_num_ = get<int64_t>(LastResponseArgs()[1].u);
-
-  return error_code{};
-}
-
 ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   const auto& ctx = server();
   return {ctx.host, ctx.port};

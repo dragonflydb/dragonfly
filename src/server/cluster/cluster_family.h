@@ -60,12 +60,6 @@ class ClusterFamily {
   // DFLYMIGRATE INIT is internal command to create incoming migration object
   void InitMigration(CmdArgList args, ConnectionContext* cntx);
 
-  // DFLYMIGRATE CONF initiate first step in slots migration procedure
-  // MigrationConf process this request and saving slots range and
-  // target node port in outgoing_migration_jobs_.
-  // return sync_id and shard number to the target node
-  void MigrationConf(CmdArgList args, ConnectionContext* cntx);
-
   // DFLYMIGRATE FLOW initiate second step in slots migration procedure
   // this request should be done for every shard on the target node
   // this method assocciate connection and shard that will be the data
@@ -83,7 +77,8 @@ class ClusterFamily {
   void RemoveFinishedMigrations();
 
   // store info about migration and create unique session id
-  uint32_t CreateOutgoingMigration(std::string host_ip, uint16_t port, SlotRanges slots);
+  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(std::string host_ip, uint16_t port,
+                                                             SlotRanges slots);
 
   std::shared_ptr<OutgoingMigration> GetOutgoingMigration(uint32_t sync_id);
 

@@ -51,8 +51,6 @@ class ClusterSlotMigration : private ProtocolClient {
   }
 
  private:
-  // Send DFLYMIGRATE CONF to the source and get info about migration process
-  std::error_code Greet();
   void MainMigrationFb();
   // Creates flows, one per shard on the source node and manage migration process
   std::error_code InitiateSlotsMigration();
