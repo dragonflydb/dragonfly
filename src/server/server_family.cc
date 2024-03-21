@@ -1042,6 +1042,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                            << sdata_res.error().message();
   }
+  AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
 
   DbStats total;
   for (const auto& db_stats : m.db_stats) {
@@ -1802,6 +1803,8 @@ Metrics ServerFamily::GetMetrics() const {
         result.tx_queue_len = shard->txq()->size();
     }
 
+    result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
+
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };
 
@@ -1928,6 +1931,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
            m.facade_stats.conn_stats.dispatch_queue_subscriber_bytes);
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
+    append("tls_bytes", m.tls_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
