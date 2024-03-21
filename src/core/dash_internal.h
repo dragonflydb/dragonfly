@@ -1508,11 +1508,30 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
                                                                       Hash_t hash,
                                                                       uint8_t result_bid[3]) const {
   if (bid < kRegularBucketCnt) {
-    // right now we do not migrate entries from nid to bid, only from stash to normal buckets.
+    // Right now we do not migrate entries from nid to bid, only from stash to normal buckets.
+    // The reason for this is that CVCBumpUp implementation swaps the slots of the same bucket
+    // so there is no further action needed.
     return 0;
   }
 
   // Stash case.
+  // There are three actors (interesting buckets). The stash bucket, the target bucket and its
+  // adjacent bucket (probe). To understand the code below consider the cases in CVCBumpUp:
+  // 1. If the bid is not a stash bucket, then just swap the slots of the target.
+  // 2. If there is empty space in target or probe bucket insert the slot there and remove
+  //    it from the stash bucket.
+  // 3. If there is no empty space then we need swap slots with either the target or the probe
+  //    bucket. Furthermore, we might clear the stash bucket so in total all the 3 buckets
+  //    are affected
+  // Case 1 is handled by the if statement above and cases 2 and 3 below. We should return via
+  // result_bid all the buckets(with version less than threshold) that CVCBumpUp will modify.
+  // Note, that for case 2 we might return an extra bucket id even though this bucket was not
+  // changed. An example of that is TryMoveFromStash which will first try to insert on the target
+  // bucket and if that fails it will retry with the probe bucket. Since we don't really know
+  // which of the two we insert to we are pesimistic and assume that both of them got modified. I
+  // suspect we could optimize this out by looking at the fingerprints but for now I care about
+  // correctness and returning the correct modified buckets. Besides, we are on a path of updating
+  // the version anyway which will assert that the bucket won't be send again during snapshotting.
   unsigned result = 0;
   if (bucket_[bid].GetVersion() < ver_threshold) {
     result_bid[result++] = bid;
@@ -1682,6 +1701,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
   // bucket_offs - 0 if exact bucket, 1 if neighbour
   unsigned bucket_offs = target.UnsetStashPtr(fp_hash, stash_pos, &next);
   uint8_t swap_bid = (target_bid + bucket_offs) % kRegularBucketCnt;
+  // TODO exit early when target_bid == swap_bid
   auto& swapb = bucket_[swap_bid];
 
   constexpr unsigned kLastSlot = kNumSlots - 1;
