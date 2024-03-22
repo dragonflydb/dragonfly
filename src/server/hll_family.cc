@@ -82,6 +82,9 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   } else {
     res.it->second.GetString(&hll);
   }
+  if (isValidHLL(StringToHllPtr(hll)) == HLL_INVALID) {
+    return OpStatus::INVALID_VALUE;
+  }
 
   int updated = 0;
   sds hll_sds = sdsnewlen(hll.data(), hll.size());
