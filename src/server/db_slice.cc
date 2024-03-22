@@ -478,6 +478,9 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
   if (TieredStorage* tiered = shard_owner()->tiered_storage();
       tiered && load_mode == LoadExternalMode::kLoad) {
     if (res.it->second.IsExternal()) {
+      // We need to move fetched_items because we preempt and some other
+      // transaction might conclude and clear the fetched_items_ with OnCbFinish()
+      auto tmp = std::move(fetched_items_);
       // Load reads data from disk therefore we will preempt in this function.
       // We will update the iterator if it changed during the preemption
       res.it = tiered->Load(cntx.db_index, res.it, key);
@@ -485,6 +488,7 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
         return OpStatus::KEY_NOTFOUND;
       }
       events_.ram_misses++;
+      fetched_items_ = std::move(tmp);
     } else {
       if (res.it->second.HasIoPending()) {
         tiered->CancelIo(cntx.db_index, res.it);
