@@ -86,12 +86,13 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   int updated = 0;
   // +3 to avoid reallocating if possible.
   // Each insertion to sparse hll could expand it by 3 bytes at most.
-  sds hll_sds =
-      sdsnewlen(hll.data(), hll.size() + 3 < HLL_SPARSE_MAX_BYTES ? hll.size() + 3 : hll.size());
+  sds hll_sds = sdsnewlen(hll.data(), hll.size());
+  sds* hll_ptr = &hll_sds;
   for (const auto& value : values) {
     // pfadd might resize the input string. A referance to string.data() makes it unnecessarily
     // complicated
-    int added = pfadd(hll_sds, (unsigned char*)value.data(), value.size());
+    int added = pfadd(hll_ptr, (unsigned char*)value.data(), value.size());
+    hll_sds = *hll_ptr;
     if (added < 0) {
       return OpStatus::INVALID_VALUE;
     }
@@ -131,7 +132,7 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
         // Even in the case of a read - we still want to convert the hll to dense format, as it
         // could originate in Redis (like in replication or rdb load).
         hll = hll_view;
-        ConvertToDenseIfNeeded(&hll);  // enhance PFCOUNT as well?
+        ConvertToDenseIfNeeded(&hll);
         hll_view = hll;
         break;
       case HLL_INVALID:

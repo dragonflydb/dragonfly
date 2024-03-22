@@ -183,6 +183,7 @@
  * when this implementation switches to the dense representation is
  * configured via the define HLL_SPARSE_MAX_BYTES.
  */
+size_t HLL_SPARSE_MAX_BYTES = 3000;
 
 struct hllhdr {
   char magic[4];       /* "HYLL" */
@@ -667,7 +668,7 @@ int hllSparseToDense(sds* hll_ptr) {
  * sparse to dense: this happens when a register requires to be set to a value
  * not representable with the sparse representation, or when the resulting
  * size would be greater than HLL_SPARSE_MAX_BYTES. */
-int hllSparseSet(sds hll, long index, uint8_t count) {
+int hllSparseSet(sds* hll_ptr, long index, uint8_t count) {
     struct hllhdr *hdr;
     uint8_t oldcount, *sparse, *end, *p, *prev, *next;
     long first, span;
@@ -686,13 +687,14 @@ int hllSparseSet(sds hll, long index, uint8_t count) {
      * If the available size of hyperloglog sds string is not enough for the increment
      * we need, we promote the hypreloglog to dense representation in 'step 3'.
      */
-
+    sds hll = *hll_ptr;
     if (sdsalloc(hll) < HLL_SPARSE_MAX_BYTES && sdsavail(hll) < 3) {
         size_t newlen = sdslen(hll) + 3;
         newlen += min(newlen, 300); /* Greediness: double 'newlen' if it is smaller than 300, or add 300 to it when it exceeds 300 */
         if (newlen > HLL_SPARSE_MAX_BYTES)
             newlen = HLL_SPARSE_MAX_BYTES;
-        hll = sdsResize(hll, newlen); //newer avaiable: sds sdsResize(sds s, size_t size, int would_regrow);
+        *hll_ptr = sdsResize(hll, newlen); //newer avaiable: sds sdsResize(sds s, size_t size, int would_regrow)
+        hll = *hll_ptr;
     }
 
     /* Step 1: we need to locate the opcode we need to modify to check
@@ -928,11 +930,11 @@ promote: /* Promote to dense representation. */
  *
  * This function is actually a wrapper for hllSparseSet(), it only performs
  * the hashing of the element to obtain the index and zeros run length. */
-int hllSparseAdd(sds hll, unsigned char *ele, size_t elesize) {
+int hllSparseAdd(sds* hll_ptr, unsigned char *ele, size_t elesize) {
     long index;
     uint8_t count = hllPatLen(ele,elesize,&index);
     /* Update the register if this element produced a longer run of zeroes. */
-    return hllSparseSet(hll,index,count);
+    return hllSparseSet(hll_ptr,index,count);
 }
 /* Compute the register histogram in the sparse representation. */
 void hllSparseRegHisto(uint8_t* sparse, int sparselen, int* invalid, int* reghisto) {
@@ -1297,15 +1299,15 @@ int convertSparseToDenseHll(struct HllBufferPtr in_hll, struct HllBufferPtr out_
   return C_OK;
 }
 
-int pfadd(sds hll, unsigned char* value, size_t size) {
-  struct hllhdr* hdr = (struct hllhdr*)hll;
+int pfadd(sds* hll_ptr, unsigned char* value, size_t size) {
+  struct hllhdr* hdr = (struct hllhdr*)(*hll_ptr);
   int retval;
   switch (hdr->encoding) {
     case HLL_DENSE:
       retval = hllDenseAdd(hdr->registers, value, size);
       break;
     case HLL_SPARSE:
-      retval = hllSparseAdd(hll, value, size);
+      retval = hllSparseAdd(hll_ptr, value, size);
       break;
     default:
       retval = -1;
