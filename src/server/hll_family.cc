@@ -84,8 +84,6 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   }
 
   int updated = 0;
-  // +3 to avoid reallocating if possible.
-  // Each insertion to sparse hll could expand it by 3 bytes at most.
   sds hll_sds = sdsnewlen(hll.data(), hll.size());
   sds* hll_ptr = &hll_sds;
   for (const auto& value : values) {
