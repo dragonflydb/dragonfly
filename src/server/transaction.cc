@@ -692,14 +692,14 @@ void Transaction::ScheduleInternal() {
   DCHECK_GT(unique_shard_cnt_, 0u);
   DCHECK(!IsAtomicMulti() || cid_->IsMultiTransactional());
 
-  // Try running immediately if we're concluding and either:
-  // - have a single shard, and thus never have to cancel due to reordering
-  // - run as an idempotent command, meaning we can safely repeat the operation
-  bool can_run_immediate = !IsGlobal() && (coordinator_state_ & COORD_CONCLUDING) &&
-                           (unique_shard_cnt_ == 1 || (cid_->opt_mask() & CO::IDEMPOTENT));
+  // Try running immediately (during scheduling) if we're concluding and either:
+  // - have a single shard, and thus never have to cancel scheduling due to reordering
+  // - run as an idempotent command, meaning we can safely repeat the operation if scheduling fails
+  bool can_run_immediately = !IsGlobal() && (coordinator_state_ & COORD_CONCLUDING) &&
+                             (unique_shard_cnt_ == 1 || (cid_->opt_mask() & CO::IDEMPOTENT));
 
   DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards "
-           << " immediate run: " << can_run_immediate;
+           << " immediate run: " << can_run_immediately;
 
   auto is_active = [this](uint32_t i) { return IsActive(i); };
 
@@ -715,8 +715,8 @@ void Transaction::ScheduleInternal() {
     InitTxTime();
 
     atomic_uint32_t schedule_fails = 0;
-    auto cb = [this, &schedule_fails, can_run_immediate]() {
-      if (!ScheduleInShard(EngineShard::tlocal(), can_run_immediate)) {
+    auto cb = [this, &schedule_fails, can_run_immediately]() {
+      if (!ScheduleInShard(EngineShard::tlocal(), can_run_immediately)) {
         schedule_fails.fetch_add(1, memory_order_relaxed);
       }
       run_barrier_.Dec();
@@ -863,12 +863,12 @@ void Transaction::DispatchHop() {
   DCHECK_GT(unique_shard_cnt_, 0u);
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
   DCHECK(!IsAtomicMulti() || multi_->lock_mode.has_value());
-  DCHECK_LE(shard_data_.size(), 256u);
+  DCHECK_LE(shard_data_.size(), 1024u);
 
   // Hops can start executing immediately after being armed, so we
   // initialize the run barrier before arming, as well as copy indices
   // of active shards to avoid reading concurrently accessed shard data.
-  std::bitset<256> poll_flags(0);
+  std::bitset<1024> poll_flags(0);
   IterateActiveShards([&poll_flags, global = IsGlobal() || IsAtomicMulti()](auto& sd, auto i) {
     if ((sd.local_mask & RAN_IMMEDIATELY) == 0)
       poll_flags.set(i, true);
