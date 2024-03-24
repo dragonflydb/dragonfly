@@ -1,12 +1,12 @@
 Dragonfly Business Source License 1.1
 
-<u>License</u>: BSL 1.1
+<u>License</u>: BUSL 1.1
 
 <u>Licensor</u>: DragonflyDB, Ltd.
 
 <u>Licensed Work</u>: Dragonfly including the software components, or any portion of them, and any modification.
 
-<u>Change Date</u>: March 15, 2028
+<u>Change Date</u>: August 15, 2028
 
 <u>Change License</u>: [Apache License, Version
 2.0](https://www.apache.org/licenses/LICENSE-2.0), as published by the
@@ -15,14 +15,14 @@ Apache Foundation.
 <u>Additional Use Grant</u>: You may make use of the Licensed Work (i) only as part of your own product or service, provided it is not an in-memory data store product or service; and (ii) provided that you do not use, provide, distribute, or make available the Licensed Work as a Service.
 A “Service” is a commercial offering, product, hosted, or managed service, that allows third parties (other than your own employees and contractors acting on your behalf) to access and/or use the Licensed Work or a substantial set of the features or functionality of the Licensed Work to third parties as a software-as-a-service, platform-as-a-service, infrastructure-as-a-service or other similar services that compete with Licensor products or services.
 
-Text of BSL 1.1
+Text of BUSL 1.1
 
 The Licensor hereby grants you the right to copy, modify, create
 derivative works, redistribute, and make non-production use of the
 Licensed Work. The Licensor may make an Additional Use Grant, above,
 permitting limited production use.
 
-Effective on the Change Date, or the fifth anniversary of the first
+Effective on the Change Date, or the forth anniversary of the first
 publicly available distribution of a specific version of the Licensed
 Work under this License, whichever comes first, the Licensor hereby
 grants you rights under the terms of the Change License, and the rights
