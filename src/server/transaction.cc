@@ -722,11 +722,12 @@ void Transaction::ScheduleInternal() {
       run_barrier_.Dec();
     };
 
+    run_barrier_.Start(unique_shard_cnt_);
     if (CanRunInlined()) {
       // single shard schedule operation can't fail
       CHECK(ScheduleInShard(EngineShard::tlocal(), can_run_immediately));
+      run_barrier_.Dec();
     } else {
-      run_barrier_.Start(unique_shard_cnt_);
       IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
       run_barrier_.Wait();
     }
