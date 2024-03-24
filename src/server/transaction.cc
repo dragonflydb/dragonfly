@@ -722,11 +722,11 @@ void Transaction::ScheduleInternal() {
       run_barrier_.Dec();
     };
 
-    run_barrier_.Start(unique_shard_cnt_);
     if (CanRunInlined()) {
-      cb();
-      DCHECK_EQ(run_barrier_.DEBUG_Count(), 0u);
+      // single shard schedule operation can't fail
+      CHECK(ScheduleInShard(EngineShard::tlocal(), can_run_immediately));
     } else {
+      run_barrier_.Start(unique_shard_cnt_);
       IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
       run_barrier_.Wait();
     }
@@ -869,13 +869,16 @@ void Transaction::DispatchHop() {
   // initialize the run barrier before arming, as well as copy indices
   // of active shards to avoid reading concurrently accessed shard data.
   std::bitset<1024> poll_flags(0);
-  IterateActiveShards([&poll_flags, global = IsGlobal() || IsAtomicMulti()](auto& sd, auto i) {
-    if ((sd.local_mask & RAN_IMMEDIATELY) == 0)
+  unsigned run_cnt = 0;
+  IterateActiveShards([&poll_flags, &run_cnt](auto& sd, auto i) {
+    if ((sd.local_mask & RAN_IMMEDIATELY) == 0) {
+      run_cnt++;
       poll_flags.set(i, true);
+    }
     sd.local_mask &= ~RAN_IMMEDIATELY;  // we'll run it next time if it avoided concluding
   });
 
-  unsigned run_cnt = poll_flags.count();
+  DCHECK_EQ(run_cnt, poll_flags.count());
   if (run_cnt == 0)  // all callbacks were run immediately
     return;
 
@@ -1077,7 +1080,9 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool can_run_immediately) 
       shard->stats().tx_immediate_total++;
 
       RunCallback(shard);
-      if (coordinator_state_ & COORD_CONCLUDING)  // could've been cleared by AVOID_CONCLUDING
+      // Check state again, it could've been updated if the callback returned AVOID_CONCLUDING flag.
+      // Only possible for single shard.
+      if (coordinator_state_ & COORD_CONCLUDING)
         return true;
     }
 
