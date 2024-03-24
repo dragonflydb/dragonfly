@@ -11,6 +11,7 @@ from .utility import *
 from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
+from .proxy import Proxy
 
 from . import dfly_args
 
@@ -1347,18 +1348,9 @@ async def test_replicate_cluster(df_local_factory: DflyInstanceFactory, df_seede
     fill_task = asyncio.create_task(seeder.run())
 
     # Start replication
-    first_node = cluster_nodes[0]
-    additional_nodes = cluster_nodes[1:]
-    await c_replica.execute_command("REPLICAOF localhost " + str(first_node.port) + " 0 5259")
-    await asyncio.gather(
-        *(
-            asyncio.create_task(
-                c_replica.execute_command(
-                    "ADDREPLICAOF localhost " + str(node.port) + " 5260 16383"
-                )
-            )
-            for node in additional_nodes
-        )
+    await c_replica.execute_command("REPLICAOF localhost " + str(cluster_nodes[0].port) + " 0 5259")
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(cluster_nodes[1].port) + " 5260 16383"
     )
 
     # give seeder time to run.
@@ -1370,11 +1362,130 @@ async def test_replicate_cluster(df_local_factory: DflyInstanceFactory, df_seede
     # wait for replication to finish
     await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
 
+    # promote replica to master and compare data
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
 
     await disconnect_clients(*c_nodes, c_replica)
+
+
+async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
+    start = time.time()
+
+    async def is_stable():
+        role = await m_client.execute_command("role")
+        return role == [
+            "master",
+            [["127.0.0.1", str(replica_port), "stable_sync"]],
+        ]
+
+    while (time.time() - start) < timeout:
+        if await is_stable():
+            return
+        await asyncio.sleep(0.05)
+
+    raise RuntimeError("Failed to reach stable sync")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_replicate_disconnect_cluster(
+    df_local_factory: DflyInstanceFactory, df_seeder_factory
+):
+    """
+    Create dragonfly cluster of 2 nodes and additional dragonfly server in emulated mode.
+    Populate the cluster with data
+    Replicate the dragonfly cluster into a single dragonfly node and wait for stable sync
+    Break connection between cluster node 0 and replica and reconnect
+    Promote replica to master
+    Compare cluster data and replica data
+    """
+    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    cluster_nodes = [
+        df_local_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
+    ]
+
+    # Start instances and connect clients
+    df_local_factory.start_all(cluster_nodes + [replica])
+    c_nodes = [node.client() for node in cluster_nodes]
+
+    c_replica = replica.client()
+
+    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes))
+    config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {cluster_nodes[0].port} }},
+          "replicas": []
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {cluster_nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes,
+    )
+
+    # Fill instances with some data
+    seeder = df_seeder_factory.create(keys=2000, port=cluster_nodes[0].port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    proxy = Proxy("127.0.0.1", 1114, "127.0.0.1", cluster_nodes[0].port)
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    # Start replication
+    await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port) + " 0 5259")
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(cluster_nodes[1].port) + " 5260 16383"
+    )
+
+    # wait for replication to reach stable state on all nodes
+    await asyncio.gather(
+        *(asyncio.create_task(await_stable_sync(c, replica.port)) for c in c_nodes)
+    )
+
+    # break connection between first node and replica
+    await proxy.close(proxy_task)
+    await asyncio.sleep(3)
+
+    async def is_first_master_conn_down(conn):
+        info = await conn.execute_command("INFO REPLICATION")
+        print(info)
+        statuses = re.findall("master_link_status:(down|up)\r\n", info)
+        assert len(statuses) == 2
+        assert statuses[0] == "down"
+        assert statuses[1] == "up"
+
+    await is_first_master_conn_down(c_replica)
+
+    # start connection again
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    seeder.stop()
+    await fill_task
+
+    # wait for stable sync on first master
+    await await_stable_sync(c_nodes[0], replica.port)
+    # wait for no lag on all cluster nodes
+    await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
+
+    # promote replica to master and compare data
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
+
+    await disconnect_clients(*c_nodes, c_replica)
+    await proxy.close(proxy_task)
 
 
 def is_offset_eq_master_repl_offset(replication_info: str):

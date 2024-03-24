@@ -68,9 +68,7 @@ void JournalExecutor::FlushAll() {
 }
 
 void JournalExecutor::FlushSlots(const SlotRange& slot_range) {
-  SlotRanges slot_ranges = {slot_range};
-  SlotSet slot_set(slot_ranges);
-  auto cmd = BuildFromParts("FLUSHSLOTS", slot_set.ToString());
+  auto cmd = BuildFromParts("DFLYCLUSTER", "FLUSHSLOTS", slot_range.start, slot_range.end);
   Execute(cmd);
 }
 

@@ -703,7 +703,6 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
   // was made. Therefore we delete slots entries with version < next_version
   uint64_t next_version = NextVersion();
-
   std::string tmp;
   auto del_entry_cb = [&](PrimeTable::iterator it) {
     std::string_view key = it->first.GetSlice(&tmp);
@@ -730,10 +729,11 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   etl.DecommitMemory(ServerState::kDataHeap);
 }
 
-void DbSlice::FlushSlots(SlotSet slot_ids) {
-  InvalidateSlotWatches(slot_ids);
-  fb2::Fiber("flush_slots", [this, slot_ids = std::move(slot_ids)]() mutable {
-    FlushSlotsFb(slot_ids);
+void DbSlice::FlushSlots(SlotRanges slot_ranges) {
+  SlotSet slot_set(slot_ranges);
+  InvalidateSlotWatches(slot_set);
+  fb2::Fiber("flush_slots", [this, slot_set = std::move(slot_set)]() mutable {
+    FlushSlotsFb(slot_set);
   }).Detach();
 }
 
