@@ -36,7 +36,7 @@ SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessor
 
 add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
-            generic_family.cc hset_family.cc json_family.cc
+            generic_family.cc hset_family.cc http_api.cc json_family.cc
             ${SEARCH_FILES}
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc

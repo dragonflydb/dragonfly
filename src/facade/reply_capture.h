@@ -47,11 +47,9 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
   void StartCollection(unsigned len, CollectionType type) override;
 
- private:
+ public:
   using Error = std::pair<std::string, std::string>;  // SendError (msg, type)
   using Null = std::nullptr_t;                        // SendNull or SendNullArray
-  struct SimpleString : public std::string {};        // SendSimpleString
-  struct BulkString : public std::string {};          // SendBulkString
 
   struct StrArrPayload {
     bool simple;
@@ -66,7 +64,9 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
     bool with_scores;
   };
 
- public:
+  struct SimpleString : public std::string {};  // SendSimpleString
+  struct BulkString : public std::string {};    // SendBulkString
+
   CapturingReplyBuilder(ReplyMode mode = ReplyMode::FULL)
       : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {
   }
@@ -89,7 +89,6 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   // If an error is stored inside payload, get a reference to it.
   static std::optional<ErrorRef> GetError(const Payload& pl);
 
- private:
   struct CollectionPayload {
     CollectionPayload(unsigned len, CollectionType type);
 
@@ -98,6 +97,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
     std::vector<Payload> arr;
   };
 
+ private:
  private:
   // Send payload directly, bypassing external interface. For efficient passing between two
   // captures.
