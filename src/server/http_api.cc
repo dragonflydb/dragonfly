@@ -19,7 +19,7 @@ using facade::CapturingReplyBuilder;
 
 namespace {
 
-bool IsValidReq(flexbuffers::Reference req) {
+bool IsVectorOfStrings(flexbuffers::Reference req) {
   if (!req.IsVector()) {
     return false;
   }
@@ -39,21 +39,25 @@ bool IsValidReq(flexbuffers::Reference req) {
 
 // Escape a string so that it is legal to print it in JSON text.
 std::string JsonEscape(string_view input) {
-  auto hex_digit = [](int c) -> char { return c < 10 ? c + '0' : c - 10 + 'a'; };
+  auto hex_digit = [](unsigned c) -> char {
+    DCHECK_LT(c, 0xFu);
+    return c < 10 ? c + '0' : c - 10 + 'a';
+  };
 
   string out;
   out.reserve(input.size() + 2);
   out.push_back('\"');
 
-  auto* p = reinterpret_cast<const unsigned char*>(input.begin());
-  auto* e = reinterpret_cast<const unsigned char*>(input.end());
+  auto p = input.begin();
+  auto e = input.end();
 
   while (p < e) {
-    if (*p == '\\' || *p == '\"') {
+    uint8_t c = *p;
+    if (c == '\\' || c == '\"') {
       out.push_back('\\');
       out.push_back(*p++);
-    } else if (*p <= 0x1f) {
-      switch (*p) {
+    } else if (c <= 0x1f) {
+      switch (c) {
         case '\b':
           out.append("\\b");
           p++;
@@ -78,8 +82,8 @@ std::string JsonEscape(string_view input) {
           // this condition captures non readable chars with value < 32,
           // so size = 1 byte (e.g control chars).
           out.append("\\u00");
-          out.push_back(hex_digit((*p & 0xf0) >> 4));
-          out.push_back(hex_digit(*p & 0xf));
+          out.push_back(hex_digit((c & 0xf0) >> 4));
+          out.push_back(hex_digit(c & 0xf));
           p++;
       }
     } else {
@@ -131,7 +135,7 @@ struct CaptureVisitor {
     absl::StrAppend(&str, "not_implemented");
   }
 
-  void operator()(const unique_ptr<CapturingReplyBuilder::CollectionPayload>& cp) {
+  void operator()(unique_ptr<CapturingReplyBuilder::CollectionPayload> cp) {
     if (!cp) {
       absl::StrAppend(&str, "null");
       return;
@@ -178,7 +182,7 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   if (success) {
     fbb.Finish();
     doc = flexbuffers::GetRoot(fbb.GetBuffer());
-    if (!IsValidReq(doc)) {
+    if (!IsVectorOfStrings(doc)) {
       success = false;
     }
   }

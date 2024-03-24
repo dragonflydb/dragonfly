@@ -98,7 +98,6 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   };
 
  private:
- private:
   // Send payload directly, bypassing external interface. For efficient passing between two
   // captures.
   void SendDirect(Payload&& val);
