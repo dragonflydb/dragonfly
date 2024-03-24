@@ -32,14 +32,6 @@ async def wait_for_replicas_state(*clients, state="stable_sync", timeout=0.05):
         clients = [c for c, role in zip(clients, roles) if role[0] != "replica" or role[3] != state]
 
 
-async def close_proxy(proxy, proxy_task):
-    proxy.close()
-    try:
-        await proxy_task
-    except asyncio.exceptions.CancelledError:
-        pass
-
-
 """
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
@@ -1417,7 +1409,7 @@ async def test_tls_replication(
     assert 100 == db_size
 
     # 4. Break the connection between master and replica
-    await close_proxy(proxy, proxy_task)
+    await proxy.close(proxy_task)
     await asyncio.sleep(3)
     await proxy.start()
     proxy_task = asyncio.create_task(proxy.serve())
@@ -1433,7 +1425,7 @@ async def test_tls_replication(
 
     await c_replica.close()
     await c_master.close()
-    await close_proxy(proxy, proxy_task)
+    await proxy.close(proxy_task)
 
 
 # busy wait for 'replica' instance to have replication status 'status'
@@ -1656,7 +1648,7 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            await close_proxy(proxy, task)
+            await proxy.close(task)
 
     master.stop()
     replica.stop()
@@ -1699,7 +1691,7 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            await close_proxy(proxy, task)
+            await proxy.close(task)
 
     master.stop()
     replica.stop()
@@ -1746,7 +1738,7 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            await close_proxy(proxy, task)
+            await proxy.close(task)
 
     master.stop()
     replica.stop()
