@@ -3,7 +3,6 @@ package golden
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,13 +39,13 @@ func TestHelmRender(t *testing.T) {
 			output = fmt.Sprintf("%s\n", string(bytes))
 
 			if *update {
-				err := ioutil.WriteFile(goldenFile, []byte(output), 0644)
+				err := os.WriteFile(goldenFile, []byte(output), 0644)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}
 
-			expected, err := ioutil.ReadFile(goldenFile)
+			expected, err := os.ReadFile(goldenFile)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,6 +54,5 @@ func TestHelmRender(t *testing.T) {
 				t.Fatalf("Expected %s, but got %s\n. Update golden files by running `go test -v ./... -update`", string(expected), output)
 			}
 		}
-
 	}
 }
