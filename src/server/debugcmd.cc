@@ -538,7 +538,7 @@ void DebugCmd::Load(string_view filename) {
   auto new_state = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
 
   if (new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    LOG(WARNING) << new_state << " in progress, ignored";
     return cntx_->SendError("Could not load file");
   }
 

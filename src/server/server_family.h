@@ -261,9 +261,7 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(std::string_view host, std::string_view port,
-                         std::optional<string_view> slot_start, std::optional<string_view> slot_end,
-                         ConnectionContext* cntx, ActionOnConnectionFail on_error);
+  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);

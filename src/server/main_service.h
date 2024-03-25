@@ -188,8 +188,8 @@ class Service : public facade::ServiceInterface {
   const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
 
   mutable util::fb2::Mutex mu_;
-  GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
-  uint32_t loading_state_counter_ = 0;              // protected by mu_;
+  GlobalState global_state_ ABSL_GUARDED_BY(mu_) = GlobalState::ACTIVE;
+  uint32_t loading_state_counter_ ABSL_GUARDED_BY(mu_) = 0;
 };
 
 uint64_t GetMaxMemoryFlag();

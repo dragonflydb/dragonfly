@@ -60,7 +60,6 @@ class ClusterConfig {
   using ClusterShards = std::vector<ClusterShard>;
 
   static SlotId KeySlot(std::string_view key);
-  static OpResult<SlotRange> SlotRangeFromStr(std::string_view start, std::string_view end);
 
   static void Initialize();
   static bool IsEnabled();

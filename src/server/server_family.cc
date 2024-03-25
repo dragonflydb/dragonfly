@@ -551,49 +551,53 @@ string_view GetRedisMode() {
 }
 
 struct ReplicaOfArgs {
-  string_view host;
-  string_view port_sv;
+  string host;
   uint16_t port;
   std::optional<SlotRange> slot_range;
-  static OpResult<ReplicaOfArgs> FromParams(string_view host, string_view port,
-                                            std::optional<string_view> slot_start,
-                                            std::optional<string_view> slot_end);
-  bool IsReplicaOfNoOne();
+  static optional<ReplicaOfArgs> FromCmdArgs(CmdArgList args, ConnectionContext* cntx);
+  bool IsReplicaOfNoOne() const {
+    return port == 0;
+  }
+  friend std::ostream& operator<<(std::ostream& os, const ReplicaOfArgs& args) {
+    if (args.IsReplicaOfNoOne()) {
+      return os << "NO ONE";
+    }
+    os << args.host << ":" << args.port;
+    if (args.slot_range.has_value()) {
+      os << " SLOTS [" << args.slot_range.value().start << "-" << args.slot_range.value().end
+         << "]";
+    }
+    return os;
+  }
 };
 
-bool ReplicaOfArgs::IsReplicaOfNoOne() {
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_sv, "one")) {
-    return true;
-  }
-  return false;
-}
-
-OpResult<ReplicaOfArgs> ReplicaOfArgs::FromParams(string_view host, string_view port_sv,
-                                                  std::optional<string_view> slot_start,
-                                                  std::optional<string_view> slot_end) {
+optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionContext* cntx) {
   ReplicaOfArgs replicaof_args;
-  replicaof_args.host = host;
-  replicaof_args.port_sv = port_sv;
-  if (replicaof_args.IsReplicaOfNoOne()) {
-    return replicaof_args;
+  CmdArgParser parser(args);
+
+  if (parser.Check("NO").IgnoreCase().ExpectTail(1)) {
+    parser.ExpectTag("ONE");
+    replicaof_args.port = 0;
+  } else {
+    replicaof_args.host = parser.Next<string>();
+    replicaof_args.port = parser.Next<uint16_t>();
+    if (replicaof_args.port < 1) {
+      cntx->SendError("port is out of range");
+      return nullopt;
+    }
+    if (parser.HasNext()) {
+      auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+      replicaof_args.slot_range = SlotRange{slot_start, slot_end};
+      if (!replicaof_args.slot_range->IsValid()) {
+        cntx->SendError("Invalid slot range");
+        return nullopt;
+      }
+    }
   }
 
-  uint32_t port;
-  if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
-    return facade::OpStatus::INVALID_INT;
-  }
-  replicaof_args.port = static_cast<uint16_t>(port);
-
-  if (slot_start.has_value()) {
-    if (!slot_end.has_value()) {
-      return facade::OpStatus::SYNTAX_ERR;
-    }
-
-    OpResult<SlotRange> slot_range = ClusterConfig::SlotRangeFromStr(*slot_start, *slot_end);
-    if (!slot_range) {
-      return slot_range.status();
-    }
-    replicaof_args.slot_range = slot_range.value();
+  if (auto err = parser.Error(); err) {
+    cntx->SendError(err->MakeReply());
+    return nullopt;
   }
   return replicaof_args;
 }
@@ -876,7 +880,7 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    LOG(WARNING) << new_state << " in progress, ignored";
     return {};
   }
 
@@ -2339,29 +2343,25 @@ void ServerFamily::AddReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   }
   CHECK(replica_);
 
-  OpResult<ReplicaOfArgs> replicaof_args =
-      ReplicaOfArgs::FromParams(ArgS(args, 0), ArgS(args, 1), ArgS(args, 2), ArgS(args, 3));
-  if (!replicaof_args) {
-    return cntx->SendError(replicaof_args.status());
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, cntx);
+  if (!replicaof_args.has_value()) {
+    return;
   }
   if (replicaof_args->IsReplicaOfNoOne()) {
     return cntx->SendError("ADDREPLICAOF does not supprot no one");
   }
-  LOG(INFO) << "Add Replica " << replicaof_args->host << ":" << replicaof_args->port_sv;
+  LOG(INFO) << "Add Replica " << *replicaof_args;
 
-  auto add_replica = make_unique<Replica>(string(replicaof_args->host), replicaof_args->port,
-                                          &service_, master_replid(), replicaof_args->slot_range);
+  auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+                                          master_replid(), replicaof_args->slot_range);
   error_code ec = add_replica->Start(cntx);
   if (!ec) {
     cluster_replicas_.push_back(std::move(add_replica));
   }
 }
 
-void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view port,
-                                     std::optional<string_view> slot_start,
-                                     std::optional<string_view> slot_end, ConnectionContext* cntx,
+void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
-  LOG(INFO) << "Replicating " << host << ":" << port;
   unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
   // We should not execute replica of command while loading from snapshot.
@@ -2370,11 +2370,12 @@ void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view por
     return;
   }
 
-  OpResult<ReplicaOfArgs> replicaof_args =
-      ReplicaOfArgs::FromParams(host, port, slot_start, slot_end);
-  if (!replicaof_args) {
-    return cntx->SendError(replicaof_args.status());
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, cntx);
+  if (!replicaof_args.has_value()) {
+    return;
   }
+
+  LOG(INFO) << "Replicating " << *replicaof_args;
 
   // If NO ONE was supplied, just stop the current replica (if it exists)
   if (replicaof_args->IsReplicaOfNoOne()) {
@@ -2409,7 +2410,7 @@ void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view por
   // First, switch into the loading state
   if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
       new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    LOG(WARNING) << new_state << " in progress, ignored";
     cntx->SendError("Invalid state");
     return;
   }
@@ -2421,8 +2422,8 @@ void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view por
   }
 
   // Create a new replica and assing it
-  auto new_replica = make_shared<Replica>(string(replicaof_args->host), replicaof_args->port,
-                                          &service_, master_replid(), replicaof_args->slot_range);
+  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+                                          master_replid(), replicaof_args->slot_range);
 
   replica_ = new_replica;
 
@@ -2454,16 +2455,7 @@ void ServerFamily::ReplicaOfInternal(std::string_view host, std::string_view por
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  string_view host = ArgS(args, 0);
-  string_view port = ArgS(args, 1);
-  std::optional<string_view> slot_start;
-  std::optional<string_view> slot_end;
-  if (args.size() == 4) {
-    slot_start = ArgS(args, 2);
-    slot_end = ArgS(args, 3);
-  }
-
-  ReplicaOfInternal(host, port, slot_start, slot_end, cntx, ActionOnConnectionFail::kReturnOnError);
+  ReplicaOfInternal(args, cntx, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -2471,8 +2463,14 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ConnectionContext ctxt{&sink, nullptr};
   ctxt.skip_acl_validation = true;
 
-  ReplicaOfInternal(host, port, std::nullopt, std::nullopt, &ctxt,
-                    ActionOnConnectionFail::kContinueReplication);
+  StringVec replicaof_params{string(host), string(port)};
+
+  CmdArgVec args_vec;
+  for (auto& s : replicaof_params) {
+    args_vec.emplace_back(MutableSlice{s.data(), s.size()});
+  }
+  CmdArgList args_list = absl::MakeSpan(args_vec);
+  ReplicaOfInternal(args_list, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {

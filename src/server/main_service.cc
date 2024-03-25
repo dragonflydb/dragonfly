@@ -1024,8 +1024,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   }
 
   if (!allowed_by_state) {
-    VLOG(1) << "Command " << cid->name() << " not executed because global state is "
-            << GlobalStateName(gstate);
+    VLOG(1) << "Command " << cid->name() << " not executed because global state is " << gstate;
 
     if (gstate == GlobalState::LOADING) {
       return ErrorReply(kLoadingErr);
@@ -2409,7 +2408,7 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
     return global_state_;
   }
 
-  VLOG(1) << "Switching state from " << GlobalStateName(from) << " to " << GlobalStateName(to);
+  VLOG(1) << "Switching state from " << from << " to " << to;
   global_state_ = to;
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });

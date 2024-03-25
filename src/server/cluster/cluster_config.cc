@@ -70,24 +70,6 @@ SlotId ClusterConfig::KeySlot(string_view key) {
   return crc16(tag.data(), tag.length()) & kMaxSlotNum;
 }
 
-OpResult<SlotRange> ClusterConfig::SlotRangeFromStr(std::string_view start, std::string_view end) {
-  uint32_t slot_id_start, slot_id_end;
-  if (!absl::SimpleAtoi(start, &slot_id_start)) {
-    return facade::OpStatus::INVALID_INT;
-  }
-  if (slot_id_start > ClusterConfig::kMaxSlotNum) {
-    return facade::OpStatus::INVALID_VALUE;
-  }
-  if (!absl::SimpleAtoi(end, &slot_id_end)) {
-    return facade::OpStatus::INVALID_INT;
-  }
-  if ((slot_id_end > ClusterConfig::kMaxSlotNum) || (slot_id_end < slot_id_start)) {
-    return facade::OpStatus::INVALID_VALUE;
-  }
-  return SlotRange{.start = static_cast<uint16_t>(slot_id_start),
-                   .end = static_cast<uint16_t>(slot_id_end)};
-}
-
 namespace {
 bool HasValidNodeIds(const ClusterConfig::ClusterShards& new_config) {
   absl::flat_hash_set<string_view> nodes;
