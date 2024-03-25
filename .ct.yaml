@@ -7,4 +7,4 @@ helm-extra-args: --debug --timeout 60s
 check-version-increment: false
 validate-maintainers: false
 exclude-charts:
-  - contrib/charts/dragonfly/ci/tls-cert-manager-values.golden.yaml
+  - contrib/charts/dragonfly/ci/tls-cert-manager-values.yaml
