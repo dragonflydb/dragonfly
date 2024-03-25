@@ -1,49 +1,43 @@
-name: Lint test chart
-description: "Run lint test chart"
-
 runs:
   using: "composite"
   steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Set up Helm
-      uses: azure/setup-helm@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
 
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.9"
-        check-latest: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          check-latest: true
 
-    - name: Chart Rendering Tests
-      shell: bash
-      run: |
-        go test -v ./contrib/charts/dragonfly/...
+      - name: Chart Rendering Tests
+        shell: bash
+        run: |
+          go test -v ./contrib/charts/dragonfly/...
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@v2.6.1
 
-    - name: Set up chart-testing
-      uses: helm/chart-testing-action@v2.6.1
-
-    - name: Run chart-testing (list-changed)
-      id: list-changed
-      shell: bash
-      run: |
-        changed=$(ct list-changed --config .ct.yaml)
-        if [[ -n "$changed" ]]; then
-          echo "changed=true" >> $GITHUB_OUTPUT
-        fi
-
-    - name: Run chart-testing (lint)
-      shell: bash
-      run: |
-        ct \
-          lint \
-          --config .ct.yaml \
-          ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
-
-    - name: Create kind cluster
-      uses: helm/kind-action@v1
+      - name: Run chart-testing (list-changed)
+        id: list-changed
+        shell: bash
+        run: |
+          changed=$(ct list-changed --config .ct.yaml)
+          if [[ -n "$changed" ]]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Run chart-testing (lint)
+        shell: bash
+        run: |
+          ct \
+            lint \
+            --config .ct.yaml \
+            ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
 
     - name: Install Dependencies
       shell: bash
@@ -51,17 +45,16 @@ runs:
         LATEST=$(curl -s https://api.github.com/repos/prometheus-operator/prometheus-operator/releases/latest | jq -cr .tag_name)
         curl -sL https://github.com/prometheus-operator/prometheus-operator/releases/download/${LATEST}/bundle.yaml | kubectl create -f -
 
-    - name: Getting cluster ready
-      shell: bash
-      run: |
-        kubectl label nodes chart-testing-control-plane key/node-kind=high-memory
-
-    - name: Run chart-testing (install)
-      shell: bash
-      run: |
-        ct \
-          install \
-          --config .ct.yaml \
-          --debug \
-          --helm-extra-set-args "--set=image.repository=ghcr.io/${{ github.repository }},probes=null" \
-          ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
+      - name: Getting cluster ready
+        shell: bash
+        run: |
+          kubectl label nodes chart-testing-control-plane key/node-kind=high-memory
+      - name: Run chart-testing (install)
+        shell: bash
+        run: |
+          ct \
+            install \
+            --config .ct.yaml \
+            --debug \
+            --helm-extra-set-args "--set=image.repository=ghcr.io/${{ github.repository }},probes=null" \
+            ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
