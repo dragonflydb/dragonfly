@@ -1,3 +1,6 @@
+name: Lint test chart
+description: "Run lint test chart"
+
 runs:
   using: "composite"
   steps:
@@ -18,6 +21,7 @@ runs:
         shell: bash
         run: |
           go test -v ./contrib/charts/dragonfly/...
+
       - name: Set up chart-testing
         uses: helm/chart-testing-action@v2.6.1
 
@@ -29,6 +33,7 @@ runs:
           if [[ -n "$changed" ]]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
+
       - name: Run chart-testing (lint)
         shell: bash
         run: |
@@ -36,6 +41,7 @@ runs:
             lint \
             --config .ct.yaml \
             ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
+
       - name: Create kind cluster
         uses: helm/kind-action@v1
 
@@ -49,6 +55,7 @@ runs:
         shell: bash
         run: |
           kubectl label nodes chart-testing-control-plane key/node-kind=high-memory
+
       - name: Run chart-testing (install)
         shell: bash
         run: |
