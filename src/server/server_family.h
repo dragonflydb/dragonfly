@@ -52,6 +52,7 @@ class Service;
 class ScriptMgr;
 
 struct ReplicaRoleInfo {
+  std::string id;
   std::string address;
   uint32_t listening_port;
   std::string_view state;
@@ -92,6 +93,7 @@ struct Metrics {
   uint32_t delete_ttl_per_sec = 0;
   uint64_t fiber_switch_cnt = 0;
   uint64_t fiber_switch_delay_usec = 0;
+  uint64_t tls_bytes = 0;
 
   // Statistics about fibers running for a long time (more than 1ms).
   uint64_t fiber_longrun_cnt = 0;
@@ -99,6 +101,8 @@ struct Metrics {
 
   // Max length of the all the tx shard-queues.
   uint32_t tx_queue_len = 0;
+  uint32_t worker_fiber_count = 0;
+  size_t worker_fiber_stack_size = 0;
 
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;

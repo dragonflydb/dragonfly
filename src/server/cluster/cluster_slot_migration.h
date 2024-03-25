@@ -26,7 +26,9 @@ class ClusterSlotMigration : private ProtocolClient {
   ~ClusterSlotMigration();
 
   // Initiate connection with source node and create migration fiber
-  std::error_code Start(ConnectionContext* cntx);
+  // will be refactored in the future
+  std::error_code Init(uint32_t sync_id, uint32_t shards_num);
+
   Info GetInfo() const;
   uint32_t GetSyncId() const {
     return sync_id_;
@@ -49,8 +51,6 @@ class ClusterSlotMigration : private ProtocolClient {
   }
 
  private:
-  // Send DFLYMIGRATE CONF to the source and get info about migration process
-  std::error_code Greet();
   void MainMigrationFb();
   // Creates flows, one per shard on the source node and manage migration process
   std::error_code InitiateSlotsMigration();
