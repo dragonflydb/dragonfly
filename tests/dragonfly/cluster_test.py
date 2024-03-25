@@ -62,7 +62,7 @@ def redis_cluster(port_picker):
 
     create_command = f'echo "yes" |redis-cli --cluster create {" ".join([f"127.0.0.1:{port}" for port in ports])}'
     subprocess.run(create_command, shell=True)
-    time.sleep(3)
+    time.sleep(4)
     yield nodes
     for node in nodes:
         node.stop()
