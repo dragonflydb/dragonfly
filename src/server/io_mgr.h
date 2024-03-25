@@ -22,12 +22,16 @@ class IoMgr {
   // (io_res, )
   using GrowCb = std::function<void(int)>;
 
+  using ReadCb = std::function<void(int)>;
+
   IoMgr();
 
   // blocks until all the pending requests are finished.
   void Shutdown();
 
-  std::error_code Open(const std::string& path);
+  std::error_code Open(std::string_view path);
+
+  std::error_code Grow(size_t len);
 
   // Grows file by that length. len must be divided by 1MB.
   // passing other values will check-fail.
@@ -37,6 +41,8 @@ class IoMgr {
   // via cb. A caller must make sure that the blob exists until cb is called.
   std::error_code WriteAsync(size_t offset, std::string_view blob, WriteCb cb);
   std::error_code Read(size_t offset, io::MutableBytes dest);
+
+  std::error_code ReadAsync(size_t offset, io::MutableBytes dest, ReadCb cb);
 
   // Total file span
   size_t Span() const {
