@@ -671,7 +671,7 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   Run({"set", "a", "1"});  // won't run ooo, because it became part of global
   Run({"move", "a", "1"});
   Run({"exec"});
-  EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_type_cnt[ServerState::GLOBAL]);
+  EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
 
   ClearMetrics();
 
@@ -683,7 +683,7 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   Run({"exec"});
 
   auto stats = GetMetrics().coordinator_stats;
-  EXPECT_EQ(1, stats.tx_type_cnt[ServerState::QUICK] + stats.tx_type_cnt[ServerState::INLINE]);
+  EXPECT_EQ(1, stats.tx_normal_cnt);  // move is global
 }
 
 TEST_F(MultiTest, ScriptFlagsCommand) {

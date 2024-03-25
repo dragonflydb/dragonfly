@@ -164,9 +164,10 @@ class Transaction {
     OUT_OF_ORDER = 1 << 2,
     // Whether its key locks are acquired, never set for global commands.
     KEYLOCK_ACQUIRED = 1 << 3,
-    SUSPENDED_Q = 1 << 4,   // Whether it suspended (by WatchInShard())
-    AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
-    UNLOCK_MULTI = 1 << 6,  // Whether this shard executed UnlockMultiShardCb
+    SUSPENDED_Q = 1 << 4,      // Whether it suspended (by WatchInShard())
+    AWAKED_Q = 1 << 5,         // Whether it was awakened (by NotifySuspended())
+    UNLOCK_MULTI = 1 << 6,     // Whether this shard executed UnlockMultiShardCb
+    RAN_IMMEDIATELY = 1 << 7,  // Whether the shard executed immediately (during schedule)
   };
 
  public:
@@ -503,19 +504,12 @@ class Transaction {
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
 
-  // Schedule if only one shard is active.
-  // Returns true if transaction ran out-of-order during the scheduling phase.
-  bool ScheduleUniqueShard(EngineShard* shard);
-
   // Schedule on shards transaction queue. Returns true if scheduled successfully,
   // false if inconsistent order was detected and the schedule needs to be cancelled.
-  bool ScheduleInShard(EngineShard* shard);
-
-  // Optimized version of RunInShard for single shard uncontended cases.
-  RunnableResult RunQuickie(EngineShard* shard);
+  bool ScheduleInShard(EngineShard* shard, bool can_run_immediately);
 
   // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier
-  void ExecuteAsync();
+  void DispatchHop();
 
   // Finish hop, decrement run barrier
   void FinishHop();
