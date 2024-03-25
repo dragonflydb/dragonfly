@@ -1,8 +1,0 @@
-tls:
-  enabled: true
-  createCerts: true
-  duration: 87600h0m0s
-  issuer:
-    kind: Issuer
-    name: selfsigned
-    group: cert-manager.io
