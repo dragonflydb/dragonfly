@@ -317,8 +317,7 @@ class DflyInstanceFactory:
     def create(self, existing_port=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
-        args.setdefault("jsonpathv2", None)
-
+        args.setdefault("enable_direct_fd", None)  # Testing iouring with direct_fd enabled.
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1"

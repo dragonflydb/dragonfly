@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -40,6 +40,7 @@ extern "C" {
 #include "server/generic_family.h"
 #include "server/hll_family.h"
 #include "server/hset_family.h"
+#include "server/http_api.h"
 #include "server/json_family.h"
 #include "server/list_family.h"
 #include "server/multi_command_squasher.h"
@@ -82,6 +83,9 @@ ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without "
           "authorization needed.");
+
+ABSL_FLAG(bool, expose_http_api, false,
+          "If set, will expose a POST /api handler for sending redis commands as json array.");
 
 ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database. "
@@ -2441,6 +2445,13 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   base->RegisterCb("/clusterz", [this](const http::QueryArgs& args, HttpContext* send) {
     return ClusterHtmlPage(args, send, &cluster_family_);
   });
+
+  if (absl::GetFlag(FLAGS_expose_http_api)) {
+    base->RegisterCb("/api",
+                     [this](const http::QueryArgs& args, HttpRequest&& req, HttpContext* send) {
+                       HttpAPI(args, std::move(req), this, send);
+                     });
+  }
 }
 
 void Service::OnClose(facade::ConnectionContext* cntx) {
