@@ -847,9 +847,7 @@ void ServerFamily::Shutdown() {
     if (replica_) {
       replica_->Stop();
     }
-    for (auto& replica : cluster_replicas_) {
-      replica->Stop();
-    }
+    StopAllClusterReplicas();
 
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
@@ -2386,10 +2384,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
       replica_->Stop();
       replica_.reset();
 
-      for (auto& replica : cluster_replicas_) {
-        replica->Stop();
-      }
-      cluster_replicas_.clear();
+      StopAllClusterReplicas();
     }
 
     CHECK_EQ(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::ACTIVE)
@@ -2401,11 +2396,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
   // If any replication is in progress, stop it, cancellation should kick in immediately
   if (replica_)
     replica_->Stop();
-  // Stop all cluster replication.
-  for (auto& replica : cluster_replicas_) {
-    replica->Stop();
-  }
-  cluster_replicas_.clear();
+  StopAllClusterReplicas();
 
   // First, switch into the loading state
   if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
@@ -2452,6 +2443,15 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
     SetMasterFlagOnAllThreads(true);
     replica_.reset();
   }
+}
+
+void ServerFamily::StopAllClusterReplicas() {
+  // Stop all cluster replication.
+  for (auto& replica : cluster_replicas_) {
+    replica->Stop();
+    replica.reset();
+  }
+  cluster_replicas_.clear();
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {

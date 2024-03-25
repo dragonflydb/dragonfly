@@ -281,6 +281,7 @@ class ServerFamily {
                                    bool ignore_state = false);
 
   GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
+  void StopAllClusterReplicas();
 
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
