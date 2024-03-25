@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/strings/str_cat.h>
-
 #include <bitset>
 #include <memory>
 #include <vector>

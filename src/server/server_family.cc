@@ -2348,7 +2348,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
   if (replicaof_args->IsReplicaOfNoOne()) {
-    return cntx->SendError("ADDREPLICAOF does not supprot no one");
+    return cntx->SendError("ADDREPLICAOF does not support no one");
   }
   LOG(INFO) << "Add Replica " << *replicaof_args;
 
@@ -2392,7 +2392,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
       cluster_replicas_.clear();
     }
 
-    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE) == GlobalState::ACTIVE)
+    CHECK_EQ(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::ACTIVE)
         << "Server is set to replica no one, yet state is not active!";
 
     return cntx->SendOk();

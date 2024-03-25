@@ -10,13 +10,10 @@
 #include <vector>
 
 #include "core/json/json_object.h"
-#include "src/facade/op_status.h"
 #include "src/server/cluster/slot_set.h"
 #include "src/server/common.h"
 
 namespace dfly {
-
-using facade::OpResult;
 
 // MigrationState constants are ordered in state changing order
 enum class MigrationState : uint8_t {
