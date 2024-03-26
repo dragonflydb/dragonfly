@@ -32,37 +32,13 @@ ClusterShardMigration::~ClusterShardMigration() {
   JoinFlow();
 }
 
-std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
-  RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
-
-  leftover_buf_.emplace(128);
-  ResetParser(/*server_mode=*/false);
-
-  std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", sync_id_, " ", source_shard_id_);
-  VLOG(1) << "cmd: " << cmd;
-
-  RETURN_ON_ERR(SendCommand(cmd));
-
-  auto read_resp = ReadRespReply(&*leftover_buf_);
-  if (!read_resp.has_value()) {
-    return read_resp.error();
-  }
-
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
-
-  leftover_buf_->ConsumeInput(read_resp->left_in_buffer);
-
-  sync_fb_ =
-      fb2::Fiber("shard_migration_full_sync", &ClusterShardMigration::FullSyncShardFb, this, cntx);
-
-  return {};
+void ClusterShardMigration::Start(Context* cntx, io::Source* source) {
+  sync_fb_ = fb2::Fiber("shard_migration_full_sync", &ClusterShardMigration::FullSyncShardFb, this,
+                        cntx, source);
 }
 
-void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
-  DCHECK(leftover_buf_);
-  io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
-
-  JournalReader reader{&ps, 0};
+void ClusterShardMigration::FullSyncShardFb(Context* cntx, io::Source* source) {
+  JournalReader reader{source, 0};
   TransactionReader tx_reader{false};
 
   while (!cntx->IsCancelled()) {
@@ -73,7 +49,7 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
     if (!tx_data)
       break;
 
-    TouchIoTime();
+    // TouchIoTime();
 
     if (tx_data->opcode == journal::Op::FIN) {
       VLOG(2) << "Flow " << source_shard_id_ << " is finalized";

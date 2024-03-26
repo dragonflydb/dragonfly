@@ -61,21 +61,27 @@ error_code ClusterSlotMigration::Init(uint32_t sync_id, uint32_t shards_num) {
   sync_id_ = sync_id;
   source_shards_num_ = shards_num;
 
-  VLOG(1) << "Resolving host DNS";
-  error_code ec = ResolveHostDns();
-  if (ec)
-    return ec;
+  // Switch to new error handler that closes flow sockets.
+  auto err_handler = [this](const auto& ge) mutable {
+    // Make sure the flows are not in a state transition
+    lock_guard lk{flows_op_mu_};
 
-  VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
-  if (ec)
-    return ec;
+    // Unblock all sockets.
+    DefaultErrorHandler(ge);
+    for (auto& flow : shard_flows_)
+      flow->Cancel();
+  };
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
-  ResetParser(false);
+  shard_flows_.resize(source_shards_num_);
+  for (unsigned i = 0; i < source_shards_num_; ++i) {
+    shard_flows_[i].reset(
+        new ClusterShardMigration(server(), local_sync_id_, i, sync_id_, &service_));
+  }
 
-  sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
+  partitions_ = Partition(source_shards_num_);
 
-  return ec;
+  return {};
 }
 
 ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
@@ -94,28 +100,54 @@ void ClusterSlotMigration::Stop() {
   }
 }
 
+void ClusterSlotMigration::StartFlow(uint32_t shard, io::Source* source) {
+  VLOG(1) << "Start flow for shard: " << shard;
+
+  lock_guard lk{flows_op_mu_};
+
+  shard_flows_[shard]->Start(&cntx_, source);
+
+  if (std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                  [](const auto& m) { return m->IsInProgress(); })) {
+    sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
+  }
+}
+
 void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "Main migration fiber started " << sync_id_;
 
-  state_ = MigrationState::C_SYNC;
-
-  // TODO add reconnection code
-  if (auto ec = InitiateSlotsMigration(); ec) {
-    LOG(WARNING) << "Error syncing with " << server().Description() << " " << ec << " "
-                 << ec.message();
+  for (auto& flow : shard_flows_) {
+    flow->JoinFlow();
   }
 
+  VLOG(1) << "flows are joined ";
+
   if (IsFinalized()) {
-    state_ = MigrationState::C_FINISHED;
+    VLOG(1) << "Resolving host DNS";
+    error_code ec = ResolveHostDns();
+    // if (ec)
+    //   return ec;
+
+    VLOG(1) << "Connecting to source";
+    ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+    // if (ec)
+    //   return ec;
+
+    ResetParser(false);
 
     auto cmd = absl::StrCat("DFLYMIGRATE ACK ", sync_id_);
     VLOG(1) << "send " << cmd;
 
     auto err = SendCommandAndReadResponse(cmd);
-    auto success = !err && CheckRespIsSimpleReply("OK");
+    LOG_IF(WARNING, err) << err;
 
-    LOG_IF(WARNING, !success) << ToSV(LastResponseArgs().front().GetBuf());
+    VLOG(1) << "SendCommandAndReadResponse " << cmd;
 
+    if (!err) {
+      LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
+    }
+
+    state_ = MigrationState::C_FINISHED;
     cluster_family_->FinalizeIncomingMigration(local_sync_id_);
   }
 }
@@ -145,29 +177,6 @@ std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
       flow->Cancel();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
-
-  std::atomic_uint32_t synced_shards = 0;
-  auto partition = Partition(source_shards_num_);
-  auto shard_cb = [&](unsigned index, auto*) {
-    for (auto id : partition[index]) {
-      auto ec = shard_flows_[id]->StartSyncFlow(&cntx_);
-      if (!ec) {
-        ++synced_shards;
-      } else {
-        cntx_.ReportError(ec);
-      }
-    }
-  };
-  // Lock to prevent the error handler from running instantly
-  // while the flows are in a mixed state.
-  lock_guard lk{flows_op_mu_};
-  shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
-
-  VLOG(1) << synced_shards << " from " << source_shards_num_ << " shards were set flow";
-  if (synced_shards != source_shards_num_) {
-    cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
-                      "incorrect shards num, only for tests");
-  }
 
   return cntx_.GetError();
 }

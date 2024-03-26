@@ -35,6 +35,7 @@ class OutgoingMigration : private ProtocolClient {
   void Cancel(uint32_t shard_id);
 
   MigrationState GetState() const;
+  void Ack();
 
   const std::string& GetHostIp() const {
     return host_ip_;
@@ -66,6 +67,7 @@ class OutgoingMigration : private ProtocolClient {
   ServerFamily* server_family_;
 
   util::fb2::Fiber main_sync_fb_;
+  bool is_finalized_ = false;
 };
 
 }  // namespace dfly
