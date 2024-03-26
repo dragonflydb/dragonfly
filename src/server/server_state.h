@@ -119,6 +119,7 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t blocked_on_interpreter = 0;
 
     uint64_t rdb_save_usec = 0;
+    uint64_t rdb_save_count = 0;
 
     // Number of times we rejected command dispatch due to OOM condition.
     uint64_t oom_error_cmd_cnt = 0;
