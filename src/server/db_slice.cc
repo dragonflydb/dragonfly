@@ -166,7 +166,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
         string_view key = bucket_it->first.GetSlice(&scratch);
         ++checked_;
         auto [prime_it, exp_it] =
-            db_slice_->ExpireIfNeeded(cntx_, DbSlice::Iterator(key, bucket_it));
+            db_slice_->ExpireIfNeeded(cntx_, DbSlice::Iterator(bucket_it, key));
         if (prime_it->is_done())
           ++res;
       }
@@ -207,7 +207,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
                            make_pair("DEL", delete_args), false);
     }
 
-    db_slice_->PerformDeletion(Iterator(key, last_slot_it), table);
+    db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, key), table);
 
     ++evicted_;
   }
@@ -314,25 +314,6 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->prime.Reserve(key_size);
 }
 
-PrimeIterator* DbSlice::Iterator::operator->() {
-  LaunderIfNeeded();
-  return &it_;
-}
-
-PrimeIterator& DbSlice::Iterator::operator*() {
-  LaunderIfNeeded();
-  return it_;
-}
-
-DbSlice::Iterator::Iterator() {
-}
-
-DbSlice::Iterator::Iterator(std::string_view key, PrimeIterator it) : it_(it), key_(key) {
-}
-
-void DbSlice::Iterator::LaunderIfNeeded() {
-}
-
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 
@@ -420,26 +401,26 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
-  return {*res->it, res->exp_it};
+  return {ConstIterator(*res->it, key), res->exp_it};
 }
 
-OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                   unsigned req_obj_type) {
+OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
+                                                       unsigned req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
   if (res.ok()) {
-    return {*res->it};
+    return ConstIterator(*res->it, key);
   }
   return res.status();
 }
 
-OpResult<PrimeConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cntx,
-                                                           std::string_view key,
-                                                           unsigned req_obj_type) {
+OpResult<DbSlice::ConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cntx,
+                                                               std::string_view key,
+                                                               unsigned req_obj_type) {
   auto res =
       FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats, LoadExternalMode::kLoad);
   if (res.ok()) {
-    return {res->it};
+    return ConstIterator(res->it, key);
   }
   return res.status();
 }
@@ -467,42 +448,42 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
     }
   };
 
-  if (!IsValid(res.it)) {
+  if (!IsValid(*res.it)) {
     return OpStatus::KEY_NOTFOUND;
   }
 
-  if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
+  if (req_obj_type.has_value() && (*res.it)->second.ObjType() != req_obj_type.value()) {
     return OpStatus::WRONG_TYPE;
   }
 
   if (TieredStorage* tiered = shard_owner()->tiered_storage();
       tiered && load_mode == LoadExternalMode::kLoad) {
-    if (res.it->second.IsExternal()) {
+    if ((*res.it)->second.IsExternal()) {
       // Load reads data from disk therefore we will preempt in this function.
       // We will update the iterator if it changed during the preemption
-      res.it = tiered->Load(cntx.db_index, res.it, key);
-      if (!IsValid(res.it)) {
+      res.it = tiered->Load(cntx.db_index, *res.it, key);
+      if (!IsValid(*res.it)) {
         return OpStatus::KEY_NOTFOUND;
       }
       events_.ram_misses++;
     } else {
-      if (res.it->second.HasIoPending()) {
-        tiered->CancelIo(cntx.db_index, res.it);
+      if ((*res.it)->second.HasIoPending()) {
+        tiered->CancelIo(cntx.db_index, *res.it);
       }
       events_.ram_hits++;
     }
-    res.it->first.SetTouched(true);
+    (*res.it)->first.SetTouched(true);
   }
 
   FiberAtomicGuard fg;
-  if (res.it->second.HasExpire()) {  // check expiry state
+  if ((*res.it)->second.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
-    if (!IsValid(res.it)) {
+    if (!IsValid(*res.it)) {
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
-  if (caching_mode_ && IsValid(res.it)) {
+  if (caching_mode_ && IsValid(*res.it)) {
     if (!change_cb_.empty()) {
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
@@ -510,9 +491,9 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
           ccb.second(cntx.db_index, bit);
         }
       };
-      db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
+      db.prime.CVCUponBump(change_cb_.back().first, *res.it, bump_cb);
     }
-    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{fetched_items_});
+    auto bump_it = db.prime.BumpUp(*res.it, PrimeBumpPolicy{fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
       res.it = bump_it;
       ++events_.bumpups;
@@ -537,14 +518,14 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
   return res;
 }
 
-OpResult<pair<PrimeConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Context& cntx,
-                                                                        ArgSlice args,
-                                                                        int req_obj_type) {
+OpResult<pair<DbSlice::ConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Context& cntx,
+                                                                            ArgSlice args,
+                                                                            int req_obj_type) {
   DCHECK(!args.empty());
 
   for (unsigned i = 0; i < args.size(); ++i) {
     string_view s = args[i];
-    OpResult<PrimeConstIterator> res = FindReadOnly(cntx, s, req_obj_type);
+    OpResult<ConstIterator> res = FindReadOnly(cntx, s, req_obj_type);
     if (res)
       return make_pair(res.value(), i);
     if (res.status() != OpStatus::KEY_NOTFOUND)
@@ -661,13 +642,13 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   }
 
   return DbSlice::AddOrFindResult{
-      .it = Iterator(key, it),
+      .it = Iterator(it, key),
       .exp_it = ExpireIterator{},
       .is_new = true,
       .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                    .db_slice = this,
                                    .db_ind = cntx.db_index,
-                                   .it = Iterator(key, it),
+                                   .it = Iterator(it, key),
                                    .key = key})};
 }
 
@@ -1112,7 +1093,7 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) {
   PerformDeletion(it, expire_it, db.get());
   ++events_.expired_keys;
 
-  return {Iterator{it.key_, PrimeIterator{}}, ExpireIterator{}};
+  return {Iterator{PrimeIterator{}, it.key_}, ExpireIterator{}};
 }
 
 void DbSlice::ExpireAllIfNeeded() {

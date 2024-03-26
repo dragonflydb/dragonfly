@@ -703,7 +703,6 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   DCHECK_EQ(res % kBlockLen, 0u);
 
   int64_t file_offset = res;
-  PrimeTable* pt = db_slice_.GetTables(db_index).first;
   auto& bin_record = db->bin_map[bin_index];
 
   DCHECK_EQ(bin_record.pending_entries.size(), NumEntriesInSmallBin(kSmallBins[bin_index]));
@@ -721,8 +720,8 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
 
   string scratch;
   for (auto key_view : bin_record.pending_entries) {
-    key_view->GetString(&scratch);
-    auto [it, exp_it, updater] = db_slice_.FindMutable(db_context, tmp);
+    auto key = key_view->GetSlice(&scratch);
+    auto [it, exp_it, updater] = db_slice_.FindMutable(db_context, key);
     DCHECK(IsValid(*it));
 
     if ((*it)->second.HasExpire()) {

@@ -75,10 +75,10 @@ class DbSlice {
     IteratorT() = default;
 
     IteratorT(T it, std::string_view key)
-        : it_(it), fiber_epoch_(fb2::FiberSwitchEpoch()), key_(key) {
+        : it_(it), fiber_epoch_(util::fb2::FiberSwitchEpoch()), key_(key) {
     }
 
-    // Do not store the result of dereference!
+    // Do not store the result of dereference / arrow operators!
     T* operator->() {
       LaunderIfNeeded();
       return &it_;
@@ -89,13 +89,23 @@ class DbSlice {
       return it_;
     }
 
+    const T* operator->() const {
+      LaunderIfNeeded();
+      return &it_;
+    }
+
+    const T& operator*() const {
+      LaunderIfNeeded();
+      return it_;
+    }
+
    private:
-    void LaunderIfNeeded() {
+    void LaunderIfNeeded() const {  // const is a lie
       if (!it_.IsOccupied()) {
         return;
       }
 
-      uint64_t current_epoch = fb2::FiberSwitchEpoch();
+      uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
       if (current_epoch != fiber_epoch_) {
         if (key_ != it_->first) {
           it_ = it_.owner().Find(key_);
@@ -104,8 +114,8 @@ class DbSlice {
       }
     }
 
-    T it_;
-    uint64_t fiber_epoch_ = 0;
+    mutable T it_;
+    mutable uint64_t fiber_epoch_ = 0;
     std::string_view key_;
   };
 
