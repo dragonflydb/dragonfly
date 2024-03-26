@@ -581,14 +581,14 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
   } else {
     replicaof_args.host = parser.Next<string>();
     replicaof_args.port = parser.Next<uint16_t>();
-    if (replicaof_args.port < 1) {
+    if (auto err = parser.Error(); err || replicaof_args.port < 1) {
       cntx->SendError("port is out of range");
       return nullopt;
     }
     if (parser.HasNext()) {
       auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = SlotRange{slot_start, slot_end};
-      if (!replicaof_args.slot_range->IsValid()) {
+      if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
         cntx->SendError("Invalid slot range");
         return nullopt;
       }
