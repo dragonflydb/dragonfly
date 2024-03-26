@@ -833,7 +833,11 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
 
     if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
-      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      // TODO remove incrementing lsn on master side otherwise we break takeover
+      // journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      if (tx_data->lsn != journal_rec_executed_.load()) {
+        // TODO LOG
+      }
     } else if (tx_data->opcode == journal::Op::EXEC) {
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));

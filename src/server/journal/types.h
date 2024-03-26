@@ -31,6 +31,7 @@ struct EntryBase {
   DbIndex dbid;
   uint32_t shard_cnt;
   std::optional<SlotId> slot;
+  LSN lsn;
 };
 
 // This struct represents a single journal entry.
@@ -44,17 +45,17 @@ struct Entry : public EntryBase {
                    >;
 
   Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt, std::optional<SlotId> slot_id,
-        Payload pl)
-      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{pl} {
+        Payload pl, LSN lsn = 0)
+      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, lsn}, payload{pl} {
   }
 
   Entry(journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
-      : EntryBase{0, opcode, dbid, 0, slot_id}, payload{} {
+      : EntryBase{0, opcode, dbid, 0, slot_id, 0}, payload{} {
   }
 
   Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt,
         std::optional<SlotId> slot_id)
-      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{} {
+      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, 0}, payload{} {
   }
 
   bool HasPayload() const {
@@ -72,6 +73,7 @@ struct ParsedEntry : public EntryBase {
     CmdArgVec cmd_args;  // represents the parsed command.
   };
   CmdData cmd;
+  LSN lsn;
 
   std::string ToString() const;
 };

@@ -55,6 +55,7 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
 
   switch (entry.opcode) {
     case journal::Op::PING:
+      lsn = entry.lsn;
       return;
     case journal::Op::FIN:
       return;
