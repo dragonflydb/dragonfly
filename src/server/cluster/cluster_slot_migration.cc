@@ -123,15 +123,9 @@ void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "flows are joined ";
 
   if (IsFinalized()) {
-    VLOG(1) << "Resolving host DNS";
-    error_code ec = ResolveHostDns();
-    // if (ec)
-    //   return ec;
-
-    VLOG(1) << "Connecting to source";
-    ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
-    // if (ec)
-    //   return ec;
+    // TODO move ack code to outgoing_slot_migration
+    ResolveHostDns();
+    ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
 
     ResetParser(false);
 

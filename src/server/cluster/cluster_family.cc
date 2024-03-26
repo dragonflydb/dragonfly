@@ -717,7 +717,6 @@ std::shared_ptr<ClusterSlotMigration> ClusterFamily::GetIncomingMigration(std::s
 }
 
 void ClusterFamily::RemoveFinishedMigrations() {
-  VLOG(1) << "erase finished migrations";
   lock_guard lk(migration_mu_);
   auto removed_items_it =
       std::remove_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
