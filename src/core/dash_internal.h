@@ -1718,10 +1718,6 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
     return Iterator{bid, slot};
   }
 
-  if (swap_bid == bid) {
-    return Iterator{bid, kLastSlot};
-  }
-
   uint8_t swap_fp = swapb.Fp(kLastSlot);
 
   // is_probing for the existing entry in swapb. It's unrelated to bucket_offs,
