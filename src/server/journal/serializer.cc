@@ -76,7 +76,7 @@ void JournalWriter::Write(const journal::Entry& entry) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
     case journal::Op::PING:
-      return;
+      return Write(entry.lsn);
     case journal::Op::COMMAND:
     case journal::Op::EXPIRED:
     case journal::Op::MULTI_COMMAND:
@@ -195,7 +195,11 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   entry.dbid = dbid_;
   entry.opcode = opcode;
 
-  if (opcode == journal::Op::PING || opcode == journal::Op::FIN) {
+  if (opcode == journal::Op::PING) {
+    SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.lsn);
+    return entry;
+  }
+  if (opcode == journal::Op::FIN) {
     return entry;
   }
 

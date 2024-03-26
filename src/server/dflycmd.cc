@@ -503,7 +503,7 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
 
   if (shard != nullptr) {
     flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
-    flow->streamer->Start(flow->conn->socket());
+    flow->streamer->Start(flow->conn->socket(), true);
   }
 
   // Register cleanup.

@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include "server/db_slice.h"
 #include "server/io_utils.h"
 #include "server/journal/journal.h"
@@ -25,7 +27,7 @@ class JournalStreamer : protected BufferedStreamerBase {
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(io::Sink* dest);
+  virtual void Start(io::Sink* dest, bool with_pings = false);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -47,6 +49,9 @@ class JournalStreamer : protected BufferedStreamerBase {
   journal::Journal* journal_;
 
   util::fb2::Fiber write_fb_{};
+  // TODO seperate this in a different class
+  std::chrono::system_clock::time_point start_time_;
+  static constexpr long kLimit = 2;
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
@@ -56,7 +61,7 @@ class RestoreStreamer : public JournalStreamer {
   RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
-  void Start(io::Sink* dest) override;
+  void Start(io::Sink* dest, bool with_pings = false) override;
   // Cancel() must be called if Start() is called
   void Cancel() override;
 

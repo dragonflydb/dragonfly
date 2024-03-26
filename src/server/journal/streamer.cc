@@ -6,15 +6,35 @@
 
 #include <absl/functional/bind_front.h>
 
+#include <chrono>
+
 #include "base/logging.h"
 
 namespace dfly {
 using namespace util;
 
-void JournalStreamer::Start(io::Sink* dest) {
+void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
   using namespace journal;
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
+  start_time_ = std::chrono::system_clock::now();
   journal_cb_id_ = journal_->RegisterOnChange([this](const JournalItem& item, bool allow_await) {
+    const auto now = std::chrono::system_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
+    if (elapsed.count() > JournalStreamer::kLimit) {
+      // TODO add check for VER4
+      // TODO move this from here
+      base::IoBuf tmp;
+      io::BufSink sink(&tmp);
+      JournalWriter writer(&sink);
+      JournalItem item;
+      Entry entry(0, journal::Op::PING, 0, 0, nullopt, {}, journal_->GetLsn());
+      writer.Write(entry);
+
+      JournalItem dummy;
+      item.data = io::View(tmp.InputBuffer());
+      Write(io::Buffer(item.data));
+      NotifyWritten(allow_await);
+    }
     if (!ShouldWrite(item)) {
       return;
     }
@@ -55,7 +75,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal
   DCHECK(slice != nullptr);
 }
 
-void RestoreStreamer::Start(io::Sink* dest) {
+void RestoreStreamer::Start(io::Sink* dest, bool with_pings) {
   VLOG(2) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
