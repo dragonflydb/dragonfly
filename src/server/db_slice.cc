@@ -194,8 +194,8 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
     auto& lt = table->trans_locks;
-    string tmp;
-    string_view key = last_slot_it->first.GetSlice(&tmp);
+    string scratch;
+    string_view key = last_slot_it->first.GetSlice(&scratch);
     // do not evict locked keys
     if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
       return 0;
@@ -207,7 +207,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
                            make_pair("DEL", delete_args), false);
     }
 
-    db_slice_->PerformDeletion(last_slot_it, table);
+    db_slice_->PerformDeletion(Iterator(key, last_slot_it), table);
 
     ++evicted_;
   }
@@ -327,22 +327,10 @@ PrimeIterator& DbSlice::Iterator::operator*() {
 DbSlice::Iterator::Iterator() {
 }
 
-DbSlice::Iterator::Iterator(std::string_view key, PrimeIterator it)
-    : it_(it), fiber_epoch_(fb2::FiberSwitchEpoch()), key_(key) {
+DbSlice::Iterator::Iterator(std::string_view key, PrimeIterator it) : it_(it), key_(key) {
 }
 
 void DbSlice::Iterator::LaunderIfNeeded() {
-  if (!it_.IsOccupied()) {
-    return;
-  }
-
-  uint64_t current_epoch = fb2::FiberSwitchEpoch();
-  if (current_epoch != fiber_epoch_) {
-    if (key_ != it_->first) {
-      it_ = it_.owner().Find(key_);
-    }
-    fiber_epoch_ = current_epoch;
-  }
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {
@@ -381,8 +369,8 @@ void DbSlice::AutoUpdater::Cancel() {
 
 DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   DCHECK(fields_.action == DestructorAction::kRun);
-  DCHECK(IsValid(fields.it));
-  fields_.orig_heap_size = fields.it->second.MallocUsed();
+  DCHECK(IsValid(*fields.it));
+  fields_.orig_heap_size = (*fields.it)->second.MallocUsed();
 }
 
 DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) {
@@ -432,7 +420,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
-  return {res->it, res->exp_it};
+  return {*res->it, res->exp_it};
 }
 
 OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
@@ -440,7 +428,7 @@ OpResult<PrimeConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_v
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
   if (res.ok()) {
-    return {res->it};
+    return {*res->it};
   }
   return res.status();
 }

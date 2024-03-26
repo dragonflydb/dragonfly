@@ -10,6 +10,7 @@
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/table.h"
+#include "util/fibers/fibers.h"
 
 namespace dfly {
 
@@ -69,22 +70,47 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
-  class Iterator {
+  template <typename T> class IteratorT {
    public:
-    Iterator();
+    IteratorT() = default;
+
+    IteratorT(T it, std::string_view key)
+        : it_(it), fiber_epoch_(fb2::FiberSwitchEpoch()), key_(key) {
+    }
 
     // Do not store the result of dereference!
-    PrimeIterator* operator->();
-    PrimeIterator& operator*();
+    T* operator->() {
+      LaunderIfNeeded();
+      return &it_;
+    }
+
+    T& operator*() {
+      LaunderIfNeeded();
+      return it_;
+    }
 
    private:
-    Iterator(std::string_view key, PrimeIterator it);
-    void LaunderIfNeeded();
+    void LaunderIfNeeded() {
+      if (!it_.IsOccupied()) {
+        return;
+      }
 
-    PrimeIterator it_;
+      uint64_t current_epoch = fb2::FiberSwitchEpoch();
+      if (current_epoch != fiber_epoch_) {
+        if (key_ != it_->first) {
+          it_ = it_.owner().Find(key_);
+        }
+        fiber_epoch_ = current_epoch;
+      }
+    }
+
+    T it_;
     uint64_t fiber_epoch_ = 0;
     std::string_view key_;
   };
+
+  using Iterator = IteratorT<PrimeIterator>;
+  using ConstIterator = IteratorT<PrimeConstIterator>;
 
   class AutoUpdater {
    public:
@@ -222,20 +248,19 @@ class DbSlice {
                                              unsigned req_obj_type);
 
   struct ItAndExpConst {
-    PrimeConstIterator it;
+    ConstIterator it;
     ExpireConstIterator exp_it;
   };
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
-  OpResult<PrimeConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                            unsigned req_obj_type);
-  OpResult<PrimeConstIterator> FindAndFetchReadOnly(const Context& cntx, std::string_view key,
-                                                    unsigned req_obj_type);
+  OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
+                                       unsigned req_obj_type);
+  OpResult<ConstIterator> FindAndFetchReadOnly(const Context& cntx, std::string_view key,
+                                               unsigned req_obj_type);
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
-  OpResult<std::pair<PrimeConstIterator, unsigned>> FindFirstReadOnly(const Context& cntx,
-                                                                      ArgSlice args,
-                                                                      int req_obj_type);
+  OpResult<std::pair<ConstIterator, unsigned>> FindFirstReadOnly(const Context& cntx, ArgSlice args,
+                                                                 int req_obj_type);
 
   struct AddOrFindResult {
     Iterator it;
