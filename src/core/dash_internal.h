@@ -1520,12 +1520,12 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
   // 1. If the bid is not a stash bucket, then just swap the slots of the target.
   // 2. If there is empty space in target or probe bucket insert the slot there and remove
   //    it from the stash bucket.
-  // 3. If there is no empty space then we need swap slots with either the target or the probe
-  //    bucket. Furthermore, we might clear the stash bucket so in total all the 3 buckets
-  //    are affected
+  // 3. If there is no empty space then we need to swap slots with either the target or the probe
+  //    bucket. Furthermore, if the target or the probe have one of their stash bits reference the
+  //    stash, then the stash bit entry is cleared. In total 2 buckets are modified.
   // Case 1 is handled by the if statement above and cases 2 and 3 below. We should return via
   // result_bid all the buckets(with version less than threshold) that CVCBumpUp will modify.
-  // Note, that for case 2 we might return an extra bucket id even though this bucket was not
+  // Note, that for case 2 & 3 we might return an extra bucket id even though this bucket was not
   // changed. An example of that is TryMoveFromStash which will first try to insert on the target
   // bucket and if that fails it will retry with the probe bucket. Since we don't really know
   // which of the two we insert to we are pesimistic and assume that both of them got modified. I
