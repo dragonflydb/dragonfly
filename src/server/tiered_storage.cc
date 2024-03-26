@@ -719,16 +719,18 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
   }
   req->SetKeyBlob(keys_size);
 
+  string scratch;
   for (auto key_view : bin_record.pending_entries) {
-    PrimeIterator it = pt->Find(key_view);
-    DCHECK(IsValid(it));
+    key_view->GetString(&scratch);
+    auto [it, exp_it, updater] = db_slice_.FindMutable(db_context, tmp);
+    DCHECK(IsValid(*it));
 
-    if (it->second.HasExpire()) {
+    if ((*it)->second.HasExpire()) {
       auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, it);
-      CHECK(!pit.is_done()) << "TBD: should abort in case of expired keys";
+      CHECK(!pit->is_done()) << "TBD: should abort in case of expired keys";
     }
 
-    req->Add(it->first, it->second);
+    req->Add((*it)->first, (*it)->second);
     VLOG(2) << "add to enqueued_entries: " << req->entries().back();
     auto res = bin_record.enqueued_entries.emplace(req->entries().back(), req);
     CHECK(res.second);

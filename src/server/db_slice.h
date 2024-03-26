@@ -69,6 +69,23 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  class Iterator {
+   public:
+    Iterator();
+
+    // Do not store the result of dereference!
+    PrimeIterator* operator->();
+    PrimeIterator& operator*();
+
+   private:
+    Iterator(std::string_view key, PrimeIterator it);
+    void LaunderIfNeeded();
+
+    PrimeIterator it_;
+    uint64_t fiber_epoch_ = 0;
+    std::string_view key_;
+  };
+
   class AutoUpdater {
    public:
     AutoUpdater();
@@ -93,12 +110,10 @@ class DbSlice {
 
       DbSlice* db_slice = nullptr;
       DbIndex db_ind = 0;
-      PrimeIterator it;
+      Iterator it;
       std::string_view key;
 
       // The following fields are calculated at init time
-      size_t db_size = 0;
-      size_t deletion_count = 0;
       size_t orig_heap_size = 0;
     };
 
@@ -195,7 +210,7 @@ class DbSlice {
   }
 
   struct ItAndUpdater {
-    PrimeIterator it;
+    Iterator it;
     ExpireIterator exp_it;
     AutoUpdater post_updater;
   };
@@ -223,7 +238,7 @@ class DbSlice {
                                                                       int req_obj_type);
 
   struct AddOrFindResult {
-    PrimeIterator it;
+    Iterator it;
     ExpireIterator exp_it;
     bool is_new = false;
     AutoUpdater post_updater;
@@ -246,19 +261,19 @@ class DbSlice {
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
-  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, PrimeIterator prime_it,
+  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
                                          ExpireIterator exp_it, const ExpireParams& params);
 
   // Adds expiry information.
-  void AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);
+  void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
 
   // Removes the corresponing expiry information if exists.
   // Returns true if expiry existed (and removed).
-  bool RemoveExpire(DbIndex db_ind, PrimeIterator main_it);
+  bool RemoveExpire(DbIndex db_ind, Iterator main_it);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
-  bool UpdateExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);
+  bool UpdateExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -266,8 +281,8 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  bool Del(DbIndex db_ind, PrimeIterator it);
-  void RemoveFromTiered(PrimeIterator it, DbIndex index);
+  bool Del(DbIndex db_ind, Iterator it);
+  void RemoveFromTiered(Iterator it, DbIndex index);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -330,12 +345,12 @@ class DbSlice {
   }
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
-  // from both tables and return PrimeIterator{}.
+  // from both tables and return Iterator{}.
   struct ItAndExp {
-    PrimeIterator it;
+    Iterator it;
     ExpireIterator exp_it;
   };
-  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
+  ItAndExp ExpireIfNeeded(const Context& cntx, Iterator it);
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -354,7 +369,7 @@ class DbSlice {
   uint64_t RegisterOnChange(ChangeCallback cb);
 
   // Call registered callbacks with version less than upper_bound.
-  void FlushChangeToEarlierCallbacks(DbIndex db_ind, PrimeIterator it, uint64_t upper_bound);
+  void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
@@ -407,14 +422,14 @@ class DbSlice {
   void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
 
   // Delete a key referred by its iterator.
-  void PerformDeletion(PrimeIterator del_it, DbTable* table);
+  void PerformDeletion(Iterator del_it, DbTable* table);
 
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key);
 
  private:
-  void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, size_t orig_size);
+  void PreUpdate(DbIndex db_ind, Iterator it);
+  void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
 
   OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                 PrimeValue obj, uint64_t expire_at_ms,
@@ -429,13 +444,13 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
 
-  void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, DbTable* table);
+  void PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* table);
 
   // Send invalidation message to the clients that are tracking the change to a key.
   void SendInvalidationTrackingMessage(std::string_view key);
 
   void CreateDb(DbIndex index);
-  size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
+  size_t EvictObjects(size_t memory_to_free, Iterator it, DbTable* table);
 
   enum class UpdateStatsMode {
     kReadStats,
@@ -458,7 +473,7 @@ class DbSlice {
   uint64_t NextVersion() {
     return version_++;
   }
-  void RemoveFromTiered(PrimeIterator it, DbTable* table);
+  void RemoveFromTiered(Iterator it, DbTable* table);
 
  private:
   ShardId shard_id_;
@@ -473,7 +488,6 @@ class DbSlice {
   ssize_t memory_budget_ = SSIZE_MAX;
   size_t bytes_per_object_ = 0;
   size_t soft_budget_limit_ = 0;
-  size_t deletion_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 

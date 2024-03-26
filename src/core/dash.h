@@ -420,6 +420,10 @@ class DashTable<_Key, _Value, Policy>::Iterator {
            ((owner_->segment_[seg_id_]->IsBusy(bucket_id_, slot_id_)));
   }
 
+  Owner& owner() const {
+    return *owner_;
+  }
+
   template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> GetVersion() const {
     assert(owner_ && seg_id_ < owner_->segment_.size());
     return owner_->segment_[seg_id_]->GetVersion(bucket_id_);
