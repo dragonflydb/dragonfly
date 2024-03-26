@@ -269,10 +269,6 @@ bool ValidateServerTlsFlags() {
   return true;
 }
 
-bool IsReplicatingNoOne(string_view host, string_view port) {
-  return absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port, "one");
-}
-
 template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
 }
@@ -554,6 +550,58 @@ string_view GetRedisMode() {
   return ClusterConfig::IsEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
 }
 
+struct ReplicaOfArgs {
+  string host;
+  uint16_t port;
+  std::optional<SlotRange> slot_range;
+  static optional<ReplicaOfArgs> FromCmdArgs(CmdArgList args, ConnectionContext* cntx);
+  bool IsReplicaOfNoOne() const {
+    return port == 0;
+  }
+  friend std::ostream& operator<<(std::ostream& os, const ReplicaOfArgs& args) {
+    if (args.IsReplicaOfNoOne()) {
+      return os << "NO ONE";
+    }
+    os << args.host << ":" << args.port;
+    if (args.slot_range.has_value()) {
+      os << " SLOTS [" << args.slot_range.value().start << "-" << args.slot_range.value().end
+         << "]";
+    }
+    return os;
+  }
+};
+
+optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionContext* cntx) {
+  ReplicaOfArgs replicaof_args;
+  CmdArgParser parser(args);
+
+  if (parser.Check("NO").IgnoreCase().ExpectTail(1)) {
+    parser.ExpectTag("ONE");
+    replicaof_args.port = 0;
+  } else {
+    replicaof_args.host = parser.Next<string>();
+    replicaof_args.port = parser.Next<uint16_t>();
+    if (auto err = parser.Error(); err || replicaof_args.port < 1) {
+      cntx->SendError("port is out of range");
+      return nullopt;
+    }
+    if (parser.HasNext()) {
+      auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+      replicaof_args.slot_range = SlotRange{slot_start, slot_end};
+      if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
+        cntx->SendError("Invalid slot range");
+        return nullopt;
+      }
+    }
+  }
+
+  if (auto err = parser.Error(); err) {
+    cntx->SendError(err->MakeReply());
+    return nullopt;
+  }
+  return replicaof_args;
+}
+
 }  // namespace
 
 std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
@@ -799,6 +847,7 @@ void ServerFamily::Shutdown() {
     if (replica_) {
       replica_->Stop();
     }
+    StopAllClusterReplicas();
 
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
@@ -828,8 +877,8 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
   LOG(INFO) << "Loading " << load_path;
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state.first != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
+  if (new_state != GlobalState::LOADING) {
+    LOG(WARNING) << new_state << " in progress, ignored";
     return {};
   }
 
@@ -1237,11 +1286,6 @@ optional<Replica::Info> ServerFamily::GetReplicaInfo() const {
   } else {
     return replica_->GetInfo();
   }
-}
-
-string ServerFamily::GetReplicaMasterId() const {
-  unique_lock lk(replicaof_mu_);
-  return string(replica_->MasterId());
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -2108,15 +2152,21 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       // The replica pointer can still be mutated even while master=true,
       // we don't want to drop the replica object in this fiber
       unique_lock lk{replicaof_mu_};
-      Replica::Info rinfo = replica_->GetInfo();
-      append("master_host", rinfo.host);
-      append("master_port", rinfo.port);
 
-      const char* link = rinfo.master_link_established ? "up" : "down";
-      append("master_link_status", link);
-      append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
-      append("master_sync_in_progress", rinfo.full_sync_in_progress);
-      append("master_replid", rinfo.master_id);
+      auto replication_info_cb = [&](Replica::Info rinfo) {
+        append("master_host", rinfo.host);
+        append("master_port", rinfo.port);
+
+        const char* link = rinfo.master_link_established ? "up" : "down";
+        append("master_link_status", link);
+        append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
+        append("master_sync_in_progress", rinfo.full_sync_in_progress);
+        append("master_replid", rinfo.master_id);
+      };
+      replication_info_cb(replica_->GetInfo());
+      for (const auto& replica : cluster_replicas_) {
+        replication_info_cb(replica->GetInfo());
+      }
     }
   }
 
@@ -2285,9 +2335,33 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   rb->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, ConnectionContext* cntx,
+void ServerFamily::AddReplicaOf(CmdArgList args, ConnectionContext* cntx) {
+  unique_lock lk(replicaof_mu_);
+  if (ServerState::tlocal()->is_master) {
+    cntx->SendError("Calling ADDREPLICAOFF allowed only after server is already a replica");
+    return;
+  }
+  CHECK(replica_);
+
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, cntx);
+  if (!replicaof_args.has_value()) {
+    return;
+  }
+  if (replicaof_args->IsReplicaOfNoOne()) {
+    return cntx->SendError("ADDREPLICAOF does not support no one");
+  }
+  LOG(INFO) << "Add Replica " << *replicaof_args;
+
+  auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+                                          master_replid(), replicaof_args->slot_range);
+  error_code ec = add_replica->Start(cntx);
+  if (!ec) {
+    cluster_replicas_.push_back(std::move(add_replica));
+  }
+}
+
+void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
-  LOG(INFO) << "Replicating " << host << ":" << port_sv;
   unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
   // We should not execute replica of command while loading from snapshot.
@@ -2296,40 +2370,43 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
     return;
   }
 
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, cntx);
+  if (!replicaof_args.has_value()) {
+    return;
+  }
+
+  LOG(INFO) << "Replicating " << *replicaof_args;
+
   // If NO ONE was supplied, just stop the current replica (if it exists)
-  if (IsReplicatingNoOne(host, port_sv)) {
+  if (replicaof_args->IsReplicaOfNoOne()) {
     if (!ServerState::tlocal()->is_master) {
       CHECK(replica_);
 
       SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
       replica_->Stop();
       replica_.reset();
+
+      StopAllClusterReplicas();
     }
 
-    CHECK(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE).first ==
-          GlobalState::ACTIVE)
+    CHECK_EQ(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::ACTIVE)
         << "Server is set to replica no one, yet state is not active!";
 
     return cntx->SendOk();
   }
 
-  uint32_t port;
-  if (!absl::SimpleAtoi(port_sv, &port) || port < 1 || port > 65535) {
-    cntx->SendError(kInvalidIntErr);
-    return;
-  }
-
-  // First, switch into the loading state
-  if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-      new_state.first != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state.first) << " in progress, ignored";
-    cntx->SendError("Invalid state");
-    return;
-  }
-
   // If any replication is in progress, stop it, cancellation should kick in immediately
   if (replica_)
     replica_->Stop();
+  StopAllClusterReplicas();
+
+  // First, switch into the loading state
+  if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+      new_state != GlobalState::LOADING) {
+    LOG(WARNING) << new_state << " in progress, ignored";
+    cntx->SendError("Invalid state");
+    return;
+  }
 
   // If we are called by "Replicate", cntx->transaction will be null but we do not need
   // to flush anything.
@@ -2338,7 +2415,9 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   }
 
   // Create a new replica and assing it
-  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_replid());
+  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+                                          master_replid(), replicaof_args->slot_range);
+
   replica_ = new_replica;
 
   // TODO: disconnect pending blocked clients (pubsub, blocking commands)
@@ -2368,11 +2447,17 @@ void ServerFamily::ReplicaOfInternal(string_view host, string_view port_sv, Conn
   }
 }
 
-void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  string_view host = ArgS(args, 0);
-  string_view port = ArgS(args, 1);
+void ServerFamily::StopAllClusterReplicas() {
+  // Stop all cluster replication.
+  for (auto& replica : cluster_replicas_) {
+    replica->Stop();
+    replica.reset();
+  }
+  cluster_replicas_.clear();
+}
 
-  ReplicaOfInternal(host, port, cntx, ActionOnConnectionFail::kReturnOnError);
+void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
+  ReplicaOfInternal(args, cntx, ActionOnConnectionFail::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -2380,7 +2465,14 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ConnectionContext ctxt{&sink, nullptr};
   ctxt.skip_acl_validation = true;
 
-  ReplicaOfInternal(host, port, &ctxt, ActionOnConnectionFail::kContinueReplication);
+  StringVec replicaof_params{string(host), string(port)};
+
+  CmdArgVec args_vec;
+  for (auto& s : replicaof_params) {
+    args_vec.emplace_back(MutableSlice{s.data(), s.size()});
+  }
+  CmdArgList args_list = absl::MakeSpan(args_vec);
+  ReplicaOfInternal(args_list, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
@@ -2526,19 +2618,25 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
 
   } else {
     unique_lock lk{replicaof_mu_};
-    Replica::Info rinfo = replica_->GetInfo();
-    rb->StartArray(4);
+    rb->StartArray(4 + cluster_replicas_.size() * 3);
     rb->SendBulkString("replica");
-    rb->SendBulkString(rinfo.host);
-    rb->SendBulkString(absl::StrCat(rinfo.port));
-    if (rinfo.full_sync_done) {
-      rb->SendBulkString("stable_sync");
-    } else if (rinfo.full_sync_in_progress) {
-      rb->SendBulkString("full_sync");
-    } else if (rinfo.master_link_established) {
-      rb->SendBulkString("preparation");
-    } else {
-      rb->SendBulkString("connecting");
+
+    auto send_replica_info = [rb](Replica::Info rinfo) {
+      rb->SendBulkString(rinfo.host);
+      rb->SendBulkString(absl::StrCat(rinfo.port));
+      if (rinfo.full_sync_done) {
+        rb->SendBulkString("stable_sync");
+      } else if (rinfo.full_sync_in_progress) {
+        rb->SendBulkString("full_sync");
+      } else if (rinfo.master_link_established) {
+        rb->SendBulkString("preparation");
+      } else {
+        rb->SendBulkString("connecting");
+      }
+    };
+    send_replica_info(replica_->GetInfo());
+    for (const auto& replica : cluster_replicas_) {
+      send_replica_info(replica->GetInfo());
     }
   }
 }
@@ -2720,7 +2818,8 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kShutDown}.HFUNC(
              ShutdownCmd)
       << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
-      << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
+      << CI{"REPLICAOF", kReplicaOpts, -3, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
+      << CI{"ADDREPLICAOF", kReplicaOpts, 5, 0, 0, acl::kReplicaOf}.HFUNC(AddReplicaOf)
       << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, acl::kReplTakeOver}.HFUNC(
              ReplTakeOver)
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)

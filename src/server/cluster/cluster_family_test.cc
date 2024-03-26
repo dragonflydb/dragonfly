@@ -719,7 +719,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                         "total_writes", _, "memory_bytes", _)))));
 
   ExpectConditionWithinTimeout([&]() {
-    return RunPrivileged({"dflycluster", "flushslots", "0"}) == "OK";
+    return RunPrivileged({"dflycluster", "flushslots", "0", "0"}) == "OK";
   });
 
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),

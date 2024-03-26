@@ -69,8 +69,9 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
-Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
-    : ProtocolClient(std::move(host), port), service_(*se), id_{id} {
+Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
+                 std::optional<SlotRange> slot_range)
+    : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
   proactor_ = ProactorBase::me();
 }
 
@@ -385,13 +386,15 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
     // Set LOADING state.
-    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
-          GlobalState::LOADING);
-    absl::Cleanup cleanup = [this]() {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    };
+    service_.RequestLoadingState();
+    absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
-    JournalExecutor{&service_}.FlushAll();
+    if (slot_range_.has_value()) {
+      JournalExecutor{&service_}.FlushSlots(slot_range_.value());
+    } else {
+      JournalExecutor{&service_}.FlushAll();
+    }
+
     RdbLoader loader(NULL);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
@@ -439,14 +442,6 @@ error_code Replica::InitiatePSync() {
 error_code Replica::InitiateDflySync() {
   auto start_time = absl::Now();
 
-  absl::Cleanup cleanup = [this]() {
-    // We do the following operations regardless of outcome.
-    JoinDflyFlows();
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    state_mask_.fetch_and(~R_SYNCING);
-    last_journal_LSNs_.reset();
-  };
-
   // Initialize MultiShardExecution.
   multi_shard_exe_.reset(new MultiShardExecution());
 
@@ -476,11 +471,19 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
-        GlobalState::LOADING);
+  service_.RequestLoadingState();
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    JoinDflyFlows();
+    service_.RemoveLoadingState();
+    state_mask_.fetch_and(~R_SYNCING);
+    last_journal_LSNs_.reset();
+  };
+
   std::string_view sync_type = "full";
   {
     // Going out of the way to avoid using std::vector<bool>...
@@ -508,7 +511,11 @@ error_code Replica::InitiateDflySync() {
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows_, 0);
 
     if (num_full_flows == num_df_flows_) {
-      JournalExecutor{&service_}.FlushAll();
+      if (slot_range_.has_value()) {
+        JournalExecutor{&service_}.FlushSlots(slot_range_.value());
+      } else {
+        JournalExecutor{&service_}.FlushAll();
+      }
       RdbLoader::PerformPreLoad(&service_);
     } else if (num_full_flows == 0) {
       sync_type = "partial";
@@ -855,7 +862,7 @@ void Replica::RedisStreamAcksFb() {
   auto next_ack_tp = std::chrono::steady_clock::now();
 
   while (!cntx_.IsCancelled()) {
-    VLOG(1) << "Sending an ACK with offset=" << repl_offs_;
+    VLOG(2) << "Sending an ACK with offset=" << repl_offs_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
