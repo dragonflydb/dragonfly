@@ -1970,6 +1970,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
     append("total_net_output_bytes", reply_stats.io_write_bytes);
+    append("rdb_save_usec", m.coordinator_stats.rdb_save_usec);
+    append("rdb_save_count", m.coordinator_stats.rdb_save_count);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
