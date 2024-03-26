@@ -1,10 +1,12 @@
-{{- if and ( .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" ) .Values.serviceMonitor.enabled }}
+{{- if .Values.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ template "dragonfly.fullname" . }}-metrics
-  {{- with .Values.serviceMonitor.namespace }}
-  namespace: {{ . }}
+  {{- if .Values.serviceMonitor.namespace }}
+  namespace: {{ .Values.serviceMonitor.namespace }}
+  {{- else }}
+  namespace: {{ .Release.Namespace }}
   {{- end }}
   {{- with .Values.serviceMonitor.annotations }}
   annotations:
