@@ -14,6 +14,7 @@
 namespace dfly::tiering {
 
 struct DiskSegment {
+  // Mesured in bytes, offset should be aligned to page boundaries (4kb)
   size_t offset, length;
 };
 

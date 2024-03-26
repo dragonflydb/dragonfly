@@ -87,7 +87,7 @@ error_code IoMgr::Grow(size_t len) {
     sz_ += len;
     return {};
   } else {
-    return std::error_code(res, std::iostream_category());
+    return std::error_code(-res, std::iostream_category());
   }
 }
 
