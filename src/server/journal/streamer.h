@@ -53,8 +53,7 @@ class JournalStreamer : protected BufferedStreamerBase {
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
  public:
-  RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal,
-                  Context* cntx);
+  RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
   void Start(io::Sink* dest) override;
@@ -81,7 +80,6 @@ class RestoreStreamer : public JournalStreamer {
   DbSlice* db_slice_;
   uint64_t snapshot_version_ = 0;
   SlotSet my_slots_;
-  uint32_t sync_id_;
   Cancellation fiber_cancellation_;
   bool snapshot_finished_ = false;
 };

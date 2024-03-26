@@ -21,17 +21,34 @@ ABSL_DECLARE_FLAG(int, source_connect_timeout_ms);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 
 using namespace std;
+using namespace facade;
 using namespace util;
 
 namespace dfly {
 
-class OutgoingMigration::SliceSlotMigration {
+class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
-  SliceSlotMigration(DbSlice* slice, SlotSet slots, uint32_t sync_id, journal::Journal* journal,
-                     Context* cntx, io::Sink* dest)
-      : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
-    state_.store(MigrationState::C_SYNC, memory_order_relaxed);
-    sync_fb_ = fb2::Fiber("slot-snapshot", [this, dest] { streamer_.Start(dest); });
+  SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
+                     journal::Journal* journal, Context* cntx)
+      : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, cntx) {
+  }
+  ~SliceSlotMigration() {
+    sync_fb_.JoinIfNeeded();
+  }
+
+  std::error_code Start(uint32_t /*sync_id*/, uint32_t shard_id) {
+    RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
+    ResetParser(/*server_mode=*/false);
+
+    auto port = absl::GetFlag(FLAGS_admin_port);
+    std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", port, " ", shard_id);
+    VLOG(1) << "cmd: " << cmd;
+
+    RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
+    LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
+
+    sync_fb_ = fb2::Fiber("slot-snapshot", [this] { streamer_.Start(Sock()); });
+    return {};
   }
 
   void Cancel() {
@@ -44,7 +61,6 @@ class OutgoingMigration::SliceSlotMigration {
 
   void Finalize() {
     streamer_.SendFinalize();
-    state_.store(MigrationState::C_FINISHED, memory_order_relaxed);
   }
 
   MigrationState GetState() const {
@@ -75,25 +91,6 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
-void OutgoingMigration::StartFlow(journal::Journal* journal, io::Sink* dest) {
-  EngineShard* shard = EngineShard::tlocal();
-  DbSlice* slice = &shard->db_slice();
-
-  const auto shard_id = slice->shard_id();
-
-  MigrationState state = MigrationState::C_NO_STATE;
-  {
-    std::lock_guard lck(flows_mu_);
-    slot_migrations_[shard_id] =
-        std::make_unique<SliceSlotMigration>(slice, slots_, sync_id_, journal, &cntx_, dest);
-    state = GetStateImpl();
-  }
-
-  if (state == MigrationState::C_SYNC) {
-    main_sync_fb_ = fb2::Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
-  }
-}
-
 void OutgoingMigration::Finalize(uint32_t shard_id) {
   slot_migrations_[shard_id]->Finalize();
 }
@@ -103,6 +100,9 @@ void OutgoingMigration::Cancel(uint32_t shard_id) {
 }
 
 MigrationState OutgoingMigration::GetState() const {
+  if (is_finalized_) {
+    return MigrationState::C_FINISHED;
+  }
   std::lock_guard lck(flows_mu_);
   return GetStateImpl();
 }
@@ -120,6 +120,17 @@ MigrationState OutgoingMigration::GetStateImpl() const {
 }
 
 void OutgoingMigration::SyncFb() {
+  auto start_cb = [this](util::ProactorBase* pb) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      server_family_->journal()->StartInThread();
+      slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
+          &shard->db_slice(), server(), slots_, server_family_->journal(), &cntx_);
+      slot_migrations_[shard->shard_id()]->Start(sync_id_, shard->shard_id());
+    }
+  };
+
+  shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
+
   for (auto& migration : slot_migrations_) {
     migration->WaitForSnapshotFinished();
   }
@@ -144,6 +155,7 @@ void OutgoingMigration::SyncFb() {
   auto cb = [this](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
       // TODO add error processing to move back into STABLE_SYNC state
+      VLOG(1) << "FINALIZE outgoing migration" << shard->shard_id();
       Finalize(shard->shard_id());
     }
   };
@@ -151,6 +163,18 @@ void OutgoingMigration::SyncFb() {
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
   // TODO add ACK here and config update
+}
+
+void OutgoingMigration::Ack() {
+  auto cb = [this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      Cancel(shard->shard_id());
+    }
+  };
+
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  is_finalized_ = true;
 }
 
 std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
@@ -180,6 +204,8 @@ std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   }
   RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
   LOG_IF(ERROR, !CheckRespIsSimpleReply("OK")) << facade::ToSV(LastResponseArgs().front().GetBuf());
+
+  main_sync_fb_ = fb2::Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
 
   return {};
 }
