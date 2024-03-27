@@ -368,8 +368,9 @@ TEST_F(DashTest, BumpUp) {
   key = segment_.Key(kFirstStashId, 5);
   hash = dt_.DoHash(key);
 
-  EXPECT_EQ(1, segment_.CVCOnBump(1, kFirstStashId, 5, hash, touched_bid));
-  EXPECT_EQ(touched_bid[0], 1);
+  EXPECT_EQ(2, segment_.CVCOnBump(1, kFirstStashId, 5, hash, touched_bid));
+  EXPECT_EQ(touched_bid[0], 0);
+  EXPECT_EQ(touched_bid[1], 1);
 
   // Bump up
   segment_.BumpUp(kFirstStashId, 5, hash, RelaxedBumpPolicy{});
@@ -384,8 +385,13 @@ TEST_F(DashTest, BumpUp) {
   key = segment_.Key(kSecondStashId, 9);
   hash = dt_.DoHash(key);
 
-  EXPECT_EQ(1, segment_.CVCOnBump(2, kSecondStashId, 9, hash, touched_bid));
+  EXPECT_EQ(2, segment_.CVCOnBump(2, kSecondStashId, 9, hash, touched_bid));
   EXPECT_EQ(touched_bid[0], kSecondStashId);
+  // There used to be a bug here because two bucket slots are swapped within BumpUp
+  // and both of them have version < version_threshold. If we don't return them both
+  // then full sync phase during replication might fail to capture the changes leading
+  // to data inconsistencies between master and replica.
+  EXPECT_EQ(touched_bid[1], 0);
 
   segment_.BumpUp(kSecondStashId, 9, hash, RelaxedBumpPolicy{});
   ASSERT_TRUE(key == segment_.Key(0, kNumSlots - 1) || key == segment_.Key(1, kNumSlots - 1));

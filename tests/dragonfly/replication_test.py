@@ -53,14 +53,17 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
+@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 async def test_replication_all(
-    df_local_factory: DflyInstanceFactory,
-    t_master,
-    t_replicas,
-    seeder_config,
-    stream_target,
+    df_local_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
 ):
-    master = df_local_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master)
+    if seeder_config["key_target"] == 1_000_000:
+        pytest.skip()
+
+    if mode:
+        mode["maxmemory"] = str(t_master * 256) + "mb"
+
+    master = df_local_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **mode)
     replicas = [
         df_local_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
@@ -99,17 +102,17 @@ async def test_replication_all(
     await stream_task
 
     # Check data after full sync
-    await check_all_replicas_finished(c_replicas, c_master)
-    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
-    assert len(set(hashes)) == 1
+    async def check():
+        await check_all_replicas_finished(c_replicas, c_master)
+        hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
+        assert len(set(hashes)) == 1
 
+    await check()
     # Stream more data in stable state
     await seeder.run(c_master, target_ops=stream_target)
 
     # Check data after stable state stream
-    await check_all_replicas_finished(c_replicas, c_master)
-    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
-    assert len(set(hashes)) == 1
+    await check()
 
     await disconnect_clients(c_master, *c_replicas)
 

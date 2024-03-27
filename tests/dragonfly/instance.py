@@ -142,10 +142,12 @@ class DflyInstance:
 
         self.log_files = self.get_logs_from_psutil()
 
-        last_log_file = open("/tmp/last_test_log_files.txt", "w")
+        last_log_file = open("/tmp/last_test_log_files.txt", "a")
 
         for log in self.log_files:
             last_log_file.write(log + "\n")
+
+        last_log_file.close()
 
         # Remove first 6 lines - our default header with log locations (as it carries no useful information)
         # Next, replace log-level + date with port and colored arrow
