@@ -49,13 +49,12 @@ jobs:
         uses: actions/setup-python@v3
         with:
           python-version: 3.9
-      - name: KinD Cluster
-        uses: container-tools/kind-action@v2.0.3
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.9.0
         with:
           kubectl_version: v1.28.0
-          registry: false
       - run: |
-          kubectl cluster-info --context kind-kind
+          kubectl cluster-info --context kind-chart-testing
       - name: Install the CRD and Operator
         run: |
           # Install the CRD and Operator
