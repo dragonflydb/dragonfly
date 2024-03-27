@@ -649,7 +649,7 @@ int hllSparseToDense(sds* hll_ptr) {
 
     /* Free the old representation and set the new one. */
     sdsfree(*hll_ptr);
-    hll_ptr = &dense;
+    *hll_ptr = dense;
     return C_OK;
 }
 
@@ -668,7 +668,7 @@ int hllSparseToDense(sds* hll_ptr) {
  * sparse to dense: this happens when a register requires to be set to a value
  * not representable with the sparse representation, or when the resulting
  * size would be greater than HLL_SPARSE_MAX_BYTES. */
-int hllSparseSet(sds* hll_ptr, long index, uint8_t count) {
+int hllSparseSet(sds* hll_ptr, long index, uint8_t count, int* promoted) {
     struct hllhdr *hdr;
     uint8_t oldcount, *sparse, *end, *p, *prev, *next;
     long first, span;
@@ -910,6 +910,7 @@ updated:
 
 promote: /* Promote to dense representation. */
     if (hllSparseToDense(&hll) == C_ERR) return -1; /* Corrupted HLL. */
+    *hll_ptr = hll;
     hdr = (struct hllhdr *)hll;
 
     /* We need to call hllDenseAdd() to perform the operation after the
@@ -921,6 +922,7 @@ promote: /* Promote to dense representation. */
      * conversion, it will be performed in all the slaves as well. */
     int dense_retval = hllDenseSet(hdr->registers,index,count);
     serverAssert(dense_retval == 1);
+    *promoted = 1;
     return dense_retval;
 }
 
@@ -930,11 +932,11 @@ promote: /* Promote to dense representation. */
  *
  * This function is actually a wrapper for hllSparseSet(), it only performs
  * the hashing of the element to obtain the index and zeros run length. */
-int hllSparseAdd(sds* hll_ptr, unsigned char *ele, size_t elesize) {
+int hllSparseAdd(sds* hll_ptr, unsigned char *ele, size_t elesize, int* promoted) {
     long index;
     uint8_t count = hllPatLen(ele,elesize,&index);
     /* Update the register if this element produced a longer run of zeroes. */
-    return hllSparseSet(hll_ptr,index,count);
+    return hllSparseSet(hll_ptr,index,count, promoted);
 }
 /* Compute the register histogram in the sparse representation. */
 void hllSparseRegHisto(uint8_t* sparse, int sparselen, int* invalid, int* reghisto) {
@@ -1299,9 +1301,9 @@ int convertSparseToDenseHll(struct HllBufferPtr in_hll, struct HllBufferPtr out_
   return C_OK;
 }
 
-int pfadd_sparse(sds* hll_ptr, unsigned char* value, size_t size) {
+int pfadd_sparse(sds* hll_ptr, unsigned char* value, size_t size, int* promoted) {
   struct hllhdr* hdr = (struct hllhdr*)(*hll_ptr);
-  int retval = hllSparseAdd(hll_ptr, value, size);
+  int retval = hllSparseAdd(hll_ptr, value, size, promoted);
   switch (retval) {
     case 1:
       HLL_INVALIDATE_CACHE(hdr);

@@ -92,15 +92,24 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   if (is_sparse) {
     hll_sds = sdsnewlen(hll.data(), hll.size());
   }
-
+  int promoted = 0;
   for (const auto& value : values) {
     int added;
     if (is_sparse) {
       // Inserting to sparse hll might extend it.
-      // A referance to string.data() makes it unnecessarily complicated
+      // Referring to string.data() makes it unnecessarily complicated
       sds* hll_ptr = &hll_sds;
-      added = pfadd_sparse(hll_ptr, (unsigned char*)value.data(), value.size());
+      added = pfadd_sparse(hll_ptr, (unsigned char*)value.data(), value.size(), &promoted);
       hll_sds = *hll_ptr;
+      if (promoted == 1) {
+        is_sparse = false;
+        hll = string{hll_sds, sdslen(hll_sds)};
+        sdsfree(hll_sds);
+        if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
+          std::cout << "PROMOTE FAILED" << std::endl;
+          return OpStatus::INVALID_VALUE;
+        }
+      }
     } else {
       added = pfadd_dense(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
     }
