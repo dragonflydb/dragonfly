@@ -103,24 +103,18 @@ void ClusterSlotMigration::Stop() {
 void ClusterSlotMigration::StartFlow(uint32_t shard, io::Source* source) {
   VLOG(1) << "Start flow for shard: " << shard;
 
-  lock_guard lk{flows_op_mu_};
-
   shard_flows_[shard]->Start(&cntx_, source);
 
-  if (std::all_of(shard_flows_.begin(), shard_flows_.end(),
-                  [](const auto& m) { return m->IsInProgress(); })) {
+  lock_guard lk{flows_op_mu_};
+
+  if (!sync_fb_.IsJoinable() && std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                                            [](const auto& m) { return m->IsFinalized(); })) {
     sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
   }
 }
 
 void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "Main migration fiber started " << sync_id_;
-
-  for (auto& flow : shard_flows_) {
-    flow->JoinFlow();
-  }
-
-  VLOG(1) << "flows are joined ";
 
   if (IsFinalized()) {
     // TODO move ack code to outgoing_slot_migration
@@ -152,13 +146,6 @@ std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
     shard_flows_[i].reset(
         new ClusterShardMigration(server(), local_sync_id_, i, sync_id_, &service_));
   }
-
-  absl::Cleanup cleanup = [this]() {
-    // We do the following operations regardless of outcome.
-    for (auto& flow : shard_flows_) {
-      flow->JoinFlow();
-    }
-  };
 
   // Switch to new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) mutable {

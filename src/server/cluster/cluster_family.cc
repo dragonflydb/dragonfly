@@ -784,7 +784,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   auto host_ip = cntx->conn()->RemoteEndpointAddress();
 
-  VLOG(1) << "Create flow " << host_ip << ":" << port << " shard_id: " << shard_id << args;
+  VLOG(1) << "Create flow " << host_ip << ":" << port << " shard_id: " << shard_id;
 
   cntx->conn()->SetName(absl::StrCat("migration_flow_", host_ip, ":", port));
 
@@ -792,7 +792,10 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
+  cntx->sync_dispatch = false;
+
   cntx->SendOk();
+
   migration->StartFlow(shard_id, cntx->conn()->socket());
 }
 
