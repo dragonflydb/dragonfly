@@ -83,6 +83,10 @@ LSN Journal::GetLsn() const {
   return journal_slice.cur_lsn();
 }
 
+LSN Journal::PostIncrLsn() {
+  return journal_slice.PostIncrLsn();
+}
+
 void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
                           std::optional<SlotId> slot, Entry::Payload payload, bool await) {
   journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)}, await);

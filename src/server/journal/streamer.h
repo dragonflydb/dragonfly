@@ -19,7 +19,10 @@ namespace dfly {
 class JournalStreamer : protected BufferedStreamerBase {
  public:
   JournalStreamer(journal::Journal* journal, Context* cntx)
-      : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx}, journal_{journal} {
+      : BufferedStreamerBase{cntx->GetCancellation()},
+        cntx_{cntx},
+        journal_{journal},
+        periodic_ping_(this) {
   }
 
   // Self referential.
@@ -42,16 +45,28 @@ class JournalStreamer : protected BufferedStreamerBase {
     return true;
   }
 
- private:
+  class PeriodicPing {
+   public:
+    explicit PeriodicPing(JournalStreamer* streamer) : streamer_(streamer) {
+    }
+    void MaybePing(bool allow_await);
+    void Start();
+
+    static constexpr std::chrono::seconds kLimit{2};
+    friend JournalStreamer;
+
+   private:
+    std::chrono::system_clock::time_point start_time_;
+    JournalStreamer* streamer_;
+  };
+
   Context* cntx_;
 
   uint32_t journal_cb_id_{0};
   journal::Journal* journal_;
 
   util::fb2::Fiber write_fb_{};
-  // TODO seperate this in a different class
-  std::chrono::system_clock::time_point start_time_;
-  static constexpr long kLimit = 2;
+  PeriodicPing periodic_ping_;
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.

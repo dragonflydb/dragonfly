@@ -830,30 +830,30 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       break;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
-
+    size_t records = 1;
     if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
-      // TODO remove incrementing lsn on master side otherwise we break takeover
-      // journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
-      if (tx_data->lsn != journal_rec_executed_.load()) {
-        // TODO LOG
-      }
+      const auto expect = journal_rec_executed_.load();
+      DCHECK(tx_data->lsn == expect)
+          << "tx_data->lsn=" << tx_data->lsn << " journal_rec_executed=" << expect;
     } else if (tx_data->opcode == journal::Op::EXEC) {
       if (use_multi_shard_exe_sync_) {
+        records = tx_data->journal_rec_count;
         InsertTxDataToShardResource(std::move(*tx_data));
       } else {
         // On no shard sync mode we execute multi commands once they are recieved, therefor when
         // receiving exec opcode, we only increase the journal counting.
         DCHECK_EQ(tx_data->commands.size(), 0u);
-        journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
       }
     } else {
+      records = tx_data->journal_rec_count;
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));
       } else {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
+    journal_rec_executed_.fetch_add(records);
     shard_replica_waker_.notify();
   }
 }
@@ -1019,7 +1019,6 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
   if (tx_data.shard_cnt <= 1 || (!use_multi_shard_exe_sync_ && !tx_data.IsGlobalCmd())) {
     VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
-    journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
     return;
   }
 
@@ -1057,7 +1056,6 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
     VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
   }
-  journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from
