@@ -50,7 +50,7 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             cluster/cluster_shard_migration.cc cluster/outgoing_slot_migration.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc
-            tiering/disk_storage.cc)
+            tiering/disk_storage.cc tiering/op_manager.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
@@ -104,6 +104,7 @@ cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
 cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
+cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
 if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(stream_family_test PRIVATE SANITIZERS)
   target_compile_definitions(multi_test PRIVATE SANITIZERS)
