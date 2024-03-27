@@ -1,0 +1,8 @@
+serviceMonitor:
+  enabled: true
+  namespace: ""
+  labels:
+    release: prometheus-stack
+  annotations: {}
+  interval: 10s
+  scrapeTimeout: 10s

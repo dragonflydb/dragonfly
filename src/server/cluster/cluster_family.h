@@ -52,17 +52,13 @@ class ClusterFamily {
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
 
  private:  // Slots migration section
-  void DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
 
-  // DFLYMIGRATE CONF initiate first step in slots migration procedure
-  // MigrationConf process this request and saving slots range and
-  // target node port in outgoing_migration_jobs_.
-  // return sync_id and shard number to the target node
-  void MigrationConf(CmdArgList args, ConnectionContext* cntx);
+  // DFLYMIGRATE INIT is internal command to create incoming migration object
+  void InitMigration(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE FLOW initiate second step in slots migration procedure
   // this request should be done for every shard on the target node
@@ -73,18 +69,20 @@ class ClusterFamily {
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
   // create a ClusterSlotMigration entity which will execute migration
-  ClusterSlotMigration* AddMigration(std::string host_ip, uint16_t port, SlotRanges slots);
+  ClusterSlotMigration* CreateIncomingMigration(std::string host_ip, uint16_t port,
+                                                SlotRanges slots);
 
   bool StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
                            ConnectionContext* cntx);
   void RemoveFinishedMigrations();
 
   // store info about migration and create unique session id
-  uint32_t CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port, SlotRanges slots);
+  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(std::string host_ip, uint16_t port,
+                                                             SlotRanges slots);
 
   std::shared_ptr<OutgoingMigration> GetOutgoingMigration(uint32_t sync_id);
 
-  mutable Mutex migration_mu_;  // guard migrations operations
+  mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
   std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);

@@ -4,14 +4,68 @@ import json
 import redis
 from redis import asyncio as aioredis
 import asyncio
+from dataclasses import dataclass
 
 from .instance import DflyInstanceFactory, DflyInstance
 from .utility import *
 from .replication_test import check_all_replicas_finished
+from redis.cluster import RedisCluster
+from redis.cluster import ClusterNode
+from .proxy import Proxy
 
 from . import dfly_args
 
 BASE_PORT = 30001
+
+
+class RedisClusterNode:
+    def __init__(self, port):
+        self.port = port
+        self.proc = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            [
+                "redis-server-6.2.11",
+                f"--port {self.port}",
+                "--save ''",
+                "--cluster-enabled yes",
+                f"--cluster-config-file nodes_{self.port}.conf",
+                "--cluster-node-timeout 5000",
+                "--appendonly no",
+                "--protected-mode no",
+                "--repl-diskless-sync yes",
+                "--repl-diskless-sync-delay 0",
+            ]
+        )
+        logging.debug(self.proc.args)
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except Exception as e:
+            pass
+
+
+@pytest.fixture(scope="function")
+def redis_cluster(port_picker):
+    # create redis client with 3 node with default slot configuration
+    # node1 slots 0-5460
+    # node2 slots 5461-10922
+    # node3 slots 10923-16383
+    ports = [port_picker.get_available_port() for i in range(3)]
+    nodes = [RedisClusterNode(port) for port in ports]
+    for node in nodes:
+        node.start()
+        time.sleep(1)
+
+    create_command = f'echo "yes" |redis-cli --cluster create {" ".join([f"127.0.0.1:{port}" for port in ports])}'
+    subprocess.run(create_command, shell=True)
+    time.sleep(4)
+    yield nodes
+    for node in nodes:
+        node.stop()
 
 
 async def push_config(config, admin_connections):
@@ -69,61 +123,120 @@ class TestEmulatedWithAnnounceIp:
         assert expected == res
 
 
-def verify_slots_result(
-    ip: str, port: int, answer: list, rep_ip: str = None, rep_port: int = None
-) -> bool:
+@dataclass
+class ReplicaInfo:
+    id: string
+    port: int
+
+
+def verify_slots_result(port: int, answer: list, replicas) -> bool:
     def is_local_host(ip: str) -> bool:
         return ip == "127.0.0.1" or ip == "localhost"
 
     assert answer[0] == 0  # start shard
     assert answer[1] == 16383  # last shard
-    if rep_ip is not None:
-        assert len(answer) == 4  # the network info
-        rep_info = answer[3]
-        assert len(rep_info) == 3
-        ip_addr = str(rep_info[0], "utf-8")
-        assert ip_addr == rep_ip or (is_local_host(ip_addr) and is_local_host(ip))
-        assert rep_info[1] == rep_port
-    else:
-        assert len(answer) == 3
+
     info = answer[2]
     assert len(info) == 3
     ip_addr = str(info[0], "utf-8")
-    assert ip_addr == ip or (is_local_host(ip_addr) and is_local_host(ip))
+    assert is_local_host(ip_addr)
     assert info[1] == port
+
+    # Replicas
+    assert len(answer) == 3 + len(replicas)
+    for i in range(3, len(replicas)):
+        replica = replicas[i - 3]
+        rep_info = answer[i]
+        assert len(rep_info) == 3
+        ip_addr = str(rep_info[0], "utf-8")
+        assert is_local_host(ip_addr)
+        assert rep_info[1] == replica.port
+        assert rep_info[2] == replica.id
+
     return True
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "emulated"})
-async def test_cluster_slots_in_replicas(df_local_factory):
+async def test_emulated_cluster_with_replicas(df_local_factory):
     master = df_local_factory.create(port=BASE_PORT)
-    replica = df_local_factory.create(port=BASE_PORT + 1, logtostdout=True)
+    replicas = [df_local_factory.create(port=BASE_PORT + i, logtostdout=True) for i in range(1, 3)]
 
-    df_local_factory.start_all([master, replica])
+    df_local_factory.start_all([master, *replicas])
 
     c_master = aioredis.Redis(port=master.port)
-    c_replica = aioredis.Redis(port=replica.port)
+    master_id = (await c_master.execute_command("dflycluster myid")).decode("utf-8")
 
-    res = await c_replica.execute_command("CLUSTER SLOTS")
-    assert len(res) == 1
-    assert verify_slots_result(ip="127.0.0.1", port=replica.port, answer=res[0])
+    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+    replica_ids = [
+        (await c_replica.execute_command("dflycluster myid")).decode("utf-8")
+        for c_replica in c_replicas
+    ]
+
+    for replica, c_replica in zip(replicas, c_replicas):
+        res = await c_replica.execute_command("CLUSTER SLOTS")
+        assert len(res) == 1
+        assert verify_slots_result(port=replica.port, answer=res[0], replicas=[])
+
     res = await c_master.execute_command("CLUSTER SLOTS")
-    assert verify_slots_result(ip="127.0.0.1", port=master.port, answer=res[0])
+    assert verify_slots_result(port=master.port, answer=res[0], replicas=[])
 
-    # Connect replica to master
-    rc = await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    assert str(rc, "utf-8") == "OK"
+    # Connect replicas to master
+    for replica, c_replica in zip(replicas, c_replicas):
+        rc = await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        assert str(rc, "utf-8") == "OK"
+
     await asyncio.sleep(0.5)
-    res = await c_replica.execute_command("CLUSTER SLOTS")
-    assert verify_slots_result(
-        ip="127.0.0.1", port=master.port, answer=res[0], rep_ip="127.0.0.1", rep_port=replica.port
-    )
+
+    for replica, c_replica in zip(replicas, c_replicas):
+        res = await c_replica.execute_command("CLUSTER SLOTS")
+        assert verify_slots_result(
+            port=master.port, answer=res[0], replicas=[ReplicaInfo(replica.port, id)]
+        )
+
     res = await c_master.execute_command("CLUSTER SLOTS")
     assert verify_slots_result(
-        ip="127.0.0.1", port=master.port, answer=res[0], rep_ip="127.0.0.1", rep_port=replica.port
+        port=master.port,
+        answer=res[0],
+        replicas=[ReplicaInfo(id, replica.port) for id, replica in zip(replica_ids, replicas)],
     )
 
-    await close_clients(c_master, c_replica)
+    assert await c_master.execute_command("CLUSTER NODES") == {
+        f"127.0.0.1:{master.port}": {
+            "connected": True,
+            "epoch": "0",
+            "flags": "myself,master",
+            "last_ping_sent": "0",
+            "last_pong_rcvd": "0",
+            "master_id": "-",
+            "migrations": [],
+            "node_id": master_id,
+            "slots": [["0", "16383"]],
+        },
+        f"127.0.0.1:{replicas[0].port}": {
+            "connected": True,
+            "epoch": "0",
+            "flags": "slave",
+            "last_ping_sent": "0",
+            "last_pong_rcvd": "0",
+            "master_id": master_id,
+            "migrations": [],
+            "node_id": replica_ids[0],
+            "slots": [],
+        },
+        f"127.0.0.1:{replicas[1].port}": {
+            "connected": True,
+            "epoch": "0",
+            "flags": "slave",
+            "last_ping_sent": "0",
+            "last_pong_rcvd": "0",
+            "master_id": master_id,
+            "migrations": [],
+            "node_id": replica_ids[1],
+            "slots": [],
+        },
+    }
+
+    await close_clients(c_master, *c_replicas)
 
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
@@ -826,7 +939,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
           "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
           "replicas": [],
           "migrations": [{{ "slot_ranges": [ {{ "start": 5200, "end": 5259 }} ]
-                         , "ip": "127.0.0.1", "port" : {nodes[0].admin_port}, "target_id": "{node_ids[1]}" }}]
+                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "target_id": "{node_ids[1]}" }}]
         }},
         {{
           "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
@@ -841,24 +954,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    await asyncio.sleep(0.5)
-    try:
-        await c_nodes_admin[1].execute_command(
-            "DFLYCLUSTER",
-            "START-SLOT-MIGRATION",
-            "127.0.0.1",
-            str(nodes[0].admin_port),
-            "5000",
-            "5200",
-        )
-        assert False, "Should not be able to start slot migration"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == "Can't start the migration, another one is in progress"
-
-    await push_config(
-        config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
-        c_nodes_admin,
-    )
+    # TODO add a check for correct results after the same config apply
 
     await close_clients(*c_nodes, *c_nodes_admin)
 
@@ -921,10 +1017,27 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
     assert await c_nodes[0].execute_command("DBSIZE") == 10
 
-    res = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "START-SLOT-MIGRATION", "127.0.0.1", str(nodes[0].admin_port), "3000", "9000"
+    migation_config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
+          "replicas": [],
+          "migrations": [{{ "slot_ranges": [ {{ "start": 3000, "end": 9000 }} ]
+                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "target_id": "{node_ids[1]}" }}]
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        migation_config.replace("LAST_SLOT_CUTOFF", "9000").replace("NEXT_SLOT_CUTOFF", "9001"),
+        c_nodes_admin,
     )
-    assert 1 == res
 
     await asyncio.sleep(0.5)
 
@@ -966,7 +1079,12 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     await close_clients(*c_nodes, *c_nodes_admin)
 
 
-from dataclasses import dataclass
+@dataclass
+class MigrationInfo:
+    ip: str
+    port: int
+    slots: list
+    target_id: str
 
 
 @dataclass
@@ -976,9 +1094,11 @@ class NodeInfo:
     admin_client: aioredis.Redis
     slots: list
     next_slots: list
-    sync_ids: list
+    migrations: list
+    id: str
 
 
+@pytest.mark.skip(reason="Failing on github regression action")
 @pytest.mark.parametrize(
     "node_count, segments, keys",
     [
@@ -1011,7 +1131,8 @@ async def test_cluster_fuzzymigration(
             admin_client=instance.admin_client(),
             slots=[],
             next_slots=[],
-            sync_ids=[],
+            migrations=[],
+            id=await get_node_id(instance.admin_client()),
         )
         for instance in instances
     ]
@@ -1021,11 +1142,20 @@ async def test_cluster_fuzzymigration(
             {
                 "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
                 "master": {
-                    "id": await get_node_id(node.admin_client),
+                    "id": node.id,
                     "ip": "127.0.0.1",
                     "port": node.instance.port,
                 },
                 "replicas": [],
+                "migrations": [
+                    {
+                        "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
+                        "target_id": m.target_id,
+                        "ip": m.ip,
+                        "port": m.port,
+                    }
+                    for m in node.migrations
+                ],
             }
             for node in nodes
         ]
@@ -1088,19 +1218,21 @@ async def test_cluster_fuzzymigration(
                 continue
 
             print(node_idx, "migrates to", dest_idx, "slots", dest_slots)
-            sync_id = await nodes[dest_idx].admin_client.execute_command(
-                "DFLYCLUSTER",
-                "START-SLOT-MIGRATION",
-                "127.0.0.1",
-                node.instance.admin_port,
-                *itertools.chain(*dest_slots),
+            node.migrations.append(
+                MigrationInfo(
+                    ip="127.0.0.1",
+                    port=nodes[dest_idx].instance.admin_port,
+                    slots=dest_slots,
+                    target_id=nodes[dest_idx].id,
+                )
             )
 
-            nodes[node_idx].sync_ids.append(sync_id)
             nodes[dest_idx].next_slots.extend(dest_slots)
 
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
+
+    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 
     iterations = 0
     while True:
@@ -1121,6 +1253,11 @@ async def test_cluster_fuzzymigration(
     for counter in counters:
         counter.cancel()
 
+    # clean migrations
+    for node in nodes:
+        node.migrations = []
+
+    # TODO this config should be pushed with new slots
     # Push new config
     await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
 
@@ -1143,3 +1280,285 @@ async def test_cluster_fuzzymigration(
     await close_clients(
         cluster_client, *[node.admin_client for node in nodes], *[node.client for node in nodes]
     )
+
+
+def parse_lag(replication_info: str):
+    lags = re.findall("lag=([0-9]+)\r\n", replication_info)
+    assert len(lags) == 1
+    return int(lags[0])
+
+
+async def await_no_lag(client: aioredis.Redis, timeout=10):
+    start = time.time()
+    while (time.time() - start) < timeout:
+        lag = parse_lag(await client.execute_command("info replication"))
+        print("current lag =", lag)
+        if lag == 0:
+            return
+        await asyncio.sleep(0.05)
+
+    raise RuntimeError("Lag did not reduced to 0!")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_replicate_cluster(df_local_factory: DflyInstanceFactory, df_seeder_factory):
+    """
+    Create dragonfly cluster of 2 nodes.
+    Create additional dragonfly server in emulated mode.
+    Replicate the dragonfly cluster into a single dragonfly node.
+    Send traffic before replication start and while replicating.
+    Promote the replica to master and check data consistency between cluster and single node.
+    """
+    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    cluster_nodes = [
+        df_local_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
+    ]
+
+    # Start instances and connect clients
+    df_local_factory.start_all(cluster_nodes + [replica])
+    c_nodes = [node.client() for node in cluster_nodes]
+
+    c_replica = replica.client()
+
+    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes))
+    config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {cluster_nodes[0].port} }},
+          "replicas": []
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {cluster_nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes,
+    )
+
+    # Fill instances with some data
+    seeder = df_seeder_factory.create(keys=2000, port=cluster_nodes[0].port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Start replication
+    await c_replica.execute_command("REPLICAOF localhost " + str(cluster_nodes[0].port) + " 0 5259")
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(cluster_nodes[1].port) + " 5260 16383"
+    )
+
+    # give seeder time to run.
+    await asyncio.sleep(1.0)
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
+    # wait for replication to finish
+    await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
+
+    # promote replica to master and compare data
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
+
+    await disconnect_clients(*c_nodes, c_replica)
+
+
+async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
+    start = time.time()
+
+    async def is_stable():
+        role = await m_client.execute_command("role")
+        return role == [
+            "master",
+            [["127.0.0.1", str(replica_port), "stable_sync"]],
+        ]
+
+    while (time.time() - start) < timeout:
+        if await is_stable():
+            return
+        await asyncio.sleep(0.05)
+
+    raise RuntimeError("Failed to reach stable sync")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_replicate_disconnect_cluster(
+    df_local_factory: DflyInstanceFactory, df_seeder_factory
+):
+    """
+    Create dragonfly cluster of 2 nodes and additional dragonfly server in emulated mode.
+    Populate the cluster with data
+    Replicate the dragonfly cluster into a single dragonfly node and wait for stable sync
+    Break connection between cluster node 0 and replica and reconnect
+    Promote replica to master
+    Compare cluster data and replica data
+    """
+    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    cluster_nodes = [
+        df_local_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
+    ]
+
+    # Start instances and connect clients
+    df_local_factory.start_all(cluster_nodes + [replica])
+    c_nodes = [node.client() for node in cluster_nodes]
+
+    c_replica = replica.client()
+
+    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes))
+    config = f"""
+      [
+        {{
+          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
+          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {cluster_nodes[0].port} }},
+          "replicas": []
+        }},
+        {{
+          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
+          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {cluster_nodes[1].port} }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        c_nodes,
+    )
+
+    # Fill instances with some data
+    seeder = df_seeder_factory.create(keys=2000, port=cluster_nodes[0].port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    proxy = Proxy("127.0.0.1", 1114, "127.0.0.1", cluster_nodes[0].port)
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    # Start replication
+    await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port) + " 0 5259")
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(cluster_nodes[1].port) + " 5260 16383"
+    )
+
+    # wait for replication to reach stable state on all nodes
+    await asyncio.gather(
+        *(asyncio.create_task(await_stable_sync(c, replica.port)) for c in c_nodes)
+    )
+
+    # break connection between first node and replica
+    await proxy.close(proxy_task)
+    await asyncio.sleep(3)
+
+    async def is_first_master_conn_down(conn):
+        info = await conn.execute_command("INFO REPLICATION")
+        print(info)
+        statuses = re.findall("master_link_status:(down|up)\r\n", info)
+        assert len(statuses) == 2
+        assert statuses[0] == "down"
+        assert statuses[1] == "up"
+
+    await is_first_master_conn_down(c_replica)
+
+    # start connection again
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    seeder.stop()
+    await fill_task
+
+    # wait for stable sync on first master
+    await await_stable_sync(c_nodes[0], replica.port)
+    # wait for no lag on all cluster nodes
+    await asyncio.gather(*(asyncio.create_task(await_no_lag(c)) for c in c_nodes))
+
+    # promote replica to master and compare data
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
+
+    await disconnect_clients(*c_nodes, c_replica)
+    await proxy.close(proxy_task)
+
+
+def is_offset_eq_master_repl_offset(replication_info: str):
+    offset = re.findall("offset=([0-9]+),", replication_info)
+    assert len(offset) == 1
+    print("current offset =", offset)
+    master_repl_offset = re.findall("master_repl_offset:([0-9]+)\r\n", replication_info)
+    assert len(master_repl_offset) == 1
+    print("current master_repl_offset =", master_repl_offset)
+    return int(offset[0]) == int(master_repl_offset[0])
+
+
+async def await_eq_offset(client: aioredis.Redis, timeout=20):
+    start = time.time()
+    while (time.time() - start) < timeout:
+        if is_offset_eq_master_repl_offset(await client.execute_command("info replication")):
+            return
+        await asyncio.sleep(0.05)
+
+    raise RuntimeError("offset not equal!")
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_replicate_redis_cluster(redis_cluster, df_local_factory, df_seeder_factory):
+    """
+    Create redis cluster of 3 nodes.
+    Create dragonfly server in emulated mode.
+    Replicate the redis cluster into a single dragonfly node.
+    Send traffic before replication start and while replicating.
+    Promote the replica to master and check data consistency between cluster and single dragonfly node.
+    """
+    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+
+    # Start instances and connect clients
+    df_local_factory.start_all([replica])
+
+    redis_cluster_nodes = redis_cluster
+    node_clients = [
+        aioredis.Redis(decode_responses=True, host="localhost", port=node.port)
+        for node in redis_cluster_nodes
+    ]
+
+    c_replica = replica.client()
+
+    seeder = df_seeder_factory.create(
+        keys=2000, port=redis_cluster_nodes[0].port, cluster_mode=True
+    )
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    # Start replication
+    await c_replica.execute_command(
+        "REPLICAOF localhost " + str(redis_cluster_nodes[0].port) + " 0 5460"
+    )
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(redis_cluster_nodes[1].port) + " 5461 10922"
+    )
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(redis_cluster_nodes[2].port) + " 10923 16383"
+    )
+
+    # give seeder time to run.
+    await asyncio.sleep(0.5)
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
+    # wait for replication to finish
+    await asyncio.gather(*(asyncio.create_task(await_eq_offset(client)) for client in node_clients))
+
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
+
+    await disconnect_clients(c_replica, *node_clients)

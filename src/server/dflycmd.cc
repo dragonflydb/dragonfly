@@ -19,6 +19,7 @@
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
+#include "server/debugcmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -109,10 +110,6 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
-  /*if (sub_cmd == "JOURNAL" && args.size() >= 2) {
-    return Journal(args, cntx);
-  }*/
-
   if (sub_cmd == "THREAD") {
     return Thread(args, cntx);
   }
@@ -141,6 +138,11 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return ReplicaOffset(args, cntx);
   }
 
+  if (sub_cmd == "LOAD" && args.size() == 2) {
+    DebugCmd debug_cmd{sf_, cntx};
+    debug_cmd.Load(ArgS(args, 1));
+    return;
+  }
   cntx->SendError(kSyntaxErr);
 }
 
@@ -569,6 +571,20 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
   return *it;
 }
 
+auto DflyCmd::GetReplicaInfo(ConnectionContext* cntx) -> std::shared_ptr<ReplicaInfo> {
+  if (cntx == nullptr) {
+    return nullptr;
+  }
+
+  unique_lock lk(mu_);
+  auto it = replica_infos_.find(cntx->conn_state.replication_info.repl_session_id);
+  if (it == replica_infos_.end()) {
+    return nullptr;
+  }
+
+  return it->second;
+}
+
 void DflyCmd::OnClose(ConnectionContext* cntx) {
   unsigned session_id = cntx->conn_state.replication_info.repl_session_id;
   if (!session_id)
@@ -657,13 +673,14 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
     } else {
       lag = std::numeric_limits<LSN>::max();
     }
-    vec.push_back(ReplicaRoleInfo{info->address, info->listening_port, SyncStateName(state), lag});
+    vec.push_back(
+        ReplicaRoleInfo{info->id, info->address, info->listening_port, SyncStateName(state), lag});
   }
   return vec;
 }
 
 void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
-  Mutex stats_mu;
+  util::fb2::Mutex stats_mu;
 
   lock_guard lk_main{mu_};  // prevent state changes
   auto cb = [this, &stats, &stats_mu](EngineShard* shard) {

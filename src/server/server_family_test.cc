@@ -310,4 +310,10 @@ TEST_F(ServerFamilyTest, ClientTrackingSelectDB) {
   EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "C");
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingNonTransactionalBug) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+
+  Run({"CLUSTER", "SLOTS"});
+}
 }  // namespace dfly

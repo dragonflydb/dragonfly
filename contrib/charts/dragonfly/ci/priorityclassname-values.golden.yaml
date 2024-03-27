@@ -1,4 +1,13 @@
 ---
+# Source: dragonfly/templates/extra-manifests.yaml
+apiVersion: scheduling.k8s.io/v1
+description: This priority class should be used only for tests.
+globalDefault: false
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+---
 # Source: dragonfly/templates/serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -8,7 +17,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/version: "v1.15.1"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: dragonfly/templates/service.yaml
@@ -20,7 +29,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/version: "v1.15.1"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -42,7 +51,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/version: "v1.15.1"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -61,7 +70,7 @@ spec:
       serviceAccountName: test-dragonfly
       containers:
         - name: dragonfly
-          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.15.0"
+          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.15.1"
           imagePullPolicy: IfNotPresent
           ports:
             - name: dragonfly
@@ -92,12 +101,3 @@ spec:
           resources:
             limits: {}
             requests: {}
----
-# Source: dragonfly/templates/extra-manifests.yaml
-apiVersion: scheduling.k8s.io/v1
-description: This priority class should be used only for tests.
-globalDefault: false
-kind: PriorityClass
-metadata:
-  name: high-priority
-value: 1000000

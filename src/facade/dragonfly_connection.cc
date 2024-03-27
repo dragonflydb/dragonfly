@@ -6,12 +6,12 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
 #include <numeric>
 #include <variant>
 
-#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
@@ -89,7 +89,8 @@ void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
 // https://www.w3.org/Protocols/rfc2616/rfc2616-sec5.html
 // One place to find a good implementation would be https://github.com/h2o/picohttpparser
 bool MatchHttp11Line(string_view line) {
-  return absl::StartsWith(line, "GET ") && absl::EndsWith(line, "HTTP/1.1");
+  return (absl::StartsWith(line, "GET ") || absl::StartsWith(line, "POST ")) &&
+         absl::EndsWith(line, "HTTP/1.1");
 }
 
 void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
@@ -613,10 +614,25 @@ void Connection::HandleRequests() {
     if (!(IsPrivileged() && no_tls_on_admin_port)) {
       // Must be done atomically before the premption point in Accept so that at any
       // point in time, the socket_ is defined.
+      uint8_t buf[2];
+      auto read_sz = socket_->Read(io::MutableBytes(buf));
+      if (!read_sz || *read_sz < sizeof(buf)) {
+        VLOG(1) << "Error reading from peer " << remote_ep << " " << read_sz.error().message();
+        return;
+      }
+      if (buf[0] != 0x16 || buf[1] != 0x03) {
+        VLOG(1) << "Bad TLS header "
+                << absl::StrCat(absl::Hex(buf[0], absl::kZeroPad2),
+                                absl::Hex(buf[1], absl::kZeroPad2));
+        peer->Write(
+            io::Buffer("-ERR Bad TLS header, double check "
+                       "if you enabled TLS for your client.\r\n"));
+      }
+
       {
         FiberAtomicGuard fg;
         unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
-        tls_sock->InitSSL(ssl_ctx_);
+        tls_sock->InitSSL(ssl_ctx_, buf);
         SetSocket(tls_sock.release());
       }
       FiberSocketBase::AcceptResult aresult = socket_->Accept();
@@ -636,11 +652,13 @@ void Connection::HandleRequests() {
   http_res = CheckForHttpProto(peer);
 
   if (http_res) {
+    cc_.reset(service_->CreateContext(peer, this));
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
       is_http_ = true;
       HttpConnection http_conn{http_listener_};
       http_conn.SetSocket(peer);
+      http_conn.set_user_data(cc_.get());
       auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
       io_buf_.ConsumeInput(io_buf_.InputLen());
       if (!ec) {
@@ -651,7 +669,6 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {
-      cc_.reset(service_->CreateContext(peer, this));
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -659,9 +676,8 @@ void Connection::HandleRequests() {
       ConnectionFlow(peer);
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
-
-      cc_.reset();
     }
+    cc_.reset();
   }
 
   VLOG(1) << "Closed connection for peer " << remote_ep;
@@ -1468,7 +1484,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 
 void Connection::LaunchDispatchFiberIfNeeded() {
   if (!dispatch_fb_.IsJoinable()) {
-    dispatch_fb_ = fb2::Fiber(dfly::Launch::post, "connection_dispatch",
+    dispatch_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }
 }

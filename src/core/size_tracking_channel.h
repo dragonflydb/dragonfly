@@ -6,7 +6,7 @@
 
 #include <atomic>
 
-#include "core/fibers.h"
+#include "util/fibers/simple_channel.h"
 
 namespace dfly {
 
@@ -68,7 +68,7 @@ template <typename T, typename Queue = folly::ProducerConsumerQueue<T>> class Si
   }
 
  private:
-  SimpleChannel<T, Queue> queue_;
+  util::fb2::SimpleChannel<T, Queue> queue_;
   std::atomic<size_t> size_ = 0;
 };
 

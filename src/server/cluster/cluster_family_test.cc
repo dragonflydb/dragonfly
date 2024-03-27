@@ -188,7 +188,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
                                         "abcd1234")))));
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
-            "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\r\n");
+            "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\n");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFull) {
@@ -259,8 +259,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
                                         "wxyz")))));
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
-            "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\r\n"
-            "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\r\n");
+            "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\n"
+            "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\n");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
@@ -383,10 +383,10 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                             "qwerty")))))));
 
   EXPECT_THAT(Run({"cluster", "nodes"}),
-              "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-10000\r\n"
-              "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\r\n"
-              "efgh7890 10.0.0.2:7001@7001 master - 0 0 0 connected 10001-16383\r\n"
-              "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected\r\n");
+              "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-10000\n"
+              "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\n"
+              "efgh7890 10.0.0.2:7001@7001 master - 0 0 0 connected 10001-16383\n"
+              "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected\n");
 
   absl::InsecureBitGen eng;
   while (true) {
@@ -719,7 +719,7 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                         "total_writes", _, "memory_bytes", _)))));
 
   ExpectConditionWithinTimeout([&]() {
-    return RunPrivileged({"dflycluster", "flushslots", "0"}) == "OK";
+    return RunPrivileged({"dflycluster", "flushslots", "0", "0"}) == "OK";
   });
 
   EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "0", "1"}),
@@ -818,7 +818,7 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
   EXPECT_THAT(Run({"cluster", "nodes"}),
-              GetMyId() + " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\r\n");
+              GetMyId() + " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\n");
 }
 
 }  // namespace

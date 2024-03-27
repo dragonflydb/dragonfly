@@ -8,6 +8,7 @@
 #include <absl/types/span.h>
 
 #include "base/logging.h"
+#include "core/json/detail/flat_dfs.h"
 #include "core/json/detail/jsoncons_dfs.h"
 #include "core/json/jsonpath_grammar.hh"
 #include "src/core/json/driver.h"
@@ -19,6 +20,7 @@ using nonstd::make_unexpected;
 namespace dfly::json {
 
 using detail::Dfs;
+using detail::FlatDfs;
 
 namespace {
 
@@ -55,7 +57,14 @@ void PathSegment::Evaluate(const JsonType& json) const {
   func->Apply(json);
 }
 
-JsonType PathSegment::GetResult() const {
+void PathSegment::Evaluate(flexbuffers::Reference json) const {
+  CHECK(type() == SegmentType::FUNCTION);
+  AggFunction* func = std::get<shared_ptr<AggFunction>>(value_).get();
+  CHECK(func);
+  func->Apply(json);
+}
+
+AggFunction::Result PathSegment::GetResult() const {
   CHECK(type() == SegmentType::FUNCTION);
   const auto& func = std::get<shared_ptr<AggFunction>>(value_).get();
   CHECK(func);
@@ -85,7 +94,17 @@ void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback)
   } else {
     Dfs::Traverse(path_tail, json, [&](auto, const JsonType& val) { func_segment.Evaluate(val); });
   }
-  callback(nullopt, func_segment.GetResult());
+
+  AggFunction::Result res = func_segment.GetResult();
+  JsonType val = visit(  // Transform the result to JsonType.
+      Overloaded{
+          [](monostate) { return JsonType::null(); },
+          [&](double d) { return JsonType(d); },
+
+          [&](int64_t i) { return JsonType(i); },
+      },
+      res);
+  callback(nullopt, val);
 }
 
 nonstd::expected<json::Path, string> ParsePath(string_view path) {
@@ -114,6 +133,53 @@ unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json) {
 
   Dfs dfs = Dfs::Mutate(path, callback, json);
   return dfs.matches();
+}
+
+// Flat json path evaluation
+void EvaluatePath(const Path& path, flexbuffers::Reference json, PathFlatCallback callback) {
+  if (path.empty()) {  // root node
+    callback(nullopt, json);
+    return;
+  }
+
+  if (path.front().type() != SegmentType::FUNCTION) {
+    FlatDfs::Traverse(path, json, std::move(callback));
+    return;
+  }
+
+  // Handling the case of `func($.somepath)`
+  // We pass our own callback to gather all the results and then call the function.
+  flexbuffers::Reference result;
+  absl::Span<const PathSegment> path_tail(path.data() + 1, path.size() - 1);
+
+  const PathSegment& func_segment = path.front();
+
+  if (path_tail.empty()) {
+    LOG(DFATAL) << "Invalid path";  // parser should not allow this.
+  } else {
+    FlatDfs::Traverse(path_tail, json,
+                      [&](auto, flexbuffers::Reference val) { func_segment.Evaluate(val); });
+  }
+  AggFunction::Result res = func_segment.GetResult();
+  flexbuffers::Builder fbb;
+  flexbuffers::Reference val = visit(  // Transform the result to a flexbuffer reference.
+      Overloaded{
+          [](monostate) { return flexbuffers::Reference{}; },
+          [&](double d) {
+            fbb.Double(d);
+            fbb.Finish();
+            return flexbuffers::GetRoot(fbb.GetBuffer());
+          },
+
+          [&](int64_t i) {
+            fbb.Int(i);
+            fbb.Finish();
+            return flexbuffers::GetRoot(fbb.GetBuffer());
+          },
+      },
+      res);
+
+  callback(nullopt, val);
 }
 
 }  // namespace dfly::json

@@ -3,6 +3,8 @@
 //
 #include "server/replica.h"
 
+#include <chrono>
+
 #include "absl/strings/match.h"
 
 extern "C" {
@@ -39,6 +41,8 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_FLAG(bool, replica_partial_sync, true,
           "Use partial sync to reconnect when a replica connection is interrupted.");
+ABSL_FLAG(bool, replica_reconnect_on_master_restart, false,
+          "When in replica mode, and master restarts, break replication from master.");
 ABSL_DECLARE_FLAG(int32_t, port);
 
 namespace dfly {
@@ -65,14 +69,16 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
-Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
-    : ProtocolClient(std::move(host), port), service_(*se), id_{id} {
+Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
+                 std::optional<SlotRange> slot_range)
+    : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
   proactor_ = ProactorBase::me();
 }
 
 Replica::~Replica() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  acl_check_fb_.JoinIfNeeded();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -140,12 +146,11 @@ void Replica::Stop() {
     state_mask_.store(0);  // Specifically ~R_ENABLED.
   });
 
-  waker_.notifyAll();
-
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  acl_check_fb_.JoinIfNeeded();
 }
 
 void Replica::Pause(bool pause) {
@@ -301,10 +306,18 @@ std::error_code Replica::HandleCapaDflyResp() {
   }
 
   // If we're syncing a different replication ID, drop the saved LSNs.
-  if (master_context_.master_repl_id != ToSV(LastResponseArgs()[0].GetBuf())) {
+  string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+  if (master_context_.master_repl_id != master_repl_id) {
+    if (absl::GetFlag(FLAGS_replica_reconnect_on_master_restart) &&
+        !master_context_.master_repl_id.empty()) {
+      LOG(ERROR) << "Encountered different master repl id (" << master_repl_id << " vs "
+                 << master_context_.master_repl_id << ")";
+      state_mask_.store(0);
+      return make_error_code(errc::connection_aborted);
+    }
     last_journal_LSNs_.reset();
   }
-  master_context_.master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+  master_context_.master_repl_id = master_repl_id;
   master_context_.dfly_session_id = ToSV(LastResponseArgs()[1].GetBuf());
   num_df_flows_ = param_num_flows;
 
@@ -373,13 +386,15 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
     // Set LOADING state.
-    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
-          GlobalState::LOADING);
-    absl::Cleanup cleanup = [this]() {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    };
+    service_.RequestLoadingState();
+    absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
-    JournalExecutor{&service_}.FlushAll();
+    if (slot_range_.has_value()) {
+      JournalExecutor{&service_}.FlushSlots(slot_range_.value());
+    } else {
+      JournalExecutor{&service_}.FlushAll();
+    }
+
     RdbLoader loader(NULL);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
@@ -427,14 +442,6 @@ error_code Replica::InitiatePSync() {
 error_code Replica::InitiateDflySync() {
   auto start_time = absl::Now();
 
-  absl::Cleanup cleanup = [this]() {
-    // We do the following operations regardless of outcome.
-    JoinDflyFlows();
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    state_mask_.fetch_and(~R_SYNCING);
-    last_journal_LSNs_.reset();
-  };
-
   // Initialize MultiShardExecution.
   multi_shard_exe_.reset(new MultiShardExecution());
 
@@ -464,11 +471,19 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
-        GlobalState::LOADING);
+  service_.RequestLoadingState();
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    JoinDflyFlows();
+    service_.RemoveLoadingState();
+    state_mask_.fetch_and(~R_SYNCING);
+    last_journal_LSNs_.reset();
+  };
+
   std::string_view sync_type = "full";
   {
     // Going out of the way to avoid using std::vector<bool>...
@@ -496,7 +511,11 @@ error_code Replica::InitiateDflySync() {
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows_, 0);
 
     if (num_full_flows == num_df_flows_) {
-      JournalExecutor{&service_}.FlushAll();
+      if (slot_range_.has_value()) {
+        JournalExecutor{&service_}.FlushSlots(slot_range_.value());
+      } else {
+        JournalExecutor{&service_}.FlushAll();
+      }
       RdbLoader::PerformPreLoad(&service_);
     } else if (num_full_flows == 0) {
       sync_type = "partial";
@@ -586,20 +605,21 @@ error_code Replica::ConsumeRedisStream() {
 
     io_buf.ConsumeInput(response->left_in_buffer);
     repl_offs_ += response->total_read;
-    waker_.notify();  // Notify to trigger ACKs.
+    replica_waker_.notify();  // Notify to trigger ACKs.
   }
 }
 
 error_code Replica::ConsumeDflyStream() {
   // Set new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) {
+    // Trigger acl-checker
+    replica_waker_.notifyAll();
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
       flow->Cancel();
     }
-
     multi_shard_exe_->CancelAllBlockingEntities();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
@@ -621,7 +641,13 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
+
+  if (master_context_.version >= DflyVersion::VER3) {
+    acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
+  }
+
   JoinDflyFlows();
+  acl_check_fb_.JoinIfNeeded();
 
   last_journal_LSNs_.emplace();
   for (auto& flow : shard_flows_) {
@@ -793,7 +819,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   }
 
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() {
+    shard_replica_waker_.await([&]() {
       return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
     });
     if (cntx->IsCancelled())
@@ -824,7 +850,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
-    waker_.notify();
+    shard_replica_waker_.notify();
   }
 }
 
@@ -836,7 +862,7 @@ void Replica::RedisStreamAcksFb() {
   auto next_ack_tp = std::chrono::steady_clock::now();
 
   while (!cntx_.IsCancelled()) {
-    VLOG(1) << "Sending an ACK with offset=" << repl_offs_;
+    VLOG(2) << "Sending an ACK with offset=" << repl_offs_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
@@ -845,9 +871,56 @@ void Replica::RedisStreamAcksFb() {
     }
     ack_offs_ = repl_offs_;
 
-    waker_.await_until(
+    replica_waker_.await_until(
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || cntx_.IsCancelled(); },
         next_ack_tp);
+  }
+}
+
+class AclCheckerClient : public ProtocolClient {
+ public:
+  AclCheckerClient(ServerContext server, Context* cntx)
+      : ProtocolClient(std::move(server)), cntx_(cntx) {
+    Connect();
+  }
+
+  void CheckAclRoundTrip() {
+    if (auto ec = SendCommandAndReadResponse(StrCat("REPLCONF acl-check ", "0")); ec) {
+      cntx_->Cancel();
+      LOG(INFO) << "Error in REPLCONF acl-check: " << ec.message();
+    } else if (!CheckRespIsSimpleReply("OK")) {
+      cntx_->Cancel();
+      LOG(INFO) << "Error: " << ToSV(LastResponseArgs().front().GetBuf());
+    }
+  }
+
+ private:
+  void Connect() {
+    VLOG(1) << "Connecting with acl client";
+    auto ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, cntx_);
+    if (ec) {
+      LOG(INFO) << "Failed to connect with acl client " << ec.message();
+      cntx_->Cancel();
+    }
+  }
+
+  Context* cntx_;
+};
+
+void Replica::AclCheckFb() {
+  // We need a new client with a different socket for acl-checks
+  // instead of using the ACK's fiber. This is because acks should
+  // not be replied (which makes them unusable for periodic ACL checks).
+  // Also there are N ACK fibers per replica instance while we only need
+  // one fiber to periodically check for ACL changes. Therefore,
+  // we decouple the logic via AclCheckFb.
+  AclCheckerClient acl_client(server(), &cntx_);
+
+  while (!cntx_.IsCancelled()) {
+    acl_client.CheckAclRoundTrip();
+    // We poll for ACL changes every second
+    replica_waker_.await_until([&]() { return cntx_.IsCancelled(); },
+                               std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
 }
 
@@ -873,7 +946,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
     }
     ack_offs_ = current_offset;
 
-    waker_.await_until(
+    shard_replica_waker_.await_until(
         [&]() {
           return journal_rec_executed_.load(std::memory_order_relaxed) >
                      ack_offs_ + kAckRecordMaxInterval ||
@@ -922,7 +995,8 @@ void DflyShardReplica::InsertTxDataToShardResource(TransactionData&& tx_data) {
 
 void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
+    shard_replica_waker_.await(
+        [&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
     if (cntx->IsCancelled()) {
       return;
     }
@@ -930,7 +1004,7 @@ void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
     auto& data = trans_data_queue_.front();
     ExecuteTx(std::move(data.first), data.second, cntx);
     trans_data_queue_.pop();
-    waker_.notify();
+    shard_replica_waker_.notify();
   }
 }
 
@@ -1130,7 +1204,7 @@ void DflyShardReplica::JoinFlow() {
 
 void DflyShardReplica::Cancel() {
   CloseSocket();
-  waker_.notifyAll();
+  shard_replica_waker_.notifyAll();
 }
 
 }  // namespace dfly

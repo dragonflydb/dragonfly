@@ -7,7 +7,7 @@ cxx_link(dragonfly base dragonfly_lib)
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
   # can cause SIGILL.
-  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2)
+  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS "-march=core2")
 endif()
 
 set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
@@ -36,7 +36,7 @@ SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessor
 
 add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
-            generic_family.cc hset_family.cc json_family.cc
+            generic_family.cc hset_family.cc http_api.cc json_family.cc
             ${SEARCH_FILES}
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
@@ -85,14 +85,11 @@ cxx_test(list_family_test dfly_test_lib LABELS DFLY)
 cxx_test(server_family_test dfly_test_lib LABELS DFLY)
 cxx_test(set_family_test dfly_test_lib LABELS DFLY)
 cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
-if (WITH_ASAN OR WITH_USAN)
-  target_compile_definitions(stream_family_test PRIVATE SANITIZERS)
-  target_compile_definitions(multi_test PRIVATE SANITIZERS)
-endif()
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
-         testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb LABELS DFLY)
+         testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
+         testdata/redis_json.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
@@ -105,6 +102,11 @@ cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+if (WITH_ASAN OR WITH_USAN)
+  target_compile_definitions(stream_family_test PRIVATE SANITIZERS)
+  target_compile_definitions(multi_test PRIVATE SANITIZERS)
+  target_compile_definitions(search_family_test PRIVATE SANITIZERS)
+endif()
 cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 
 

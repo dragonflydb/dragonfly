@@ -4,16 +4,25 @@
 
 #include "server/cluster/outgoing_slot_migration.h"
 
+#include <absl/flags/flag.h>
+
 #include <atomic>
 
 #include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/journal/streamer.h"
 #include "server/server_family.h"
 
+ABSL_DECLARE_FLAG(int, source_connect_timeout_ms);
+
+ABSL_DECLARE_FLAG(uint16_t, admin_port);
+
 using namespace std;
+using namespace util;
+
 namespace dfly {
 
 class OutgoingMigration::SliceSlotMigration {
@@ -22,7 +31,7 @@ class OutgoingMigration::SliceSlotMigration {
                      Context* cntx, io::Sink* dest)
       : streamer_(slice, std::move(slots), sync_id, journal, cntx) {
     state_.store(MigrationState::C_SYNC, memory_order_relaxed);
-    sync_fb_ = Fiber("slot-snapshot", [this, dest] { streamer_.Start(dest); });
+    sync_fb_ = fb2::Fiber("slot-snapshot", [this, dest] { streamer_.Start(dest); });
   }
 
   void Cancel() {
@@ -46,13 +55,16 @@ class OutgoingMigration::SliceSlotMigration {
   RestoreStreamer streamer_;
   // Atomic only for simple read operation, writes - from the same thread, reads - from any thread
   atomic<MigrationState> state_ = MigrationState::C_CONNECTING;
-  Fiber sync_fb_;
+  fb2::Fiber sync_fb_;
 };
 
 OutgoingMigration::OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots,
-                                     Context::ErrHandler err_handler, ServerFamily* sf)
-    : host_ip_(ip),
+                                     uint32_t sync_id, Context::ErrHandler err_handler,
+                                     ServerFamily* sf)
+    : ProtocolClient(ip, port),
+      host_ip_(ip),
       port_(port),
+      sync_id_(sync_id),
       slots_(slots),
       cntx_(err_handler),
       slot_migrations_(shard_set->size()),
@@ -63,7 +75,7 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
-void OutgoingMigration::StartFlow(uint32_t sync_id, journal::Journal* journal, io::Sink* dest) {
+void OutgoingMigration::StartFlow(journal::Journal* journal, io::Sink* dest) {
   EngineShard* shard = EngineShard::tlocal();
   DbSlice* slice = &shard->db_slice();
 
@@ -73,12 +85,12 @@ void OutgoingMigration::StartFlow(uint32_t sync_id, journal::Journal* journal, i
   {
     std::lock_guard lck(flows_mu_);
     slot_migrations_[shard_id] =
-        std::make_unique<SliceSlotMigration>(slice, slots_, sync_id, journal, &cntx_, dest);
+        std::make_unique<SliceSlotMigration>(slice, slots_, sync_id_, journal, &cntx_, dest);
     state = GetStateImpl();
   }
 
   if (state == MigrationState::C_SYNC) {
-    main_sync_fb_ = Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
+    main_sync_fb_ = fb2::Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
   }
 }
 
@@ -139,6 +151,37 @@ void OutgoingMigration::SyncFb() {
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
   // TODO add ACK here and config update
+}
+
+std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
+  VLOG(1) << "Starting outgoing migration";
+
+  auto check_connection_error = [&cntx](error_code ec, const char* msg) -> error_code {
+    if (ec) {
+      cntx->SendError(absl::StrCat(msg, ec.message()));
+    }
+    return ec;
+  };
+
+  VLOG(1) << "Resolving host DNS";
+  error_code ec = ResolveHostDns();
+  RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
+
+  VLOG(1) << "Connecting to source";
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+  RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
+
+  VLOG(1) << "Migration initiating";
+  ResetParser(false);
+  auto port = absl::GetFlag(FLAGS_admin_port);
+  auto cmd = absl::StrCat("DFLYMIGRATE INIT ", sync_id_, " ", port, " ", slot_migrations_.size());
+  for (const auto& s : slots_) {
+    absl::StrAppend(&cmd, " ", s.start, " ", s.end);
+  }
+  RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
+  LOG_IF(ERROR, !CheckRespIsSimpleReply("OK")) << facade::ToSV(LastResponseArgs().front().GetBuf());
+
+  return {};
 }
 
 }  // namespace dfly

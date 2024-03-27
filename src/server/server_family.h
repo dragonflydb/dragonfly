@@ -17,6 +17,7 @@
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "util/fibers/fiberqueue_threadpool.h"
+#include "util/fibers/future.h"
 
 void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
                 std::string_view sub_cmd);
@@ -51,6 +52,7 @@ class Service;
 class ScriptMgr;
 
 struct ReplicaRoleInfo {
+  std::string id;
   std::string address;
   uint32_t listening_port;
   std::string_view state;
@@ -91,6 +93,7 @@ struct Metrics {
   uint32_t delete_ttl_per_sec = 0;
   uint64_t fiber_switch_cnt = 0;
   uint64_t fiber_switch_delay_usec = 0;
+  uint64_t tls_bytes = 0;
 
   // Statistics about fibers running for a long time (more than 1ms).
   uint64_t fiber_longrun_cnt = 0;
@@ -98,6 +101,8 @@ struct Metrics {
 
   // Max length of the all the tx shard-queues.
   uint32_t tx_queue_len = 0;
+  uint32_t worker_fiber_count = 0;
+  size_t worker_fiber_stack_size = 0;
 
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
@@ -205,7 +210,6 @@ class ServerFamily {
 
   bool HasReplica() const;
   std::optional<Replica::Info> GetReplicaInfo() const;
-  std::string GetReplicaMasterId() const;
 
   void OnClose(ConnectionContext* cntx);
 
@@ -238,10 +242,12 @@ class ServerFamily {
   void LastSave(CmdArgList args, ConnectionContext* cntx);
   void Latency(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
+  void AddReplicaOf(CmdArgList args, ConnectionContext* cntx);
   void ReplTakeOver(CmdArgList args, ConnectionContext* cntx);
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
+  void BgSave(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void SlowLog(CmdArgList args, ConnectionContext* cntx);
   void Module(CmdArgList args, ConnectionContext* cntx);
@@ -255,8 +261,7 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(std::string_view host, std::string_view port, ConnectionContext* cntx,
-                         ActionOnConnectionFail on_error);
+  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
@@ -265,7 +270,20 @@ class ServerFamily {
 
   void SendInvalidationMessages() const;
 
-  Fiber snapshot_schedule_fb_;
+  // Helper function to retrieve version(true if format is dfs rdb), and basename from args.
+  // In case of an error an empty optional is returned.
+  using VersionBasename = std::pair<bool, std::string_view>;
+  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, ConnectionContext* cntx);
+
+  void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
+
+  GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
+                                   bool ignore_state = false);
+
+  GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
+  void StopAllClusterReplicas();
+
+  util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
 
   uint32_t stats_caching_task_ = 0;
@@ -275,8 +293,10 @@ class ServerFamily {
   std::vector<facade::Listener*> listeners_;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable Mutex replicaof_mu_, save_mu_;
+  mutable util::fb2::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
+  std::vector<std::unique_ptr<Replica>> cluster_replicas_
+      ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
@@ -296,6 +316,9 @@ class ServerFamily {
   util::fb2::Done schedule_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
+
+  // protected by save_mu_
+  util::fb2::Fiber bg_save_fb_;
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;

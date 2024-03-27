@@ -157,6 +157,7 @@ bool ConfigureKeepAlive(int fd) {
 }
 
 thread_local size_t ssl_allocated_bytes = 0;
+atomic_int ssl_init_refcount = 0;
 
 void* OverriddenSSLMalloc(size_t size, const char* file, int line) {
   void* res = mi_malloc(size);
@@ -177,16 +178,14 @@ void OverriddenSSLFree(void* addr, const char* file, int line) {
   mi_free(addr);
 }
 
-std::once_flag g_set_mem_functions_flag;
-
 }  // namespace
 
 Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
     : service_(si), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
-  call_once(g_set_mem_functions_flag, []() {
+  if (ssl_init_refcount.fetch_add(1) == 0) {
     CRYPTO_set_mem_functions(&OverriddenSSLMalloc, &OverriddenSSLRealloc, &OverriddenSSLFree);
-  });
+  }
 
   // Always initialise OpenSSL so we can enable TLS at runtime.
   OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, nullptr);
@@ -209,6 +208,10 @@ Listener::Listener(Protocol protocol, ServiceInterface* si, Role role)
 Listener::~Listener() {
 #ifdef DFLY_USE_SSL
   SSL_CTX_free(ctx_);
+
+  if (ssl_init_refcount.fetch_sub(1) == 1) {
+    OPENSSL_cleanup();
+  }
 #endif
 }
 
