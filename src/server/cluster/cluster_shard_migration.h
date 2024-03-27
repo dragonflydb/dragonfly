@@ -5,7 +5,6 @@
 
 #include "base/io_buf.h"
 #include "server/journal/executor.h"
-#include "server/protocol_client.h"
 
 namespace dfly {
 
@@ -15,14 +14,13 @@ class MultiShardExecution;
 
 // ClusterShardMigration manage data receiving in slots migration process.
 // It is created per shard on the target node to initiate FLOW step.
-class ClusterShardMigration : public ProtocolClient {
+class ClusterShardMigration {
  public:
-  ClusterShardMigration(ServerContext server_context, uint32_t local_sync_id, uint32_t shard_id,
-                        uint32_t sync_id, Service* service);
+  ClusterShardMigration(uint32_t local_sync_id, uint32_t shard_id, uint32_t sync_id,
+                        Service* service);
   ~ClusterShardMigration();
 
   void Start(Context* cntx, io::Source* source);
-  void Cancel();
 
   bool IsFinalized() {
     return is_finalized_;

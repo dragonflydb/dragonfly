@@ -21,9 +21,9 @@ using namespace facade;
 using namespace util;
 using absl::GetFlag;
 
-ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t local_sync_id,
-                                             uint32_t shard_id, uint32_t sync_id, Service* service)
-    : ProtocolClient(server_context), source_shard_id_(shard_id), sync_id_(sync_id) {
+ClusterShardMigration::ClusterShardMigration(uint32_t local_sync_id, uint32_t shard_id,
+                                             uint32_t sync_id, Service* service)
+    : source_shard_id_(shard_id), sync_id_(sync_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
   executor_->connection_context()->slot_migration_id = local_sync_id;
 }
@@ -44,8 +44,6 @@ void ClusterShardMigration::Start(Context* cntx, io::Source* source) {
       VLOG(1) << "No tx data";
       break;
     }
-
-    // TouchIoTime();
 
     if (tx_data->opcode == journal::Op::FIN) {
       VLOG(2) << "Flow " << source_shard_id_ << " is finalized";
@@ -72,10 +70,6 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
     CHECK(false) << "We don't support command: " << ToSV(tx_data.commands.front().cmd_args[0])
                  << "in cluster migration process.";
   }
-}
-
-void ClusterShardMigration::Cancel() {
-  CloseSocket();
 }
 
 }  // namespace dfly

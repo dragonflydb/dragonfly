@@ -792,6 +792,9 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
+  DCHECK(cntx->sync_dispatch);
+  // we do this to be ignored by the dispatch tracker
+  // TODO provide a more clear approach
   cntx->sync_dispatch = false;
 
   cntx->SendOk();

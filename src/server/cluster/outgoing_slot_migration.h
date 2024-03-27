@@ -35,6 +35,9 @@ class OutgoingMigration : private ProtocolClient {
   void Cancel(uint32_t shard_id);
 
   MigrationState GetState() const;
+
+  // Temporary method, will be removed in one of the PR
+  // This method stop migration connections
   void Ack();
 
   const std::string& GetHostIp() const {
@@ -67,7 +70,9 @@ class OutgoingMigration : private ProtocolClient {
   ServerFamily* server_family_;
 
   util::fb2::Fiber main_sync_fb_;
-  bool is_finalized_ = false;
+
+  // Atomic only for simple read operation, writes - from the same thread, reads - from any thread
+  std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
 };
 
 }  // namespace dfly
