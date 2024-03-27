@@ -70,14 +70,14 @@ error_code IoMgr::Open(std::string_view path) {
 error_code IoMgr::Grow(size_t len) {
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
-  if (exchange(grow_progress, true))
+  if (exchange(grow_progress_, true))
     return make_error_code(errc::operation_in_progress);
 
   fb2::FiberCall fc(proactor);
   fc->PrepFallocate(backing_file_->fd(), 0, sz_, len);
   Proactor::IoResult res = fc.Get();
 
-  grow_progress = false;
+  grow_progress_ = false;
 
   if (res == 0) {
     sz_ += len;
@@ -90,7 +90,7 @@ error_code IoMgr::Grow(size_t len) {
 error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
   DCHECK_EQ(0u, len % (1 << 20));
 
-  if (exchange(grow_progress, true)) {
+  if (exchange(grow_progress_, true)) {
     return make_error_code(errc::operation_in_progress);
   }
 
@@ -98,7 +98,7 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
 
   SubmitEntry entry = proactor->GetSubmitEntry(
       [this, len, cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t) {
-        this->grow_progress = false;
+        this->grow_progress_ = false;
         sz_ += (res == 0 ? len : 0);
         cb(res);
       },
@@ -176,7 +176,7 @@ std::error_code IoMgr::ReadAsync(size_t offset, absl::Span<uint8_t> buffer, Read
 }
 
 void IoMgr::Shutdown() {
-  while (grow_progress) {
+  while (grow_progress_) {
     ThisFiber::SleepFor(200us);  // TODO: hacky for now.
   }
 }

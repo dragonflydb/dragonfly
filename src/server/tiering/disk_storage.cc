@@ -22,7 +22,9 @@ void DiskStorage::Close() {
 
 void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   DCHECK_GT(segment.length, 0u);
+  DCHECK_EQ(segment.offset % 4096, 0u);
 
+  // TODO: use registered buffers (UringProactor::RegisterBuffers)
   uint8_t* buf = new uint8_t[segment.length];
   auto io_cb = [cb, buf, segment](int res) {
     cb(std::string_view{reinterpret_cast<char*>(buf), segment.length});
@@ -33,6 +35,8 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
 
 void DiskStorage::MarkAsFree(DiskSegment segment) {
   DCHECK_GT(segment.length, 0u);
+  DCHECK_EQ(segment.offset % 4096, 0u);
+
   alloc_.Free(segment.offset, segment.length);
 }
 
@@ -48,7 +52,10 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
     RETURN_ON_ERR(io_mgr_.Grow(grow_size));
 
     alloc_.AddStorage(start, grow_size);
-    return Stash(bytes, std::move(cb));
+    offset = alloc_.Malloc(bytes.size());
+
+    if (offset < 0)  // we can't fit it even after resizing
+      return std::make_error_code(std::errc::file_too_large);
   }
 
   auto io_cb = [this, cb, offset, bytes, len = bytes.size()](int io_res) {
