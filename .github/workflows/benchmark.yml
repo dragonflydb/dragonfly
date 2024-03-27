@@ -54,6 +54,8 @@ jobs:
         with:
           kubectl_version: v1.28.0
           registry: false
+      - run: |
+          kubectl cluster-info --context kind-kind
       - name: Install the CRD and Operator
         run: |
           # Install the CRD and Operator
