@@ -693,7 +693,7 @@ int hllSparseSet(sds* hll_ptr, long index, uint8_t count) {
         newlen += min(newlen, 300); /* Greediness: double 'newlen' if it is smaller than 300, or add 300 to it when it exceeds 300 */
         if (newlen > HLL_SPARSE_MAX_BYTES)
             newlen = HLL_SPARSE_MAX_BYTES;
-        *hll_ptr = sdsResize(hll, newlen); //newer avaiable: sds sdsResize(sds s, size_t size, int would_regrow)
+        *hll_ptr = sdsResize(hll, newlen);
         hll = *hll_ptr;
     }
 
@@ -1299,21 +1299,26 @@ int convertSparseToDenseHll(struct HllBufferPtr in_hll, struct HllBufferPtr out_
   return C_OK;
 }
 
-int pfadd(sds* hll_ptr, unsigned char* value, size_t size) {
+int pfadd_sparse(sds* hll_ptr, unsigned char* value, size_t size) {
   struct hllhdr* hdr = (struct hllhdr*)(*hll_ptr);
-  int retval;
-  switch (hdr->encoding) {
-    case HLL_DENSE:
-      retval = hllDenseAdd(hdr->registers, value, size);
-      break;
-    case HLL_SPARSE:
-      retval = hllSparseAdd(hll_ptr, value, size);
-      break;
+  int retval = hllSparseAdd(hll_ptr, value, size);
+  switch (retval) {
+    case 1:
+      HLL_INVALIDATE_CACHE(hdr);
+      return 1;
     default:
-      retval = -1;
-      break;
+      return retval;
   }
+}
 
+int pfadd_dense(struct HllBufferPtr hll_ptr, unsigned char* value, size_t size) {
+  if (isValidHLL(hll_ptr) != HLL_VALID_DENSE)
+    return C_ERR;
+
+  struct hllhdr* hdr = (struct hllhdr*)hll_ptr.hll;
+
+  /* Perform the low level ADD operation for every element. */
+  int retval = hllDenseAdd(hdr->registers, value, size);
   switch (retval) {
     case 1:
       HLL_INVALIDATE_CACHE(hdr);

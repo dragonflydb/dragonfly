@@ -87,21 +87,34 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   }
 
   int updated = 0;
-  sds hll_sds = sdsnewlen(hll.data(), hll.size());
-  sds* hll_ptr = &hll_sds;
+  bool is_sparse = isValidHLL(StringToHllPtr(hll)) == HLL_VALID_SPARSE;
+  sds hll_sds;
+  if (is_sparse) {
+    hll_sds = sdsnewlen(hll.data(), hll.size());
+  }
+
   for (const auto& value : values) {
-    // pfadd might resize the input string. A referance to string.data() makes it unnecessarily
-    // complicated
-    int added = pfadd(hll_ptr, (unsigned char*)value.data(), value.size());
-    hll_sds = *hll_ptr;
+    int added;
+    if (is_sparse) {
+      // Inserting to sparse hll might extend it.
+      // A referance to string.data() makes it unnecessarily complicated
+      sds* hll_ptr = &hll_sds;
+      added = pfadd_sparse(hll_ptr, (unsigned char*)value.data(), value.size());
+      hll_sds = *hll_ptr;
+    } else {
+      added = pfadd_dense(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
+    }
     if (added < 0) {
       return OpStatus::INVALID_VALUE;
     }
     updated += added;
   }
-  hll = string{hll_sds, sdslen(hll_sds)};
+
+  if (is_sparse) {
+    hll = string{hll_sds, sdslen(hll_sds)};
+    sdsfree(hll_sds);
+  }
   res.it->second.SetString(hll);
-  sdsfree(hll_sds);
   return std::min(updated, 1);
 }
 
