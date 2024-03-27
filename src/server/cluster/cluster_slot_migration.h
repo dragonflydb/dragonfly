@@ -29,6 +29,8 @@ class ClusterSlotMigration : private ProtocolClient {
   // will be refactored in the future
   std::error_code Init(uint32_t sync_id, uint32_t shards_num);
 
+  void StartFlow(uint32_t shard, io::Source* source);
+
   Info GetInfo() const;
   uint32_t GetSyncId() const {
     return sync_id_;
@@ -68,6 +70,7 @@ class ClusterSlotMigration : private ProtocolClient {
   uint32_t sync_id_ = 0;
   uint32_t local_sync_id_ = 0;
   MigrationState state_ = MigrationState::C_NO_STATE;
+  std::vector<std::vector<unsigned>> partitions_;
 
   util::fb2::Fiber sync_fb_;
 };

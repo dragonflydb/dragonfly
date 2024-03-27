@@ -72,6 +72,8 @@ class ClusterFamily {
   ClusterSlotMigration* CreateIncomingMigration(std::string host_ip, uint16_t port,
                                                 SlotRanges slots);
 
+  std::shared_ptr<ClusterSlotMigration> GetIncomingMigration(std::string host_ip, uint16_t port);
+
   bool StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
                            ConnectionContext* cntx);
   void RemoveFinishedMigrations();
@@ -84,7 +86,7 @@ class ClusterFamily {
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
-  std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
+  std::vector<std::shared_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   uint32_t next_sync_id_ ABSL_GUARDED_BY(migration_mu_) = 1;

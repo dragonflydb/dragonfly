@@ -49,12 +49,9 @@ void JournalStreamer::WriterFb(io::Sink* dest) {
   }
 }
 
-RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id,
-                                 journal::Journal* journal, Context* cntx)
-    : JournalStreamer(journal, cntx),
-      db_slice_(slice),
-      my_slots_(std::move(slots)),
-      sync_id_(sync_id) {
+RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal,
+                                 Context* cntx)
+    : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
 }
 
@@ -92,7 +89,8 @@ void RestoreStreamer::Start(io::Sink* dest) {
 }
 
 void RestoreStreamer::SendFinalize() {
-  VLOG(2) << "DFLYMIGRATE FINALIZE for " << sync_id_ << " : " << db_slice_->shard_id();
+  VLOG(2) << "DFLYMIGRATE FINALIZE for "
+          << " : " << db_slice_->shard_id();
   journal::Entry entry(journal::Op::FIN, 0 /*db_id*/, 0 /*slot_id*/);
 
   JournalWriter writer{this};
