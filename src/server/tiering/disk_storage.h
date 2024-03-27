@@ -10,13 +10,9 @@
 #include "core/external_alloc.h"
 #include "io/io.h"
 #include "server/io_mgr.h"
+#include "server/tiering/common.h"
 
 namespace dfly::tiering {
-
-struct DiskSegment {
-  // Mesured in bytes, offset should be aligned to page boundaries (4kb)
-  size_t offset, length;
-};
 
 // Disk storage controlled by asynchronous operations.
 class DiskStorage {
