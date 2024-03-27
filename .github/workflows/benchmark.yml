@@ -26,13 +26,14 @@ jobs:
               replicas: 2
               resources:
                 requests:
-                  cpu: "4"
+                  cpu: "2"
                   memory: "2000Mi"
                 limits:
-                  cpu: "4"
+                  cpu: "2"
                   memory: "2000Mi"
 
-    runs-on: [self-hosted, linux, x86, benchmark]
+    #runs-on: [self-hosted, linux, x86, benchmark]
+    runs-on: ubuntu-latest
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
