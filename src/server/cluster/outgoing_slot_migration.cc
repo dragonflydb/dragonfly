@@ -63,14 +63,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.SendFinalize();
   }
 
-  MigrationState GetState() const {
-    return state_.load(memory_order_relaxed);
-  }
-
  private:
   RestoreStreamer streamer_;
-  // Atomic only for simple read operation, writes - from the same thread, reads - from any thread
-  atomic<MigrationState> state_ = MigrationState::C_CONNECTING;
   fb2::Fiber sync_fb_;
 };
 
@@ -100,23 +94,7 @@ void OutgoingMigration::Cancel(uint32_t shard_id) {
 }
 
 MigrationState OutgoingMigration::GetState() const {
-  if (is_finalized_) {
-    return MigrationState::C_FINISHED;
-  }
-  std::lock_guard lck(flows_mu_);
-  return GetStateImpl();
-}
-
-MigrationState OutgoingMigration::GetStateImpl() const {
-  MigrationState min_state = MigrationState::C_MAX_INVALID;
-  for (const auto& slot_migration : slot_migrations_) {
-    if (slot_migration) {
-      min_state = std::min(min_state, slot_migration->GetState());
-    } else {
-      min_state = MigrationState::C_NO_STATE;
-    }
-  }
-  return min_state;
+  return state_.load();
 }
 
 void OutgoingMigration::SyncFb() {
@@ -128,6 +106,8 @@ void OutgoingMigration::SyncFb() {
       slot_migrations_[shard->shard_id()]->Start(sync_id_, shard->shard_id());
     }
   };
+
+  state_.store(MigrationState::C_SYNC);
 
   shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
 
@@ -174,11 +154,13 @@ void OutgoingMigration::Ack() {
 
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
-  is_finalized_ = true;
+  state_.store(MigrationState::C_FINISHED);
 }
 
 std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   VLOG(1) << "Starting outgoing migration";
+
+  state_.store(MigrationState::C_CONNECTING);
 
   auto check_connection_error = [&cntx](error_code ec, const char* msg) -> error_code {
     if (ec) {

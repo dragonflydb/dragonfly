@@ -61,22 +61,9 @@ error_code ClusterSlotMigration::Init(uint32_t sync_id, uint32_t shards_num) {
   sync_id_ = sync_id;
   source_shards_num_ = shards_num;
 
-  // Switch to new error handler that closes flow sockets.
-  auto err_handler = [this](const auto& ge) mutable {
-    // Make sure the flows are not in a state transition
-    lock_guard lk{flows_op_mu_};
-
-    // Unblock all sockets.
-    DefaultErrorHandler(ge);
-    for (auto& flow : shard_flows_)
-      flow->Cancel();
-  };
-  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
-
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(
-        new ClusterShardMigration(server(), local_sync_id_, i, sync_id_, &service_));
+    shard_flows_[i].reset(new ClusterShardMigration(local_sync_id_, i, sync_id_, &service_));
   }
 
   partitions_ = Partition(source_shards_num_);
@@ -95,9 +82,7 @@ bool ClusterSlotMigration::IsFinalized() const {
 }
 
 void ClusterSlotMigration::Stop() {
-  for (auto& flow : shard_flows_) {
-    flow->Cancel();
-  }
+  // TODO add implementation
 }
 
 void ClusterSlotMigration::StartFlow(uint32_t shard, io::Source* source) {
@@ -143,21 +128,8 @@ void ClusterSlotMigration::MainMigrationFb() {
 std::error_code ClusterSlotMigration::InitiateSlotsMigration() {
   shard_flows_.resize(source_shards_num_);
   for (unsigned i = 0; i < source_shards_num_; ++i) {
-    shard_flows_[i].reset(
-        new ClusterShardMigration(server(), local_sync_id_, i, sync_id_, &service_));
+    shard_flows_[i].reset(new ClusterShardMigration(local_sync_id_, i, sync_id_, &service_));
   }
-
-  // Switch to new error handler that closes flow sockets.
-  auto err_handler = [this](const auto& ge) mutable {
-    // Make sure the flows are not in a state transition
-    lock_guard lk{flows_op_mu_};
-
-    // Unblock all sockets.
-    DefaultErrorHandler(ge);
-    for (auto& flow : shard_flows_)
-      flow->Cancel();
-  };
-  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   return cntx_.GetError();
 }
