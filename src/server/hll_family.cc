@@ -105,10 +105,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
         is_sparse = false;
         hll = string{hll_sds, sdslen(hll_sds)};
         sdsfree(hll_sds);
-        if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
-          std::cout << "PROMOTE FAILED" << std::endl;
-          return OpStatus::INVALID_VALUE;
-        }
+        DCHECK_EQ(isValidHLL(StringToHllPtr(hll)), HLL_VALID_DENSE);
       }
     } else {
       added = pfadd_dense(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
