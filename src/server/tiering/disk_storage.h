@@ -34,9 +34,8 @@ class DiskStorage {
   void MarkAsFree(DiskSegment segment);
 
   // Request bytes to be stored, cb will be called with assigned segment on completion. Can block to
-  // grow backing file, thus safe to call only from single fiber.
-  // Returns error code if operation failed  immediately (most likely it failed to grow the backing
-  // file) or passes an empty segment if the final write operation failed.
+  // grow backing file. Returns error code if operation failed  immediately (most likely it failed
+  // to grow the backing file) or passes an empty segment if the final write operation failed.
   std::error_code Stash(io::Bytes bytes, StashCb cb);
 
  private:

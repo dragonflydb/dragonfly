@@ -24,8 +24,6 @@ class IoMgr {
 
   using ReadCb = std::function<void(int)>;
 
-  IoMgr();
-
   // blocks until all the pending requests are finished.
   void Shutdown();
 
@@ -50,7 +48,7 @@ class IoMgr {
   }
 
   bool grow_pending() const {
-    return flags.grow_progress;
+    return grow_progress;
   }
 
   const IoMgrStats& GetStats() const {
@@ -61,13 +59,7 @@ class IoMgr {
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   size_t sz_ = 0;
 
-  union {
-    uint8_t flags_val;
-    struct {
-      uint8_t grow_progress : 1;
-    } flags;
-  };
-
+  bool grow_progress = false;
   IoMgrStats stats_;
 };
 

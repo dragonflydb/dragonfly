@@ -41,14 +41,15 @@ struct DiskStorageTest : public PoolTestBase {
     EXPECT_EQ(pending_ops_, 0);
   }
 
-  void Open(std::string_view filename) {
+  void Open() {
     storage_ = make_unique<DiskStorage>();
-    storage_->Open(filename);
+    storage_->Open("disk_storage_test_backing");
   }
 
   void Close() {
     storage_->Close();
     storage_.reset();
+    unlink("disk_storage_test_backing");
   }
 
   void Stash(size_t index, string value) {
@@ -91,7 +92,7 @@ struct DiskStorageTest : public PoolTestBase {
 TEST_F(DiskStorageTest, Basic) {
   pp_->at(0)->Await([this] {
     // Write 100 values
-    Open("testfile");
+    Open();
     for (size_t i = 0; i < 100; i++)
       Stash(i, absl::StrCat("value", i));
     Wait();
@@ -112,7 +113,7 @@ TEST_F(DiskStorageTest, Basic) {
 
 TEST_F(DiskStorageTest, ReUse) {
   pp_->at(0)->Await([this] {
-    Open("testfile");
+    Open();
 
     Stash(0, "value1");
     Wait();
