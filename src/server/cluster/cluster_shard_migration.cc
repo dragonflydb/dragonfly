@@ -29,15 +29,9 @@ ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint3
 }
 
 ClusterShardMigration::~ClusterShardMigration() {
-  JoinFlow();
 }
 
 void ClusterShardMigration::Start(Context* cntx, io::Source* source) {
-  sync_fb_ = fb2::Fiber("shard_migration_full_sync", &ClusterShardMigration::FullSyncShardFb, this,
-                        cntx, source);
-}
-
-void ClusterShardMigration::FullSyncShardFb(Context* cntx, io::Source* source) {
   JournalReader reader{source, 0};
   TransactionReader tx_reader{false};
 
@@ -46,8 +40,10 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx, io::Source* source) {
       break;
 
     auto tx_data = tx_reader.NextTxData(&reader, cntx);
-    if (!tx_data)
+    if (!tx_data) {
+      VLOG(1) << "No tx data";
       break;
+    }
 
     // TouchIoTime();
 
@@ -80,10 +76,6 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
 
 void ClusterShardMigration::Cancel() {
   CloseSocket();
-}
-
-void ClusterShardMigration::JoinFlow() {
-  sync_fb_.JoinIfNeeded();
 }
 
 }  // namespace dfly

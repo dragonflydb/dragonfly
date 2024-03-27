@@ -24,15 +24,9 @@ class ClusterShardMigration : public ProtocolClient {
   void Start(Context* cntx, io::Source* source);
   void Cancel();
 
-  bool IsInProgress() const {
-    return sync_fb_.IsJoinable();
-  }
-
   bool IsFinalized() {
     return is_finalized_;
   }
-
-  void JoinFlow();
 
  private:
   void FullSyncShardFb(Context* cntx, io::Source* source);
@@ -45,7 +39,6 @@ class ClusterShardMigration : public ProtocolClient {
   uint32_t sync_id_;
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<JournalExecutor> executor_;
-  util::fb2::Fiber sync_fb_;
   bool is_finalized_ = false;
 };
 
