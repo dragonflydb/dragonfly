@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <chrono>
+#include <ctime>
 
 #include "server/db_slice.h"
 #include "server/io_utils.h"
@@ -52,11 +52,10 @@ class JournalStreamer : protected BufferedStreamerBase {
     void MaybePing();
     void Start();
 
-    static constexpr std::chrono::seconds kLimit{2};
-    friend JournalStreamer;
+    static const time_t kPingInterval;
 
    private:
-    std::chrono::system_clock::time_point start_time_;
+    time_t start_time_;
     JournalStreamer* streamer_;
   };
 

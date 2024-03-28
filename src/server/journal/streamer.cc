@@ -6,7 +6,7 @@
 
 #include <absl/functional/bind_front.h>
 
-#include <chrono>
+#include <ctime>
 #include <system_error>
 
 #include "base/logging.h"
@@ -14,10 +14,12 @@
 namespace dfly {
 using namespace util;
 
+const time_t JournalStreamer::PeriodicPing::kPingInterval = 2;
+
 void JournalStreamer::PeriodicPing::MaybePing() {
-  const auto now = std::chrono::system_clock::now();
-  const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
-  if (elapsed > kLimit) {
+  const auto now = time(nullptr);
+  const auto elapsed = now - start_time_;
+  if (elapsed > kPingInterval) {
     base::IoBuf tmp;
     io::BufSink sink(&tmp);
     JournalWriter writer(&sink);
@@ -30,7 +32,7 @@ void JournalStreamer::PeriodicPing::MaybePing() {
 }
 
 void JournalStreamer::PeriodicPing::Start() {
-  start_time_ = std::chrono::system_clock::now();
+  start_time_ = time(nullptr);
 }
 
 void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
