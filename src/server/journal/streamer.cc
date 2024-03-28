@@ -21,13 +21,10 @@ void JournalStreamer::PeriodicPing::MaybePing(bool allow_await) {
     base::IoBuf tmp;
     io::BufSink sink(&tmp);
     JournalWriter writer(&sink);
-    journal::Entry entry(0, journal::Op::PING, 0, 0, nullopt, {},
-                         streamer_->journal_->PostIncrLsn());
+    journal::Entry entry(0, journal::Op::PING, 0, 0, nullopt, {}, streamer_->total_records_);
     writer.Write(entry);
 
-    journal::JournalItem dummy;
     streamer_->Write(io::Buffer(io::View(tmp.InputBuffer())));
-    streamer_->NotifyWritten(allow_await);
     Start();
   }
 }
@@ -38,7 +35,6 @@ void JournalStreamer::PeriodicPing::Start() {
 
 void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
   using namespace journal;
-  // periodic_ping_ = PeriodicPing(this);
   periodic_ping_.Start();
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
   journal_cb_id_ =
@@ -51,13 +47,15 @@ void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
           // No record to write, just await if data was written so consumer will read the data.
           return AwaitIfWritten();
         }
+        ++total_records_;
+        LOG(INFO) << "TOTAL RECORDS " << total_records_;
 
         Write(io::Buffer(item.data));
-        NotifyWritten(allow_await);
 
         if (with_pings) {
           periodic_ping_.MaybePing(allow_await);
         }
+        NotifyWritten(allow_await);
       });
 }
 

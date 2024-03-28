@@ -33,7 +33,6 @@ class Journal {
   std::string_view GetEntry(LSN lsn) const;
 
   LSN GetLsn() const;
-  LSN PostIncrLsn();
 
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
                    std::optional<SlotId> slot, Entry::Payload payload, bool await);

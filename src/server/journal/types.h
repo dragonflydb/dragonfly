@@ -31,7 +31,7 @@ struct EntryBase {
   DbIndex dbid;
   uint32_t shard_cnt;
   std::optional<SlotId> slot;
-  LSN lsn;
+  LSN lsn{0};
 };
 
 // This struct represents a single journal entry.
