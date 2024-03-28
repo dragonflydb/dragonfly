@@ -18,12 +18,29 @@ namespace dfly {
 
 class HllFamilyTest : public BaseFamilyTest {
  protected:
+  std::string GenerateUniqueValue(int index) {
+    return "Value_{" + std::to_string(index) + "}";
+  }
 };
 
 TEST_F(HllFamilyTest, Simple) {
   EXPECT_EQ(CheckedInt({"pfadd", "key", "1"}), 1);
   EXPECT_EQ(CheckedInt({"pfadd", "key", "1"}), 0);
   EXPECT_EQ(CheckedInt({"pfcount", "key"}), 1);
+}
+
+TEST_F(HllFamilyTest, Promote) {
+  int unique_values = 2000;
+  for (int i = 0; i < unique_values; ++i) {
+    std::string newkey = GenerateUniqueValue(i);
+    // promote was triggered at 1660th insertion. But how to verify that?
+    Run({"pfadd", "key", newkey});
+  }
+  // HyperLogLog is an advanced data structure in Redis, primarily used for cardinality estimation
+  // (counting unique elements) of massive datasets (up to 2^64 elements). Its characteristics
+  // include high speed and low memory footprint (12KB). However, its computations come with a
+  // margin of error, with a standard error rate of 0.81%. got 0.83% error rate when unique_values =
+  // 200000 EXPECT_LT(std::abs(Run({"pfcount", "key"}) - unique_values)/unique_values, 0.0081);
 }
 
 TEST_F(HllFamilyTest, MultipleValues) {
