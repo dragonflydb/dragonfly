@@ -22,9 +22,9 @@ class JournalWriter {
 
   // Write single entry to sink.
   void Write(const journal::Entry& entry);
+  void Write(uint64_t v);  // Write packed unsigned integer.
 
  private:
-  void Write(uint64_t v);           // Write packed unsigned integer.
   void Write(std::string_view sv);  // Write string.
 
   template <typename C>  // CmdArgList or ArgSlice.
@@ -42,7 +42,8 @@ class JournalWriter {
 struct JournalReader {
  public:
   // Initialize start database index.
-  JournalReader(io::Source* source, DbIndex dbid);
+  JournalReader(io::Source* source, DbIndex dbid,
+                std::optional<DflyVersion> version = std::nullopt);
 
   // Overwrite current source and ensure there is no leftover from previous.
   void SetSource(io::Source* source);
@@ -67,6 +68,7 @@ struct JournalReader {
   io::Source* source_;
   base::IoBuf buf_;
   DbIndex dbid_;
+  std::optional<DflyVersion> maybe_version_;
 };
 
 }  // namespace dfly

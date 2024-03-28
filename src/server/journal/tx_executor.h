@@ -51,6 +51,7 @@ struct TransactionData {
   absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
   uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
   journal::Op opcode = journal::Op::NOOP;
+  uint64_t lsn = 0;
 };
 
 // Utility for reading TransactionData from a journal reader.
@@ -65,6 +66,7 @@ struct TransactionReader {
   // Stores ongoing multi transaction data.
   absl::flat_hash_map<TxId, TransactionData> current_;
   bool accumulate_multi_ = false;
+  int64_t total_ = 0;
 };
 
 }  // namespace dfly

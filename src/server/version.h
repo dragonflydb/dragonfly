@@ -33,8 +33,11 @@ enum class DflyVersion {
   // ACL with user replication
   VER3,
 
+  // - Periodic lag checks from master to replica
+  VER4,
+
   // Always points to the latest version
-  CURRENT_VER = VER3,
+  CURRENT_VER = VER4,
 };
 
 }  // namespace dfly

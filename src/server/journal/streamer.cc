@@ -6,27 +6,58 @@
 
 #include <absl/functional/bind_front.h>
 
+#include <ctime>
+#include <system_error>
+
 #include "base/logging.h"
 
 namespace dfly {
 using namespace util;
 
-void JournalStreamer::Start(io::Sink* dest) {
+const time_t JournalStreamer::PeriodicPing::kPingInterval = 2;
+
+void JournalStreamer::PeriodicPing::MaybePing() {
+  const auto now = time(nullptr);
+  const auto elapsed = now - start_time_;
+  if (elapsed > kPingInterval) {
+    base::IoBuf tmp;
+    io::BufSink sink(&tmp);
+    JournalWriter writer(&sink);
+    journal::Entry entry(0, journal::Op::PING, 0, 0, nullopt, {}, streamer_->total_records_);
+    writer.Write(entry);
+
+    streamer_->Write(io::Buffer(io::View(tmp.InputBuffer())));
+    Start();
+  }
+}
+
+void JournalStreamer::PeriodicPing::Start() {
+  start_time_ = time(nullptr);
+}
+
+void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
   using namespace journal;
+  periodic_ping_.Start();
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
-  journal_cb_id_ = journal_->RegisterOnChange([this](const JournalItem& item, bool allow_await) {
-    if (!ShouldWrite(item)) {
-      return;
-    }
+  journal_cb_id_ =
+      journal_->RegisterOnChange([this, with_pings](const JournalItem& item, bool allow_await) {
+        if (!ShouldWrite(item)) {
+          return;
+        }
 
-    if (item.opcode == Op::NOOP) {
-      // No record to write, just await if data was written so consumer will read the data.
-      return AwaitIfWritten();
-    }
+        if (item.opcode == Op::NOOP) {
+          // No record to write, just await if data was written so consumer will read the data.
+          return AwaitIfWritten();
+        }
+        ++total_records_;
 
-    Write(io::Buffer(item.data));
-    NotifyWritten(allow_await);
-  });
+        Write(io::Buffer(item.data));
+
+        if (with_pings) {
+          periodic_ping_.MaybePing();
+        }
+        NotifyWritten(allow_await);
+      });
 }
 
 void JournalStreamer::Cancel() {
@@ -58,7 +89,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, uint32_t sync_id
   DCHECK(slice != nullptr);
 }
 
-void RestoreStreamer::Start(io::Sink* dest) {
+void RestoreStreamer::Start(io::Sink* dest, bool with_pings) {
   VLOG(2) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));

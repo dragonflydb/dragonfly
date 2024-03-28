@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <ctime>
+
 #include "server/db_slice.h"
 #include "server/io_utils.h"
 #include "server/journal/journal.h"
@@ -17,7 +19,10 @@ namespace dfly {
 class JournalStreamer : protected BufferedStreamerBase {
  public:
   JournalStreamer(journal::Journal* journal, Context* cntx)
-      : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx}, journal_{journal} {
+      : BufferedStreamerBase{cntx->GetCancellation()},
+        cntx_{cntx},
+        journal_{journal},
+        periodic_ping_(this) {
   }
 
   // Self referential.
@@ -25,7 +30,7 @@ class JournalStreamer : protected BufferedStreamerBase {
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(io::Sink* dest);
+  virtual void Start(io::Sink* dest, bool with_pings = false);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -40,13 +45,28 @@ class JournalStreamer : protected BufferedStreamerBase {
     return true;
   }
 
- private:
+  class PeriodicPing {
+   public:
+    explicit PeriodicPing(JournalStreamer* streamer) : streamer_(streamer) {
+    }
+    void MaybePing();
+    void Start();
+
+    static const time_t kPingInterval;
+
+   private:
+    time_t start_time_;
+    JournalStreamer* streamer_;
+  };
+
   Context* cntx_;
 
   uint32_t journal_cb_id_{0};
   journal::Journal* journal_;
+  uint64_t total_records_{0};
 
   util::fb2::Fiber write_fb_{};
+  PeriodicPing periodic_ping_;
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
@@ -57,7 +77,7 @@ class RestoreStreamer : public JournalStreamer {
                   Context* cntx);
   ~RestoreStreamer() override;
 
-  void Start(io::Sink* dest) override;
+  void Start(io::Sink* dest, bool with_pings = false) override;
   // Cancel() must be called if Start() is called
   void Cancel() override;
 

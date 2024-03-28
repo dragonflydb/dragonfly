@@ -794,6 +794,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
 
   if (auto jo = loader.journal_offset(); jo.has_value()) {
     this->journal_rec_executed_.store(*jo);
+    lsn_ = 0;
   } else {
     if (master_context_.version > DflyVersion::VER0)
       cntx->ReportError(std::make_error_code(errc::protocol_error),
@@ -811,7 +812,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
 
   io::PrefixSource ps{prefix, Sock()};
 
-  JournalReader reader{&ps, 0};
+  JournalReader reader{&ps, 0, master_context_.version};
   TransactionReader tx_reader{use_multi_shard_exe_sync_};
 
   if (master_context_.version > DflyVersion::VER0) {
@@ -829,11 +830,22 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
     if (!tx_data)
       break;
 
-    last_io_time_ = Proactor()->GetMonotonicTimeNs();
+    const bool is_ping = tx_data->opcode == journal::Op::PING;
+    if ((is_ping && tx_data->lsn == 0) || (!is_ping)) {
+      lsn_ += tx_data->journal_rec_count;
+    }
 
-    if (tx_data->opcode == journal::Op::PING) {
+    last_io_time_ = Proactor()->GetMonotonicTimeNs();
+    if (is_ping) {
       force_ping_ = true;
-      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+      if (tx_data->lsn != 0) {
+        const uint64_t expect = lsn_;
+        const bool is_expected = tx_data->lsn == expect;
+        LOG_FIRST_N(INFO, 10) << "tx_data->lsn=" << tx_data->lsn << " lsn_=" << expect;
+        DCHECK(is_expected) << "tx_data->lsn=" << tx_data->lsn << "lsn=" << expect;
+      } else {
+        journal_rec_executed_.fetch_add(1);
+      }
     } else if (tx_data->opcode == journal::Op::EXEC) {
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));
