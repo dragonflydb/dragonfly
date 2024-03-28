@@ -34,7 +34,7 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
 SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc
     search/aggregator.cc)
 
-add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
+add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             ${SEARCH_FILES}
@@ -97,6 +97,7 @@ cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
+cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)

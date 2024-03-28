@@ -33,6 +33,7 @@ extern "C" {
 #include "server/acl/user_registry.h"
 #include "server/acl/validator.h"
 #include "server/bitops_family.h"
+#include "server/bloom_family.h"
 #include "server/cluster/cluster_family.h"
 #include "server/cluster/unique_slot_checker.h"
 #include "server/conn_context.h"
@@ -2593,7 +2594,7 @@ void Service::RegisterCommands() {
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
   SearchFamily::Register(&registry_);
-
+  BloomFamily::Register(&registry_);
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
 
