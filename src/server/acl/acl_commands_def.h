@@ -8,34 +8,9 @@
 #include "facade/acl_commands_def.h"
 
 namespace dfly::acl {
+
 /* There are 21 ACL categories as of redis 7
  *
- * bit 0: keyspace
- * bit 1: read
- * bit 2: write
- * bit 3: set
- * bit 4: sortedset
- * bit 5: list
- * bit 6: hash
- * bit 7: string
- * bit 8: bitmap
- * bit 9: hyperloglog
- * bit 10: geo
- * bit 11: stream
- * bit 12: pubsub
- * bit 13: admin
- * bit 14: fast
- * bit 15: slow
- * bit 16: blocking
- * bit 17: dangerous
- * bit 18: connection
- * bit 19: transaction
- * bit 20: scripting
- * bits 21..28: tba
- * Dragonfly extensions:
- * bit 29: ft_search
- * bit 30: throttle
- * bit 31: json
  */
 
 enum AclCat {
@@ -60,6 +35,9 @@ enum AclCat {
   CONNECTION = 1ULL << 18,
   TRANSACTION = 1ULL << 19,
   SCRIPTING = 1ULL << 20,
+
+  // Extensions
+  BLOOM = 1ULL << 28,
   FT_SEARCH = 1ULL << 29,
   THROTTLE = 1ULL << 30,
   JSON = 1ULL << 31
@@ -89,6 +67,7 @@ inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABL
     {"CONNECTION", CONNECTION},
     {"TRANSACTION", TRANSACTION},
     {"SCRIPTING", SCRIPTING},
+    {"BLOOM", BLOOM},
     {"FT_SEARCH", FT_SEARCH},
     {"THROTTLE", THROTTLE},
     {"JSON", JSON},
@@ -103,7 +82,7 @@ inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
     "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",     "PUBSUB",      "ADMIN",
     "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
     "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
-    "_RESERVED", "FT_SEARCH", "THROTTLE",  "JSON"};
+    "BLOOM",     "FT_SEARCH", "THROTTLE",  "JSON"};
 
 using RevCommandField = std::vector<std::string>;
 using RevCommandsIndexStore = std::vector<RevCommandField>;
