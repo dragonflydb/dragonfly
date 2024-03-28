@@ -12,12 +12,81 @@ using namespace std;
 using nonstd::make_unexpected;
 
 inline bool IsRecursive(flexbuffers::Type type) {
-  return false;
+  return type == flexbuffers::FBT_MAP || type == flexbuffers::FBT_VECTOR;
 }
 
-// TODO: to finish everything
+// Binary search of a key, returns UINT_MAX if not found.
+unsigned FindByKey(const flexbuffers::TypedVector& keys, const char* elem) {
+  unsigned s = 0, end = keys.size();
+  while (s < end) {
+    unsigned mid = (s + end) / 2;
+    flexbuffers::String mid_elem = keys[mid].AsString();
+    int res = strcmp(elem, mid_elem.c_str());
+    if (res < 0) {
+      end = mid;
+    } else if (res > 0) {
+      s = mid + 1;
+    } else {
+      return mid;
+    }
+  }
+  return UINT_MAX;
+}
+
 auto FlatDfsItem::Init(const PathSegment& segment) -> AdvanceResult {
-  return AdvanceResult{};
+  switch (segment.type()) {
+    case SegmentType::IDENTIFIER: {
+      if (obj().IsMap()) {
+        auto map = obj().AsMap();
+        flexbuffers::TypedVector keys = map.Keys();
+        unsigned index = FindByKey(keys, segment.identifier().c_str());
+        if (index == UINT_MAX) {
+          return Exhausted();
+        }
+        state_ = index;
+        return DepthState{obj().AsVector()[index], depth_state_.second + 1};
+      }
+      break;
+    }
+    case SegmentType::INDEX: {
+      unsigned index = segment.index();
+      if (obj().IsUntypedVector()) {
+        auto vec = obj().AsVector();
+        if (index >= vec.size()) {
+          return nonstd::make_unexpected(OUT_OF_BOUNDS);
+        }
+        state_ = index;
+        return Next(vec[index]);
+      }
+      break;
+    }
+
+    case SegmentType::DESCENT:
+      if (segment_step_ == 1) {
+        // first time, branching to return the same object but with the next segment,
+        // exploring the path of ignoring the DESCENT operator.
+        // Also, shift the state (segment_step) to bypass this branch next time.
+        segment_step_ = 0;
+        return DepthState{depth_state_.first, depth_state_.second + 1};
+      }
+
+      // Now traverse all the children but do not progress with segment path.
+      // This is why segment_step_ is set to 0.
+      [[fallthrough]];
+    case SegmentType::WILDCARD: {
+      auto vec = obj().AsVector();
+      if (vec.size() == 0) {
+        return Exhausted();
+      }
+      state_ = 0;
+      return Next(vec[0]);
+    } break;
+
+    default:
+      LOG(DFATAL) << "Unknown segment " << SegmentName(segment.type());
+  }  // end switch
+
+  return nonstd::make_unexpected(MISMATCH);
 }
 
 auto FlatDfsItem::Advance(const PathSegment& segment) -> AdvanceResult {
@@ -93,7 +162,7 @@ auto FlatDfs::PerformStep(const PathSegment& segment, const flexbuffers::Referen
       }
     } break;
     case SegmentType::INDEX: {
-      if (!node.IsVector())
+      if (!node.IsUntypedVector())
         return make_unexpected(MISMATCH);
       auto vec = node.AsVector();
       if (segment.index() >= vec.size()) {

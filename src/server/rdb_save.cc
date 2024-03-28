@@ -1196,7 +1196,11 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
+      auto before = absl::GetCurrentTimeNanos();
       io_error = sink_->Write(io::Buffer(record->value));
+      auto& stats = ServerState::tlocal()->stats;
+      stats.rdb_save_usec += (absl::GetCurrentTimeNanos() - before) / 1'000;
+      stats.rdb_save_count++;
       if (io_error) {
         break;
       }

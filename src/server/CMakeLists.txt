@@ -36,7 +36,7 @@ SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessor
 
 add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
-            generic_family.cc hset_family.cc json_family.cc
+            generic_family.cc hset_family.cc http_api.cc json_family.cc
             ${SEARCH_FILES}
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
@@ -49,7 +49,8 @@ add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
             cluster/cluster_family.cc cluster/cluster_slot_migration.cc
             cluster/cluster_shard_migration.cc cluster/outgoing_slot_migration.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc acl/helpers.cc)
+            acl/validator.cc acl/helpers.cc
+            tiering/disk_storage.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
@@ -102,6 +103,7 @@ cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
+cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
 if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(stream_family_test PRIVATE SANITIZERS)
   target_compile_definitions(multi_test PRIVATE SANITIZERS)

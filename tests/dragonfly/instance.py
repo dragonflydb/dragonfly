@@ -142,10 +142,12 @@ class DflyInstance:
 
         self.log_files = self.get_logs_from_psutil()
 
-        last_log_file = open("/tmp/last_test_log_files.txt", "w")
+        last_log_file = open("/tmp/last_test_log_files.txt", "a")
 
         for log in self.log_files:
             last_log_file.write(log + "\n")
+
+        last_log_file.close()
 
         # Remove first 6 lines - our default header with log locations (as it carries no useful information)
         # Next, replace log-level + date with port and colored arrow
@@ -317,8 +319,7 @@ class DflyInstanceFactory:
     def create(self, existing_port=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
-        args.setdefault("jsonpathv2", None)
-
+        args.setdefault("enable_direct_fd", None)  # Testing iouring with direct_fd enabled.
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1"

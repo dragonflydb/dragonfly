@@ -33,13 +33,9 @@ constexpr inline size_t alignup(size_t num, size_t align) {
 
 }  // namespace
 
-IoMgr::IoMgr() {
-  flags_val = 0;
-}
-
 constexpr size_t kInitialSize = 1UL << 28;  // 256MB
 
-error_code IoMgr::Open(const string& path) {
+error_code IoMgr::Open(std::string_view path) {
   CHECK(!backing_file_);
 
   int kFlags = O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC;
@@ -71,10 +67,30 @@ error_code IoMgr::Open(const string& path) {
   return error_code{};
 }
 
+error_code IoMgr::Grow(size_t len) {
+  Proactor* proactor = (Proactor*)ProactorBase::me();
+
+  if (exchange(grow_progress_, true))
+    return make_error_code(errc::operation_in_progress);
+
+  fb2::FiberCall fc(proactor);
+  fc->PrepFallocate(backing_file_->fd(), 0, sz_, len);
+  Proactor::IoResult res = fc.Get();
+
+  grow_progress_ = false;
+
+  if (res == 0) {
+    sz_ += len;
+    return {};
+  } else {
+    return std::error_code(-res, std::iostream_category());
+  }
+}
+
 error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
   DCHECK_EQ(0u, len % (1 << 20));
 
-  if (flags.grow_progress) {
+  if (exchange(grow_progress_, true)) {
     return make_error_code(errc::operation_in_progress);
   }
 
@@ -82,14 +98,13 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
 
   SubmitEntry entry = proactor->GetSubmitEntry(
       [this, len, cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t) {
-        this->flags.grow_progress = 0;
+        this->grow_progress_ = false;
         sz_ += (res == 0 ? len : 0);
         cb(res);
       },
       0);
 
   entry.PrepFallocate(backing_file_->fd(), 0, sz_, len);
-  flags.grow_progress = 1;
 
   return error_code{};
 }
@@ -146,8 +161,22 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
   return ec;
 }
 
+std::error_code IoMgr::ReadAsync(size_t offset, absl::Span<uint8_t> buffer, ReadCb cb) {
+  DCHECK(!buffer.empty());
+  VLOG(1) << "Read " << offset << "/" << buffer.size();
+
+  Proactor* proactor = (Proactor*)ProactorBase::me();
+
+  auto ring_cb = [cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t flags) { cb(res); };
+
+  SubmitEntry se = proactor->GetSubmitEntry(std::move(ring_cb), 0);
+  se.PrepRead(backing_file_->fd(), buffer.data(), buffer.size(), offset);
+
+  return error_code{};
+}
+
 void IoMgr::Shutdown() {
-  while (flags_val) {
+  while (grow_progress_) {
     ThisFiber::SleepFor(200us);  // TODO: hacky for now.
   }
 }
