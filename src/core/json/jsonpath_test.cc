@@ -20,7 +20,6 @@ namespace dfly::json {
 using namespace std;
 
 using testing::ElementsAre;
-using FlatJson = flexbuffers::Reference;
 
 MATCHER_P(SegType, value, "") {
   return ExplainMatchResult(testing::Property(&PathSegment::type, value), arg, result_listener);
@@ -157,6 +156,30 @@ TEST_F(ScannerTest, Basic) {
   NEXT_TOK(ROOT);
   NEXT_TOK(DESCENT);
   NEXT_TOK(WILDCARD);
+}
+
+TEST_F(ScannerTest, FlatToJson) {
+  flatbuffers::Parser parser;
+  const char* json = R"(
+    {
+      "foo": "bar",
+      "bar": 1.5,
+      "strs": ["hello", "world"]
+    }
+  )";
+  flexbuffers::Builder fbb;
+  ASSERT_TRUE(parser.ParseFlexBuffer(json, nullptr, &fbb));
+  fbb.Finish();
+
+  flexbuffers::Reference root = flexbuffers::GetRoot(fbb.GetBuffer());
+  JsonType res = FromFlat(root);
+  EXPECT_EQ(res, JsonType::parse(json));
+  fbb.Clear();
+  FromJsonType(res, &fbb);
+  fbb.Finish();
+  string actual;
+  flexbuffers::GetRoot(fbb.GetBuffer()).ToString(false, true, actual);
+  EXPECT_EQ(res, JsonType::parse(actual));
 }
 
 TYPED_TEST(JsonPathTest, Parser) {

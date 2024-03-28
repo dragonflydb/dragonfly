@@ -11,3 +11,7 @@
 #include <flatbuffers/flatbuffers.h>
 #include <flatbuffers/flexbuffers.h>
 #include <flatbuffers/idl.h>
+
+namespace dfly {
+using FlatJson = flexbuffers::Reference;
+}  // namespace dfly
