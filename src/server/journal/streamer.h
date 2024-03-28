@@ -64,6 +64,7 @@ class JournalStreamer : protected BufferedStreamerBase {
 
   uint32_t journal_cb_id_{0};
   journal::Journal* journal_;
+  uint64_t total_records_{0};
 
   util::fb2::Fiber write_fb_{};
   PeriodicPing periodic_ping_;

@@ -28,10 +28,6 @@ class JournalSlice {
     return lsn_;
   }
 
-  LSN PostIncrLsn() {
-    return lsn_++;
-  }
-
   std::error_code status() const {
     return status_ec_;
   }
