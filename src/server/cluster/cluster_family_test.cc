@@ -36,6 +36,28 @@ class ClusterFamilyTest : public BaseFamilyTest {
   string GetMyId() {
     return RunPrivileged({"dflycluster", "myid"}).GetString();
   }
+
+  void ConfigSingleNodeCluster(string id) {
+    string config_template = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "$0",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+    string config = absl::Substitute(config_template, id);
+    EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+  }
 };
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
@@ -136,25 +158,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcd1234",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json"}),
-            "OK");
-
+  ConfigSingleNodeCluster("abcd1234");
   string cluster_info = Run({"cluster", "info"}).GetString();
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
@@ -422,26 +426,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfoInvalid) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
-  string config_template = R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "$0",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json";
-  string config = absl::Substitute(config_template, GetMyId());
-
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+  ConfigSingleNodeCluster(GetMyId());
 
   constexpr string_view kKey = "some-key";
   const SlotId slot = ClusterConfig::KeySlot(kKey);
@@ -480,26 +465,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
-  string config_template = R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "$0",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json";
-  string config = absl::Substitute(config_template, GetMyId());
-
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+  ConfigSingleNodeCluster(GetMyId());
 
   Run({"debug", "populate", "10000", "key", "4", "SLOTS", "0", "1000"});
 
@@ -515,26 +481,7 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
-  string config_template = R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "$0",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json";
-  string config = absl::Substitute(config_template, GetMyId());
-
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+  ConfigSingleNodeCluster(GetMyId());
 
   Run({"debug", "populate", "100000"});
 
@@ -546,8 +493,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
           RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
 
-  config = absl::Substitute(config_template, "abc");
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+  ConfigSingleNodeCluster("abc");
 
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
@@ -562,26 +508,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 
 // Test issue #1302
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
-  string config_template = R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "$0",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json";
-  string config = absl::Substitute(config_template, GetMyId());
-
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+  ConfigSingleNodeCluster(GetMyId());
 
   Run({"debug", "populate", "100000"});
 
@@ -593,10 +520,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
           RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads", IntArg(0),
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
 
-  config = absl::Substitute(config_template, "abc");
   // After running the new config we start a fiber that removes all slots from current instance
   // we immediately shut down to test that we do not crash.
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+  ConfigSingleNodeCluster("abc");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
@@ -674,24 +600,7 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   EXPECT_EQ(Run({"debug", "load", save_info.file_name}), "OK");
   EXPECT_EQ(CheckedInt({"dbsize"}), 50000);
 
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcd1234",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json"}),
-            "OK");
+  ConfigSingleNodeCluster("abcd1234");
 
   // Make sure `dbsize` all slots were removed
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
@@ -739,27 +648,24 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)))));
 }
 
-TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
-  string config_template = R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "$0",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json";
-  string config = absl::Substitute(config_template, GetMyId());
+TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
+  for (string_view count : {"1", "10", "100", "1000", "10000", "100000"}) {
+    ConfigSingleNodeCluster(GetMyId());
 
-  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+    EXPECT_EQ(Run({"debug", "populate", count, "key", "4"}), "OK");
+    EXPECT_THAT(Run({"cluster", "keyslot", "key:0"}), IntArg(2592));
+    EXPECT_EQ(Run({"dflycluster", "flushslots", "2592"}), "OK");
+    // key:0 should have been removed, so APPEND will end up with key:0 == ZZZZ
+    EXPECT_THAT(Run({"append", "key:0", "ZZZZ"}), IntArg(4));
+    EXPECT_EQ(Run({"get", "key:0"}), "ZZZZ");
+
+    ResetService();
+  }
+}
+
+TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
+  ConfigSingleNodeCluster(GetMyId());
+
   EXPECT_EQ(Run({"SET", "key", "value"}), "OK");
   EXPECT_EQ(Run({"GET", "key"}), "value");
 
