@@ -654,7 +654,7 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
 
     EXPECT_EQ(Run({"debug", "populate", count, "key", "4"}), "OK");
     EXPECT_THAT(Run({"cluster", "keyslot", "key:0"}), IntArg(2592));
-    EXPECT_EQ(Run({"dflycluster", "flushslots", "2592"}), "OK");
+    EXPECT_EQ(Run({"dflycluster", "flushslots", "2592", "2592"}), "OK");
     // key:0 should have been removed, so APPEND will end up with key:0 == ZZZZ
     EXPECT_THAT(Run({"append", "key:0", "ZZZZ"}), IntArg(4));
     EXPECT_EQ(Run({"get", "key:0"}), "ZZZZ");
