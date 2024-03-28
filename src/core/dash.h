@@ -34,15 +34,8 @@ class DashTable : public detail::DashTableBase {
   DashTable(const DashTable&) = delete;
   DashTable& operator=(const DashTable&) = delete;
 
-  struct SegmentPolicy {
-    static constexpr unsigned NUM_SLOTS = Policy::kSlotNum;
-    static constexpr unsigned BUCKET_CNT = Policy::kBucketNum;
-    static constexpr unsigned STASH_BUCKET_NUM = Policy::kStashBucketNum;
-    static constexpr bool USE_VERSION = Policy::kUseVersion;
-  };
-
   using Base = detail::DashTableBase;
-  using SegmentType = detail::Segment<_Key, _Value, SegmentPolicy>;
+  using SegmentType = detail::Segment<_Key, _Value, Policy>;
   using SegmentIterator = typename SegmentType::Iterator;
 
  public:
@@ -50,17 +43,12 @@ class DashTable : public detail::DashTableBase {
   using Value_t = _Value;
   using Segment_t = SegmentType;
 
-  //! Number of "official" buckets that are used to position a key. In other words, does not include
-  //! stash buckets.
-  static constexpr unsigned kLogicalBucketNum = Policy::kBucketNum;
-
   //! Total number of buckets in a segment (including stash).
-  static constexpr unsigned kPhysicalBucketNum = SegmentType::kTotalBuckets;
-  static constexpr unsigned kBucketWidth = Policy::kSlotNum;
   static constexpr double kTaxAmount = SegmentType::kTaxSize;
   static constexpr size_t kSegBytes = sizeof(SegmentType);
   static constexpr size_t kSegCapacity = SegmentType::capacity();
-  static constexpr bool kUseVersion = Policy::kUseVersion;
+  static constexpr size_t kSlotNum = SegmentType::kSlotNum;
+  static constexpr size_t kBucketNum = SegmentType::kBucketNum;
 
   // if IsSingleBucket is true - iterates only over a single bucket.
   template <bool IsConst, bool IsSingleBucket = false> class Iterator;
@@ -556,11 +544,11 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
     return;
   }
 
-  static_assert(kPhysicalBucketNum < 0xFF, "");
+  static_assert(SegmentType::kTotalBuckets < 0xFF, "");
 
   // Segment is full, we need to return the whole segment, because it can be split
   // and its entries can be reshuffled into different buckets.
-  for (uint8_t i = 0; i < kPhysicalBucketNum; ++i) {
+  for (uint8_t i = 0; i < SegmentType::kTotalBuckets; ++i) {
     if (target->GetVersion(i) < ver_threshold && !target->GetBucket(i).IsEmpty()) {
       cb(bucket_iterator{this, seg_id, i});
     }
@@ -646,8 +634,8 @@ bool DashTable<_Key, _Value, Policy>::ShiftRight(bucket_iterator it) {
   typename Segment_t::Hash_t hash_val = 0;
   auto& bucket = seg->GetBucket(it.bucket_id_);
 
-  if (bucket.GetBusy() & (1 << (kBucketWidth - 1))) {
-    it.slot_id_ = kBucketWidth - 1;
+  if (bucket.GetBusy() & (1 << (kSlotNum - 1))) {
+    it.slot_id_ = kSlotNum - 1;
     hash_val = DoHash(it->first);
     policy_.DestroyKey(it->first);
     policy_.DestroyValue(it->second);
@@ -800,7 +788,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
 
       for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
         hotspot.probes.by_type.stash_buckets[i] =
-            bucket_iterator{this, target_seg_id, uint8_t(kLogicalBucketNum + i), 0};
+            bucket_iterator{this, target_seg_id, uint8_t(Policy::kBucketNum + i), 0};
       }
       hotspot.num_buckets = HotspotBuckets::kNumBuckets;
 
@@ -910,7 +898,7 @@ auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& c
   s->TraverseBucket(bid, std::move(dt_cb));
 
   ++bid;
-  if (bid == kPhysicalBucketNum) {
+  if (bid == SegmentType::kTotalBuckets) {
     sid = NextSeg(sid);
     bid = 0;
     if (sid >= segment_.size()) {
@@ -924,7 +912,7 @@ auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& c
 template <typename _Key, typename _Value, typename Policy>
 auto DashTable<_Key, _Value, Policy>::GetRandomCursor(absl::BitGen* bitgen) -> Cursor {
   uint32_t sid = absl::Uniform<uint32_t>(*bitgen, 0, segment_.size());
-  uint8_t bid = absl::Uniform<uint8_t>(*bitgen, 0, kLogicalBucketNum);
+  uint8_t bid = absl::Uniform<uint8_t>(*bitgen, 0, Policy::kBucketNum);
 
   return Cursor{global_depth_, sid, bid};
 }
@@ -932,7 +920,7 @@ auto DashTable<_Key, _Value, Policy>::GetRandomCursor(absl::BitGen* bitgen) -> C
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
-  if (curs.bucket_id() >= kLogicalBucketNum)  // sanity.
+  if (curs.bucket_id() >= Policy::kBucketNum)  // sanity.
     return 0;
 
   uint32_t sid = curs.segment_id(global_depth_);
@@ -955,7 +943,7 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
       sid = 0;
       ++bid;
 
-      if (bid >= kLogicalBucketNum)
+      if (bid >= Policy::kBucketNum)
         return 0;  // "End of traversal" cursor.
     }
   } while (!fetched);
