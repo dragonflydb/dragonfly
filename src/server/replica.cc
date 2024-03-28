@@ -841,7 +841,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       if (tx_data->lsn != 0) {
         const uint64_t expect = lsn_;
         const bool is_expected = tx_data->lsn == expect;
-        LOG(INFO) << "tx_data->lsn=" << tx_data->lsn << " lsn_=" << expect;
+        LOG_FIRST_N(INFO, 10) << "tx_data->lsn=" << tx_data->lsn << " lsn_=" << expect;
         DCHECK(is_expected) << "tx_data->lsn=" << tx_data->lsn << "lsn=" << expect;
       } else {
         journal_rec_executed_.fetch_add(1);
