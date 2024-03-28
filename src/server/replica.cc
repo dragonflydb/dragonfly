@@ -812,7 +812,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
 
   io::PrefixSource ps{prefix, Sock()};
 
-  JournalReader reader{&ps, 0};
+  JournalReader reader{&ps, 0, master_context_.version};
   TransactionReader tx_reader{use_multi_shard_exe_sync_};
 
   if (master_context_.version > DflyVersion::VER0) {
@@ -831,16 +831,15 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       break;
 
     const bool is_ping = tx_data->opcode == journal::Op::PING;
-    const bool is_noop = tx_data->opcode == journal::Op::NOOP;
-    if ((is_ping && tx_data->lsn == 0) || (!is_ping && !is_noop)) {
-      lsn_.fetch_add(tx_data->journal_rec_count);
+    if ((is_ping && tx_data->lsn == 0) || (!is_ping)) {
+      lsn_ += tx_data->journal_rec_count;
     }
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
     if (is_ping) {
       force_ping_ = true;
       if (tx_data->lsn != 0) {
-        const uint64_t expect = lsn_.load();
+        const uint64_t expect = lsn_;
         const bool is_expected = tx_data->lsn == expect;
         LOG(INFO) << "tx_data->lsn=" << tx_data->lsn << " lsn_=" << expect;
         DCHECK(is_expected) << "tx_data->lsn=" << tx_data->lsn << "lsn=" << expect;

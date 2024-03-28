@@ -14,7 +14,7 @@
 namespace dfly {
 using namespace util;
 
-void JournalStreamer::PeriodicPing::MaybePing(bool allow_await) {
+void JournalStreamer::PeriodicPing::MaybePing() {
   const auto now = std::chrono::system_clock::now();
   const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time_);
   if (elapsed > kLimit) {
@@ -48,12 +48,11 @@ void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
           return AwaitIfWritten();
         }
         ++total_records_;
-        LOG(INFO) << "TOTAL RECORDS " << total_records_;
 
         Write(io::Buffer(item.data));
 
         if (with_pings) {
-          periodic_ping_.MaybePing(allow_await);
+          periodic_ping_.MaybePing();
         }
         NotifyWritten(allow_await);
       });

@@ -49,7 +49,7 @@ class JournalStreamer : protected BufferedStreamerBase {
    public:
     explicit PeriodicPing(JournalStreamer* streamer) : streamer_(streamer) {
     }
-    void MaybePing(bool allow_await);
+    void MaybePing();
     void Start();
 
     static constexpr std::chrono::seconds kLimit{2};
