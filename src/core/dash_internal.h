@@ -289,36 +289,38 @@ static_assert(alignof(VersionedBB<14, 4>) == 1, "");
 static_assert(sizeof(VersionedBB<12, 4>) == 12 * 2 + 8, "");
 static_assert(sizeof(VersionedBB<14, 4>) <= 14 * 2 + 8, "");
 
-// Segment - static-hashtable of size NUM_SLOTS*(BUCKET_CNT + STASH_BUCKET_NUM).
+// Segment - static-hashtable of size kSlotNum*(kBucketNum + kStashBucketNum).
 struct DefaultSegmentPolicy {
-  static constexpr unsigned NUM_SLOTS = 12;
-  static constexpr unsigned BUCKET_CNT = 64;
-  static constexpr unsigned STASH_BUCKET_NUM = 2;
-  static constexpr bool USE_VERSION = true;
+  static constexpr unsigned kSlotNum = 12;
+  static constexpr unsigned kBucketNum = 64;
+  static constexpr unsigned kStashBucketNum = 2;
+  static constexpr bool kUseVersion = true;
 };
 
 template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy> class Segment {
-  static constexpr unsigned BUCKET_CNT = Policy::BUCKET_CNT;
-  static constexpr unsigned STASH_BUCKET_NUM = Policy::STASH_BUCKET_NUM;
-  static constexpr unsigned NUM_SLOTS = Policy::NUM_SLOTS;
-  static constexpr bool USE_VERSION = Policy::USE_VERSION;
+ public:
+  static constexpr unsigned kSlotNum = Policy::kSlotNum;
+  static constexpr unsigned kBucketNum = Policy::kBucketNum;
+  static constexpr unsigned kStashBucketNum = Policy::kStashBucketNum;
+  static constexpr bool kUseVersion = Policy::kUseVersion;
 
-  static_assert(BUCKET_CNT + STASH_BUCKET_NUM < 255);
+ private:
+  static_assert(kBucketNum + kStashBucketNum < 255);
   static constexpr unsigned kFingerBits = 8;
 
   using BucketType =
-      std::conditional_t<USE_VERSION, VersionedBB<NUM_SLOTS, 4>, BucketBase<NUM_SLOTS, 4>>;
+      std::conditional_t<kUseVersion, VersionedBB<kSlotNum, 4>, BucketBase<kSlotNum, 4>>;
 
   struct Bucket : public BucketType {
     using BucketType::kNanSlot;
     using typename BucketType::SlotId;
 
-    _Key key[NUM_SLOTS];
-    _Value value[NUM_SLOTS];
+    _Key key[kSlotNum];
+    _Value value[kSlotNum];
 
     template <typename U, typename V>
     void Insert(uint8_t slot, U&& u, V&& v, uint8_t meta_hash, bool probe) {
-      assert(slot < NUM_SLOTS);
+      assert(slot < kSlotNum);
 
       key[slot] = std::forward<U>(u);
       value[slot] = std::forward<V>(v);
@@ -337,14 +339,13 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
       std::swap(value[slot_a], value[slot_b]);
     }
 
-    // calls for each busy slot: cb(iterator, probe)
-    template <typename Cb> void ForEachSlot(Cb&& cb) const {
+    template <typename This, typename Cb> void ForEachSlotImpl(This obj, Cb&& cb) const {
       uint32_t mask = this->GetBusy();
       uint32_t probe_mask = this->GetProbe(true);
 
-      for (unsigned j = 0; j < NUM_SLOTS; ++j) {
+      for (unsigned j = 0; j < kSlotNum; ++j) {
         if (mask & 1) {
-          cb(this, j, probe_mask & 1);
+          cb(obj, j, probe_mask & 1);
         }
         mask >>= 1;
         probe_mask >>= 1;
@@ -352,17 +353,13 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     }
 
     // calls for each busy slot: cb(iterator, probe)
-    template <typename Cb> void ForEachSlot(Cb&& cb) {
-      uint32_t mask = this->GetBusy();
-      uint32_t probe_mask = this->GetProbe(true);
+    template <typename Cb> void ForEachSlot(Cb&& cb) const {
+      ForEachSlotImpl(this, std::forward<Cb&&>(cb));
+    }
 
-      for (unsigned j = 0; j < NUM_SLOTS; ++j) {
-        if (mask & 1) {
-          cb(this, j, probe_mask & 1);
-        }
-        mask >>= 1;
-        probe_mask >>= 1;
-      }
+    // calls for each busy slot: cb(iterator, probe)
+    template <typename Cb> void ForEachSlot(Cb&& cb) {
+      ForEachSlotImpl(this, std::forward<Cb&&>(cb));
     }
   };  // class Bucket
 
@@ -392,12 +389,9 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   };
 
   /* number of normal buckets in one segment*/
-  static constexpr uint8_t kRegularBucketCnt = BUCKET_CNT;
-  static constexpr uint8_t kTotalBuckets = kRegularBucketCnt + STASH_BUCKET_NUM;
-  static constexpr uint8_t kStashBucketCnt = STASH_BUCKET_NUM;
+  static constexpr uint8_t kTotalBuckets = kBucketNum + kStashBucketNum;
 
   static constexpr size_t kFpMask = (1 << kFingerBits) - 1;
-  static constexpr size_t kNumSlots = NUM_SLOTS;
 
   using Value_t = _Value;
   using Key_t = _Key;
@@ -439,13 +433,11 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     local_depth_ = depth;
   }
 
-  template <bool UV = Policy::USE_VERSION>
-  std::enable_if_t<UV, uint64_t> GetVersion(uint8_t bid) const {
+  template <bool UV = kUseVersion> std::enable_if_t<UV, uint64_t> GetVersion(uint8_t bid) const {
     return bucket_[bid].GetVersion();
   }
 
-  template <bool UV = Policy::USE_VERSION>
-  std::enable_if_t<UV> SetVersion(uint8_t bid, uint64_t v) {
+  template <bool UV = kUseVersion> std::enable_if_t<UV> SetVersion(uint8_t bid, uint64_t v) {
     return bucket_[bid].SetVersion(v);
   }
 
@@ -466,7 +458,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Used in test.
   unsigned NumProbingBuckets() const {
     unsigned res = 0;
-    for (unsigned i = 0; i < kRegularBucketCnt; ++i) {
+    for (unsigned i = 0; i < kBucketNum; ++i) {
       res += (bucket_[i].GetProbe(true) != 0);
     }
     return res;
@@ -526,13 +518,13 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Returns UINT16_MAX if segment is full. Otherwise, returns number of touched bucket ids (1 or 2)
   // if the insertion would happen. The ids are put into bid array that should have at least 2
   // spaces.
-  template <bool UV = Policy::USE_VERSION>
+  template <bool UV = kUseVersion>
   std::enable_if_t<UV, unsigned> CVCOnInsert(uint64_t ver_threshold, Hash_t key_hash,
                                              uint8_t bid[2]) const;
 
   // Returns bucket ids whose versions will change as a result of bumping up the item
   // Can return upto 3 buckets.
-  template <bool UV = Policy::USE_VERSION>
+  template <bool UV = kUseVersion>
   std::enable_if_t<UV, unsigned> CVCOnBump(uint64_t ver_threshold, unsigned bid, unsigned slot,
                                            Hash_t hash, uint8_t result_bid[3]) const;
 
@@ -542,10 +534,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Shifts all slots in the bucket right.
   // Returns true if the last slot was busy and the entry has been deleted.
   bool ShiftRight(unsigned bid, Hash_t right_hashval) {
-    if (bid >= kRegularBucketCnt) {  // Stash
-      constexpr auto kLastSlotMask = 1u << (kNumSlots - 1);
+    if (bid >= kBucketNum) {  // Stash
+      constexpr auto kLastSlotMask = 1u << (kSlotNum - 1);
       if (bucket_[bid].GetBusy() & kLastSlotMask)
-        RemoveStashReference(bid - kRegularBucketCnt, right_hashval);
+        RemoveStashReference(bid - kBucketNum, right_hashval);
     }
 
     return bucket_[bid].ShiftRight();
@@ -565,15 +557,15 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   static_assert(sizeof(Iterator) == 2);
 
   static unsigned BucketIndex(Hash_t hash) {
-    return (hash >> kFingerBits) % kRegularBucketCnt;
+    return (hash >> kFingerBits) % kBucketNum;
   }
 
   static uint8_t NextBid(uint8_t bid) {
-    return bid < kRegularBucketCnt - 1 ? bid + 1 : 0;
+    return bid < kBucketNum - 1 ? bid + 1 : 0;
   }
 
   static uint8_t PrevBid(uint8_t bid) {
-    return bid ? bid - 1 : kRegularBucketCnt - 1;
+    return bid ? bid - 1 : kBucketNum - 1;
   }
 
   // if own_items is true it means we try to move owned item to probing bucket.
@@ -591,7 +583,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   int TryInsertToBucket(unsigned bidx, U&& key, V&& value, uint8_t meta_hash, bool probe) {
     auto& b = bucket_[bidx];
     auto slot = b.FindEmptySlot();
-    assert(slot < int(kNumSlots));
+    assert(slot < int(kSlotNum));
     if (slot < 0) {
       return -1;
     }
@@ -609,7 +601,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
  public:
   static constexpr size_t kBucketSz = sizeof(Bucket);
-  static constexpr size_t kMaxSize = kTotalBuckets * kNumSlots;
+  static constexpr size_t kMaxSize = kTotalBuckets * kSlotNum;
   static constexpr double kTaxSize =
       (double(sizeof(Segment)) / kMaxSize) - sizeof(Key_t) - sizeof(Value_t);
 
@@ -1030,7 +1022,7 @@ auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, 
 
   unsigned delta = __builtin_ctz(mask);
   mask >>= delta;
-  for (unsigned i = delta; i < NUM_SLOTS; ++i) {
+  for (unsigned i = delta; i < kSlotNum; ++i) {
     if ((mask & 1) && pred(key[i], k)) {
       return i;
     }
@@ -1043,7 +1035,7 @@ auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, 
 template <typename Key, typename Value, typename Policy>
 bool Segment<Key, Value, Policy>::Bucket::ShiftRight() {
   bool res = BucketType::ShiftRight();
-  for (int i = NUM_SLOTS - 1; i > 0; i--) {
+  for (int i = kSlotNum - 1; i > 0; i--) {
     std::swap(key[i], key[i - 1]);
     std::swap(value[i], value[i - 1]);
   }
@@ -1066,7 +1058,7 @@ auto Segment<Key, Value, Policy>::TryMoveFromStash(unsigned stash_id, unsigned s
                                                    Hash_t key_hash) -> Iterator {
   uint8_t bid = BucketIndex(key_hash);
   uint8_t hash_fp = key_hash & kFpMask;
-  uint8_t stash_bid = kRegularBucketCnt + stash_id;
+  uint8_t stash_bid = kBucketNum + stash_id;
   auto& key = Key(stash_bid, stash_slot_id);
   auto& value = Value(stash_bid, stash_slot_id);
 
@@ -1079,7 +1071,7 @@ auto Segment<Key, Value, Policy>::TryMoveFromStash(unsigned stash_id, unsigned s
   }
 
   if (reg_slot >= 0) {
-    if constexpr (USE_VERSION) {
+    if constexpr (kUseVersion) {
       // We maintain the invariant for the physical bucket by updating the version when
       // the entries move between buckets.
       uint64_t ver = bucket_[stash_bid].GetVersion();
@@ -1140,9 +1132,9 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
   }
 
   auto stash_cb = [&](unsigned overflow_index, unsigned pos) -> SlotId {
-    assert(pos < STASH_BUCKET_NUM);
+    assert(pos < kStashBucketNum);
 
-    pos += kRegularBucketCnt;
+    pos += kBucketNum;
     const Bucket& bucket = bucket_[pos];
     return bucket.FindByFp(fp_hash, false, key, cf);
   };
@@ -1152,10 +1144,10 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
     stats.stash_overflow_probes++;
 #endif
 
-    for (unsigned i = 0; i < STASH_BUCKET_NUM; ++i) {
+    for (unsigned i = 0; i < kStashBucketNum; ++i) {
       auto sid = stash_cb(0, i);
       if (sid != BucketType::kNanSlot) {
-        return Iterator{uint8_t(kRegularBucketCnt + i), sid};
+        return Iterator{uint8_t(kBucketNum + i), sid};
       }
     }
 
@@ -1169,12 +1161,12 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
 
   auto stash_res = target.IterateStash(fp_hash, false, stash_cb);
   if (stash_res.second != BucketType::kNanSlot) {
-    return Iterator{uint8_t(kRegularBucketCnt + stash_res.first), stash_res.second};
+    return Iterator{uint8_t(kBucketNum + stash_res.first), stash_res.second};
   }
 
   stash_res = probe.IterateStash(fp_hash, true, stash_cb);
   if (stash_res.second != BucketType::kNanSlot) {
-    return Iterator{uint8_t(kRegularBucketCnt + stash_res.first), stash_res.second};
+    return Iterator{uint8_t(kBucketNum + stash_res.first), stash_res.second};
   }
   return Iterator{};
 }
@@ -1199,8 +1191,8 @@ void Segment<Key, Value, Policy>::Delete(const Iterator& it, Hash_t key_hash) {
 
   auto& b = bucket_[it.index];
 
-  if (it.index >= kRegularBucketCnt) {
-    RemoveStashReference(it.index - kRegularBucketCnt, key_hash);
+  if (it.index >= kBucketNum) {
+    RemoveStashReference(it.index - kBucketNum, key_hash);
   }
 
   b.Delete(it.slot);
@@ -1219,7 +1211,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
   // do_versioning();
   auto is_mine = [this](Hash_t hash) { return (hash >> (64 - local_depth_) & 1) == 0; };
 
-  for (unsigned i = 0; i < kRegularBucketCnt; ++i) {
+  for (unsigned i = 0; i < kBucketNum; ++i) {
     uint32_t invalid_mask = 0;
 
     auto cb = [&](auto* bucket, unsigned slot, bool probe) {
@@ -1257,7 +1249,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       assert(it.found());
       (void)it;
 
-      if constexpr (USE_VERSION) {
+      if constexpr (kUseVersion) {
         // Maintaining consistent versioning.
         uint64_t ver = bucket->GetVersion();
         dest_right->bucket_[it.index].UpdateVersion(ver);
@@ -1268,9 +1260,9 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
     bucket_[i].ClearSlots(invalid_mask);
   }
 
-  for (unsigned i = 0; i < STASH_BUCKET_NUM; ++i) {
+  for (unsigned i = 0; i < kStashBucketNum; ++i) {
     uint32_t invalid_mask = 0;
-    unsigned bid = kRegularBucketCnt + i;
+    unsigned bid = kBucketNum + i;
     Bucket& stash = bucket_[bid];
 
     auto cb = [&](auto* bucket, unsigned slot, bool probe) {
@@ -1293,7 +1285,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       (void)it;
       assert(it.index != kNanBid);
 
-      if constexpr (USE_VERSION) {
+      if constexpr (kUseVersion) {
         // Update the version in the destination bucket.
         uint64_t ver = bucket->GetVersion();
         dest_right->bucket_[it.index].UpdateVersion(ver);
@@ -1327,7 +1319,7 @@ void Segment<Key, Value, Policy>::MoveFrom(HFunc&& hfunc, Segment* src) {
         return;
       }
 
-      if constexpr (USE_VERSION) {
+      if constexpr (kUseVersion) {
         // Update the version in the destination bucket.
         this->bucket_[it.index].UpdateVersion(bucket->GetVersion());
       }
@@ -1355,7 +1347,7 @@ int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from_bid, 
     return -1;
 
   // We never decrease the version of the entry.
-  if constexpr (USE_VERSION) {
+  if constexpr (kUseVersion) {
     auto& dst = bucket_[to_bid];
     dst.UpdateVersion(src.GetVersion());
   }
@@ -1425,13 +1417,13 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   }
 
   // we balance stash fill rate  by starting from y % STASH_BUCKET_NUM.
-  for (unsigned i = 0; i < STASH_BUCKET_NUM; ++i) {
-    unsigned stash_pos = (bid + i) % STASH_BUCKET_NUM;
-    int stash_slot = TryInsertToBucket(kRegularBucketCnt + stash_pos, std::forward<U>(key),
+  for (unsigned i = 0; i < kStashBucketNum; ++i) {
+    unsigned stash_pos = (bid + i) % kStashBucketNum;
+    int stash_slot = TryInsertToBucket(kBucketNum + stash_pos, std::forward<U>(key),
                                        std::forward<V>(value), meta_hash, false);
     if (stash_slot >= 0) {
       target.SetStashPtr(stash_pos, meta_hash, &neighbor);
-      return Iterator{uint8_t(kRegularBucketCnt + stash_pos), uint8_t(stash_slot)};
+      return Iterator{uint8_t(kBucketNum + stash_pos), uint8_t(stash_slot)};
     }
   }
 
@@ -1462,33 +1454,31 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
   // both nid and bid are full.
   const uint8_t after_next = NextBid(nid);
 
-  if (CheckIfMovesToOther(true, nid, after_next)) {
+  auto do_fun = [this, ver_threshold, &cnt, &bid_res, after_next](auto bid, auto nid) {
     // We could tighten the checks here and below because
     // if nid is less than ver_threshold, than after_next won't be affected and won't cross
     // ver_threshold as well.
-    if (bucket_[nid].GetVersion() < ver_threshold)
+    if (bucket_[bid].GetVersion() < ver_threshold)
+      bid_res[cnt++] = bid;
+
+    if (!bucket_[nid].IsEmpty() && bucket_[nid].GetVersion() < ver_threshold)
       bid_res[cnt++] = nid;
+  };
 
-    if (!bucket_[after_next].IsEmpty() && bucket_[after_next].GetVersion() < ver_threshold)
-      bid_res[cnt++] = after_next;
-
+  if (CheckIfMovesToOther(true, nid, after_next)) {
+    do_fun(nid, after_next);
     return cnt;
   }
 
   const uint8_t prev_bid = PrevBid(bid);
   if (CheckIfMovesToOther(false, bid, prev_bid)) {
-    if (bucket_[bid].GetVersion() < ver_threshold)
-      bid_res[cnt++] = bid;
-
-    if (!bucket_[prev_bid].IsEmpty() && bucket_[prev_bid].GetVersion() < ver_threshold)
-      bid_res[cnt++] = prev_bid;
-
+    do_fun(bid, prev_bid);
     return cnt;
   }
 
   // Important to repeat exactly the insertion logic of InsertUnique.
-  for (unsigned i = 0; i < STASH_BUCKET_NUM; ++i) {
-    unsigned stash_bid = kRegularBucketCnt + ((bid + i) % STASH_BUCKET_NUM);
+  for (unsigned i = 0; i < kStashBucketNum; ++i) {
+    unsigned stash_bid = kBucketNum + ((bid + i) % kStashBucketNum);
     const Bucket& stash = bucket_[stash_bid];
     if (!stash.IsFull()) {
       if (!stash.IsEmpty() && stash.GetVersion() < ver_threshold)
@@ -1507,7 +1497,7 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
                                                                       unsigned bid, unsigned slot,
                                                                       Hash_t hash,
                                                                       uint8_t result_bid[3]) const {
-  if (bid < kRegularBucketCnt) {
+  if (bid < kBucketNum) {
     // Right now we do not migrate entries from nid to bid, only from stash to normal buckets.
     // The reason for this is that CVCBumpUp implementation swaps the slots of the same bucket
     // so there is no further action needed.
@@ -1541,34 +1531,27 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
   const uint8_t probing_bid = NextBid(target_bid);
   const auto& probing = bucket_[probing_bid];
 
-  unsigned stash_pos = bid - kRegularBucketCnt;
+  unsigned stash_pos = bid - kBucketNum;
   uint8_t fp_hash = hash & kFpMask;
 
   auto find_stash = [&](unsigned, unsigned pos) {
     return stash_pos == pos ? slot : BucketType::kNanSlot;
   };
 
-  if (target.GetVersion() < ver_threshold) {
+  auto do_fun = [&result, &result_bid, fp_hash, find_stash](auto& target, auto target_bid,
+                                                            bool probe) {
     if (target.HasStashOverflow()) {
       result_bid[result++] = target_bid;
     } else {
-      SlotId slot_id = target.IterateStash(fp_hash, false, find_stash).second;
+      SlotId slot_id = target.IterateStash(fp_hash, probe, find_stash).second;
       if (slot_id != BucketType::kNanSlot) {
         result_bid[result++] = target_bid;
       }
     }
-  }
+  };
 
-  if (probing.GetVersion() < ver_threshold) {
-    if (probing.HasStashOverflow()) {
-      result_bid[result++] = probing_bid;
-    } else {
-      SlotId slot_id = probing.IterateStash(fp_hash, true, find_stash).second;
-      if (slot_id != BucketType::kNanSlot) {
-        result_bid[result++] = probing_bid;
-      }
-    }
-  }
+  do_fun(target, target_bid, false);
+  do_fun(probing, probing_bid, true);
 
   return result;
 }
@@ -1585,7 +1568,7 @@ void Segment<Key, Value, Policy>::TraverseBucket(uint8_t bid, Cb&& cb) {
 template <typename Key, typename Value, typename Policy>
 template <typename Cb, typename HashFn>
 bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hfun, Cb&& cb) const {
-  assert(bid < kRegularBucketCnt);
+  assert(bid < kBucketNum);
 
   const Bucket& b = bucket_[bid];
   bool found = false;
@@ -1615,7 +1598,7 @@ bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hf
   // Finally go over stash buckets and find those entries that belong to b.
   if (b.HasStash()) {
     // do not bother with overflow fps. Just go over all the stash buckets.
-    for (uint8_t j = kRegularBucketCnt; j < kTotalBuckets; ++j) {
+    for (uint8_t j = kBucketNum; j < kTotalBuckets; ++j) {
       const auto& stashb = bucket_[j];
       stashb.ForEachSlot([&](auto* bucket, SlotId slot, bool probe) {
         if (BucketIndex(hfun(bucket->key[slot])) == bid) {
@@ -1671,7 +1654,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
   if (!bp.CanBump(from.key[slot])) {
     return Iterator{bid, slot};
   }
-  if (bid < kRegularBucketCnt) {
+  if (bid < kBucketNum) {
     // non stash case.
     if (slot > 0 && bp.CanBump(from.key[slot - 1])) {
       from.Swap(slot - 1, slot);
@@ -1683,7 +1666,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
 
   // stash bucket
   // We swap the item with the item in the "normal" bucket in the last slot.
-  unsigned stash_pos = bid - kRegularBucketCnt;
+  unsigned stash_pos = bid - kBucketNum;
 
   // If we have an empty space for some reason just unload the stash entry.
   if (Iterator it = TryMoveFromStash(stash_pos, slot, key_hash); it.found()) {
@@ -1700,11 +1683,10 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
 
   // bucket_offs - 0 if exact bucket, 1 if neighbour
   unsigned bucket_offs = target.UnsetStashPtr(fp_hash, stash_pos, &next);
-  uint8_t swap_bid = (target_bid + bucket_offs) % kRegularBucketCnt;
-  // TODO exit early when target_bid == swap_bid
+  uint8_t swap_bid = (target_bid + bucket_offs) % kBucketNum;
   auto& swapb = bucket_[swap_bid];
 
-  constexpr unsigned kLastSlot = kNumSlots - 1;
+  constexpr unsigned kLastSlot = kSlotNum - 1;
   assert(swapb.GetBusy() & (1 << kLastSlot));
 
   // Don't move sticky items back to the stash because they're not evictable
@@ -1730,7 +1712,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
   swapb.SetHash(kLastSlot, fp_hash, bucket_offs == 1);
 
   // update versions.
-  if constexpr (USE_VERSION) {
+  if constexpr (kUseVersion) {
     uint64_t from_ver = from.GetVersion();
     uint64_t swap_ver = swapb.GetVersion();
     if (from_ver < swap_ver) {
@@ -1759,8 +1741,8 @@ template <typename HFunc>
 unsigned Segment<Key, Value, Policy>::UnloadStash(HFunc&& hfunc) {
   unsigned moved = 0;
 
-  for (unsigned i = 0; i < STASH_BUCKET_NUM; ++i) {
-    unsigned bid = kRegularBucketCnt + i;
+  for (unsigned i = 0; i < kStashBucketNum; ++i) {
+    unsigned bid = kBucketNum + i;
     Bucket& stash = bucket_[bid];
     uint32_t invalid_mask = 0;
 

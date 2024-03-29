@@ -182,7 +182,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   // choose "randomly" a stash bucket to evict an item.
   auto bucket_it = eb.probes.by_type.stash_buckets[eb.key_hash % kNumStashBuckets];
   auto last_slot_it = bucket_it;
-  last_slot_it += (PrimeTable::kBucketWidth - 1);
+  last_slot_it += (PrimeTable::kSlotNum - 1);
   if (!last_slot_it.is_done()) {
     // don't evict sticky items
     if (last_slot_it->first.IsSticky()) {
@@ -1261,7 +1261,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
   auto& db_table = db_arr_[db_ind];
   int32_t num_segments = db_table->prime.GetSegmentCount();
   int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
-  int32_t num_slots = PrimeTable::Segment_t::kNumSlots;
+  int32_t num_slots = PrimeTable::Segment_t::kSlotNum;
 
   size_t used_memory_after;
   size_t evicted = 0;
@@ -1349,8 +1349,8 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
   PrimeTable::Segment_t* segment = table->prime.GetSegment(it.segment_id());
   DCHECK(segment);
 
-  constexpr unsigned kNumStashBuckets = PrimeTable::Segment_t::kStashBucketCnt;
-  constexpr unsigned kNumRegularBuckets = PrimeTable::Segment_t::kRegularBucketCnt;
+  constexpr unsigned kNumStashBuckets = PrimeTable::Segment_t::kStashBucketNum;
+  constexpr unsigned kNumRegularBuckets = PrimeTable::Segment_t::kBucketNum;
 
   PrimeTable::bucket_iterator it2(it);
   unsigned evicted = 0;
@@ -1370,7 +1370,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
     if (bucket.IsEmpty())
       continue;
 
-    for (int slot_id = PrimeTable::Segment_t::kNumSlots - 1; slot_id >= 0; --slot_id) {
+    for (int slot_id = PrimeTable::Segment_t::kSlotNum - 1; slot_id >= 0; --slot_id) {
       if (!bucket.IsBusy(slot_id))
         continue;
 
@@ -1394,7 +1394,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
   }
 
   // Try normal buckets now. We iterate from largest slot to smallest across the whole segment.
-  for (int slot_id = PrimeTable::Segment_t::kNumSlots - 1; !evict_succeeded && slot_id >= 0;
+  for (int slot_id = PrimeTable::Segment_t::kSlotNum - 1; !evict_succeeded && slot_id >= 0;
        --slot_id) {
     for (unsigned i = 0; i < kNumRegularBuckets; ++i) {
       unsigned bid = (it.bucket_id() + i) % kNumRegularBuckets;
