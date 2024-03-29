@@ -6,6 +6,7 @@
 
 #include "base/logging.h"
 #include "core/overloaded.h"
+#include "io/io.h"
 #include "server/tiering/common.h"
 
 namespace dfly::tiering {
@@ -26,6 +27,10 @@ OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
 
 OpManager::~OpManager() {
   storage_.Close();
+}
+
+std::error_code OpManager::Open(std::string_view file) {
+  return storage_.Open(file);
 }
 
 tiering::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) {
@@ -51,32 +56,27 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
   auto id = ToOwned(id_ref);
   unsigned version = ++pending_stashes_[id];
 
-  auto* value_ptr = new char[value.size()];  // unique_ptr can't be captured
-  memcpy(value_ptr, value.data(), value.length());
+  std::shared_ptr<char[]> buf(new char[value.length()]);
+  memcpy(buf.get(), value.data(), value.length());
 
-  auto cb = [this, version, id, value_ptr](DiskSegment segment) {
-    delete[] value_ptr;
+  io::MutableBytes buf_view{reinterpret_cast<uint8_t*>(buf.get()), value.length()};
+  return storage_.Stash(buf_view, [this, version, id = std::move(id), buf](DiskSegment segment) {
     ProcessStashed(Borrowed(id), version, segment);
-  };
-  auto ec = storage_.Stash({reinterpret_cast<uint8_t*>(value_ptr), value.length()}, std::move(cb));
-  if (ec)
-    delete[] value_ptr;
-  return ec;
-}
-
-std::error_code OpManager::Open(std::string_view file) {
-  return storage_.Open(file);
+  });
 }
 
 OpManager::ReadOp* OpManager::PrepareRead(DiskSegment segment) {
-  // If a read for a small key is requested, read the whole page
-  if (segment.offset % 4_KB != 0)
+  // If a read for a small key is requested, read the whole page.
+  // Small keys never begin at 0 because their keys are stored before values.
+  if (segment.offset % 4_KB != 0) {
+    DCHECK_LT(segment.length, 4_KB);
     segment = {segment.offset / 4_KB * 4_KB, 4_KB};
+  }
 
   auto [it, inserted] = pending_reads_.try_emplace(segment.offset, segment);
   if (inserted) {
-    auto cb = [this, segment](std::string_view value) { ProcessRead(segment.offset, value); };
-    storage_.Read(segment, std::move(cb));
+    storage_.Read(segment,
+                  [this, segment](std::string_view value) { ProcessRead(segment.offset, value); });
   }
   return &it->second;
 }

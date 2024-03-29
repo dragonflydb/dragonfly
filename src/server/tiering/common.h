@@ -11,6 +11,7 @@
 
 namespace dfly::tiering {
 
+// Location on the offloaded blob, measured in bytes
 struct DiskSegment {
   DiskSegment() = default;
   DiskSegment(size_t offset, size_t length) : offset{offset}, length{length} {
@@ -18,7 +19,6 @@ struct DiskSegment {
   DiskSegment(std::pair<size_t, size_t> p) : offset{p.first}, length(p.second) {
   }
 
-  // Mesured in bytes, offset should be aligned to page boundaries (4kb)
   size_t offset = 0, length = 0;
 };
 

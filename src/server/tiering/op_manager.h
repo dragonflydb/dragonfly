@@ -6,7 +6,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
 
 #include <variant>
 
@@ -83,9 +82,9 @@ class OpManager {
  private:
   DiskStorage storage_;
 
-  absl::node_hash_map<size_t /* offset */, ReadOp> pending_reads_;
+  absl::flat_hash_map<size_t /* offset */, ReadOp> pending_reads_;
 
-  // TODO: allow heterogeneous with non owned id
+  // todo: allow heterogeneous lookups with non owned id
   absl::flat_hash_map<OwnedEntryId, unsigned /* version */> pending_stashes_;
 };
 
