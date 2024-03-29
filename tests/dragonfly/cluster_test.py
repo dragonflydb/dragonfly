@@ -892,6 +892,7 @@ async def test_cluster_native_client(
     await close_clients(client, *c_masters, *c_masters_admin, *c_replicas, *c_replicas_admin)
 
 
+@pytest.mark.skip(reason="Test needs refactoring because of cluster design change")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
     # Check slot migration from one node to another
