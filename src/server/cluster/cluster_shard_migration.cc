@@ -48,7 +48,6 @@ void ClusterShardMigration::Start(Context* cntx, io::Source* source) {
 
     if (tx_data->opcode == journal::Op::FIN) {
       VLOG(2) << "Flow " << source_shard_id_ << " is finalized";
-      is_finalized_ = true;
       break;
     } else if (tx_data->opcode == journal::Op::PING) {
       // TODO check about ping logic

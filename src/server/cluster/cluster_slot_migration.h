@@ -46,14 +46,7 @@ class ClusterSlotMigration : private ProtocolClient {
   }
 
  private:
-  // void MainMigrationFb();
-
-  // may be called after we finish all flows
-  bool IsFinalized() const;
-
- private:
   Service& service_;
-  // util::fb2::Mutex flows_op_mu_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   SlotRanges slots_;
   uint32_t local_sync_id_ = 0;

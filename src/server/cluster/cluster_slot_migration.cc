@@ -64,11 +64,6 @@ ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   return {ctx.host, ctx.port};
 }
 
-bool ClusterSlotMigration::IsFinalized() const {
-  return std::all_of(shard_flows_.begin(), shard_flows_.end(),
-                     [](const auto& el) { return el->IsFinalized(); });
-}
-
 void ClusterSlotMigration::Join() {
   bc_->Wait();
   state_ = MigrationState::C_FINISHED;
@@ -79,41 +74,6 @@ void ClusterSlotMigration::StartFlow(uint32_t shard, io::Source* source) {
 
   shard_flows_[shard]->Start(&cntx_, source);
   bc_->Dec();
-
-  // lock_guard lk{flows_op_mu_};
-
-  // if (!sync_fb_.IsJoinable() && std::all_of(shard_flows_.begin(), shard_flows_.end(),
-  //                                           [](const auto& m) { return m->IsFinalized(); })) {
-  //   sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
-  // }
 }
-
-// void ClusterSlotMigration::MainMigrationFb() {
-//   VLOG(1) << "Main migration fiber started ";
-
-//   // if (IsFinalized()) {
-//   //   // TODO move ack code to outgoing_slot_migration
-//   //   ResolveHostDns();
-//   //   ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
-
-//   //   ResetParser(false);
-
-//   //   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", sync_id_);
-//   //   VLOG(1) << "send " << cmd;
-
-//   //   auto err = SendCommandAndReadResponse(cmd);
-//   //   LOG_IF(WARNING, err) << err;
-
-//   //   VLOG(1) << "SendCommandAndReadResponse " << cmd;
-
-//   //   if (!err) {
-//   //     LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) <<
-//   ToSV(LastResponseArgs().front().GetBuf());
-//   //   }
-
-//     state_ = MigrationState::C_FINISHED;
-
-//   }
-// }
 
 }  // namespace dfly

@@ -21,10 +21,6 @@ class ClusterShardMigration {
 
   void Start(Context* cntx, io::Source* source);
 
-  bool IsFinalized() {
-    return is_finalized_;
-  }
-
  private:
   void FullSyncShardFb(Context* cntx, io::Source* source);
 
@@ -35,7 +31,6 @@ class ClusterShardMigration {
   uint32_t source_shard_id_;
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<JournalExecutor> executor_;
-  bool is_finalized_ = false;
 };
 
 }  // namespace dfly
