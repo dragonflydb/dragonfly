@@ -254,7 +254,7 @@ def port_picker():
 
 @pytest.fixture(scope="function")
 def memcached_client(df_server: DflyInstance):
-    client = pymemcache.Client(f"localhost:{df_server.mc_port}", default_noreply=False)
+    client = pymemcache.Client(f"127.0.0.1:{df_server.mc_port}", default_noreply=False)
 
     yield client
 

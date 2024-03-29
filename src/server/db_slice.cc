@@ -830,14 +830,10 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
 void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
   auto& db = *db_arr_[db_ind];
   if (flag == 0) {
-    if (db.mcflag.Erase(key) == 0) {
-      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
-                 << key.ToString();
-    }
+    db.mcflag.Erase(key);
   } else {
-    auto [it, inserted] = db.mcflag.Insert(std::move(key), flag);
-    if (!inserted)
-      it->second = flag;
+    auto [it, _] = db.mcflag.Insert(std::move(key), flag);
+    it->second = flag;
   }
 }
 
