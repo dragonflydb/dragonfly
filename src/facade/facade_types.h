@@ -16,10 +16,20 @@
 
 namespace facade {
 
+#if defined(__clang__)
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+constexpr size_t kSanitizerOverhead = 24u;
+#else
+constexpr size_t kSanitizerOverhead = 0u;
+#endif
+#endif
+#else
 #ifdef __SANITIZE_ADDRESS__
 constexpr size_t kSanitizerOverhead = 24u;
 #else
 constexpr size_t kSanitizerOverhead = 0u;
+#endif
 #endif
 
 enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };

@@ -20,10 +20,9 @@ class ServerFamily;
 // Whole outgoing slots migration manager
 class OutgoingMigration : private ProtocolClient {
  public:
-  OutgoingMigration() = default;
-  ~OutgoingMigration();
   OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots, uint32_t sync_id,
                     Context::ErrHandler, ServerFamily* sf);
+  ~OutgoingMigration();
 
   // start migration process, sends INIT command to the target node
   std::error_code Start(ConnectionContext* cntx);

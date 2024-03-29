@@ -1454,9 +1454,9 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
   // both nid and bid are full.
   const uint8_t after_next = NextBid(nid);
 
-  auto do_fun = [this, ver_threshold, &cnt, &bid_res, after_next](auto bid, auto nid) {
+  auto do_fun = [this, ver_threshold, &cnt, &bid_res](auto bid, auto nid) {
     // We could tighten the checks here and below because
-    // if nid is less than ver_threshold, than after_next won't be affected and won't cross
+    // if nid is less than ver_threshold, than nid won't be affected and won't cross
     // ver_threshold as well.
     if (bucket_[bid].GetVersion() < ver_threshold)
       bid_res[cnt++] = bid;

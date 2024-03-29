@@ -49,7 +49,7 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist) {
   for (string_view tag : absl::StrSplit(taglist, ',')) {
     tmp = absl::StripAsciiWhitespace(tag);
     absl::AsciiStrToLower(&tmp);
-    tags.insert(move(tmp));
+    tags.insert(std::move(tmp));
   }
   return tags;
 }
