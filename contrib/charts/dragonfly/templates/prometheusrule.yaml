@@ -3,7 +3,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: {{ template "dragonfly.fullname" . }}-metrics
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ .Values.prometheusRule.namespace | default .Release.Namespace }}
   labels:
     {{- include "dragonfly.labels" . | nindent 4 }}
 spec:

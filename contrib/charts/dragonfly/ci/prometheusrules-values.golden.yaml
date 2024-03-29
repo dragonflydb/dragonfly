@@ -1,13 +1,4 @@
 ---
-# Source: dragonfly/templates/extra-manifests.yaml
-apiVersion: scheduling.k8s.io/v1
-description: This priority class should be used only for tests.
-globalDefault: false
-kind: PriorityClass
-metadata:
-  name: high-priority
-value: 1000000
----
 # Source: dragonfly/templates/serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -19,6 +10,29 @@ metadata:
     app.kubernetes.io/instance: test
     app.kubernetes.io/version: "v1.15.0"
     app.kubernetes.io/managed-by: Helm
+---
+# Source: dragonfly/templates/metrics-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-dragonfly-metrics
+  namespace: default
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v1.15.0"
+    app.kubernetes.io/managed-by: Helm
+    type: metrics
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
 ---
 # Source: dragonfly/templates/service.yaml
 apiVersion: v1
@@ -66,7 +80,6 @@ spec:
         app.kubernetes.io/name: dragonfly
         app.kubernetes.io/instance: test
     spec:
-      priorityClassName: high-priority
       serviceAccountName: test-dragonfly
       containers:
         - name: dragonfly
