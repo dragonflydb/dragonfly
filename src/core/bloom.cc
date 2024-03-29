@@ -7,11 +7,9 @@
 #include <absl/base/internal/endian.h>
 #include <absl/numeric/bits.h>
 #include <mimalloc.h>
+#include <xxhash.h>
 
 #include <cmath>
-
-#define XXH_STATIC_LINKING_ONLY
-#include <xxhash.h>
 
 #include "base/logging.h"
 
@@ -23,6 +21,10 @@ namespace {
 
 inline XXH128_hash_t Hash(string_view str) {
   return XXH3_128bits_withSeed(str.data(), str.size(), 0xc6a4a7935bd1e995ULL);  // murmur2 seed
+}
+
+uint64_t GetMask(unsigned log) {
+  return (1ULL << log) - 1;
 }
 
 inline uint64_t BitIndex(const XXH128_hash_t& hash, unsigned i, uint64_t mask) {
@@ -64,7 +66,7 @@ Bloom::~Bloom() {
 bool Bloom::Exists(std::string_view str) const {
   XXH128_hash_t hash = Hash(str);
 
-  uint64_t mask = GetMask();
+  uint64_t mask = GetMask(bit_log_);
   for (unsigned i = 0; i < hash_cnt_; ++i) {
     uint64_t index = BitIndex(hash, i, mask);
     if (!IsSet(index))
@@ -75,7 +77,7 @@ bool Bloom::Exists(std::string_view str) const {
 
 bool Bloom::Add(std::string_view str) {
   XXH128_hash_t hash = Hash(str);
-  uint64_t mask = GetMask();
+  uint64_t mask = GetMask(bit_log_);
 
   unsigned changes = 0;
   for (uint64_t i = 0; i < hash_cnt_; i++) {
