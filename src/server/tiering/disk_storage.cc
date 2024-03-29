@@ -28,7 +28,7 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   uint8_t* buf = new uint8_t[segment.length];
   auto io_cb = [cb, buf, segment](int res) {
     cb(std::string_view{reinterpret_cast<char*>(buf), segment.length});
-    delete buf;  // because std::function needs to be copyable, unique_ptr can't be used
+    delete[] buf;  // because std::function needs to be copyable, unique_ptr can't be used
   };
   io_mgr_.ReadAsync(segment.offset, {buf, segment.length}, std::move(io_cb));
 }
