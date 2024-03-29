@@ -82,7 +82,7 @@ bool Bloom::Exists(std::string_view str) const {
   return Exists(fp);
 }
 
-bool Bloom::Exists(uint64_t fp[2]) const {
+bool Bloom::Exists(const uint64_t fp[2]) const {
   uint64_t mask = GetMask(bit_log_);
   for (unsigned i = 0; i < hash_cnt_; ++i) {
     uint64_t index = BitIndex(fp[0], fp[1], i, mask);
@@ -98,7 +98,7 @@ bool Bloom::Add(std::string_view str) {
   return Add(fp);
 }
 
-bool Bloom::Add(uint64_t fp[2]) {
+bool Bloom::Add(const uint64_t fp[2]) {
   uint64_t mask = GetMask(bit_log_);
 
   unsigned changes = 0;
@@ -148,19 +148,18 @@ SBF::~SBF() {
 
 bool SBF::Add(std::string_view str) {
   DCHECK_LT(current_size_, max_capacity_);
-  auto it = filters_.rbegin();  // largest filter
-  auto cur = it++;
 
   XXH128_hash_t hash = Hash(str);
   uint64_t fp[2] = {hash.low64, hash.high64};
 
-  // Check for all other filters whether the item exists.
-  for (; it != filters_.rend(); ++it) {
-    if (it->Exists(fp))
-      return false;
+  auto exists = [fp](const Bloom& b) { return b.Exists(fp); };
+
+  // Check for all the previous filters whether the item exists.
+  if (any_of(next(filters_.crbegin()), filters_.crend(), exists)) {
+    return false;
   }
 
-  if (!cur->Add(fp))
+  if (!filters_.back().Add(fp))
     return false;
 
   ++current_size_;
@@ -174,6 +173,7 @@ bool SBF::Add(std::string_view str) {
     current_size_ = 0;
     max_capacity_ = filters_.back().Capacity(fp_prob_);
   }
+
   return true;
 }
 
@@ -181,12 +181,9 @@ bool SBF::Exists(std::string_view str) const {
   XXH128_hash_t hash = Hash(str);
   uint64_t fp[2] = {hash.low64, hash.high64};
 
-  for (auto it = filters_.crbegin(); it != filters_.crend(); ++it) {
-    if (it->Exists(fp)) {
-      return true;
-    }
-  }
-  return false;
+  auto exists = [fp](const Bloom& b) { return b.Exists(fp); };
+
+  return any_of(filters_.crbegin(), filters_.crend(), exists);
 }
 
 }  // namespace dfly

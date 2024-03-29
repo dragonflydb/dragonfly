@@ -12,7 +12,7 @@
 
 namespace dfly {
 
-// Bloom filter based on the design of https://github.com/jvirkki/libbloom
+/// Bloom filter based on the design of https://github.com/jvirkki/libbloom
 class Bloom {
   Bloom(const Bloom&) = delete;
   Bloom& operator=(const Bloom&) = delete;
@@ -20,23 +20,17 @@ class Bloom {
  public:
   Bloom() = default;
 
-  /// @brief Destroy must be called before calling the d'tor
+  // Note, that Destroy() must be called before calling the d'tor
   ~Bloom();
 
-  /**
-   * @brief Initializes a new Bloom object
-   *
-   * @param entries - entries are silently rounded up to the minimum capacity.
-   * @param fp_prob - False-positive probability of collision. Must be in (0, 1) range.
-   * @param heap
-   */
+  // Initializes a new Bloom object
+  // entries - entries are silently rounded up to the minimum capacity.
+  // fp_prob - False-positive probability of collision. Must be in (0, 1) range.
+  // heap
   void Init(uint64_t entries, double fp_prob, PMR_NS::memory_resource* resource);
 
-  /**
-   * @brief Destroys the object, must be called before destructing the object.
-   *
-   * @param resource - resource with which the object was initialized.
-   */
+  // Destroys the object, must be called before destructing the object.
+  // resource - resource with which the object was initialized.
   void Destroy(PMR_NS::memory_resource* resource);
 
   Bloom(Bloom&& o);
@@ -44,16 +38,13 @@ class Bloom {
   bool Exists(std::string_view str) const;
 
   // Equivalent to the Exist above but accepts two fingerprints of the item.
-  bool Exists(uint64_t fp[2]) const;
+  bool Exists(const uint64_t fp[2]) const;
 
-  /**
-   * @brief Adds an item to the bloom filter.
-   * @param str  -
-   * @return true if element was not present and was added,
-   * @return false - if element (or a collision) had already been added previously.
-   */
+  // Adds an item to the bloom filter.
+  // Returns true if element was not present and was added,
+  // false - if element (or a collision) had already been added previously.
   bool Add(std::string_view str);
-  bool Add(uint64_t fp[2]);
+  bool Add(const uint64_t fp[2]);
 
   size_t bitlen() const {
     return 1ULL << bit_log_;
