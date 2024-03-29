@@ -10,6 +10,7 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
+#include "cluster_family.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -36,7 +37,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     sync_fb_.JoinIfNeeded();
   }
 
-  std::error_code Start(uint32_t /*sync_id*/, uint32_t shard_id) {
+  std::error_code Start(uint32_t shard_id) {
     RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
     ResetParser(/*server_mode=*/false);
 
@@ -69,16 +70,14 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 };
 
 OutgoingMigration::OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots,
-                                     uint32_t sync_id, Context::ErrHandler err_handler,
+                                     ClusterFamily* cf, Context::ErrHandler err_handler,
                                      ServerFamily* sf)
     : ProtocolClient(ip, port),
-      host_ip_(ip),
-      port_(port),
-      sync_id_(sync_id),
       slots_(slots),
       cntx_(err_handler),
       slot_migrations_(shard_set->size()),
-      server_family_(sf) {
+      server_family_(sf),
+      cf_(cf) {
 }
 
 OutgoingMigration::~OutgoingMigration() {
@@ -103,7 +102,7 @@ void OutgoingMigration::SyncFb() {
       server_family_->journal()->StartInThread();
       slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
           &shard->db_slice(), server(), slots_, server_family_->journal(), &cntx_);
-      slot_migrations_[shard->shard_id()]->Start(sync_id_, shard->shard_id());
+      slot_migrations_[shard->shard_id()]->Start(shard->shard_id());
     }
   };
 
@@ -142,7 +141,25 @@ void OutgoingMigration::SyncFb() {
 
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
-  // TODO add ACK here and config update
+  auto port = absl::GetFlag(FLAGS_admin_port);
+  auto cmd = absl::StrCat("DFLYMIGRATE ACK ", port);
+  VLOG(1) << "send " << cmd;
+
+  auto err = SendCommandAndReadResponse(cmd);
+  LOG_IF(WARNING, err) << err;
+
+  if (!err) {
+    LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
+
+    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+      if (const auto* shard = EngineShard::tlocal(); shard)
+        Cancel(shard->shard_id());
+    });
+
+    state_.store(MigrationState::C_FINISHED);
+  }
+
+  cf_->UpdateConfig(slots_, false);
 }
 
 void OutgoingMigration::Ack() {
@@ -180,7 +197,7 @@ std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   VLOG(1) << "Migration initiating";
   ResetParser(false);
   auto port = absl::GetFlag(FLAGS_admin_port);
-  auto cmd = absl::StrCat("DFLYMIGRATE INIT ", sync_id_, " ", port, " ", slot_migrations_.size());
+  auto cmd = absl::StrCat("DFLYMIGRATE INIT ", port, " ", slot_migrations_.size());
   for (const auto& s : slots_) {
     absl::StrAppend(&cmd, " ", s.start, " ", s.end);
   }

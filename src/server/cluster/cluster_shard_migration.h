@@ -16,8 +16,7 @@ class MultiShardExecution;
 // It is created per shard on the target node to initiate FLOW step.
 class ClusterShardMigration {
  public:
-  ClusterShardMigration(uint32_t local_sync_id, uint32_t shard_id, uint32_t sync_id,
-                        Service* service);
+  ClusterShardMigration(uint32_t local_sync_id, uint32_t shard_id, Service* service);
   ~ClusterShardMigration();
 
   void Start(Context* cntx, io::Source* source);
@@ -34,7 +33,6 @@ class ClusterShardMigration {
 
  private:
   uint32_t source_shard_id_;
-  uint32_t sync_id_;
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<JournalExecutor> executor_;
   bool is_finalized_ = false;

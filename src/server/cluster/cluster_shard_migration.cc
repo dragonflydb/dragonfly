@@ -22,9 +22,10 @@ using namespace util;
 using absl::GetFlag;
 
 ClusterShardMigration::ClusterShardMigration(uint32_t local_sync_id, uint32_t shard_id,
-                                             uint32_t sync_id, Service* service)
-    : source_shard_id_(shard_id), sync_id_(sync_id) {
+                                             Service* service)
+    : source_shard_id_(shard_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
+  // Check why do we need this
   executor_->connection_context()->slot_migration_id = local_sync_id;
 }
 
