@@ -14,9 +14,6 @@
 
 namespace dfly {
 
-// This is temporary, there is an issue right now with jsoncons about using jsonpath
-// with custom allocator. once it would resolved, we would change this to use custom allocator
-// that allocate memory from mimalloc
 using JsonType = jsoncons::pmr::json;
 
 // Build a json object from string. If the string is not legal json, will return nullopt
