@@ -11,7 +11,8 @@
 #include <vector>
 
 #include "base/expected.hpp"
-#include "src/core/json/json_object.h"
+#include "core/flatbuffers.h"
+#include "core/json/json_object.h"
 
 namespace dfly::json {
 
@@ -27,6 +28,7 @@ const char* SegmentName(SegmentType type);
 
 class AggFunction {
  public:
+  using Result = std::variant<std::monostate, double, int64_t>;
   virtual ~AggFunction() {
   }
 
@@ -35,14 +37,20 @@ class AggFunction {
       valid_ = ApplyImpl(src);
   }
 
+  void Apply(FlatJson src) {
+    if (valid_ != 0)
+      valid_ = ApplyImpl(src);
+  }
+
   // returns null if Apply was not called or ApplyImpl failed.
-  JsonType GetResult() const {
-    return valid_ == 1 ? GetResultImpl() : JsonType::null();
+  Result GetResult() const {
+    return valid_ == 1 ? GetResultImpl() : Result{};
   }
 
  protected:
   virtual bool ApplyImpl(const JsonType& src) = 0;
-  virtual JsonType GetResultImpl() const = 0;
+  virtual bool ApplyImpl(FlatJson src) = 0;
+  virtual Result GetResultImpl() const = 0;
 
   int valid_ = -1;
 };
@@ -76,7 +84,8 @@ class PathSegment {
   }
 
   void Evaluate(const JsonType& json) const;
-  JsonType GetResult() const;
+  void Evaluate(FlatJson json) const;
+  AggFunction::Result GetResult() const;
 
  private:
   SegmentType type_;
@@ -90,14 +99,28 @@ using Path = std::vector<PathSegment>;
 // Passes the key name for object fields or nullopt for array elements.
 // The second argument is a json value of either object fields or array elements.
 using PathCallback = absl::FunctionRef<void(std::optional<std::string_view>, const JsonType&)>;
+using PathFlatCallback = absl::FunctionRef<void(std::optional<std::string_view>, FlatJson)>;
 
 // Returns true if the entry should be deleted, false otherwise.
 using MutateCallback = absl::FunctionRef<bool(std::optional<std::string_view>, JsonType*)>;
 
 void EvaluatePath(const Path& path, const JsonType& json, PathCallback callback);
 
+// Same as above but for flatbuffers.
+void EvaluatePath(const Path& path, FlatJson json, PathFlatCallback callback);
+
 // returns number of matches found with the given path.
 unsigned MutatePath(const Path& path, MutateCallback callback, JsonType* json);
+
+// utility function to parse a jsonpath. Returns an error message if a parse error was
+// encountered.
 nonstd::expected<Path, std::string> ParsePath(std::string_view path);
+
+// Transforms FlatJson to JsonType.
+JsonType FromFlat(FlatJson src);
+
+// Transforms JsonType to a buffer using flexbuffers::Builder.
+// Does not call flexbuffers::Builder::Finish.
+void FromJsonType(const JsonType& src, flexbuffers::Builder* fbb);
 
 }  // namespace dfly::json

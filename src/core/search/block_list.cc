@@ -41,8 +41,7 @@ template <typename C> typename BlockList<C>::BlockIt BlockList<C>::FindBlock(Doc
   if (it != blocks_.begin())
     --it;
 
-  DCHECK(it == blocks_.begin() || it->Size() > 0);
-  DCHECK(it == blocks_.begin() || it == blocks_.begin() || it->Size() * 2 >= block_size_);
+  DCHECK(it == blocks_.begin() || it->Size() * 2 >= block_size_);
   DCHECK(it == blocks_.end() || it->Size() <= 2 * block_size_);
   return it;
 }

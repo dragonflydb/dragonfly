@@ -18,7 +18,7 @@ jobs:
     container:
       image: ghcr.io/romange/${{ matrix.container }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
@@ -57,5 +57,5 @@ jobs:
   lint-test-chart:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/lint-test-chart

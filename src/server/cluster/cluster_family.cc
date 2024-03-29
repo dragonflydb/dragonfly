@@ -25,6 +25,9 @@
 #include "server/server_state.h"
 
 ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
+ABSL_FLAG(std::string, cluster_node_id, "",
+          "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
+          "replication ID (random string)");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 
@@ -33,6 +36,8 @@ namespace {
 
 using namespace std;
 using namespace facade;
+using namespace util;
+
 using CI = CommandId;
 using ClusterShard = ClusterConfig::ClusterShard;
 using ClusterShards = ClusterConfig::ClusterShards;
@@ -49,7 +54,16 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
+
   ClusterConfig::Initialize();
+
+  id_ = absl::GetFlag(FLAGS_cluster_node_id);
+  if (id_.empty()) {
+    id_ = server_family_->master_replid();
+  } else if (ClusterConfig::IsEmulated()) {
+    LOG(ERROR) << "Setting --cluster_node_id in emulated mode is unsupported";
+    exit(1);
+  }
 }
 
 ClusterConfig* ClusterFamily::cluster_config() {
@@ -70,19 +84,19 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
 
-    info.master = {.id = server_family_->master_id(),
+    info.master = {.id = id_,
                    .ip = preferred_endpoint,
                    .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
 
     for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
-      info.replicas.push_back({.id = etl.remote_client_id_,
+      info.replicas.push_back({.id = replica.id,
                                .ip = replica.address,
                                .port = static_cast<uint16_t>(replica.listening_port)});
     }
   } else {
-    info.master = {
-        .id = etl.remote_client_id_, .ip = replication_info->host, .port = replication_info->port};
-    info.replicas.push_back({.id = server_family_->master_id(),
+    // TODO: We currently don't save the master's ID in the replica
+    info.master = {.id = "", .ip = replication_info->host, .port = replication_info->port};
+    info.replicas.push_back({.id = id_,
                              .ip = cntx->conn()->LocalBindAddress(),
                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
   }
@@ -236,7 +250,8 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
       }
     }
 
-    absl::StrAppend(&result, "\r\n");
+    // Separate lines with only \n, not \r\n, see #2726
+    absl::StrAppend(&result, "\n");
   };
 
   for (const auto& shard : config) {
@@ -254,9 +269,9 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
 
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
   if (ClusterConfig::IsEmulated()) {
-    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, server_family_->master_id(), cntx);
+    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, id_, cntx);
   } else if (tl_cluster_config != nullptr) {
-    return ClusterNodesImpl(tl_cluster_config->GetConfig(), server_family_->master_id(), cntx);
+    return ClusterNodesImpl(tl_cluster_config->GetConfig(), id_, cntx);
   } else {
     return cntx->SendError(kClusterNotConfigured);
   }
@@ -266,6 +281,7 @@ namespace {
 void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
   std::string msg;
   auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
+    // Separate lines with \r\n, not \n, see #2726
     absl::StrAppend(&msg, a1, ":", a2, "\r\n");
   };
 
@@ -392,12 +408,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterMyId(args, cntx);
   } else if (sub_cmd == "FLUSHSLOTS") {
     return DflyClusterFlushSlots(args, cntx);
-  } else if (sub_cmd == "START-SLOT-MIGRATION") {
-    return DflyClusterStartSlotMigration(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
     return DflyClusterSlotMigrationStatus(args, cntx);
-  } else if (sub_cmd == "SLOT-MIGRATION-FINALIZE") {
-    return DflyClusterMigrationFinalize(args, cntx);
   }
 
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -408,15 +420,15 @@ void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(server_family_->master_id());
+  rb->SendBulkString(id_);
 }
 
 namespace {
 // Guards set configuration, so that we won't handle 2 in parallel.
-Mutex set_config_mu;
+util::fb2::Mutex set_config_mu;
 
-void DeleteSlots(const SlotSet& slots) {
-  if (slots.Empty()) {
+void DeleteSlots(const SlotRanges& slots_ranges) {
+  if (slots_ranges.empty()) {
     return;
   }
 
@@ -425,23 +437,23 @@ void DeleteSlots(const SlotSet& slots) {
     if (shard == nullptr)
       return;
 
-    shard->db_slice().FlushSlots(slots);
+    shard->db_slice().FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
 
-void WriteFlushSlotsToJournal(const SlotSet& slots) {
-  if (slots.Empty()) {
+void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
+  if (slot_ranges.empty()) {
     return;
   }
 
   // Build args
   vector<string> args;
-  args.reserve(slots.Count() + 1);
+  args.reserve(slot_ranges.size() + 1);
   args.push_back("FLUSHSLOTS");
-  for (SlotId slot = 0; slot <= SlotSet::kMaxSlot; ++slot) {
-    if (slots.Contains(slot))
-      args.push_back(absl::StrCat(slot));
+  for (SlotRange range : slot_ranges) {
+    args.push_back(absl::StrCat(range.start));
+    args.push_back(absl::StrCat(range.end));
   }
 
   // Build view
@@ -483,8 +495,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     return cntx->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  shared_ptr<ClusterConfig> new_config =
-      ClusterConfig::CreateFromConfig(server_family_->master_id(), json.value());
+  shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json.value());
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
     return cntx->SendError("Invalid cluster configuration.");
@@ -513,7 +524,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   DCHECK(tl_cluster_config != nullptr);
 
   // TODO rewrite with outgoing migrations
-  if (!StartSlotMigrations(new_config->GetIncomingMigrations(), cntx)) {
+  if (!StartSlotMigrations(new_config->GetOutgoingMigrations(), cntx)) {
     return cntx->SendError("Can't start the migration");
   }
   RemoveFinishedMigrations();
@@ -524,7 +535,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
-    auto deleted_slots = before.GetRemovedSlots(after);
+    auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
@@ -548,7 +559,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
   if (auto err = parser.Error(); err)
     return rb->SendError(err->MakeReply());
 
-  Mutex mu;
+  fb2::Mutex mu;
 
   auto cb = [&](auto*) {
     EngineShard* shard = EngineShard::tlocal();
@@ -580,50 +591,28 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 }
 
 void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx) {
-  SlotSet slots;
-  for (size_t i = 0; i < args.size(); ++i) {
-    unsigned slot;
-    if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
-      return cntx->SendError(kSyntaxErrType);
-    }
-    slots.Set(static_cast<SlotId>(slot), true);
-  }
+  SlotRanges slot_ranges;
 
-  DeleteSlots(slots);
-
-  return cntx->SendOk();
-}
-
-void ClusterFamily::DflyClusterStartSlotMigration(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
-  auto [host_ip, port] = parser.Next<std::string_view, uint16_t>();
-  std::vector<SlotRange> slots;
   do {
     auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
-    slots.emplace_back(SlotRange{slot_start, slot_end});
+    slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
   } while (parser.HasNext());
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  auto* node = AddMigration(std::string(host_ip), port, std::move(slots));
-  if (!node) {
-    return cntx->SendError("Can't start the migration, another one is in progress");
-  }
-  node->Start(cntx);
+  DeleteSlots(slot_ranges);
 
-  return cntx->SendLong(node->GetSyncId());
+  return cntx->SendOk();
 }
 
 bool ClusterFamily::StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
                                         ConnectionContext* cntx) {
   // Add validating and error processing
   for (auto m : migrations) {
-    auto* node = AddMigration(m.ip, m.port, m.slot_ranges);
-    if (!node) {
-      return false;
-    }
-    node->Start(cntx);
+    auto outgoing_migration = CreateOutgoingMigration(m.ip, m.port, m.slot_ranges);
+    outgoing_migration->Start(cntx);
   }
   return true;
 }
@@ -634,10 +623,8 @@ static std::string_view state_to_str(MigrationState state) {
       return "NO_STATE"sv;
     case MigrationState::C_CONNECTING:
       return "CONNECTING"sv;
-    case MigrationState::C_FULL_SYNC:
-      return "FULL_SYNC"sv;
-    case MigrationState::C_STABLE_SYNC:
-      return "STABLE_SYNC"sv;
+    case MigrationState::C_SYNC:
+      return "SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
     case MigrationState::C_MAX_INVALID:
@@ -689,61 +676,14 @@ void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionCo
   return rb->SendSimpleString(state_to_str(MigrationState::C_NO_STATE));
 }
 
-void ClusterFamily::DflyClusterMigrationFinalize(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser{args};
-  auto sync_id = parser.Next<uint32_t>();
-
-  if (auto err = parser.Error(); err) {
-    return cntx->SendError(err->MakeReply());
-  }
-
-  auto migration = GetOutgoingMigration(sync_id);
-  if (!migration)
-    return cntx->SendError(kIdNotFound);
-
-  if (migration->GetState() != MigrationState::C_STABLE_SYNC) {
-    return cntx->SendError("Migration process is not in STABLE_SYNC state");
-  }
-
-  // TODO implement blocking on migrated slots only
-
-  bool is_block_active = true;
-  auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
-  auto pause_fb_opt =
-      Pause(server_family_->GetListeners(), cntx->conn(), ClientPause::WRITE, is_pause_in_progress);
-
-  if (!pause_fb_opt) {
-    LOG(WARNING) << "Cluster migration finalization time out";
-    return cntx->SendError("Blocking connections time out");
-  }
-
-  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
-    is_block_active = false;
-    pause_fb_opt->JoinIfNeeded();
-  });
-
-  auto cb = [this, &migration](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      // TODO add error processing to move back into STABLE_SYNC state
-      migration->Finalize(shard->shard_id());
-    }
-  };
-
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-
-  return cntx->SendOk();
-}
-
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   args.remove_prefix(1);
-  if (sub_cmd == "CONF") {
-    MigrationConf(args, cntx);
+  if (sub_cmd == "INIT") {
+    InitMigration(args, cntx);
   } else if (sub_cmd == "FLOW") {
     DflyMigrateFlow(args, cntx);
-  } else if (sub_cmd == "FULL-SYNC-CUT") {
-    DflyMigrateFullSyncCut(args, cntx);
   } else if (sub_cmd == "ACK") {
     DflyMigrateAck(args, cntx);
   } else {
@@ -751,8 +691,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-ClusterSlotMigration* ClusterFamily::AddMigration(std::string host_ip, uint16_t port,
-                                                  SlotRanges slots) {
+ClusterSlotMigration* ClusterFamily::CreateIncomingMigration(std::string host_ip, uint16_t port,
+                                                             SlotRanges slots) {
   lock_guard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
@@ -781,10 +721,10 @@ void ClusterFamily::RemoveFinishedMigrations() {
   }
 }
 
-void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "Create slot migration config " << args;
+void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "Create incoming migration, args: " << args;
   CmdArgParser parser{args};
-  auto port = parser.Next<uint16_t>();
+  auto [sync_id, port, flows_num] = parser.Next<uint32_t, uint32_t, uint32_t>();
 
   SlotRanges slots;
   do {
@@ -795,32 +735,18 @@ void ClusterFamily::MigrationConf(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  if (!tl_cluster_config) {
-    return cntx->SendError(kClusterNotConfigured);
-  }
+  auto* node =
+      CreateIncomingMigration(cntx->conn()->RemoteEndpointAddress(), port, std::move(slots));
 
-  for (const auto& migration_range : slots) {
-    for (auto i = migration_range.start; i <= migration_range.end; ++i) {
-      if (!tl_cluster_config->IsMySlot(i)) {
-        VLOG(1) << "Invalid migration slot " << i << " in range " << migration_range.start << ':'
-                << migration_range.end;
-        return cntx->SendError("Invalid slots range");
-      }
-    }
-  }
+  VLOG(1) << "Init migration " << cntx->conn()->RemoteEndpointAddress() << ":" << port;
+  node->Init(sync_id, flows_num);
 
-  auto sync_id = CreateOutgoingMigration(cntx, port, std::move(slots));
-
-  cntx->conn()->SetName("slot_migration_ctrl");
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(2);
-  rb->SendLong(sync_id);
-  rb->SendLong(shard_set->size());
-  return;
+  return cntx->SendOk();
 }
 
-uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_t port,
-                                                SlotRanges slots) {
+std::shared_ptr<OutgoingMigration> ClusterFamily::CreateOutgoingMigration(std::string host,
+                                                                          uint16_t port,
+                                                                          SlotRanges slots) {
   std::lock_guard lk(migration_mu_);
   auto sync_id = next_sync_id_++;
   auto err_handler = [](const GenericError& err) {
@@ -829,12 +755,11 @@ uint32_t ClusterFamily::CreateOutgoingMigration(ConnectionContext* cntx, uint16_
     // Todo add error processing, stop migration process
     // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
   };
-  auto info =
-      make_shared<OutgoingMigration>(shard_set->size(), cntx->conn()->RemoteEndpointAddress(), port,
-                                     std::move(slots), err_handler);
-  auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, std::move(info));
+  auto migration = make_shared<OutgoingMigration>(host, port, std::move(slots), sync_id,
+                                                  err_handler, server_family_);
+  auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, migration);
   CHECK(inserted);
-  return sync_id;
+  return migration;
 }
 
 void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
@@ -849,8 +774,8 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->conn()->SetName(absl::StrCat("migration_flow_", sync_id));
 
-  auto info = GetOutgoingMigration(sync_id);
-  if (!info)
+  auto migration = GetOutgoingMigration(sync_id);
+  if (!migration)
     return cntx->SendError(kIdNotFound);
 
   cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
@@ -861,37 +786,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   EngineShard* shard = EngineShard::tlocal();
   DCHECK(shard->shard_id() == shard_id);
 
-  info->StartFlow(&shard->db_slice(), sync_id, server_family_->journal(), cntx->conn()->socket());
-}
-
-void ClusterFamily::DflyMigrateFullSyncCut(CmdArgList args, ConnectionContext* cntx) {
-  CHECK(cntx->slot_migration_id != 0);
-  CmdArgParser parser{args};
-  auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
-
-  if (auto err = parser.Error(); err) {
-    return cntx->SendError(err->MakeReply());
-  }
-
-  VLOG(1) << "Full sync cut "
-          << " sync_id: " << sync_id << " shard_id: " << shard_id << " shard";
-
-  std::lock_guard lck(migration_mu_);
-  auto migration_it = std::find_if(
-      incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-      [cntx](const auto& el) { return cntx->slot_migration_id == el->GetLocalSyncId(); });
-
-  if (migration_it == incoming_migrations_jobs_.end()) {
-    LOG(WARNING) << "Couldn't find migration id";
-    return cntx->SendError(kIdNotFound);
-  }
-
-  (*migration_it)->SetStableSyncForFlow(shard_id);
-  if ((*migration_it)->GetState() == MigrationState::C_STABLE_SYNC) {
-    LOG(INFO) << "STABLE-SYNC state is set for sync_id " << sync_id;
-  }
-
-  cntx->SendOk();
+  migration->StartFlow(server_family_->journal(), cntx->conn()->socket());
 }
 
 void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {

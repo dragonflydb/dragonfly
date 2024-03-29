@@ -17,7 +17,8 @@
 
 namespace dfly {
 using namespace facade;
-using namespace std;
+using util::fb2::Fiber;
+using util::fb2::Launch;
 
 class TestConnection : public facade::Connection {
  public:
@@ -143,7 +144,7 @@ class BaseFamilyTest : public ::testing::Test {
   static absl::flat_hash_set<std::string> GetLastUsedKeys();
   static void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
                                            absl::Duration timeout = absl::Seconds(10));
-  Fiber ExpectConditionWithSuspension(const std::function<bool()>& condition);
+  util::fb2::Fiber ExpectConditionWithSuspension(const std::function<bool()>& condition);
 
   static unsigned NumLocked();
 
@@ -156,7 +157,7 @@ class BaseFamilyTest : public ::testing::Test {
   unsigned num_threads_ = 3;
 
   absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;
-  Mutex mu_;
+  util::fb2::Mutex mu_;
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
 
   std::vector<RespVec*> resp_vec_;

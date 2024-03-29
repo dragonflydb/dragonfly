@@ -5,6 +5,7 @@
 #include "server/json_family.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
@@ -1295,6 +1296,13 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
 }
 
 io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
+  // We expect all valid paths to start with the root selector, otherwise prepend it
+  string tmp_buf;
+  if (!path.empty() && path.front() != '$') {
+    tmp_buf = absl::StrCat("$", path.front() != '.' ? "." : "", path);
+    path = tmp_buf;
+  }
+
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
     return json::ParsePath(path);
   }

@@ -130,4 +130,7 @@ struct SortedVector {
   PMR_NS::vector<DocId> entries_;
 };
 
+extern template class BlockList<CompressedSortedSet>;
+extern template class BlockList<SortedVector>;
+
 }  // namespace dfly::search

@@ -33,6 +33,7 @@ using namespace std;
 using namespace util;
 using absl::SetFlag;
 using absl::StrCat;
+using fb2::Fiber;
 using ::io::Result;
 using testing::ElementsAre;
 using testing::HasSubstr;

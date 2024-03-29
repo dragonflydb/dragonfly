@@ -2,8 +2,9 @@ from pymemcache.client.base import Client as MCClient
 from . import dfly_args
 from .instance import DflyInstance
 import socket
+import random
 
-DEFAULT_ARGS = {"memcached_port": 12111, "proactor_threads": 4}
+DEFAULT_ARGS = {"memcached_port": 11211, "proactor_threads": 4}
 
 # Generic basic tests
 
@@ -122,3 +123,14 @@ def test_version(memcached_client: MCClient):
     stats = memcached_client.stats()
     version = stats[b"version"].decode("utf-8")
     assert version.startswith("v") or version == "dev"
+
+
+@dfly_args(DEFAULT_ARGS)
+def test_flags(memcached_client: MCClient):
+    for i in range(1, 20):
+        flags = random.randrange(50, 1000)
+        memcached_client.set("a", "real-value", flags=flags, noreply=True)
+
+        res = memcached_client.raw_command("get a", "END\r\n").split()
+        if len(res) > 0:
+            assert res[2].decode() == str(flags)

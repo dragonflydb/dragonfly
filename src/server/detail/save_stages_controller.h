@@ -115,9 +115,6 @@ struct SaveStagesController : public SaveStagesInputs {
   // Build full path: get dir, try creating dirs, get filename with placeholder
   GenericError BuildFullPath();
 
-  // Switch to saving state if in active state
-  GenericError SwitchState();
-
   void SaveCb(unsigned index);
 
   void CloseCb(unsigned index);
@@ -133,7 +130,7 @@ struct SaveStagesController : public SaveStagesInputs {
   std::vector<std::pair<std::unique_ptr<RdbSnapshot>, std::filesystem::path>> snapshots_;
 
   absl::flat_hash_map<string_view, size_t> rdb_name_map_;
-  Mutex rdb_name_map_mu_;
+  util::fb2::Mutex rdb_name_map_mu_;
 };
 
 GenericError ValidateFilename(const std::filesystem::path& filename, bool new_version);

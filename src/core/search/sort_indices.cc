@@ -10,6 +10,7 @@
 #include <absl/strings/str_split.h>
 
 #include <algorithm>
+#include <type_traits>
 
 namespace dfly::search {
 
@@ -19,6 +20,15 @@ namespace {}  // namespace
 
 template <typename T>
 SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr) : values_{mr} {
+}
+
+template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) const {
+  DCHECK_LT(doc, values_.size());
+  if constexpr (is_same_v<T, PMR_NS::string>) {
+    return std::string(values_[doc]);
+  } else {
+    return values_[doc];
+  }
 }
 
 template <typename T>
@@ -37,7 +47,7 @@ std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, 
 
 template <typename T>
 void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_view field) {
-  DCHECK(id <= values_.size());  // Doc ids grow at most by one
+  DCHECK_LE(id, values_.size());  // Doc ids grow at most by one
   if (id >= values_.size())
     values_.resize(id + 1);
   values_[id] = Get(id, doc, field);
@@ -45,6 +55,7 @@ void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_v
 
 template <typename T>
 void SimpleValueSortIndex<T>::Remove(DocId id, DocumentAccessor* doc, std::string_view field) {
+  DCHECK_LT(id, values_.size());
   values_[id] = T{};
 }
 

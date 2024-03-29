@@ -823,7 +823,7 @@ double GetKeyWeight(Transaction* t, ShardId shard_id, const vector<double>& weig
 OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
                             const vector<double>& weights, bool store) {
   ArgSlice keys = t->GetShardArgs(shard->shard_id());
-  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
+  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << keys;
   DCHECK(!keys.empty());
 
   unsigned cmdargs_keys_offset = 1;  // after {numkeys} for ZUNION
@@ -872,7 +872,7 @@ ScoredMap ZSetFromSet(const PrimeValue& pv, double weight) {
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
                             const vector<double>& weights, bool store) {
   ArgSlice keys = t->GetShardArgs(shard->shard_id());
-  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
+  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << keys;
   DCHECK(!keys.empty());
 
   unsigned removed_keys = 0;
@@ -1345,7 +1345,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
 
 vector<ScoredMap> OpFetch(EngineShard* shard, Transaction* t) {
   ArgSlice keys = t->GetShardArgs(shard->shard_id());
-  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
+  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << keys;
   DCHECK(!keys.empty());
 
   vector<ScoredMap> results;

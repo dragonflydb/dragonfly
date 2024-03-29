@@ -90,6 +90,11 @@ namespace dfly {
 
 namespace {
 
+// Default stack size for fibers. We decrease it by 16 bytes because some allocators
+// need additional 8-16 bytes for their internal structures, thus over reserving additional
+// memory pages if using round sizes.
+constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
+
 using util::http::TlsClient;
 
 enum class TermColor { kDefault, kRed, kGreen, kYellow };
@@ -151,6 +156,12 @@ string NormalizePaths(std::string_view path) {
   return string(path);
 }
 
+template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
+  auto res = make_unique<Listener>(forward<Args>(args)...);
+  res->SetConnFiberStackSize(kFiberDefaultStackSize);
+  return res;
+}
+
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   uint64_t maxmemory = GetMaxMemoryFlag();
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
@@ -165,12 +176,14 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   Listener* main_listener = nullptr;
 
   std::vector<facade::Listener*> listeners;
+
   // If we ever add a new listener, plz don't change this,
   // we depend on tcp listener to be at the front since we later
   // need to pass it to the AclFamily::Init
   if (!tcp_disabled) {
-    main_listener = new Listener{Protocol::REDIS, &service, Listener::Role::MAIN};
-    listeners.push_back(main_listener);
+    auto listener = MakeListener(Protocol::REDIS, &service, Listener::Role::MAIN);
+    main_listener = listener.get();
+    listeners.push_back(listener.release());
   }
 
   Service::InitOpts opts;
@@ -218,7 +231,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
     unlink(unix_sock.c_str());
 
-    auto uds_listener = std::make_unique<Listener>(Protocol::REDIS, &service);
+    auto uds_listener = MakeListener(Protocol::REDIS, &service);
     error_code ec =
         acceptor->AddUDSListener(unix_sock.c_str(), unix_socket_perm, uds_listener.get());
     if (ec) {
@@ -248,8 +261,8 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
-    auto admin_listener =
-        std::make_unique<Listener>(Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
+    auto admin_listener = MakeListener(Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
+
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener.get());
 
     if (ec) {
@@ -260,7 +273,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
   }
 
-  if (!tcp_disabled) {
+  if (main_listener) {
     error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
 
     if (ec) {
@@ -274,7 +287,8 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   }
 
   if (mc_port > 0 && !tcp_disabled) {
-    acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
+    auto listener = MakeListener(Protocol::MEMCACHE, &service);
+    acceptor->AddListener(mc_port, listener.release());
   }
 
   service.Init(acceptor, listeners, opts);
@@ -690,9 +704,13 @@ Usage: dragonfly [FLAGS]
     LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
 
+  // Initialize mi_malloc options
+  // export MIMALLOC_VERBOSE=1 to see the options before the override.
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
   mi_option_set(mi_option_decommit_delay, 1);
+
+  fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
   unique_ptr<util::ProactorPool> pool;
 
@@ -716,7 +734,7 @@ Usage: dragonfly [FLAGS]
 
   pool->Run();
 
-  AcceptServer acceptor(pool.get());
+  AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
   acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
   int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;

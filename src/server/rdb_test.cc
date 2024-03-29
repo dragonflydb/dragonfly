@@ -260,9 +260,13 @@ TEST_F(RdbTest, ReloadTtl) {
 TEST_F(RdbTest, ReloadExpired) {
   Run({"set", "key", "val"});
   Run({"expire", "key", "2"});
-  sleep(2);
-  Run({"debug", "reload"});
-  auto resp = Run({"get", "key"});
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  AdvanceTime(2000);
+  resp = Run({"debug", "load", save_info.file_name});
+  ASSERT_EQ(resp, "OK");
+  resp = Run({"get", "key"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
@@ -504,5 +508,30 @@ TEST_F(RdbTest, LoadSmall7) {
   resp = Run({"zrange", "zset", "0", "-1"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("einstein", "schrodinger"));
+}
+
+TEST_F(RdbTest, RedisJson) {
+  // RDB file generated via:
+  // ./redis-server --save "" --appendonly no --loadmodule ../lib/rejson.so
+  // and then:
+  // JSON.SET json-str $ '"hello"'
+  // JSON.SET json-arr $ "[1, true, \"hello\", 3.14]"
+  // JSON.SET json-obj $
+  // '{"company":"DragonflyDB","product":"Dragonfly","website":"https://dragondlydb.io","years-active":[2021,2022,2023,2024,"and
+  // more!"]}'
+  io::FileSource fs = GetSource("redis_json.rdb");
+  RdbLoader loader{service_.get()};
+
+  // must run in proactor thread in order to avoid polluting the serverstate
+  // in the main, testing thread.
+  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"JSON.GET", "json-str"}), "\"hello\"");
+  EXPECT_EQ(Run({"JSON.GET", "json-arr"}), "[1,true,\"hello\",3.14]");
+  EXPECT_EQ(Run({"JSON.GET", "json-obj"}),
+            "{\"company\":\"DragonflyDB\",\"product\":\"Dragonfly\",\"website\":\"https://"
+            "dragondlydb.io\",\"years-active\":[2021,2022,2023,2024,\"and more!\"]}");
 }
 }  // namespace dfly

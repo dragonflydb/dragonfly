@@ -22,12 +22,15 @@ class IoMgr {
   // (io_res, )
   using GrowCb = std::function<void(int)>;
 
-  IoMgr();
+  using ReadCb = std::function<void(int)>;
 
   // blocks until all the pending requests are finished.
   void Shutdown();
 
-  std::error_code Open(const std::string& path);
+  std::error_code Open(std::string_view path);
+
+  // Try growing file by that length. Return error if growth failed.
+  std::error_code Grow(size_t len);
 
   // Grows file by that length. len must be divided by 1MB.
   // passing other values will check-fail.
@@ -36,7 +39,12 @@ class IoMgr {
   // Returns error if submission failed. Otherwise - returns the io result
   // via cb. A caller must make sure that the blob exists until cb is called.
   std::error_code WriteAsync(size_t offset, std::string_view blob, WriteCb cb);
+
+  // Read synchronously into dest
   std::error_code Read(size_t offset, io::MutableBytes dest);
+
+  // Read into dest and call cb once read
+  std::error_code ReadAsync(size_t offset, io::MutableBytes dest, ReadCb cb);
 
   // Total file span
   size_t Span() const {
@@ -44,7 +52,7 @@ class IoMgr {
   }
 
   bool grow_pending() const {
-    return flags.grow_progress;
+    return grow_progress_;
   }
 
   const IoMgrStats& GetStats() const {
@@ -55,13 +63,7 @@ class IoMgr {
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   size_t sz_ = 0;
 
-  union {
-    uint8_t flags_val;
-    struct {
-      uint8_t grow_progress : 1;
-    } flags;
-  };
-
+  bool grow_progress_ = false;
   IoMgrStats stats_;
 };
 

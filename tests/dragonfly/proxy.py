@@ -68,9 +68,14 @@ class Proxy:
             self.stop_connections.remove(cb)
             cb()
 
-    def close(self):
+    async def close(self, task=None):
         if self.server is not None:
             self.server.close()
             self.server = None
         for cb in self.stop_connections:
             cb()
+        if not task == None:
+            try:
+                await task
+            except asyncio.exceptions.CancelledError:
+                pass

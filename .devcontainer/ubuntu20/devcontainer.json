@@ -10,7 +10,8 @@
         "twxs.cmake"
       ],
       "settings": {
-        "cmake.buildDirectory": "/build"
+        "cmake.buildDirectory": "/build",
+        "extensions.ignoreRecommendations": true
       }
     }
   },

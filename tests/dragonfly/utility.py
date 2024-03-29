@@ -46,12 +46,8 @@ async def wait_available_async(client: aioredis.Redis, timeout=10):
     start = time.time()
     while (time.time() - start) < timeout:
         try:
-            await client.get("key")
+            await client.ping()
             return
-        except aioredis.ResponseError as e:
-            if "MOVED" in str(e):
-                # MOVED means we *can* serve traffic, but 'key' does not belong to an owned slot
-                return
         except aioredis.BusyLoadingError as e:
             assert "Dragonfly is loading the dataset in memory" in str(e)
 
@@ -646,3 +642,7 @@ class EnvironCntx:
                 os.environ[k] = self.undo[k]
             else:
                 del os.environ[k]
+
+
+async def is_saving(c_client: aioredis.Redis):
+    return "saving:1" in (await c_client.execute_command("INFO PERSISTENCE"))

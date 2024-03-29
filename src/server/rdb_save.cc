@@ -758,8 +758,12 @@ std::error_code SerializerBase::WriteOpcode(uint8_t opcode) {
   return WriteRaw(::io::Bytes{&opcode, 1});
 }
 
-size_t SerializerBase::GetTotalBufferCapacity() const {
+size_t SerializerBase::GetBufferCapacity() const {
   return mem_buf_.Capacity();
+}
+
+size_t SerializerBase::GetTempBufferSize() const {
+  return tmp_buf_.size();
 }
 
 error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
@@ -1192,7 +1196,11 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
+      auto before = absl::GetCurrentTimeNanos();
       io_error = sink_->Write(io::Buffer(record->value));
+      auto& stats = ServerState::tlocal()->stats;
+      stats.rdb_save_usec += (absl::GetCurrentTimeNanos() - before) / 1'000;
+      stats.rdb_save_count++;
       if (io_error) {
         break;
       }
@@ -1253,7 +1261,8 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
   auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
     channel_bytes.fetch_add(snapshot->GetTotalChannelCapacity(), memory_order_relaxed);
-    serializer_bytes.store(snapshot->GetTotalBufferCapacity(), memory_order_relaxed);
+    serializer_bytes.store(snapshot->GetBufferCapacity() + snapshot->GetTempBuffersSize(),
+                           memory_order_relaxed);
   };
 
   if (shard_snapshots_.size() == 1) {
@@ -1547,6 +1556,10 @@ void SerializerBase::CompressBlob() {
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
   ++compression_stats_->compressed_blobs;
+}
+
+size_t RdbSerializer::GetTempBufferSize() const {
+  return SerializerBase::GetTempBufferSize() + tmp_str_.size();
 }
 
 }  // namespace dfly

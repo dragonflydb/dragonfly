@@ -124,8 +124,10 @@ class SliceSnapshot {
     return type_freq_map_;
   }
 
-  size_t GetTotalBufferCapacity() const;   // In bytes
-  size_t GetTotalChannelCapacity() const;  // In bytes
+  // Get different sizes, in bytes. All disjoint.
+  size_t GetBufferCapacity() const;
+  size_t GetTotalChannelCapacity() const;
+  size_t GetTempBuffersSize() const;
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
@@ -142,7 +144,7 @@ class SliceSnapshot {
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
-  Fiber snapshot_fb_;  // IterateEntriesFb
+  util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
 
   CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;

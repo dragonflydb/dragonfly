@@ -29,7 +29,8 @@ TEST_F(FlatBuffersTest, Basic) {
 
   fbb.Finish();
   auto buffer = fbb.GetBuffer();
-  auto map = flexbuffers::GetRoot(buffer).AsMap();
+  flexbuffers::Reference ref = flexbuffers::GetRoot(buffer);
+  auto map = ref.AsMap();
   EXPECT_EQ("bar", map["foo"].AsString().str());
 }
 
@@ -48,8 +49,8 @@ TEST_F(FlatBuffersTest, FlexiParser) {
   const auto& buffer = fbb.GetBuffer();
   string_view buf_view{reinterpret_cast<const char*>(buffer.data()), buffer.size()};
   LOG(INFO) << "Binary buffer: " << absl::CHexEscape(buf_view);
-
-  auto map = flexbuffers::GetRoot(buffer).AsMap();
+  flexbuffers::Reference root = flexbuffers::GetRoot(buffer);
+  auto map = root.AsMap();
   EXPECT_EQ("bar", map["foo"].AsString().str());
 }
 

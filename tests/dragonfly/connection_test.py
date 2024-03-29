@@ -4,12 +4,13 @@ import pytest
 import asyncio
 import time
 from redis import asyncio as aioredis
-from redis.exceptions import ConnectionError as redis_conn_error
+from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
 import async_timeout
 from dataclasses import dataclass
+from aiohttp import ClientSession
 
 from . import dfly_args
-from .instance import DflyInstance
+from .instance import DflyInstance, DflyInstanceFactory
 
 BASE_PORT = 1111
 
@@ -67,7 +68,6 @@ Test MONITOR command with basic use case
 """
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4})
 async def test_monitor_command(async_pool):
     monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
@@ -90,7 +90,6 @@ Test MONITOR command with MULTI/EXEC transaction with squashing
 """
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "multi_exec_squash": "true"})
 async def test_monitor_command_multi(async_pool):
     monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
@@ -127,7 +126,6 @@ TEST_MONITOR_SCRIPT = """
 """
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "lua_auto_async": "false"})
 async def test_monitor_command_lua(async_pool):
     monitor = CollectingMonitor(aioredis.Redis(connection_pool=async_pool))
@@ -151,7 +149,6 @@ the connections is running all commands in its context
 """
 
 
-@pytest.mark.asyncio
 async def test_pipeline_support(async_client):
     def generate(max):
         for i in range(max):
@@ -200,7 +197,6 @@ expected results on the subscriber side
 """
 
 
-@pytest.mark.asyncio
 async def test_pubsub_command(async_client):
     def generate(max):
         for i in range(max):
@@ -276,7 +272,6 @@ across multiple connections internally
 """
 
 
-@pytest.mark.asyncio
 async def test_multi_pubsub(async_client):
     def generate(max):
         for i in range(max):
@@ -293,7 +288,6 @@ Test PUBSUB NUMSUB command.
 """
 
 
-@pytest.mark.asyncio
 async def test_pubsub_subcommand_for_numsub(async_client):
     subs1 = [async_client.pubsub() for i in range(5)]
     for s in subs1:
@@ -343,7 +337,6 @@ will eventually unblock when it disconnects.
 """
 
 
-@pytest.mark.asyncio
 @pytest.mark.slow
 @dfly_args({"proactor_threads": "1", "subscriber_thread_limit": "100"})
 async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Redis):
@@ -381,7 +374,6 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
         await pub
 
 
-@pytest.mark.asyncio
 async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
     # TODO: I am not how to customize the max connections for the pool.
     async_pool = aioredis.ConnectionPool(
@@ -562,9 +554,8 @@ async def test_large_cmd(async_client: aioredis.Redis):
     assert len(res) == MAX_ARR_SIZE
 
 
-@pytest.mark.asyncio
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_factory):
-    server = df_local_factory.create(
+    server: DflyInstance = df_local_factory.create(
         no_tls_on_admin_port="true",
         admin_port=1111,
         port=1211,
@@ -573,18 +564,16 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_
     )
     server.start()
 
-    client = aioredis.Redis(port=server.port, password="XXX")
-    try:
-        await client.execute_command("DBSIZE")
-    except redis_conn_error:
-        pass
+    client = server.client(password="XXX")
+    with pytest.raises((ResponseError)):
+        await client.dbsize()
+    await client.close()
 
-    client = aioredis.Redis(port=server.admin_port, password="XXX")
+    client = server.admin_client(password="XXX")
     assert await client.dbsize() == 0
     await client.close()
 
 
-@pytest.mark.asyncio
 async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
     server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
@@ -594,7 +583,6 @@ async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_lo
     await client.close()
 
 
-@pytest.mark.asyncio
 async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory):
     server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
@@ -604,32 +592,22 @@ async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, d
     await client.close()
 
 
-@pytest.mark.asyncio
-async def test_tls_reject(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
-    server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+async def test_tls_reject(
+    with_ca_tls_server_args, with_tls_client_args, df_local_factory: DflyInstanceFactory
+):
+    server: DflyInstance = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
 
-    client = aioredis.Redis(port=server.port, **with_tls_client_args, ssl_cert_reqs=None)
-    try:
+    client = server.client(**with_tls_client_args, ssl_cert_reqs=None)
+    await client.ping()
+    await client.close()
+
+    client = server.client(**with_tls_client_args)
+    with pytest.raises(redis_conn_error):
         await client.ping()
-    except redis_conn_error:
-        pass
-
-    client = aioredis.Redis(port=server.port, **with_tls_client_args)
-    try:
-        assert await client.dbsize() != 0
-    except redis_conn_error:
-        pass
-
-    client = aioredis.Redis(port=server.port, ssl_cert_reqs=None)
-    try:
-        assert await client.dbsize() != 0
-    except redis_conn_error:
-        pass
     await client.close()
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
 async def test_squashed_pipeline(async_client: aioredis.Redis):
     p = async_client.pipeline(transaction=False)
@@ -647,7 +625,6 @@ async def test_squashed_pipeline(async_client: aioredis.Redis):
         res = res[11:]
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
 async def test_squashed_pipeline_seeder(df_server, df_seeder_factory):
     seeder = df_seeder_factory.create(port=df_server.port, keys=10_000)
@@ -659,7 +636,6 @@ This test makes sure that multi transactions can be integrated into pipeline squ
 """
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": "4", "pipeline_squash": 1})
 async def test_squashed_pipeline_multi(async_client: aioredis.Redis):
     p = async_client.pipeline(transaction=False)
@@ -679,7 +655,6 @@ async def test_squashed_pipeline_multi(async_client: aioredis.Redis):
     await p.execute()
 
 
-@pytest.mark.asyncio
 async def test_unix_domain_socket(df_local_factory, tmp_dir):
     server = df_local_factory.create(proactor_threads=1, port=BASE_PORT, unixsocket="./df.sock")
     server.start()
@@ -697,7 +672,6 @@ It should prolong the pause for all current commands.
 
 
 @pytest.mark.slow
-@pytest.mark.asyncio
 async def test_nested_client_pause(async_client: aioredis.Redis):
     async def do_pause():
         await async_client.execute_command("CLIENT", "PAUSE", "1000", "WRITE")
@@ -724,7 +698,6 @@ async def test_nested_client_pause(async_client: aioredis.Redis):
     await p3
 
 
-@pytest.mark.asyncio
 async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     """
     1. Check client pause success when blocking transaction is running
@@ -752,7 +725,6 @@ async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     await blocking
 
 
-@pytest.mark.asyncio
 async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Redis):
     """
     Check running client pause command simultaneously with running multiple blocking command
@@ -774,3 +746,24 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
 
     assert not all.done()
     await all
+
+
+@dfly_args({"proactor_threads": "1", "expose_http_api": "true"})
+async def test_http(df_server: DflyInstance):
+    client = df_server.client()
+    async with ClientSession() as session:
+        async with session.get(f"http://localhost:{df_server.port}") as resp:
+            assert resp.status == 200
+
+        body = '["set", "foo", "МайяХилли", "ex", "100"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            assert text.strip() == '{"result":"OK"}'
+
+        body = '["get", "foo"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            assert text.strip() == '{"result":"МайяХилли"}'
+    assert await client.ttl("foo") > 0

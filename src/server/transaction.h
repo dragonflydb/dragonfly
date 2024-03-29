@@ -10,6 +10,7 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/functional/function_ref.h>
 
+#include <atomic>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -156,14 +158,15 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,      // Whether its active on this shard (to schedule or execute hops)
-    ARMED = 1 << 1,  // Whether its armed (the hop was prepared)
-    OUT_OF_ORDER =
-        1 << 2,  // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
-    KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
-    SUSPENDED_Q = 1 << 4,       // Whether it suspended (by WatchInShard())
-    AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
-    UNLOCK_MULTI = 1 << 6,      // Whether this shard executed UnlockMultiShardCb
+    ACTIVE = 1,  // Whether its active on this shard (to schedule or execute hops)
+    // ARMED = 1 << 1,  // Whether its armed (the hop was prepared)
+    // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
+    OUT_OF_ORDER = 1 << 2,
+    // Whether its key locks are acquired, never set for global commands.
+    KEYLOCK_ACQUIRED = 1 << 3,
+    SUSPENDED_Q = 1 << 4,   // Whether it suspended (by WatchInShard())
+    AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
+    UNLOCK_MULTI = 1 << 6,  // Whether this shard executed UnlockMultiShardCb
   };
 
  public:
@@ -220,11 +223,6 @@ class Transaction {
   // Must be called from coordinator thread.
   void CancelBlocking(std::function<OpStatus(ArgSlice)>);
 
-  // In some cases for non auto-journaling commands we want to enable the auto journal flow.
-  void RenableAutoJournal() {
-    renabled_auto_journal_.store(true, std::memory_order_relaxed);
-  }
-
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
@@ -258,19 +256,22 @@ class Transaction {
   // Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  // Returns true if the transaction is waiting for shard callbacks and the shard is armed.
-  // Safe to read transaction state (and update shard local) until following RunInShard() finishes.
-  bool IsArmedInShard(ShardId sid) const;
+  // If the transaction is armed, disarm it and return the local mask (ACTIVE is always set).
+  // Otherwise 0 is returned. Sync point (acquire).
+  uint16_t DisarmInShard(ShardId sid);
+
+  // Same as DisarmInShard, but the transaction is only disarmed if any of the req_flags is present.
+  // If the transaction is armed, returns the local mask and a flag whether it was disarmed.
+  std::pair<uint16_t, bool /* disarmed */> DisarmInShardWhen(ShardId sid, uint16_t req_flags);
 
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
 
-  // Returns the state mask on this shard. Safe only when the transaction is armed (or blocked).
-  uint16_t GetLocalMask(ShardId sid) const;
+  // If blocking tx was woken up on this shard, get wake key.
+  std::optional<std::string_view> GetWakeKey(ShardId sid) const;
 
-  uint32_t GetLocalTxqPos(ShardId sid) const {
-    return shard_data_[SidToId(sid)].pq_pos;
-  }
+  // Get OpArgs for specific shard
+  OpArgs GetOpArgs(EngineShard* shard) const;
 
   TxId txid() const {
     return txid_;
@@ -311,13 +312,6 @@ class Transaction {
 
   bool IsGlobal() const;
 
-  // If blocking tx was woken up on this shard, get wake key.
-  std::optional<std::string_view> GetWakeKey(ShardId sid) const;
-
-  OpArgs GetOpArgs(EngineShard* shard) const {
-    return OpArgs{shard, this, GetDbContext()};
-  }
-
   DbContext GetDbContext() const {
     return DbContext{.db_index = db_index_, .time_now_ms = time_now_ms_};
   }
@@ -346,6 +340,10 @@ class Transaction {
                          bool multi_commands, bool allow_await) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
+  // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.
+  void ReviveAutoJournal();
+
+  // Clear all state to make transaction re-usable
   void Refurbish();
 
   // Get keys multi transaction was initialized with, normalized and unique
@@ -356,6 +354,18 @@ class Transaction {
 
   // Print in-dept failure state for debugging.
   std::string DEBUG_PrintFailState(ShardId sid) const;
+
+  uint32_t DEBUG_GetTxqPosInShard(ShardId sid) const {
+    return shard_data_[SidToId(sid)].pq_pos;
+  }
+
+  bool DEBUG_IsArmedInShard(ShardId sid) const {
+    return shard_data_[SidToId(sid)].is_armed.load(std::memory_order_relaxed);
+  }
+
+  uint16_t DEBUG_GetLocalMask(ShardId sid) const {
+    return shard_data_[SidToId(sid)].local_mask;
+  }
 
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
@@ -373,14 +383,22 @@ class Transaction {
   };
 
   struct alignas(64) PerShardData {
+    PerShardData() {
+    }
+    PerShardData(PerShardData&& other) noexcept {
+    }
+
+    // State of shard - bitmask with LocalState flags
+    uint16_t local_mask = 0;
+
+    // Set when the shard is prepared for another hop. Sync point. Cleared when execution starts.
+    std::atomic_bool is_armed = false;
+
     uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
     uint32_t arg_count = 0;
 
     // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
-    uint32_t pq_pos = TxQueue::kEnd;
-
-    // State of shard - bitmask with LocalState flags
-    uint16_t local_mask = 0;
+    TxQueue::Iterator pq_pos = TxQueue::kEnd;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;
@@ -391,7 +409,7 @@ class Transaction {
     } stats;
 
     // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
-    char pad[64 - 4 * sizeof(uint32_t) - sizeof(Stats)];
+    char pad[64 - 5 * sizeof(uint32_t) - sizeof(Stats)];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
@@ -434,22 +452,6 @@ class Transaction {
       args.clear();
       original_index.clear();
     }
-  };
-
-  // Barrier akin to helio's BlockingCounter, but with proper acquire semantics
-  // for polling work from other threads (active, inactive phases). And without heap allocation.
-  class PhasedBarrier {
-   public:
-    void Start(uint32_t count);  // Release: Store count
-    void Wait();                 // Acquire: Wait until count = 0
-
-    bool Active() const;                // Acquire: Return if count > 0. Use for polling for work
-    void Dec(Transaction* keep_alive);  // Release: Decrease count, notify ec on count = 0
-
-    uint32_t DEBUG_Count() const;  // Get current counter value
-   private:
-    std::atomic_uint32_t count_{0};
-    util::fb2::EventCount ec_{};
   };
 
   // "Single claim - single modification" barrier. Multiple threads might try to claim it, only one
@@ -515,6 +517,12 @@ class Transaction {
   // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier
   void ExecuteAsync();
 
+  // Finish hop, decrement run barrier
+  void FinishHop();
+
+  // Run actual callback on shard, store result if single shard or OOM was catched
+  void RunCallback(EngineShard* shard);
+
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc);
 
@@ -548,6 +556,9 @@ class Transaction {
   // Should be called immediately after the last hop.
   void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
 
+  // Whether the callback can be run directly on this thread without dispatching on the shard queue
+  bool CanRunInlined() const;
+
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
   }
@@ -580,14 +591,8 @@ class Transaction {
   }
 
  private:
-  // Main synchronization point for dispatching hop callbacks and waiting for them to finish.
-  // After scheduling, sequential hops are executed as follows:
-  //    coordinator: Prepare hop, then Start(num_shards), dispatch poll jobs and Wait()
-  //    tx queue:    Once IsArmedInShard() /* checks Active() */ -> run in shard and Dec()
-  // As long as barrier is active, any writes by the coordinator are prohibited, so shard threads
-  // can safely read transaction state and modify per-shard state belonging to them.
-  // Inter-thread synchronization is provided by the barriers acquire/release pairs.
-  PhasedBarrier run_barrier_;
+  // Used for waiting for all hop callbacks to run.
+  util::fb2::EmbeddedBlockingCounter run_barrier_{0};
 
   // Stores per-shard data: state flags and keys. Index only with SidToId(shard index)!
   // Theoretically, same size as number of shards, but contains only a single element for
@@ -603,8 +608,8 @@ class Transaction {
   // Stores the full undivided command.
   CmdArgList full_args_;
 
-  // True if NO_AUTOJOURNAL command asked to enable auto journal
-  std::atomic<bool> renabled_auto_journal_ = false;
+  // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
+  bool re_enabled_auto_journal_ = false;
 
   // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
   std::vector<uint32_t> reverse_index_;
@@ -659,10 +664,6 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
     return res.status();
   });
   return res;
-}
-
-inline uint16_t trans_id(const Transaction* ptr) {
-  return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args);

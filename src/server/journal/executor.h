@@ -7,6 +7,7 @@
 #include <absl/types/span.h>
 
 #include "facade/reply_capture.h"
+#include "server/cluster/slot_set.h"
 #include "server/journal/types.h"
 
 namespace dfly {
@@ -25,6 +26,7 @@ class JournalExecutor {
   void Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
 
   void FlushAll();  // Execute FLUSHALL.
+  void FlushSlots(const SlotRange& slot_range);
 
   ConnectionContext* connection_context() {
     return &conn_context_;

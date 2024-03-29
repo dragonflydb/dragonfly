@@ -118,6 +118,9 @@ class ServerState {  // public struct - to allow initialization.
 
     uint64_t blocked_on_interpreter = 0;
 
+    uint64_t rdb_save_usec = 0;
+    uint64_t rdb_save_count = 0;
+
     // Number of times we rejected command dispatch due to OOM condition.
     uint64_t oom_error_cmd_cnt = 0;
 
@@ -245,7 +248,6 @@ class ServerState {  // public struct - to allow initialization.
   Stats stats;
 
   bool is_master = true;
-  std::string remote_client_id_;  // for cluster support
   uint32_t log_slower_than_usec = UINT32_MAX;
 
   acl::UserRegistry* user_registry;
@@ -266,6 +268,13 @@ class ServerState {  // public struct - to allow initialization.
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
   };
+
+  // Tries to returns as much RSS memory as possible to the OS.
+  // Decommits 3 possible heaps according to the flags.
+  // For decommit_glibcmalloc the heap is global for the process, for others it's specific only
+  // for this thread.
+  enum { kDataHeap = 1, kBackingHeap = 2, kGlibcmalloc = 4 };
+  void DecommitMemory(uint8_t flags);
 
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;

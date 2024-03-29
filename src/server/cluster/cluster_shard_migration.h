@@ -48,7 +48,7 @@ class ClusterShardMigration : public ProtocolClient {
   uint32_t sync_id_;
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<JournalExecutor> executor_;
-  Fiber sync_fb_;
+  util::fb2::Fiber sync_fb_;
   std::atomic_bool is_stable_sync_ = false;
   bool is_finalized_ = false;
 };

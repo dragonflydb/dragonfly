@@ -51,6 +51,9 @@ struct Schema {
 
   // Mapping for short field names (aliases).
   absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
+
+  // Return identifier for alias if found, otherwise return passed value
+  std::string_view LookupAlias(std::string_view alias) const;
 };
 
 // Collection of indices for all fields in schema
@@ -64,12 +67,13 @@ class FieldIndices {
 
   BaseIndex* GetIndex(std::string_view field) const;
   BaseSortIndex* GetSortIndex(std::string_view field) const;
-
   std::vector<TextIndex*> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
-
   const Schema& GetSchema() const;
+
+  // Extract values stored in sort indices
+  std::vector<std::pair<std::string, SortableValue>> ExtractStoredValues(DocId doc) const;
 
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);

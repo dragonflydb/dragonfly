@@ -8,7 +8,14 @@
         "ms-vscode.cmake-tools",
         "ms-vscode.cpptools-themes",
         "twxs.cmake"
-      ]
+      ],
+      "settings": {
+        "cmake.buildDirectory": "/build",
+        "extensions.ignoreRecommendations": true
+      }
     }
-  }
+  },
+  "mounts": [
+    "source=fedora-vol,target=/build,type=volume"
+  ]
 }

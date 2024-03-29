@@ -81,7 +81,7 @@ class ChannelStore {
     SubscribeMap* Get() const;
     void Set(SubscribeMap* sm);
 
-    SubscribeMap* operator->();
+    SubscribeMap* operator->() const;
     const SubscribeMap& operator*() const;
 
    private:
@@ -100,7 +100,7 @@ class ChannelStore {
   // Centralized controller to prevent overlaping updates.
   struct ControlBlock {
     std::atomic<ChannelStore*> most_recent;
-    Mutex update_mu;  // locked during updates.
+    util::fb2::Mutex update_mu;  // locked during updates.
   };
 
  private:

@@ -31,15 +31,6 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 
 namespace dfly {
 
-std::ostream& operator<<(std::ostream& os, ArgSlice list) {
-  os << "[";
-  if (!list.empty()) {
-    std::for_each(list.begin(), list.end() - 1, [&os](const auto& val) { os << val << ", "; });
-    os << (*(list.end() - 1));
-  }
-  return os << "]";
-}
-
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_size
      << ", tiered_entries: " << stats.tiered_entries << "\n";
@@ -637,7 +628,7 @@ vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
 }
 
 absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
-  Mutex mu;
+  fb2::Mutex mu;
   absl::flat_hash_set<string> result;
 
   auto add_keys = [&](ProactorBase* proactor) {
@@ -671,14 +662,15 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
       << "Timeout of " << timeout << " reached when expecting condition";
 }
 
-Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
+fb2::Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<bool()>& condition) {
   TransactionSuspension tx;
   pp_->at(0)->Await([&] { tx.Start(); });
 
-  auto fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [condition, tx = std::move(tx)]() mutable {
-    ExpectConditionWithinTimeout(condition);
-    tx.Terminate();
-  });
+  auto fb =
+      pp_->at(0)->LaunchFiber(fb2::Launch::dispatch, [condition, tx = std::move(tx)]() mutable {
+        ExpectConditionWithinTimeout(condition);
+        tx.Terminate();
+      });
   return fb;
 }
 

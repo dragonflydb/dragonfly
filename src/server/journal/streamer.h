@@ -46,7 +46,7 @@ class JournalStreamer : protected BufferedStreamerBase {
   uint32_t journal_cb_id_{0};
   journal::Journal* journal_;
 
-  Fiber write_fb_{};
+  util::fb2::Fiber write_fb_{};
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
@@ -82,7 +82,6 @@ class RestoreStreamer : public JournalStreamer {
   uint64_t snapshot_version_ = 0;
   SlotSet my_slots_;
   uint32_t sync_id_;
-  Fiber snapshot_fb_;
   Cancellation fiber_cancellation_;
   bool snapshot_finished_ = false;
 };

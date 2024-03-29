@@ -53,71 +53,34 @@ ClusterSlotMigration::~ClusterSlotMigration() {
   sync_fb_.JoinIfNeeded();
 }
 
-error_code ClusterSlotMigration::Start(ConnectionContext* cntx) {
-  VLOG(1) << "Starting slot migration";
-
-  auto check_connection_error = [&cntx](error_code ec, const char* msg) -> error_code {
-    if (ec) {
-      cntx->SendError(absl::StrCat(msg, ec.message()));
-    }
-    return ec;
-  };
-
-  VLOG(1) << "Resolving host DNS";
-  error_code ec = ResolveHostDns();
-  RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
-
-  VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
-  RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
+error_code ClusterSlotMigration::Init(uint32_t sync_id, uint32_t shards_num) {
+  VLOG(1) << "Init slot migration";
 
   state_ = MigrationState::C_CONNECTING;
 
-  VLOG(1) << "Greeting";
-  ec = Greet();
-  RETURN_ON_ERR(check_connection_error(ec, "couldn't greet source "));
+  sync_id_ = sync_id;
+  source_shards_num_ = shards_num;
+
+  VLOG(1) << "Resolving host DNS";
+  error_code ec = ResolveHostDns();
+  if (ec)
+    return ec;
+
+  VLOG(1) << "Connecting to source";
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+  if (ec)
+    return ec;
+
+  ResetParser(false);
 
   sync_fb_ = fb2::Fiber("main_migration", &ClusterSlotMigration::MainMigrationFb, this);
 
-  return {};
-}
-
-error_code ClusterSlotMigration::Greet() {
-  ResetParser(false);
-  VLOG(1) << "greeting message handling";
-  RETURN_ON_ERR(SendCommandAndReadResponse("PING"));
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
-
-  auto port = absl::GetFlag(FLAGS_port);
-  auto cmd = absl::StrCat("DFLYMIGRATE CONF ", port);
-  for (const auto& s : slots_) {
-    absl::StrAppend(&cmd, " ", s.start, " ", s.end);
-  }
-  VLOG(1) << "Migration command: " << cmd;
-  RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
-  // Response is: sync_id, num_shards
-  if (!CheckRespFirstTypes({RespExpr::INT64, RespExpr::INT64}))
-    return make_error_code(errc::bad_message);
-
-  sync_id_ = get<int64_t>(LastResponseArgs()[0].u);
-  source_shards_num_ = get<int64_t>(LastResponseArgs()[1].u);
-
-  return error_code{};
+  return ec;
 }
 
 ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
   const auto& ctx = server();
   return {ctx.host, ctx.port};
-}
-
-void ClusterSlotMigration::SetStableSyncForFlow(uint32_t flow) {
-  DCHECK(shard_flows_.size() > flow);
-  shard_flows_[flow]->SetStableSync();
-
-  if (std::all_of(shard_flows_.begin(), shard_flows_.end(),
-                  [](const auto& el) { return el->IsStableSync(); })) {
-    state_ = MigrationState::C_STABLE_SYNC;
-  }
 }
 
 bool ClusterSlotMigration::IsFinalized() const {
@@ -134,7 +97,7 @@ void ClusterSlotMigration::Stop() {
 void ClusterSlotMigration::MainMigrationFb() {
   VLOG(1) << "Main migration fiber started " << sync_id_;
 
-  state_ = MigrationState::C_FULL_SYNC;
+  state_ = MigrationState::C_SYNC;
 
   // TODO add reconnection code
   if (auto ec = InitiateSlotsMigration(); ec) {

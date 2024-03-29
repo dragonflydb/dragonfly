@@ -14,16 +14,18 @@
 #include <string_view>
 #include <vector>
 
-#include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
+#include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
 enum class ListDir : uint8_t { LEFT, RIGHT };
 
 // Dependent on ExpirePeriod representation of the value.
-constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;
+constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;  // 8.5 years
+constexpr int64_t kMaxExpireDeadlineMs = kMaxExpireDeadlineSec * 1000;
 
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
@@ -158,6 +160,10 @@ enum class GlobalState : uint8_t {
   TAKEN_OVER,
 };
 
+std::ostream& operator<<(std::ostream& os, const GlobalState& state);
+
+std::ostream& operator<<(std::ostream& os, ArgSlice list);
+
 enum class TimeUnit : uint8_t { SEC, MSEC };
 
 inline void ToUpper(const MutableSlice* val) {
@@ -238,7 +244,7 @@ template <typename T> struct AggregateValue {
   }
 
  private:
-  Mutex mu_{};
+  util::fb2::Mutex mu_{};
   T current_{};
 };
 
@@ -342,10 +348,10 @@ class Context : protected Cancellation {
 
  private:
   GenericError err_;
-  Mutex mu_;
+  util::fb2::Mutex mu_;
 
   ErrHandler err_handler_;
-  Fiber err_handler_fb_;
+  util::fb2::Fiber err_handler_fb_;
 };
 
 struct ScanOpts {

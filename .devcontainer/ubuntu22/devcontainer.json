@@ -1,0 +1,22 @@
+{
+  "name": "ubuntu22",
+  "image": "ghcr.io/romange/ubuntu-dev:22",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools-themes",
+        "twxs.cmake"
+      ],
+      "settings": {
+        "cmake.buildDirectory": "/build",
+        "extensions.ignoreRecommendations": true
+      }
+    }
+  },
+  "mounts": [
+    "source=ubuntu22-vol,target=/build,type=volume"
+  ],
+  "postCreateCommand": ".devcontainer/ubuntu22/post-create.sh ${containerWorkspaceFolder}"
+}
