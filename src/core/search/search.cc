@@ -39,8 +39,10 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params) {
 
 // GCC 12 yields a wrong warning in a deeply inlined call in UnifyResults, only ignoring the whole
 // scope solves it
+#ifndef __clang__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 
 // Represents an either owned or non-owned result set that can be accessed transparently.
 struct IndexResult {
@@ -439,7 +441,9 @@ struct BasicSearch {
   vector<pair<float, DocId>> knn_distances_;
 };
 
+#ifndef __clang__
 #pragma GCC diagnostic pop
+#endif
 
 }  // namespace
 
