@@ -99,6 +99,9 @@ const char* ObjTypeName(int type) {
       return "stream";
     case OBJ_JSON:
       return "rejson-rl";
+    case OBJ_SBF:
+      return "MBbloom--";
+
     default:
       LOG(ERROR) << "Unsupported type " << type;
   }

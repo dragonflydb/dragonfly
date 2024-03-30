@@ -218,8 +218,8 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
-  constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 208);
+  constexpr size_t kDbSz = sizeof(DbStats) - sizeof(DbTableStats);
+  static_assert(kDbSz == 32);
 
   DbTableStats::operator+=(o);
 
