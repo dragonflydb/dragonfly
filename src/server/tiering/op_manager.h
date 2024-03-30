@@ -11,6 +11,7 @@
 
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
+#include "util/fibers/future.h"
 
 namespace dfly::tiering {
 
@@ -31,7 +32,7 @@ class OpManager {
   std::error_code Open(std::string_view file);
 
   // Schedule read for offloaded entry that will resolve the future
-  tiering::Future<std::string> Read(EntryId id, DiskSegment segment);
+  util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment);
 
   // Delete entry - either offloaded or with pending io
   void Delete(EntryId id, std::optional<DiskSegment> segment);
@@ -54,7 +55,7 @@ class OpManager {
 
     OwnedEntryId id;
     DiskSegment segment;
-    absl::InlinedVector<tiering::Future<std::string>, 1> futures;
+    absl::InlinedVector<util::fb2::Promise<std::string>, 1> futures;
   };
 
   // Describes an ongoing read operation for a fixed segment
@@ -63,15 +64,16 @@ class OpManager {
     }
 
     // Get ops for id or create new
-    EntryOps* ForId(EntryId id, DiskSegment segment);
+    EntryOps& ForId(EntryId id, DiskSegment segment);
 
     DiskSegment segment;                       // spanning segment of whole read
     absl::InlinedVector<EntryOps, 1> key_ops;  // enqueued operations for different keys
     bool delete_requested = false;             // whether to delete after reading the segment
   };
 
-  // Prepare read operation for segment or return pending if it exists
-  ReadOp* PrepareRead(DiskSegment segment);
+  // Prepare read operation for segment or return pending if it exists.
+  // Refernce is valid until any other read operations occur.
+  ReadOp& PrepareRead(DiskSegment segment);
 
   // Called once read finished
   void ProcessRead(size_t offset, std::string_view value);
@@ -85,7 +87,7 @@ class OpManager {
   absl::flat_hash_map<size_t /* offset */, ReadOp> pending_reads_;
 
   // todo: allow heterogeneous lookups with non owned id
-  absl::flat_hash_map<OwnedEntryId, unsigned /* version */> pending_stashes_;
+  absl::flat_hash_map<OwnedEntryId, unsigned /* version */> pending_stash_ver_;
 };
 
 };  // namespace dfly::tiering

@@ -22,26 +22,4 @@ struct DiskSegment {
   size_t offset = 0, length = 0;
 };
 
-// Simple thread-safe fiber-blocking future for waiting for value. Pass by value.
-template <typename T> struct Future {
-  Future() : block{std::make_shared<Block>()} {
-  }
-
-  T Get() {
-    block->waker.await([this] { return block->value.has_value(); });
-    return std::move(*block->value);
-  }
-
-  void Resolve(T result) {
-    block->value = std::move(result);
-    block->waker.notify();
-  }
-
- private:
-  struct Block {
-    std::optional<T> value;
-    util::fb2::EventCount waker;
-  };
-  std::shared_ptr<Block> block;
-};
 };  // namespace dfly::tiering
