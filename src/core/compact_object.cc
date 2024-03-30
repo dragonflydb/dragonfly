@@ -718,7 +718,7 @@ void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_f
     *u_.sbf = SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
   } else {
     SetMeta(SBF_TAG);
-    void* ptr = tl.local_mr->allocate(sizeof(SBF));
+    void* ptr = tl.local_mr->allocate(sizeof(SBF), alignof(SBF));
     u_.sbf = new (ptr) SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
   }
 }
