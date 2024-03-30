@@ -146,6 +146,17 @@ SBF::~SBF() {
     f.Destroy(mr);
 }
 
+SBF& SBF::operator=(SBF&& src) {
+  filters_.clear();
+  filters_.swap(src.filters_);
+  grow_factor_ = src.grow_factor_;
+  fp_prob_ = src.fp_prob_;
+  current_size_ = src.current_size_;
+  max_capacity_ = src.max_capacity_;
+
+  return *this;
+}
+
 bool SBF::Add(std::string_view str) {
   DCHECK_LT(current_size_, max_capacity_);
 
