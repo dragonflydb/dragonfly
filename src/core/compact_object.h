@@ -18,6 +18,8 @@ constexpr unsigned kEncodingIntSet = 0;
 constexpr unsigned kEncodingStrMap = 1;   // for set/map encodings of strings
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
 constexpr unsigned kEncodingListPack = 3;
+constexpr unsigned kEncodingJsonCons = 0;
+constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
 
@@ -296,6 +298,7 @@ class CompactObj {
   // you need to move an object that created with the function JsonFromString
   // into here, no copying is allowed!
   void SetJson(JsonType&& j);
+  void SetJson(const uint8_t* buf, size_t len);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
@@ -380,8 +383,12 @@ class CompactObj {
   } __attribute__((packed));
 
   struct JsonWrapper {
-    JsonType* json_ptr = nullptr;
-    size_t unneeded = 0;
+    union {
+      JsonType* json_ptr;
+      uint8_t* flat_ptr;
+    };
+    uint32_t json_len = 0;
+    uint8_t encoding = 0;
   } __attribute__((packed));
 
   // My main data structure. Union of representations.
