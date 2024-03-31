@@ -794,7 +794,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
 
   if (auto jo = loader.journal_offset(); jo.has_value()) {
     this->journal_rec_executed_.store(*jo);
-    lsn_ = this->journal_rec_executed_.load();
+    lsn_ = this->journal_rec_executed_;
   } else {
     if (master_context_.version > DflyVersion::VER0)
       cntx->ReportError(std::make_error_code(errc::protocol_error),
@@ -836,8 +836,10 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
     if (is_ping) {
       force_ping_ = true;
-      LOG_IF_EVERY_N(WARNING, tx_data->lsn != lsn_, 1000);
-      DCHECK_EQ(tx_data->lsn, lsn_) << "tx_data->lsn=" << tx_data->lsn << " lsn=" << lsn_;
+      if (tx_data->lsn != 0) {
+        LOG_IF_EVERY_N(WARNING, tx_data->lsn != lsn_, 1000);
+        DCHECK_EQ(tx_data->lsn, lsn_);
+      }
       journal_rec_executed_.fetch_add(1);
     } else if (tx_data->opcode == journal::Op::EXEC) {
       if (use_multi_shard_exe_sync_) {

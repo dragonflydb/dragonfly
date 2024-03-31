@@ -45,17 +45,17 @@ struct Entry : public EntryBase {
                    >;
 
   Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt, std::optional<SlotId> slot_id,
-        Payload pl, LSN lsn = 0)
-      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, lsn}, payload{pl} {
+        Payload pl)
+      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{pl} {
   }
 
   Entry(journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
-      : EntryBase{0, opcode, dbid, 0, slot_id, 0}, payload{} {
+      : EntryBase{0, opcode, dbid, 0, slot_id, 0} {
   }
 
   Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt,
         std::optional<SlotId> slot_id)
-      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, 0}, payload{} {
+      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, 0} {
   }
 
   bool HasPayload() const {
@@ -85,7 +85,8 @@ struct JournalItem {
   std::optional<SlotId> slot;
 };
 
-using ChangeCallback = std::function<void(const JournalItem&, bool await)>;
+using ChangeCallback =
+    std::function<void(const JournalItem&, bool await, const JournalItem* maybe_ping)>;
 
 }  // namespace journal
 }  // namespace dfly

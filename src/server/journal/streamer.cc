@@ -9,39 +9,17 @@
 #include <ctime>
 #include <system_error>
 
+#include "absl/strings/str_cat.h"
 #include "base/logging.h"
 
 namespace dfly {
 using namespace util;
 
-const time_t JournalStreamer::PeriodicPing::kPingInterval = 2;
-
-void JournalStreamer::PeriodicPing::MaybePing() {
-  const auto now = time(nullptr);
-  const auto elapsed = now - start_time_;
-  if (elapsed > kPingInterval) {
-    base::IoBuf tmp;
-    io::BufSink sink(&tmp);
-    JournalWriter writer(&sink);
-    journal::Entry entry(0, journal::Op::PING, 0, 0, nullopt, {},
-                         streamer_->journal_->PostIncrLsn());
-    writer.Write(entry);
-
-    streamer_->Write(io::Buffer(io::View(tmp.InputBuffer())));
-    Start();
-  }
-}
-
-void JournalStreamer::PeriodicPing::Start() {
-  start_time_ = time(nullptr);
-}
-
 void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
   using namespace journal;
-  periodic_ping_.Start();
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
-  journal_cb_id_ =
-      journal_->RegisterOnChange([this, with_pings](const JournalItem& item, bool allow_await) {
+  journal_cb_id_ = journal_->RegisterOnChange(
+      [this, with_pings](const JournalItem& item, bool allow_await, const JournalItem* maybe_ping) {
         if (!ShouldWrite(item)) {
           return;
         }
@@ -51,10 +29,19 @@ void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
           return AwaitIfWritten();
         }
 
-        Write(io::Buffer(item.data));
+        if (with_pings && item.opcode == Op::PING) {
+          base::IoBuf tmp;
+          io::BufSink buf_sink{&tmp};
+          JournalWriter writer{&buf_sink};
+          writer.Write(0);
+          auto res = absl::StrCat(item.data, io::View(tmp.InputBuffer()));
+          Write(io::Buffer(res));
+        } else {
+          Write(io::Buffer(item.data));
+        }
 
-        if (with_pings) {
-          periodic_ping_.MaybePing();
+        if (with_pings && maybe_ping) {
+          Write(io::Buffer(maybe_ping->data));
         }
         NotifyWritten(allow_await);
       });

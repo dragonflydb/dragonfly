@@ -184,15 +184,28 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
       file_offset_ += line.size();
     }
 #endif
+  const auto now = time(nullptr);
+  std::optional<JournalItem> ping_item;
+  if ((now - start_time_) > 2) {
+    journal::Entry entry(0, journal::Op::PING, 0, 0, nullopt, {});
+    io::BufSink buf_sink{&ring_serialize_buf_};
+    JournalWriter writer{&buf_sink};
+    writer.Write(entry);
+    writer.Write(lsn_++);
+    item->data = io::View(ring_serialize_buf_.InputBuffer());
+    ring_serialize_buf_.Clear();
+    start_time_ = time(nullptr);
+  }
 
   // TODO: Remove the callbacks, replace with notifiers
   {
     std::shared_lock lk(cb_mu_);
+    auto* maybe_ping = ping_item ? &*ping_item : nullptr;
     DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
              << " num callbacks: " << change_cb_arr_.size();
 
     for (const auto& k_v : change_cb_arr_) {
-      k_v.second(*item, await);
+      k_v.second(*item, await, maybe_ping);
     }
   }
 }

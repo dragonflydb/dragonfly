@@ -34,8 +34,6 @@ class Journal {
 
   LSN GetLsn() const;
 
-  LSN PostIncrLsn();
-
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
                    std::optional<SlotId> slot, Entry::Payload payload, bool await);
 

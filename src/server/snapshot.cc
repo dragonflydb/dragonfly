@@ -328,7 +328,8 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
+void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await,
+                                   const journal::JournalItem* unused_ping) {
   // We ignore EXEC and NOOP entries because we they have no meaning during
   // the LOAD phase on replica.
   if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC)

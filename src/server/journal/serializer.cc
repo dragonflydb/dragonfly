@@ -21,8 +21,7 @@ using namespace std;
 
 namespace dfly {
 
-JournalWriter::JournalWriter(io::Sink* sink, std::optional<DflyVersion> maybe_version)
-    : sink_{sink}, maybe_version_(maybe_version) {
+JournalWriter::JournalWriter(io::Sink* sink) : sink_{sink} {
 }
 
 void JournalWriter::Write(uint64_t v) {
@@ -77,9 +76,6 @@ void JournalWriter::Write(const journal::Entry& entry) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
     case journal::Op::PING:
-      if (maybe_version_ && *maybe_version_ >= DflyVersion::VER4) {
-        Write(entry.lsn);
-      }
       return;
     case journal::Op::COMMAND:
     case journal::Op::EXPIRED:
