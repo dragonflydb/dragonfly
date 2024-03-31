@@ -698,8 +698,7 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
 
-  string_view key = parser.Next();
-  string_view value = parser.Next();
+  auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
@@ -709,8 +708,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   while (parser.HasNext()) {
     parser.ToUpper();
     if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
-      string_view opt = parser.Next();
-      int64_t int_arg = parser.Next<int64_t>();
+      auto [opt, int_arg] = parser.Next<string_view, int64_t>();
 
       if (auto err = parser.Error(); err) {
         return builder->SendError(err->MakeReply());
