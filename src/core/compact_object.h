@@ -301,6 +301,7 @@ class CompactObj {
   JsonType* GetJson() const;
 
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
+  SBF* GetSBF() const;
 
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
