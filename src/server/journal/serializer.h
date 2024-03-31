@@ -18,7 +18,7 @@ namespace dfly {
 // It automatically keeps track of the current database index.
 class JournalWriter {
  public:
-  JournalWriter(io::Sink* sink);
+  JournalWriter(io::Sink* sink, std::optional<DflyVersion> version = std::nullopt);
 
   // Write single entry to sink.
   void Write(const journal::Entry& entry);
@@ -35,6 +35,7 @@ class JournalWriter {
  private:
   io::Sink* sink_;
   std::optional<DbIndex> cur_dbid_{};
+  std::optional<DflyVersion> maybe_version_;
 };
 
 // JournalReader allows deserializing journal entries from a source.

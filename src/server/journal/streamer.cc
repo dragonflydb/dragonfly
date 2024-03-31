@@ -23,7 +23,8 @@ void JournalStreamer::PeriodicPing::MaybePing() {
     base::IoBuf tmp;
     io::BufSink sink(&tmp);
     JournalWriter writer(&sink);
-    journal::Entry entry(0, journal::Op::PING, 0, 0, nullopt, {}, streamer_->total_records_);
+    journal::Entry entry(0, journal::Op::PING, 0, 0, nullopt, {},
+                         streamer_->journal_->PostIncrLsn());
     writer.Write(entry);
 
     streamer_->Write(io::Buffer(io::View(tmp.InputBuffer())));
@@ -49,7 +50,6 @@ void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
           // No record to write, just await if data was written so consumer will read the data.
           return AwaitIfWritten();
         }
-        ++total_records_;
 
         Write(io::Buffer(item.data));
 

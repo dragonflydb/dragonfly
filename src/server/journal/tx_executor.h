@@ -66,7 +66,6 @@ struct TransactionReader {
   // Stores ongoing multi transaction data.
   absl::flat_hash_map<TxId, TransactionData> current_;
   bool accumulate_multi_ = false;
-  int64_t total_ = 0;
 };
 
 }  // namespace dfly
