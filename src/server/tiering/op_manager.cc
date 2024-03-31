@@ -25,12 +25,12 @@ OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
 
 }  // namespace
 
-OpManager::~OpManager() {
-  storage_.Close();
-}
-
 std::error_code OpManager::Open(std::string_view file) {
   return storage_.Open(file);
+}
+
+void OpManager::Close() {
+  storage_.Close();
 }
 
 util::fb2::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) {

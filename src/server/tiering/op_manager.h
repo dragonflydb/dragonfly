@@ -26,10 +26,10 @@ class OpManager {
   using OwnedEntryId = std::variant<unsigned, std::string>;
 
   OpManager() = default;
-  ~OpManager();
-
   // Open file with underlying disk storage, must be called before use
   std::error_code Open(std::string_view file);
+
+  void Close();
 
   // Schedule read for offloaded entry that will resolve the future
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment);
