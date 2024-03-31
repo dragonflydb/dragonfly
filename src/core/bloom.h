@@ -72,9 +72,13 @@ class Bloom {
  * TODO: to test the actual rate of this filter.
  */
 class SBF {
+  SBF(const SBF&) = delete;
+
  public:
   SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::memory_resource* mr);
   ~SBF();
+
+  SBF& operator=(SBF&& src);
 
   bool Add(std::string_view str);
   bool Exists(std::string_view str) const;
