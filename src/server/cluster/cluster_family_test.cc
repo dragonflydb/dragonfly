@@ -649,16 +649,27 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
 }
 
 TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
-  for (string_view count : {"1", "10", "100", "1000", "10000", "100000"}) {
+  for (int count : {1, 10, 100, 1000, 10000, 100000}) {
     ConfigSingleNodeCluster(GetMyId());
 
-    EXPECT_EQ(Run({"debug", "populate", count, "key", "4"}), "OK");
+    EXPECT_EQ(Run({"debug", "populate", absl::StrCat(count), "key", "4"}), "OK");
     EXPECT_EQ(Run({"get", "key:0"}), "xxxx");
+
     EXPECT_THAT(Run({"cluster", "keyslot", "key:0"}), IntArg(2592));
+    EXPECT_THAT(Run({"dbsize"}), IntArg(count));
+    auto slot_size_response = Run({"dflycluster", "getslotinfo", "slots", "2592"});
+    EXPECT_THAT(slot_size_response, RespArray(ElementsAre(_, "key_count", _, "total_reads", _,
+                                                          "total_writes", _, "memory_bytes", _)));
+    auto slot_size = slot_size_response.GetVec()[2].GetInt();
+    EXPECT_TRUE(slot_size.has_value());
+
     EXPECT_EQ(Run({"dflycluster", "flushslots", "2592", "2592"}), "OK");
     // key:0 should have been removed, so APPEND will end up with key:0 == ZZZZ
     EXPECT_THAT(Run({"append", "key:0", "ZZZZ"}), IntArg(4));
     EXPECT_EQ(Run({"get", "key:0"}), "ZZZZ");
+    // db size should be count - (size of slot 2592) + 1, where 1 is for 'key:0'
+    ExpectConditionWithinTimeout(
+        [&]() { return CheckedInt({"dbsize"}) == (count - *slot_size + 1); });
 
     ResetService();
   }
