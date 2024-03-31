@@ -12,6 +12,7 @@
 #include "server/tiering/common.h"
 #include "server/tiering/test_common.h"
 #include "util/fibers/fibers.h"
+#include "util/fibers/future.h"
 
 namespace dfly::tiering {
 
@@ -33,12 +34,14 @@ struct OpManagerTest : PoolTestBase, OpManager {
   }
 
   void ReportFetched(EntryId id, std::string_view value, DiskSegment segment) {
+    fetched_[id] = value;
   }
 
+  absl::flat_hash_map<EntryId, std::string> fetched_;
   absl::flat_hash_map<EntryId, DiskSegment> stashed_;
 };
 
-TEST_F(OpManagerTest, SimpleStashes) {
+TEST_F(OpManagerTest, SimpleStashesWithReads) {
   pp_->at(0)->Await([this] {
     Open();
 
@@ -55,7 +58,28 @@ TEST_F(OpManagerTest, SimpleStashes) {
       EXPECT_GE(stashed_[i].offset, i > 0);
       EXPECT_EQ(stashed_[i].length, 10 + (i > 9));
       EXPECT_EQ(Read(i, stashed_[i]).get(), absl::StrCat("VALUE", i, "real"));
+      EXPECT_EQ(fetched_.extract(i).mapped(), absl::StrCat("VALUE", i, "real"));
     }
+
+    Close();
+  });
+}
+
+TEST_F(OpManagerTest, DeleteAfterReads) {
+  pp_->at(0)->Await([this] {
+    Open();
+
+    EXPECT_FALSE(Stash(0u, absl::StrCat("DATA")));
+    while (stashed_.empty())
+      util::ThisFiber::SleepFor(1ms);
+
+    std::vector<util::fb2::Future<std::string>> reads;
+    for (unsigned i = 0; i < 100; i++)
+      reads.emplace_back(Read(0u, stashed_[0u]));
+    Delete(0u, stashed_[0u]);
+
+    for (auto& fut : reads)
+      EXPECT_EQ(fut.get(), "DATA");
 
     Close();
   });
