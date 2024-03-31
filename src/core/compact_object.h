@@ -345,7 +345,7 @@ class CompactObj {
   template <typename T> static void DeleteMR(void* ptr) {
     T* t = (T*)ptr;
     t->~T();
-    memory_resource()->deallocate(ptr, alignof(T));
+    memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
  private:
