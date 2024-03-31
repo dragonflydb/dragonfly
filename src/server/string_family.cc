@@ -688,6 +688,10 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   if (params.flags & SET_STICK) {
     cmds.push_back("STICK");
   }
+  if (params.memcache_flags) {
+    cmds.push_back("_MCFLAGS");
+    cmds.push_back(absl::StrCat(params.memcache_flags));
+  }
 
   // Skip NX/XX because SET operation was exectued.
   // Skip GET, because its not important on replica.
@@ -749,6 +753,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         int_arg *= 1000;
       }
       sparams.expire_after_ms = int_arg;
+    } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
+      sparams.memcache_flags = parser.Next<uint16_t>();
     } else {
       uint16_t flag = parser.Switch(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
