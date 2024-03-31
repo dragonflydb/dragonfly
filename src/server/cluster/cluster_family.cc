@@ -427,8 +427,8 @@ namespace {
 // Guards set configuration, so that we won't handle 2 in parallel.
 util::fb2::Mutex set_config_mu;
 
-void DeleteSlots(const SlotSet& slots) {
-  if (slots.Empty()) {
+void DeleteSlots(const SlotRanges& slots_ranges) {
+  if (slots_ranges.empty()) {
     return;
   }
 
@@ -437,23 +437,23 @@ void DeleteSlots(const SlotSet& slots) {
     if (shard == nullptr)
       return;
 
-    shard->db_slice().FlushSlots(slots);
+    shard->db_slice().FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
 
-void WriteFlushSlotsToJournal(const SlotSet& slots) {
-  if (slots.Empty()) {
+void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
+  if (slot_ranges.empty()) {
     return;
   }
 
   // Build args
   vector<string> args;
-  args.reserve(slots.Count() + 1);
+  args.reserve(slot_ranges.size() + 1);
   args.push_back("FLUSHSLOTS");
-  for (SlotId slot = 0; slot <= SlotSet::kMaxSlot; ++slot) {
-    if (slots.Contains(slot))
-      args.push_back(absl::StrCat(slot));
+  for (SlotRange range : slot_ranges) {
+    args.push_back(absl::StrCat(range.start));
+    args.push_back(absl::StrCat(range.end));
   }
 
   // Build view
@@ -535,7 +535,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
-    auto deleted_slots = before.GetRemovedSlots(after);
+    auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
@@ -591,16 +591,18 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 }
 
 void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx) {
-  SlotSet slots;
-  for (size_t i = 0; i < args.size(); ++i) {
-    unsigned slot;
-    if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
-      return cntx->SendError(kSyntaxErrType);
-    }
-    slots.Set(static_cast<SlotId>(slot), true);
-  }
+  SlotRanges slot_ranges;
 
-  DeleteSlots(slots);
+  CmdArgParser parser(args);
+  do {
+    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+    slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
+  } while (parser.HasNext());
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  DeleteSlots(slot_ranges);
 
   return cntx->SendOk();
 }

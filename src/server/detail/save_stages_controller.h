@@ -115,9 +115,6 @@ struct SaveStagesController : public SaveStagesInputs {
   // Build full path: get dir, try creating dirs, get filename with placeholder
   GenericError BuildFullPath();
 
-  // Switch to saving state if in active state
-  GenericError SwitchState();
-
   void SaveCb(unsigned index);
 
   void CloseCb(unsigned index);

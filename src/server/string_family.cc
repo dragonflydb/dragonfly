@@ -655,12 +655,9 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     it->first.SetSticky(true);
   }
 
-  // Check whether we need to update flags table.
-  bool req_flag_update = (params.memcache_flags != 0) != prime_value.HasFlag();
-  if (req_flag_update) {
-    prime_value.SetFlag(params.memcache_flags != 0);
-    db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
-  }
+  // Update flags
+  prime_value.SetFlag(params.memcache_flags != 0);
+  db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
 
   db_slice.RemoveFromTiered(it, op_args_.db_cntx.db_index);
   // overwrite existing entry.

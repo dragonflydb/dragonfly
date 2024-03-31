@@ -589,7 +589,7 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
 }
 
 // GCC yields a wrong warning about uninitialized optional use
-#ifdef __GNUC__
+#ifndef __clang__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
@@ -1123,7 +1123,9 @@ void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
   BitFieldGeneric(args, true, cntx);
 }
 
+#ifndef __clang__
 #pragma GCC diagnostic pop
+#endif
 
 void BitOp(CmdArgList args, ConnectionContext* cntx) {
   static const std::array<std::string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,

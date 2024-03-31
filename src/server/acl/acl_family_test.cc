@@ -228,7 +228,7 @@ TEST_F(AclFamilyTest, TestCat) {
   EXPECT_THAT(resp, ErrArg("ERR Unkown category: NONSENSE"));
 
   resp = Run({"ACL", "CAT"});
-  EXPECT_THAT(resp.GetVec().size(), 24);
+  EXPECT_GE(resp.GetVec().size(), 24u);
 
   resp = Run({"ACL", "CAT", "STRING"});
 

@@ -210,7 +210,6 @@ class ServerFamily {
 
   bool HasReplica() const;
   std::optional<Replica::Info> GetReplicaInfo() const;
-  std::string GetReplicaMasterId() const;
 
   void OnClose(ConnectionContext* cntx);
 
@@ -243,6 +242,7 @@ class ServerFamily {
   void LastSave(CmdArgList args, ConnectionContext* cntx);
   void Latency(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
+  void AddReplicaOf(CmdArgList args, ConnectionContext* cntx);
   void ReplTakeOver(CmdArgList args, ConnectionContext* cntx);
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
@@ -261,8 +261,7 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(std::string_view host, std::string_view port, ConnectionContext* cntx,
-                         ActionOnConnectionFail on_error);
+  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
@@ -282,6 +281,7 @@ class ServerFamily {
                                    bool ignore_state = false);
 
   GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
+  void StopAllClusterReplicas();
 
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Future<GenericError> load_result_;
@@ -295,6 +295,8 @@ class ServerFamily {
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
+  std::vector<std::unique_ptr<Replica>> cluster_replicas_
+      ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;

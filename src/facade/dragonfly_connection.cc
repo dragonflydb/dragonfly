@@ -89,7 +89,8 @@ void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
 // https://www.w3.org/Protocols/rfc2616/rfc2616-sec5.html
 // One place to find a good implementation would be https://github.com/h2o/picohttpparser
 bool MatchHttp11Line(string_view line) {
-  return absl::StartsWith(line, "GET ") && absl::EndsWith(line, "HTTP/1.1");
+  return (absl::StartsWith(line, "GET ") || absl::StartsWith(line, "POST ")) &&
+         absl::EndsWith(line, "HTTP/1.1");
 }
 
 void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
@@ -651,11 +652,13 @@ void Connection::HandleRequests() {
   http_res = CheckForHttpProto(peer);
 
   if (http_res) {
+    cc_.reset(service_->CreateContext(peer, this));
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
       is_http_ = true;
       HttpConnection http_conn{http_listener_};
       http_conn.SetSocket(peer);
+      http_conn.set_user_data(cc_.get());
       auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
       io_buf_.ConsumeInput(io_buf_.InputLen());
       if (!ec) {
@@ -666,7 +669,6 @@ void Connection::HandleRequests() {
       // this connection.
       http_conn.ReleaseSocket();
     } else {
-      cc_.reset(service_->CreateContext(peer, this));
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
@@ -674,9 +676,8 @@ void Connection::HandleRequests() {
       ConnectionFlow(peer);
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
-
-      cc_.reset();
     }
+    cc_.reset();
   }
 
   VLOG(1) << "Closed connection for peer " << remote_ep;

@@ -185,7 +185,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   // choose "randomly" a stash bucket to evict an item.
   auto bucket_it = eb.probes.by_type.stash_buckets[eb.key_hash % kNumStashBuckets];
   auto last_slot_it = bucket_it;
-  last_slot_it += (PrimeTable::kBucketWidth - 1);
+  last_slot_it += (PrimeTable::kSlotNum - 1);
   if (!last_slot_it.is_done()) {
     // don't evict sticky items
     if (last_slot_it->first.IsSticky()) {
@@ -221,8 +221,8 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
-  constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 208);
+  constexpr size_t kDbSz = sizeof(DbStats) - sizeof(DbTableStats);
+  static_assert(kDbSz == 32);
 
   DbTableStats::operator+=(o);
 
@@ -458,7 +458,10 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
 
   if (TieredStorage* tiered = shard_owner()->tiered_storage();
       tiered && load_mode == LoadExternalMode::kLoad) {
-    if ((*res.it)->second.IsExternal()) {
+    if (res.it->second.IsExternal()) {
+      // We need to move fetched_items because we preempt and some other
+      // transaction might conclude and clear the fetched_items_ with OnCbFinish()
+      auto tmp = std::move(fetched_items_);
       // Load reads data from disk therefore we will preempt in this function.
       // We will update the iterator if it changed during the preemption
       res.it = tiered->Load(cntx.db_index, *res.it, key);
@@ -466,6 +469,7 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
         return OpStatus::KEY_NOTFOUND;
       }
       events_.ram_misses++;
+      fetched_items_ = std::move(tmp);
     } else {
       if ((*res.it)->second.HasIoPending()) {
         tiered->CancelIo(cntx.db_index, *res.it);
@@ -683,7 +687,6 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
   // was made. Therefore we delete slots entries with version < next_version
   uint64_t next_version = NextVersion();
-
   std::string tmp;
   auto del_entry_cb = [&](PrimeTable::iterator it) {
     std::string_view key = it->first.GetSlice(&tmp);
@@ -710,10 +713,11 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   etl.DecommitMemory(ServerState::kDataHeap);
 }
 
-void DbSlice::FlushSlots(SlotSet slot_ids) {
-  InvalidateSlotWatches(slot_ids);
-  fb2::Fiber("flush_slots", [this, slot_ids = std::move(slot_ids)]() mutable {
-    FlushSlotsFb(slot_ids);
+void DbSlice::FlushSlots(SlotRanges slot_ranges) {
+  SlotSet slot_set(slot_ranges);
+  InvalidateSlotWatches(slot_set);
+  fb2::Fiber("flush_slots", [this, slot_set = std::move(slot_set)]() mutable {
+    FlushSlotsFb(slot_set);
   }).Detach();
 }
 
@@ -806,14 +810,10 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, Iterator it, uint64_t at) {
 void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
   auto& db = *db_arr_[db_ind];
   if (flag == 0) {
-    if (db.mcflag.Erase(key) == 0) {
-      LOG(ERROR) << "Internal error, inconsistent state, mcflag should be present but not found "
-                 << key.ToString();
-    }
+    db.mcflag.Erase(key);
   } else {
-    auto [it, inserted] = db.mcflag.Insert(std::move(key), flag);
-    if (!inserted)
-      it->second = flag;
+    auto [it, _] = db.mcflag.Insert(std::move(key), flag);
+    it->second = flag;
   }
 }
 
@@ -1240,7 +1240,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
   auto& db_table = db_arr_[db_ind];
   int32_t num_segments = db_table->prime.GetSegmentCount();
   int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
-  int32_t num_slots = PrimeTable::Segment_t::kNumSlots;
+  int32_t num_slots = PrimeTable::Segment_t::kSlotNum;
 
   size_t used_memory_after;
   size_t evicted = 0;
@@ -1328,8 +1328,8 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, Iterator it, DbTable* table)
   PrimeTable::Segment_t* segment = table->prime.GetSegment(it.segment_id());
   DCHECK(segment);
 
-  constexpr unsigned kNumStashBuckets = PrimeTable::Segment_t::kStashBucketCnt;
-  constexpr unsigned kNumRegularBuckets = PrimeTable::Segment_t::kRegularBucketCnt;
+  constexpr unsigned kNumStashBuckets = PrimeTable::Segment_t::kStashBucketNum;
+  constexpr unsigned kNumRegularBuckets = PrimeTable::Segment_t::kBucketNum;
 
   PrimeTable::bucket_iterator it2(it);
   unsigned evicted = 0;
@@ -1349,7 +1349,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, Iterator it, DbTable* table)
     if (bucket.IsEmpty())
       continue;
 
-    for (int slot_id = PrimeTable::Segment_t::kNumSlots - 1; slot_id >= 0; --slot_id) {
+    for (int slot_id = PrimeTable::Segment_t::kSlotNum - 1; slot_id >= 0; --slot_id) {
       if (!bucket.IsBusy(slot_id))
         continue;
 
@@ -1373,7 +1373,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, Iterator it, DbTable* table)
   }
 
   // Try normal buckets now. We iterate from largest slot to smallest across the whole segment.
-  for (int slot_id = PrimeTable::Segment_t::kNumSlots - 1; !evict_succeeded && slot_id >= 0;
+  for (int slot_id = PrimeTable::Segment_t::kSlotNum - 1; !evict_succeeded && slot_id >= 0;
        --slot_id) {
     for (unsigned i = 0; i < kNumRegularBuckets; ++i) {
       unsigned bid = (it.bucket_id() + i) % kNumRegularBuckets;

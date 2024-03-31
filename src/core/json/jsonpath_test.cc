@@ -20,7 +20,6 @@ namespace dfly::json {
 using namespace std;
 
 using testing::ElementsAre;
-using FlatJson = flexbuffers::Reference;
 
 MATCHER_P(SegType, value, "") {
   return ExplainMatchResult(testing::Property(&PathSegment::type, value), arg, result_listener);
@@ -85,7 +84,7 @@ bool is_object(FlatJson ref) {
 }
 
 bool is_array(FlatJson ref) {
-  return ref.IsVector();
+  return ref.IsUntypedVector();
 }
 
 class ScannerTest : public ::testing::Test {
@@ -159,6 +158,30 @@ TEST_F(ScannerTest, Basic) {
   NEXT_TOK(WILDCARD);
 }
 
+TEST_F(ScannerTest, FlatToJson) {
+  flatbuffers::Parser parser;
+  const char* json = R"(
+    {
+      "foo": "bar",
+      "bar": 1.5,
+      "strs": ["hello", "world"]
+    }
+  )";
+  flexbuffers::Builder fbb;
+  ASSERT_TRUE(parser.ParseFlexBuffer(json, nullptr, &fbb));
+  fbb.Finish();
+
+  flexbuffers::Reference root = flexbuffers::GetRoot(fbb.GetBuffer());
+  JsonType res = FromFlat(root);
+  EXPECT_EQ(res, JsonType::parse(json));
+  fbb.Clear();
+  FromJsonType(res, &fbb);
+  fbb.Finish();
+  string actual;
+  flexbuffers::GetRoot(fbb.GetBuffer()).ToString(false, true, actual);
+  EXPECT_EQ(res, JsonType::parse(actual));
+}
+
 TYPED_TEST(JsonPathTest, Parser) {
   EXPECT_NE(0, this->Parse("foo"));
   EXPECT_NE(0, this->Parse("$foo"));
@@ -187,9 +210,6 @@ TYPED_TEST(JsonPathTest, Parser) {
 }
 
 TYPED_TEST(JsonPathTest, Root) {
-  if constexpr (std::is_same_v<TypeParam, FlatJson>) {
-    return;  // TODO
-  }
   TypeParam json = ValidJson<TypeParam>(R"({"foo" : 1, "bar": "str" })");
   ASSERT_EQ(0, this->Parse("$"));
   Path path = this->driver_.TakePath();
@@ -203,10 +223,6 @@ TYPED_TEST(JsonPathTest, Root) {
 }
 
 TYPED_TEST(JsonPathTest, Functions) {
-  if constexpr (std::is_same_v<TypeParam, FlatJson>) {
-    return;  // TODO
-  }
-
   ASSERT_EQ(0, this->Parse("max($.plays[*].score)"));
   Path path = this->driver_.TakePath();
   ASSERT_EQ(4, path.size());
@@ -217,18 +233,14 @@ TYPED_TEST(JsonPathTest, Functions) {
   TypeParam json = ValidJson<TypeParam>(R"({"plays": [{"score": 1}, {"score": 2}]})");
   int called = 0;
   EvaluatePath(path, json, [&](auto, const TypeParam& val) {
+    ++called;
     ASSERT_TRUE(is_int(val));
     ASSERT_EQ(2, to_int(val));
-    ++called;
   });
   ASSERT_EQ(1, called);
 }
 
 TYPED_TEST(JsonPathTest, Descent) {
-  if constexpr (std::is_same_v<TypeParam, FlatJson>) {
-    return;  // TODO
-  }
-
   EXPECT_EQ(0, this->Parse("$..foo"));
   Path path = this->driver_.TakePath();
   ASSERT_EQ(2, path.size());
@@ -247,10 +259,6 @@ TYPED_TEST(JsonPathTest, Descent) {
 }
 
 TYPED_TEST(JsonPathTest, Path) {
-  if constexpr (std::is_same_v<TypeParam, FlatJson>) {
-    return;  // TODO
-  }
-
   Path path;
   TypeParam json = ValidJson<TypeParam>(R"({"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "a2": [1]},
       "v13": 3
@@ -294,10 +302,6 @@ TYPED_TEST(JsonPathTest, Path) {
 }
 
 TYPED_TEST(JsonPathTest, EvalDescent) {
-  if constexpr (std::is_same_v<TypeParam, FlatJson>) {
-    return;  // TODO
-  }
-
   TypeParam json = ValidJson<TypeParam>(R"(
     {"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "v21": {"f": 3, "a2": [1]}},
       "v13": { "a2" : { "b" : {"f" : 4}}}
@@ -353,10 +357,6 @@ TYPED_TEST(JsonPathTest, EvalDescent) {
 }
 
 TYPED_TEST(JsonPathTest, Wildcard) {
-  if constexpr (std::is_same_v<TypeParam, FlatJson>) {
-    return;  // TODO
-  }
-
   ASSERT_EQ(0, this->Parse("$[*]"));
   Path path = this->driver_.TakePath();
   ASSERT_EQ(1, path.size());

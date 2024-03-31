@@ -328,8 +328,8 @@ class DbSlice {
    */
   void FlushDb(DbIndex db_ind);
 
-  // Flushes the data of given slot ids.
-  void FlushSlots(SlotSet slot_ids);
+  // Flushes the data of given slot ranges.
+  void FlushSlots(SlotRanges slot_ranges);
 
   EngineShard* shard_owner() const {
     return owner_;

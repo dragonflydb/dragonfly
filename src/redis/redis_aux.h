@@ -7,31 +7,10 @@
 /* the last one in object.h is OBJ_STREAM and it is 6,
  * this will add enough place for Redis types to grow */
 #define OBJ_JSON 15U
+#define OBJ_SBF  16U
 
 /* How many types of objects exist */
-#define OBJ_TYPE_MAX 16U
-
-#define HASHTABLE_MIN_FILL 10           /* Minimal hash table fill 10% */
-#define HASHTABLE_MAX_LOAD_FACTOR 1.618 /* Maximum hash table load factor. */
-
-/* Redis maxmemory strategies. Instead of using just incremental number
- * for this defines, we use a set of flags so that testing for certain
- * properties common to multiple policies is faster. */
-#define MAXMEMORY_FLAG_LRU (1 << 0)
-#define MAXMEMORY_FLAG_LFU (1 << 1)
-#define MAXMEMORY_FLAG_ALLKEYS (1 << 2)
-#define MAXMEMORY_FLAG_NO_SHARED_INTEGERS (MAXMEMORY_FLAG_LRU | MAXMEMORY_FLAG_LFU)
-
-#define LFU_INIT_VAL 5
-
-#define MAXMEMORY_VOLATILE_LRU ((0 << 8) | MAXMEMORY_FLAG_LRU)
-#define MAXMEMORY_VOLATILE_LFU ((1 << 8) | MAXMEMORY_FLAG_LFU)
-#define MAXMEMORY_VOLATILE_TTL (2 << 8)
-#define MAXMEMORY_VOLATILE_RANDOM (3 << 8)
-#define MAXMEMORY_ALLKEYS_LRU ((4 << 8) | MAXMEMORY_FLAG_LRU | MAXMEMORY_FLAG_ALLKEYS)
-#define MAXMEMORY_ALLKEYS_LFU ((5 << 8) | MAXMEMORY_FLAG_LFU | MAXMEMORY_FLAG_ALLKEYS)
-#define MAXMEMORY_ALLKEYS_RANDOM ((6 << 8) | MAXMEMORY_FLAG_ALLKEYS)
-#define MAXMEMORY_NO_EVICTION (7 << 8)
+#define OBJ_TYPE_MAX 17U
 
 #define CONFIG_RUN_ID_SIZE 40U
 
