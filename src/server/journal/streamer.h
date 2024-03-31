@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <ctime>
-
 #include "server/db_slice.h"
 #include "server/io_utils.h"
 #include "server/journal/journal.h"

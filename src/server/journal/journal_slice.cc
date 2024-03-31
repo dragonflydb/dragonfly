@@ -63,6 +63,7 @@ void JournalSlice::Init(unsigned index) {
 
   slice_index_ = index;
   ring_buffer_.emplace(2);
+  start_time_ = time(nullptr);
 }
 
 #if 0

@@ -6,7 +6,6 @@
 
 #include <absl/functional/bind_front.h>
 
-#include <ctime>
 #include <system_error>
 
 #include "absl/strings/str_cat.h"
