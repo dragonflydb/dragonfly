@@ -18,7 +18,9 @@ class BloomFamily {
  private:
   static void Reserve(CmdArgList args, ConnectionContext* cntx);
   static void Add(CmdArgList args, ConnectionContext* cntx);
+  static void MAdd(CmdArgList args, ConnectionContext* cntx);
   static void Exists(CmdArgList args, ConnectionContext* cntx);
+  static void MExists(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly
