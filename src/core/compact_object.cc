@@ -1008,8 +1008,7 @@ void CompactObj::Free() {
     u_.json_obj.json_ptr->~JsonType();
     tl.local_mr->deallocate(u_.json_obj.json_ptr, sizeof(JsonType), kAlignSize);
   } else if (taglen_ == SBF_TAG) {
-    u_.sbf->~SBF();
-    tl.local_mr->deallocate(u_.sbf, sizeof(SBF), alignof(SBF));
+    DeleteMR<SBF>(u_.sbf);
   } else {
     LOG(FATAL) << "Unsupported tag " << int(taglen_);
   }
