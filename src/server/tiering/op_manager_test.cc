@@ -10,6 +10,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "server/tiering/common.h"
+#include "server/tiering/disk_storage.h"
 #include "server/tiering/test_common.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
@@ -80,6 +81,37 @@ TEST_F(OpManagerTest, DeleteAfterReads) {
 
     for (auto& fut : reads)
       EXPECT_EQ(fut.get(), "DATA");
+
+    Close();
+  });
+}
+
+TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
+  pp_->at(0)->Await([this] {
+    Open();
+
+    // Build single numbers blob
+    std::string numbers = "H";  // single padding byte to recognize it as small keys
+    std::vector<DiskSegment> number_segments;
+    for (size_t i = 0; i < 100; i++) {
+      std::string number = std::to_string(i);
+      number_segments.emplace_back(numbers.size(), number.size());
+      numbers += number;
+    }
+
+    EXPECT_FALSE(Stash(0u, numbers));
+    while (stashed_.empty())
+      util::ThisFiber::SleepFor(1ms);
+
+    EXPECT_EQ(stashed_[0u].offset, 0u);
+
+    // Issue lots of concurrent reads
+    std::vector<util::fb2::Future<std::string>> futures;
+    for (size_t i = 0; i < 100; i++)
+      futures.emplace_back(Read(absl::StrCat("k", i), number_segments[i]));
+
+    for (size_t i = 0; i < 100; i++)
+      EXPECT_EQ(futures[i].get(), std::to_string(i));
 
     Close();
   });
