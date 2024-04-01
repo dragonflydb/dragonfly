@@ -64,7 +64,6 @@ void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
-  // TODO: get version between cluster nodes on migraion start
   JournalStreamer::Start(dest, send_lsn);
 
   PrimeTable::Cursor cursor;
