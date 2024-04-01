@@ -66,7 +66,7 @@ jobs:
 
       - name: Create k8s Kind Cluster
         run: |
-          kind create cluster --name chart-testing || true
+          kind create cluster --name chart-testing
       
       - name: Install the CRD and Operator
         run: |
