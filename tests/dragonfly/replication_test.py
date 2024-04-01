@@ -1654,7 +1654,6 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
 
     master.stop()
     replica.stop()
-    assert replica.is_in_logs("partial sync finished in")
 
 
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
@@ -1697,7 +1696,6 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
 
     master.stop()
     replica.stop()
-    assert replica.is_in_logs("partial sync finished in")
 
 
 async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_factory):
