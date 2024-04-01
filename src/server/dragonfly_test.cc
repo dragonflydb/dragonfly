@@ -347,6 +347,15 @@ TEST_F(DflyEngineTest, Memcache) {
   EXPECT_THAT(resp, ElementsAre("END"));
 }
 
+TEST_F(DflyEngineTest, MemcacheFlags) {
+  using MP = MemcacheParser;
+
+  auto resp = Run("resp", {"SET", "key", "bar", "_MCFLAGS", "42"});
+  ASSERT_EQ(resp, "OK");
+  MCResponse resp2 = RunMC(MP::GET, "key");
+  EXPECT_THAT(resp2, ElementsAre("VALUE key 42 3", "bar", "END"));
+}
+
 TEST_F(DflyEngineTest, LimitMemory) {
   mi_option_enable(mi_option_limit_os_alloc);
   string blob(128, 'a');

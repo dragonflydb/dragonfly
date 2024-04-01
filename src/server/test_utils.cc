@@ -365,6 +365,10 @@ RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
 }
 
 RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->Run(id, slice); });
+  }
+
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
 
   CmdArgVec args = conn_wrapper->Args(slice);
@@ -601,6 +605,8 @@ ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id)
 }
 
 auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {
+  DCHECK(ProactorBase::IsProactorThread());
+
   unique_lock lk(mu_);
 
   auto [it, inserted] = connections_.emplace(id, nullptr);
