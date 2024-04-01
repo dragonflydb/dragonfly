@@ -37,18 +37,20 @@ util::fb2::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) 
   return PrepareRead(segment).ForId(id, segment).futures.emplace_back().get_future();
 }
 
-void OpManager::Delete(EntryId id, std::optional<DiskSegment> segment) {
-  if (!segment.has_value()) {
-    // If the item isn't offloaded, it has io pending, so cancel it
-    DCHECK(pending_stash_ver_.count(ToOwned(id)));
-    ++pending_stash_ver_[ToOwned(id)];
-  } else if (auto it = pending_reads_.find(segment->offset); it != pending_reads_.end()) {
+void OpManager::Delete(EntryId id) {
+  // If the item isn't offloaded, it has io pending, so cancel it
+  DCHECK(pending_stash_ver_.count(ToOwned(id)));
+  ++pending_stash_ver_[ToOwned(id)];
+}
+
+void OpManager::Delete(DiskSegment segment) {
+  if (auto it = pending_reads_.find(segment.offset); it != pending_reads_.end()) {
     // If a read is pending, it will be deleted once the read finished
-    DCHECK_EQ(it->second.segment.length, segment->length);
+    DCHECK_EQ(it->second.segment.length, segment.length);
     it->second.delete_requested = true;
   } else {
     // Otherwise, delete it immediately
-    storage_.MarkAsFree(*segment);
+    storage_.MarkAsFree(segment);
   }
 }
 

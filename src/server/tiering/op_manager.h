@@ -34,8 +34,11 @@ class OpManager {
   // Schedule read for offloaded entry that will resolve the future
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment);
 
-  // Delete entry - either offloaded or with pending io
-  void Delete(EntryId id, std::optional<DiskSegment> segment);
+  // Delete entry with pending io
+  void Delete(EntryId id);
+
+  // Delete offloaded entry
+  void Delete(DiskSegment segment);
 
   // Stash value to be offloaded
   std::error_code Stash(EntryId id, std::string_view value);
