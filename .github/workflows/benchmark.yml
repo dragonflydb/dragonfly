@@ -49,17 +49,12 @@ jobs:
 
       - name: install sude
         run: |
-          sudo apt-get install -y apt-transport-https ca-certificates curl
-          curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
-          sudo apt-get update
           sudo apt-get install -y kubectl
 
       - name: Set up Python
         uses: actions/setup-python@v3
         with:
           python-version: 3.9
-
 
       # - name: Create k8s Kind Cluster
       #   uses: helm/kind-action@v1.9.0
