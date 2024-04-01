@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: "0 9 * * *" # run at 6 AM UTC
   workflow_dispatch:
+  pull_request:
 
 jobs:
   benchmark:
@@ -32,7 +33,7 @@ jobs:
                   cpu: "2"
                   memory: "2000Mi"
 
-    runs-on: [self-hosted, linux, x86, benchmark]
+    runs-on: [benchmark]
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
@@ -41,15 +42,25 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: true
-      - name: install sude
+      - name: install sudo
         run: |
           apt-get update
           apt-get install sudo
+
+      - name: install sude
+        run: |
+          sudo apt-get install -y apt-transport-https ca-certificates curl
+          curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+          sudo apt-get update
+          sudo apt-get install -y kubectl
+
       - name: Set up Python
         uses: actions/setup-python@v3
         with:
           python-version: 3.9
-      
+
+
       # - name: Create k8s Kind Cluster
       #   uses: helm/kind-action@v1.9.0
       #   with:
