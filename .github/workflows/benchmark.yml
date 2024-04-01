@@ -32,8 +32,7 @@ jobs:
                   cpu: "2"
                   memory: "2000Mi"
 
-    #runs-on: [self-hosted, linux, x86, benchmark]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x86, benchmark]
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
@@ -55,6 +54,7 @@ jobs:
         with:
           kubectl_version: v1.28.0
       - run: |
+          kubectl config get-contexts
           kubectl cluster-info --context kind-chart-testing
       - name: Install the CRD and Operator
         run: |
