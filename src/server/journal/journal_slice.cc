@@ -142,7 +142,7 @@ std::string_view JournalSlice::GetEntry(LSN lsn) const {
   return (*ring_buffer_)[lsn - start].data;
 }
 
-void JournalSlice::AddLogRecord(Entry entry, bool await) {
+void JournalSlice::AddLogRecord(Entry&& entry, bool await) {
   optional<FiberAtomicGuard> guard;
   if (!await) {
     guard.emplace();  // Guard is non-movable/copyable, so we must use emplace()
