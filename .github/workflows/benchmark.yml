@@ -73,7 +73,7 @@ jobs:
 
       - name: Create k8s Kind Cluster
         run: |
-          kind create cluster --name kind-chart-testing
+          kind create cluster --name chart-testing
 
       - run: |
             kubectl config get-contexts
