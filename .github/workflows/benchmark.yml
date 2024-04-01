@@ -47,10 +47,6 @@ jobs:
           apt-get update
           apt-get install sudo
 
-      - name: install sude
-        run: |
-          sudo apt-get install -y kubectl
-
       - name: Set up Python
         uses: actions/setup-python@v3
         with:
@@ -60,18 +56,13 @@ jobs:
       #   uses: helm/kind-action@v1.9.0
       #   with:
       #     kubectl_version: v1.28.0
-      
-      - name: Create KinD Cluster
-        run: /usr/local/bin/kind create cluster
 
-      - name: Set Kubeconfig
-        run: |
-          echo "KUBECONFIG=$(/usr/local/bin/kind get kubeconfig-path --name="kind")" >> $GITHUB_ENV
 
       - name: Run Kubectl Commands
         run: |
-          kubectl cluster-info
-          kubectl get nodes
+          whereis kubectl
+          whereis kind
+          
       
       # - run: |
       #      kubectl config get-contexts
