@@ -54,8 +54,8 @@ jobs:
         with:
           kubectl_version: v1.28.0
       - run: |
-          kubectl config get-contexts
-          kubectl cluster-info --context kind-chart-testing
+          sudo kubectl config get-contexts
+          sudo kubectl cluster-info --context kind-chart-testing
       - name: Install the CRD and Operator
         run: |
           # Install the CRD and Operator
