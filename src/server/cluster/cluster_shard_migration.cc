@@ -34,7 +34,7 @@ ClusterShardMigration::~ClusterShardMigration() {
 
 void ClusterShardMigration::Start(Context* cntx, io::Source* source) {
   JournalReader reader{source, 0};
-  TransactionReader tx_reader{false, 0};
+  TransactionReader tx_reader{false};
 
   while (!cntx->IsCancelled()) {
     if (cntx->IsCancelled())
