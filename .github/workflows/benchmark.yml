@@ -56,8 +56,7 @@ jobs:
       #     kubectl_version: v1.28.0
       
       - name: Create KinD Cluster
-        run:
-          kind create cluster
+        run: kind create cluster
 
       - name: Set Kubeconfig
         run: |
