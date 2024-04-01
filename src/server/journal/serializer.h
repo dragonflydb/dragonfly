@@ -42,8 +42,7 @@ class JournalWriter {
 struct JournalReader {
  public:
   // Initialize start database index.
-  JournalReader(io::Source* source, DbIndex dbid,
-                std::optional<DflyVersion> version = std::nullopt);
+  JournalReader(io::Source* source, DbIndex dbid);
 
   // Overwrite current source and ensure there is no leftover from previous.
   void SetSource(io::Source* source);
@@ -68,7 +67,6 @@ struct JournalReader {
   io::Source* source_;
   base::IoBuf buf_;
   DbIndex dbid_;
-  std::optional<DflyVersion> maybe_version_;
 };
 
 }  // namespace dfly

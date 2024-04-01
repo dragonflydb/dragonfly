@@ -37,7 +37,7 @@ class JournalSlice {
     return slice_index_ != UINT32_MAX;
   }
 
-  void AddLogRecord(const Entry& entry, bool await);
+  void AddLogRecord(Entry entry, bool await);
 
   // Register a callback that will be called every time a new entry is
   // added to the journal.
@@ -70,7 +70,6 @@ class JournalSlice {
   uint32_t slice_index_ = UINT32_MAX;
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
-  time_t start_time_;
 };
 
 }  // namespace journal

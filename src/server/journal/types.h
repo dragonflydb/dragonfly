@@ -22,7 +22,8 @@ enum class Op : uint8_t {
   MULTI_COMMAND = 11,
   EXEC = 12,
   PING = 13,
-  FIN = 14
+  FIN = 14,
+  LSN = 15
 };
 
 struct EntryBase {
@@ -73,7 +74,6 @@ struct ParsedEntry : public EntryBase {
     CmdArgVec cmd_args;  // represents the parsed command.
   };
   CmdData cmd;
-  LSN lsn;
 
   std::string ToString() const;
 };
@@ -85,8 +85,7 @@ struct JournalItem {
   std::optional<SlotId> slot;
 };
 
-using ChangeCallback =
-    std::function<void(const JournalItem&, bool await, const JournalItem* maybe_ping)>;
+using ChangeCallback = std::function<void(const JournalItem&, bool await)>;
 
 }  // namespace journal
 }  // namespace dfly

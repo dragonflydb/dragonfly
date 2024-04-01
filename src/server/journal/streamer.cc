@@ -6,20 +6,20 @@
 
 #include <absl/functional/bind_front.h>
 
-#include <system_error>
-
-#include "absl/strings/str_cat.h"
 #include "base/logging.h"
 
 namespace dfly {
 using namespace util;
 
-void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
+void JournalStreamer::Start(io::Sink* dest, DflyVersion version) {
   using namespace journal;
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
-  journal_cb_id_ = journal_->RegisterOnChange(
-      [this, with_pings](const JournalItem& item, bool allow_await, const JournalItem* maybe_ping) {
+  journal_cb_id_ =
+      journal_->RegisterOnChange([this, version](const JournalItem& item, bool allow_await) {
         if (!ShouldWrite(item)) {
+          return;
+        }
+        if (item.opcode == Op::LSN && version < DflyVersion::VER4) {
           return;
         }
 
@@ -28,20 +28,7 @@ void JournalStreamer::Start(io::Sink* dest, bool with_pings) {
           return AwaitIfWritten();
         }
 
-        if (with_pings && item.opcode == Op::PING) {
-          base::IoBuf tmp;
-          io::BufSink buf_sink{&tmp};
-          JournalWriter writer{&buf_sink};
-          writer.Write(0);
-          auto res = absl::StrCat(item.data, io::View(tmp.InputBuffer()));
-          Write(io::Buffer(res));
-        } else {
-          Write(io::Buffer(item.data));
-        }
-
-        if (with_pings && maybe_ping) {
-          Write(io::Buffer(maybe_ping->data));
-        }
+        Write(io::Buffer(item.data));
         NotifyWritten(allow_await);
       });
 }
@@ -72,12 +59,13 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal
   DCHECK(slice != nullptr);
 }
 
-void RestoreStreamer::Start(io::Sink* dest, bool with_pings) {
+void RestoreStreamer::Start(io::Sink* dest, DflyVersion version) {
   VLOG(2) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
-  JournalStreamer::Start(dest);
+  // TODO: get version between cluster nodes on migraion start
+  JournalStreamer::Start(dest, version);
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;

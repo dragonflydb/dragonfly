@@ -25,7 +25,7 @@ class JournalStreamer : protected BufferedStreamerBase {
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(io::Sink* dest, bool with_pings = false);
+  virtual void Start(io::Sink* dest, DflyVersion version);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -55,7 +55,8 @@ class RestoreStreamer : public JournalStreamer {
   RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
-  void Start(io::Sink* dest, bool with_pings = false) override;
+  // TODO: get target node version on migration start
+  void Start(io::Sink* dest, DflyVersion version = DflyVersion::CURRENT_VER) override;
   // Cancel() must be called if Start() is called
   void Cancel() override;
 

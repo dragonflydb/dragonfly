@@ -75,6 +75,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
   switch (entry.opcode) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
+    case journal::Op::LSN:
+      return Write(entry.lsn);
     case journal::Op::PING:
       return;
     case journal::Op::COMMAND:
@@ -89,8 +91,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
   };
 }
 
-JournalReader::JournalReader(io::Source* source, DbIndex dbid, std::optional<DflyVersion> version)
-    : source_{source}, buf_{4_KB}, dbid_{dbid}, maybe_version_(version) {
+JournalReader::JournalReader(io::Source* source, DbIndex dbid)
+    : source_{source}, buf_{4_KB}, dbid_{dbid} {
 }
 
 void JournalReader::SetSource(io::Source* source) {
@@ -196,12 +198,13 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   entry.opcode = opcode;
 
   if (opcode == journal::Op::PING) {
-    if (maybe_version_ && *maybe_version_ >= DflyVersion::VER4) {
-      SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.lsn);
-    }
     return entry;
   }
   if (opcode == journal::Op::FIN) {
+    return entry;
+  }
+  if (opcode == journal::Op::LSN) {
+    SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.lsn);
     return entry;
   }
 
