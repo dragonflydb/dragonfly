@@ -19,9 +19,6 @@ void JournalStreamer::Start(io::Sink* dest, bool send_lsn) {
         if (!ShouldWrite(item)) {
           return;
         }
-        if (item.opcode == Op::LSN && !send_lsn) {
-          return;
-        }
 
         if (item.opcode == Op::NOOP) {
           // No record to write, just await if data was written so consumer will read the data.
@@ -29,6 +26,15 @@ void JournalStreamer::Start(io::Sink* dest, bool send_lsn) {
         }
 
         Write(io::Buffer(item.data));
+        time_t now = time(nullptr);
+        if (send_lsn && now - last_lsn_time_ > 3) {
+          last_lsn_time_ = now;
+          base::IoBuf tmp;
+          io::BufSink sink(&tmp);
+          JournalWriter writer(&sink);
+          writer.Write(Entry{journal::Op::LSN, item.lsn});
+          Write(io::Buffer(io::View(tmp.InputBuffer())));
+        }
         NotifyWritten(allow_await);
       });
 }

@@ -109,7 +109,9 @@ std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* read
       cntx->ReportError(res.error());
       return std::nullopt;
     }
-    if (lsn_.has_value()) {
+
+    // When LSN opcode is sent master does not increase journal lsn.
+    if (lsn_.has_value() && res->opcode != journal::Op::LSN) {
       ++*lsn_;
     }
 
@@ -122,7 +124,7 @@ std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* read
       TransactionData tx_data = TransactionData::FromSingle(std::move(res.value()));
       if (lsn_.has_value() && tx_data.opcode == journal::Op::LSN) {
         DCHECK_NE(tx_data.lsn, 0u);
-        LOG_IF_EVERY_N(WARNING, tx_data.lsn != *lsn_, 1000)
+        LOG_IF_EVERY_N(WARNING, tx_data.lsn != *lsn_, 10000)
             << "master lsn:" << tx_data.lsn << " replica lsn" << *lsn_;
         DCHECK_EQ(tx_data.lsn, *lsn_);
       }

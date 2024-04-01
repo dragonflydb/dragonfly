@@ -44,6 +44,7 @@ class JournalStreamer : protected BufferedStreamerBase {
 
   uint32_t journal_cb_id_{0};
   journal::Journal* journal_;
+  time_t last_lsn_time_ = 0;
 
   util::fb2::Fiber write_fb_{};
 };

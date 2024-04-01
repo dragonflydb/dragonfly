@@ -63,7 +63,8 @@ void JournalWriter::Write(std::monostate) {
 
 void JournalWriter::Write(const journal::Entry& entry) {
   // Check if entry has a new db index and we need to emit a SELECT entry.
-  if (entry.opcode != journal::Op::SELECT && (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
+  if (entry.opcode != journal::Op::SELECT && entry.opcode != journal::Op::LSN &&
+      entry.opcode != journal::Op::PING && (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
     Write(journal::Entry{journal::Op::SELECT, entry.dbid, entry.slot});
     cur_dbid_ = entry.dbid;
   }
