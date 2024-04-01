@@ -49,14 +49,29 @@ jobs:
         uses: actions/setup-python@v3
         with:
           python-version: 3.9
-      - name: Create k8s Kind Cluster
-        uses: helm/kind-action@v1.9.0
-        with:
-          kubectl_version: v1.28.0
-      - run: |
-           echo $KUBECONFIG
-           kubectl config get-contexts
-           kubectl cluster-info --context kind-chart-testing
+      
+      # - name: Create k8s Kind Cluster
+      #   uses: helm/kind-action@v1.9.0
+      #   with:
+      #     kubectl_version: v1.28.0
+      
+      - name: Create KinD Cluster
+        run:
+          kind create cluster
+
+      - name: Set Kubeconfig
+        run: |
+          echo "KUBECONFIG=$(kind get kubeconfig-path --name="kind")" >> $GITHUB_ENV
+
+      - name: Run Kubectl Commands
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+      
+      # - run: |
+      #      kubectl config get-contexts
+      #      kubectl cluster-info --context kind-chart-testing
+      
       - name: Install the CRD and Operator
         run: |
           # Install the CRD and Operator
