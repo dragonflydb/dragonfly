@@ -389,7 +389,7 @@ class CompactObj {
     };
     uint32_t json_len = 0;
     uint8_t encoding = 0;
-  } __attribute__((packed));
+  };
 
   // My main data structure. Union of representations.
   // RobjWrapper is kInlineLen=16 bytes, so we employ SSO of that size via inline_str.
@@ -400,7 +400,9 @@ class CompactObj {
 
     SmallString small_str;
     detail::RobjWrapper r_obj;
-    JsonWrapper json_obj;
+
+    // using 'packed' to reduce alignement of U to 1.
+    JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
