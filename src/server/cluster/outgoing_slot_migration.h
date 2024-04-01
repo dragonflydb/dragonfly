@@ -46,7 +46,6 @@ class OutgoingMigration : private ProtocolClient {
 
   uint16_t GetPort() const {
     return server().port;
-    ;
   };
 
   const SlotRanges& GetSlots() const {
