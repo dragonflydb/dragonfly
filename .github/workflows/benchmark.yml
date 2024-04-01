@@ -73,17 +73,12 @@ jobs:
 
       - name: Create k8s Kind Cluster
         run: |
-          kind delete cluster --name chart-testing
-          kind create cluster --name chart-testing
-
-      - run: |
-            kubectl config get-contexts
-            kubectl config use-context kind-chart-testing
+          kind create cluster --name chart-testing || true
       
       - name: Install the CRD and Operator
         run: |
           # Install the CRD and Operator
-          kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml --validate=false
+          kubectl apply --validate=false -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
       - name: Apply Configuration
         run: |
           echo '${{ toJson(matrix.config) }}' | kubectl apply -f -
