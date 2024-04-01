@@ -28,7 +28,7 @@ class ClusterFamily {
   // Returns a thread-local pointer.
   ClusterConfig* cluster_config();
 
-  void FinalizeIncomingMigration(uint32_t local_sync_id);
+  void UpdateConfig(const std::vector<SlotRange>& slots, bool enable);
 
  private:
   // Cluster commands compatible with Redis
@@ -70,7 +70,9 @@ class ClusterFamily {
 
   // create a ClusterSlotMigration entity which will execute migration
   ClusterSlotMigration* CreateIncomingMigration(std::string host_ip, uint16_t port,
-                                                SlotRanges slots);
+                                                SlotRanges slots, uint32_t shards_num);
+
+  std::shared_ptr<ClusterSlotMigration> GetIncomingMigration(std::string host_ip, uint16_t port);
 
   bool StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
                            ConnectionContext* cntx);
@@ -84,7 +86,7 @@ class ClusterFamily {
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
-  std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
+  std::vector<std::shared_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   uint32_t next_sync_id_ ABSL_GUARDED_BY(migration_mu_) = 1;

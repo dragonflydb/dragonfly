@@ -21,48 +21,19 @@ using namespace facade;
 using namespace util;
 using absl::GetFlag;
 
-ClusterShardMigration::ClusterShardMigration(ServerContext server_context, uint32_t local_sync_id,
-                                             uint32_t shard_id, uint32_t sync_id, Service* service)
-    : ProtocolClient(server_context), source_shard_id_(shard_id), sync_id_(sync_id) {
+ClusterShardMigration::ClusterShardMigration(uint32_t local_sync_id, uint32_t shard_id,
+                                             Service* service)
+    : source_shard_id_(shard_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
+  // Check why do we need this
   executor_->connection_context()->slot_migration_id = local_sync_id;
 }
 
 ClusterShardMigration::~ClusterShardMigration() {
-  JoinFlow();
 }
 
-std::error_code ClusterShardMigration::StartSyncFlow(Context* cntx) {
-  RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
-
-  leftover_buf_.emplace(128);
-  ResetParser(/*server_mode=*/false);
-
-  std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", sync_id_, " ", source_shard_id_);
-  VLOG(1) << "cmd: " << cmd;
-
-  RETURN_ON_ERR(SendCommand(cmd));
-
-  auto read_resp = ReadRespReply(&*leftover_buf_);
-  if (!read_resp.has_value()) {
-    return read_resp.error();
-  }
-
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
-
-  leftover_buf_->ConsumeInput(read_resp->left_in_buffer);
-
-  sync_fb_ =
-      fb2::Fiber("shard_migration_full_sync", &ClusterShardMigration::FullSyncShardFb, this, cntx);
-
-  return {};
-}
-
-void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
-  DCHECK(leftover_buf_);
-  io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
-
-  JournalReader reader{&ps, 0};
+void ClusterShardMigration::Start(Context* cntx, io::Source* source) {
+  JournalReader reader{source, 0};
   TransactionReader tx_reader{false};
 
   while (!cntx->IsCancelled()) {
@@ -70,14 +41,13 @@ void ClusterShardMigration::FullSyncShardFb(Context* cntx) {
       break;
 
     auto tx_data = tx_reader.NextTxData(&reader, cntx);
-    if (!tx_data)
+    if (!tx_data) {
+      VLOG(1) << "No tx data";
       break;
-
-    TouchIoTime();
+    }
 
     if (tx_data->opcode == journal::Op::FIN) {
       VLOG(2) << "Flow " << source_shard_id_ << " is finalized";
-      is_finalized_ = true;
       break;
     } else if (tx_data->opcode == journal::Op::PING) {
       // TODO check about ping logic
@@ -100,14 +70,6 @@ void ClusterShardMigration::ExecuteTxWithNoShardSync(TransactionData&& tx_data, 
     CHECK(false) << "We don't support command: " << ToSV(tx_data.commands.front().cmd_args[0])
                  << "in cluster migration process.";
   }
-}
-
-void ClusterShardMigration::Cancel() {
-  CloseSocket();
-}
-
-void ClusterShardMigration::JoinFlow() {
-  sync_fb_.JoinIfNeeded();
 }
 
 }  // namespace dfly
