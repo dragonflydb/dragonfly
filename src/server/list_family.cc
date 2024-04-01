@@ -198,7 +198,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   absl::StrAppend(debugMessages.Next(), "OpBPop: ", key, " by ", t->DebugId());
@@ -228,7 +228,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   if (!src_res)
     return src_res.status();
 
-  PrimeIterator src_it = src_res->it;
+  auto src_it = src_res->it;
   quicklist* src_ql = GetQL(src_it->second);
 
   if (src == dest) {  // simple case.
@@ -255,7 +255,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
     dest_res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, dest_ql);
-    DCHECK(IsValid(src_it));
+    DCHECK(src_it.IsValid());
   } else {
     if (dest_res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
@@ -368,7 +368,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   StringVec res;
@@ -499,8 +499,7 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
                                  std::string_view element, int rank, int count, int max_len) {
-  OpResult<PrimeConstIterator> it_res =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
 
@@ -580,7 +579,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   int iter_direction = AL_START_HEAD;
@@ -622,7 +621,7 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
@@ -639,7 +638,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
   long llen = quicklistCount(ql);
 

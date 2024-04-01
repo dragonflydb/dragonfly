@@ -189,7 +189,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
     return it_res.status();
   }
 
-  PrimeConstIterator entry_it = it_res->it;
+  auto entry_it = it_res->it;
   JsonType* json_val = entry_it->second.GetJson();
   DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
                    << entry_it->second.ObjType() << "'";
@@ -234,8 +234,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, string_view key, const json::Path& p
 }
 
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeConstIterator> it_res =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok())
     return it_res.status();
 
@@ -1129,8 +1128,7 @@ vector<OptString> OpJsonMGet(JsonPathV2 expression, const Transaction* t, Engine
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeConstIterator> it_res =
-        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_JSON);
+    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_JSON);
     if (!it_res.ok())
       continue;
 
@@ -1214,8 +1212,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // and its not JSON, it would return an error.
   if (path == "." || path == "$") {
     if (is_nx_condition || is_xx_condition) {
-      OpResult<PrimeConstIterator> it_res =
-          op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+      auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
       bool key_exists = (it_res.status() != OpStatus::KEY_NOTFOUND);
       if (is_nx_condition && key_exists) {
         return false;

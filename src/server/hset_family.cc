@@ -280,15 +280,14 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
    * of returning no or very few elements. (taken from redis code at db.c line 904 */
   constexpr size_t INTERATION_FACTOR = 10;
 
-  OpResult<PrimeConstIterator> find_res =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto find_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
 
   if (!find_res) {
     DVLOG(1) << "ScanOp: find failed: " << find_res << ", baling out";
     return find_res.status();
   }
 
-  PrimeConstIterator it = find_res.value();
+  auto it = find_res.value();
   StringVec res;
   uint32_t count = scan_op.limit * HASH_TABLE_ENTRIES_FACTOR;
   const PrimeValue& pv = it->second;
@@ -626,7 +625,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
   uint8_t* lp = nullptr;
-  PrimeIterator& it = add_res.it;
+  auto& it = add_res.it;
   PrimeValue& pv = it->second;
 
   if (add_res.is_new) {

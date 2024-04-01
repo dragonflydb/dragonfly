@@ -95,8 +95,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeConstIterator> it_res =
-      db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -126,7 +125,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val,
+size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view key, string_view val,
                       bool prepend) {
   string tmp, new_val;
   string_view slice = it->second.GetSlice(&tmp);
@@ -175,7 +174,7 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
   auto res = op_args.shard->db_slice().FindAndFetchMutable(op_args.db_cntx, key);
   res.post_updater.Run();
 
-  if (!IsValid(res.it))
+  if (!res.it.IsValid())
     return OpStatus::KEY_NOTFOUND;
 
   if (res.it->second.ObjType() != OBJ_STRING)
@@ -260,7 +259,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
   auto res = db_slice.FindMutable(op_args.db_cntx, key);
 
-  if (!IsValid(res.it)) {
+  if (!res.it.IsValid()) {
     if (skip_on_missing)
       return OpStatus::KEY_NOTFOUND;
 
@@ -381,7 +380,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   const int64_t now_ms = op_args.db_cntx.time_now_ms;
 
   int64_t tat_ms = now_ms;
-  if (IsValid(res.it)) {
+  if (res.it.IsValid()) {
     if (res.it->second.ObjType() != OBJ_STRING) {
       return OpStatus::WRONG_TYPE;
     }
@@ -440,7 +439,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   reset_after_ms = ttl_ms;
 
   if (!limited) {
-    if (IsValid(res.it)) {
+    if (res.it.IsValid()) {
       if (IsValid(res.exp_it)) {
         res.exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
       } else {
@@ -496,12 +495,11 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   auto& db_slice = shard->db_slice();
 
   SinkReplyBuilder::MGetResponse response(keys.size());
-  absl::InlinedVector<PrimeConstIterator, 32> iters(keys.size());
+  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.size());
 
   size_t total_size = 0;
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeConstIterator> it_res =
-        db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
+    auto it_res = db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -512,7 +510,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   char* next = response.storage_list->data;
 
   for (size_t i = 0; i < keys.size(); ++i) {
-    PrimeConstIterator it = iters[i];
+    auto it = iters[i];
     if (it.is_done())
       continue;
 
@@ -528,7 +526,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
       }
 
       if (fetch_mcver) {
-        resp.mc_ver = it.GetVersion();
+        resp.mc_ver = it.GetInnerIt().GetVersion();
       }
     }
   }
@@ -557,20 +555,20 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
     } else {
       find_res = db_slice.FindMutable(op_args_.db_cntx, key);
     }
-    if (IsValid(find_res.it)) {
+    if (find_res.it.IsValid()) {
       result_builder.CachePrevValueIfNeeded(find_res.it->second);
     }
 
     // Make sure that we have this key, and only add it if it does exists
     if (params.flags & SET_IF_EXISTS) {
-      if (IsValid(find_res.it)) {
+      if (find_res.it.IsValid()) {
         return std::move(result_builder)
             .Return(SetExisting(params, find_res.it, find_res.exp_it, key, value));
       } else {
         return std::move(result_builder).Return(OpStatus::SKIPPED);
       }
     } else {
-      if (IsValid(find_res.it)) {  // if the policy is not to overide and have the key, just return
+      if (find_res.it.IsValid()) {  // if the policy is not to overide and have the key, just return
         return std::move(result_builder).Return(OpStatus::SKIPPED);
       }
     }
@@ -582,7 +580,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  PrimeIterator it = add_res.it;
+  auto it = add_res.it;
   if (!add_res.is_new) {
     result_builder.CachePrevValueIfNeeded(it->second);
     return std::move(result_builder).Return(SetExisting(params, it, add_res.exp_it, key, value));
@@ -607,7 +605,8 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   if (shard->tiered_storage() &&
       TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
-    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it, key);
+    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it.GetInnerIt(),
+                                                         key);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -617,7 +616,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   return std::move(result_builder).Return(OpStatus::OK);
 }
 
-OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
+OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it, ExpireIterator e_it,
                              string_view key, string_view value) {
   if (params.flags & SET_IF_NOTEXIST)
     return OpStatus::SKIPPED;
@@ -826,7 +825,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     auto op_args = t->GetOpArgs(shard);
     DbSlice& db_slice = op_args.shard->db_slice();
 
-    OpResult<PrimeConstIterator> res;
+    OpResult<DbSlice::ConstIterator> res;
 
     // A temporary code that allows running dragonfly without filling up memory store
     // when reading data from disk.
@@ -1272,7 +1271,7 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
     auto args = t->GetShardArgs(es->shard_id());
     for (size_t i = 0; i < args.size(); i += 2) {
       auto it = es->db_slice().FindReadOnly(t->GetDbContext(), args[i]).it;
-      if (IsValid(it)) {
+      if (it.IsValid()) {
         exists.store(true, memory_order_relaxed);
         break;
       }
@@ -1302,8 +1301,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<PrimeConstIterator> it_res =
-        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto it_res = shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 

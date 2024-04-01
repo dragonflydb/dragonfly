@@ -668,7 +668,7 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename U>
 auto DashTable<_Key, _Value, Policy>::Find(U&& key) const -> const_iterator {
   uint64_t key_hash = DoHash(key);
-  size_t seg_id = SegmentId(key_hash);  // seg_id takes up global_depth_ high bits.
+  uint32_t seg_id = SegmentId(key_hash);  // seg_id takes up global_depth_ high bits.
   const auto* target = segment_[seg_id];
 
   // Hash structure is like this: [SSUUUUBF], where S is segment id, U - unused,

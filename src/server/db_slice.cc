@@ -165,9 +165,9 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
       if (bucket_it->second.HasExpire()) {
         string_view key = bucket_it->first.GetSlice(&scratch);
         ++checked_;
-        auto [prime_it, exp_it] =
-            db_slice_->ExpireIfNeeded(cntx_, DbSlice::Iterator(bucket_it, key));
-        if (prime_it->is_done())
+        auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(
+            cntx_, DbSlice::Iterator(bucket_it, StringOrView::FromView(key)));
+        if (prime_it.is_done())
           ++res;
       }
     }
@@ -207,7 +207,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
                            make_pair("DEL", delete_args), false);
     }
 
-    db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, key), table);
+    db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
 
     ++evicted_;
   }
@@ -217,6 +217,59 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 }
 
 }  // namespace
+
+StringOrView StringOrView::FromString(string s) {
+  StringOrView sov;
+  sov.s_ = std::move(s);
+  sov.sv_ = sov.s_;
+  return sov;
+}
+
+StringOrView StringOrView::FromView(string_view sv) {
+  StringOrView sov;
+  sov.sv_ = sv;
+  return sov;
+}
+
+StringOrView::StringOrView(const StringOrView& o) {
+  *this = o;
+}
+
+StringOrView::StringOrView(StringOrView&& o) {
+  *this = std::move(o);
+}
+
+StringOrView& StringOrView::operator=(const StringOrView& o) {
+  Set(o.s_, o.sv_);
+  return *this;
+}
+
+StringOrView& StringOrView::operator=(StringOrView&& o) {
+  Set(std::move(o.s_), o.sv_);
+  return *this;
+}
+
+bool StringOrView::operator==(const StringOrView& o) const {
+  return view() == o.view();
+}
+
+bool StringOrView::operator!=(const StringOrView& o) const {
+  return !(*this == o);
+}
+
+string_view StringOrView::view() const {
+  return sv_;
+}
+
+void StringOrView::Set(string s, string_view sv) {
+  s_ = std::move(s);
+
+  if (s_.empty()) {
+    sv_ = sv;
+  } else {
+    sv_ = s_;
+  }
+}
 
 #define ADD(x) (x) += o.x
 
@@ -350,8 +403,8 @@ void DbSlice::AutoUpdater::Cancel() {
 
 DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   DCHECK(fields_.action == DestructorAction::kRun);
-  DCHECK(IsValid(*fields.it));
-  fields_.orig_heap_size = (*fields.it)->second.MallocUsed();
+  DCHECK(fields.it.IsValid());
+  fields_.orig_heap_size = fields.it->second.MallocUsed();
 }
 
 DbSlice::AddOrFindResult& DbSlice::AddOrFindResult::operator=(ItAndUpdater&& o) {
@@ -389,19 +442,20 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
     return res.status();
   }
 
-  PreUpdate(cntx.db_index, res->it);
-  return {{res->it, res->exp_it,
+  auto it = DbSlice::Iterator(res->it, StringOrView::FromView(key));
+  PreUpdate(cntx.db_index, it);
+  return {{it, res->exp_it,
            AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                         .db_slice = this,
                         .db_ind = cntx.db_index,
-                        .it = res->it,
+                        .it = it,
                         .key = key})}};
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
-  return {ConstIterator(*res->it, key), res->exp_it};
+  return {ConstIterator(res->it, StringOrView::FromView(key)), res->exp_it};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
@@ -409,7 +463,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, stri
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
   if (res.ok()) {
-    return ConstIterator(*res->it, key);
+    return ConstIterator(res->it, StringOrView::FromView(key));
   }
   return res.status();
 }
@@ -420,7 +474,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cn
   auto res =
       FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats, LoadExternalMode::kLoad);
   if (res.ok()) {
-    return ConstIterator(res->it, key);
+    return ConstIterator(res->it, StringOrView::FromView(key));
   }
   return res.status();
 }
@@ -448,11 +502,11 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
     }
   };
 
-  if (!IsValid(*res.it)) {
+  if (!IsValid(res.it)) {
     return OpStatus::KEY_NOTFOUND;
   }
 
-  if (req_obj_type.has_value() && (*res.it)->second.ObjType() != req_obj_type.value()) {
+  if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     return OpStatus::WRONG_TYPE;
   }
 
@@ -464,30 +518,30 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
       auto tmp = std::move(fetched_items_);
       // Load reads data from disk therefore we will preempt in this function.
       // We will update the iterator if it changed during the preemption
-      res.it = tiered->Load(cntx.db_index, *res.it, key);
-      if (!IsValid(*res.it)) {
+      res.it = tiered->Load(cntx.db_index, res.it, key);
+      if (!IsValid(res.it)) {
         return OpStatus::KEY_NOTFOUND;
       }
       events_.ram_misses++;
       fetched_items_ = std::move(tmp);
     } else {
-      if ((*res.it)->second.HasIoPending()) {
-        tiered->CancelIo(cntx.db_index, *res.it);
+      if (res.it->second.HasIoPending()) {
+        tiered->CancelIo(cntx.db_index, res.it);
       }
       events_.ram_hits++;
     }
-    (*res.it)->first.SetTouched(true);
+    res.it->first.SetTouched(true);
   }
 
   FiberAtomicGuard fg;
-  if ((*res.it)->second.HasExpire()) {  // check expiry state
+  if (res.it->second.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
-    if (!IsValid(*res.it)) {
+    if (!IsValid(res.it)) {
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
-  if (caching_mode_ && IsValid(*res.it)) {
+  if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
@@ -495,9 +549,9 @@ OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::stri
           ccb.second(cntx.db_index, bit);
         }
       };
-      db.prime.CVCUponBump(change_cb_.back().first, *res.it, bump_cb);
+      db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
-    auto bump_it = db.prime.BumpUp(*res.it, PrimeBumpPolicy{fetched_items_});
+    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
       res.it = bump_it;
       ++events_.bumpups;
@@ -557,15 +611,16 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kMutableStats, load_mode);
 
   if (res.ok()) {
-    PreUpdate(cntx.db_index, res->it);
+    Iterator it(res->it, StringOrView::FromView(key));
+    PreUpdate(cntx.db_index, it);
     return DbSlice::AddOrFindResult{
-        .it = res->it,
+        .it = it,
         .exp_it = res->exp_it,
         .is_new = false,
         .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                      .db_slice = this,
                                      .db_ind = cntx.db_index,
-                                     .it = res->it,
+                                     .it = it,
                                      .key = key})};
   }
   auto status = res.status();
@@ -646,13 +701,13 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   }
 
   return DbSlice::AddOrFindResult{
-      .it = Iterator(it, key),
+      .it = Iterator(it, StringOrView::FromView(key)),
       .exp_it = ExpireIterator{},
       .is_new = true,
       .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                    .db_slice = this,
                                    .db_ind = cntx.db_index,
-                                   .it = Iterator(it, key),
+                                   .it = Iterator(it, StringOrView::FromView(key)),
                                    .key = key})};
 }
 
@@ -663,20 +718,20 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 }
 
 bool DbSlice::Del(DbIndex db_ind, Iterator it) {
-  if (!IsValid(*it)) {
+  if (!it.IsValid()) {
     return false;
   }
 
   auto& db = db_arr_[db_ind];
-  auto obj_type = (*it)->second.ObjType();
+  auto obj_type = it->second.ObjType();
 
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
     string tmp;
-    string_view key = (*it)->first.GetSlice(&tmp);
+    string_view key = it->first.GetSlice(&tmp);
     DbContext cntx{db_ind, GetCurrentTimeMs()};
-    doc_del_cb_(key, cntx, (*it)->second);
+    doc_del_cb_(key, cntx, it->second);
   }
-  fetched_items_.erase((*it)->first.AsRef());
+  fetched_items_.erase(it->first.AsRef());
   PerformDeletion(it, db.get());
 
   return true;
@@ -692,7 +747,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     std::string_view key = it->first.GetSlice(&tmp);
     SlotId sid = ClusterConfig::KeySlot(key);
     if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-      PerformDeletion(it, db_arr_[0].get());
+      PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
     }
     return true;
   };
@@ -742,7 +797,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
       if (db_ptr && db_ptr->stats.tiered_entries > 0) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
           if (it->second.IsExternal())
-            PerformDeletion(it, db_ptr.get());
+            PerformDeletion(Iterator::FromPrime(it), db_ptr.get());
         }
 
         DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
@@ -852,7 +907,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
                                         ExpireIterator expire_it, const ExpireParams& params) {
   constexpr uint64_t kPersistValue = 0;
   DCHECK(params.IsDefined());
-  DCHECK(IsValid(prime_it));
+  DCHECK(prime_it.IsValid());
   // If this need to persist, then only set persist value and return
   if (params.persist) {
     RemoveExpire(cntx.db_index, prime_it);
@@ -1019,10 +1074,10 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it) {
 
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
   for (const auto& ccb : change_cb_) {
-    ccb.second(db_ind, ChangeReq{it});
+    ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
   }
 
-  it.SetVersion(NextVersion());
+  it.GetInnerIt().SetVersion(NextVersion());
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size) {
@@ -1052,6 +1107,10 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 }
 
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) {
+  return ExpireIfNeeded(cntx, it.GetInnerIt());
+}
+
+DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
   if (!it->second.HasExpire()) {
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
@@ -1074,26 +1133,24 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) {
                << ", expire table size: " << db->expire.size()
                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
-  string tmp_key_buf;
-  string_view tmp_key;
+  // TODO: Accept Iterator instead of PrimeIterator, as this might save an allocation below.
+  string scratch;
+  string_view key = it->first.GetSlice(&scratch);
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
-    tmp_key = it->first.GetSlice(&tmp_key_buf);
-    RecordExpiry(cntx.db_index, tmp_key);
+    RecordExpiry(cntx.db_index, key);
   }
 
   auto obj_type = it->second.ObjType();
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
-    if (tmp_key.empty())
-      tmp_key = it->first.GetSlice(&tmp_key_buf);
-    doc_del_cb_(tmp_key, cntx, it->second);
+    doc_del_cb_(key, cntx, it->second);
   }
 
-  PerformDeletion(it, expire_it, db.get());
+  PerformDeletion(Iterator(it, StringOrView::FromView(key)), expire_it, db.get());
   ++events_.expired_keys;
 
-  return {Iterator{PrimeIterator{}, it.key_}, ExpireIterator{}};
+  return {PrimeIterator{}, ExpireIterator{}};
 }
 
 void DbSlice::ExpireAllIfNeeded() {
@@ -1126,7 +1183,7 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   FiberAtomicGuard fg;
-  uint64_t bucket_version = it.GetVersion();
+  uint64_t bucket_version = it.GetInnerIt().GetVersion();
   // change_cb_ is ordered by version.
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
@@ -1137,7 +1194,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
       return;
     }
     if (bucket_version < cb_version) {
-      ccb.second(db_ind, ChangeReq{it});
+      ccb.second(db_ind, ChangeReq{it.GetInnerIt()});  // Is it OK to pass PrimeIterator here???
     }
   }
 }
@@ -1279,7 +1336,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
             keys_to_journal.push_back(string(key));
           }
 
-          PerformDeletion(evict_it, db_table.get());
+          PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
           ++evicted;
 
           used_memory_after = owner_->UsedMemory();
@@ -1325,13 +1382,13 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, Iterator it, DbTable* table)
   if (owner_->IsReplica()) {
     return 0;
   }
-  PrimeTable::Segment_t* segment = table->prime.GetSegment(it.segment_id());
+  PrimeTable::Segment_t* segment = table->prime.GetSegment(it.GetInnerIt().segment_id());
   DCHECK(segment);
 
   constexpr unsigned kNumStashBuckets = PrimeTable::Segment_t::kStashBucketNum;
   constexpr unsigned kNumRegularBuckets = PrimeTable::Segment_t::kBucketNum;
 
-  PrimeTable::bucket_iterator it2(it);
+  PrimeTable::bucket_iterator it2(it.GetInnerIt());
   unsigned evicted = 0;
   bool evict_succeeded = false;
 
@@ -1353,9 +1410,9 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, Iterator it, DbTable* table)
       if (!bucket.IsBusy(slot_id))
         continue;
 
-      auto evict_it = table->prime.GetIterator(it.segment_id(), stash_bid, slot_id);
+      auto evict_it = table->prime.GetIterator(it.GetInnerIt().segment_id(), stash_bid, slot_id);
       // skip the iterator that we must keep or the sticky items.
-      if (evict_it == it || evict_it->first.IsSticky())
+      if (evict_it == it.GetInnerIt() || evict_it->first.IsSticky())
         continue;
 
       PerformDeletion(evict_it, table);
@@ -1376,13 +1433,13 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, Iterator it, DbTable* table)
   for (int slot_id = PrimeTable::Segment_t::kSlotNum - 1; !evict_succeeded && slot_id >= 0;
        --slot_id) {
     for (unsigned i = 0; i < kNumRegularBuckets; ++i) {
-      unsigned bid = (it.bucket_id() + i) % kNumRegularBuckets;
+      unsigned bid = (it.GetInnerIt().bucket_id() + i) % kNumRegularBuckets;
       const auto& bucket = segment->GetBucket(bid);
       if (!bucket.IsBusy(slot_id))
         continue;
 
-      auto evict_it = table->prime.GetIterator(it.segment_id(), bid, slot_id);
-      if (evict_it == it || evict_it->first.IsSticky())
+      auto evict_it = table->prime.GetIterator(it.GetInnerIt().segment_id(), bid, slot_id);
+      if (evict_it == it.GetInnerIt() || evict_it->first.IsSticky())
         continue;
 
       PerformDeletion(evict_it, table);
@@ -1505,18 +1562,19 @@ void DbSlice::RemoveFromTiered(Iterator it, DbTable* table) {
   PrimeValue& pv = it->second;
   if (pv.IsExternal()) {
     TieredStorage* tiered = shard_owner()->tiered_storage();
-    tiered->Free(it, &stats);
+    tiered->Free(it.GetInnerIt(), &stats);
   }
   if (pv.HasIoPending()) {
     TieredStorage* tiered = shard_owner()->tiered_storage();
-    tiered->CancelIo(table->index, it);
+    tiered->CancelIo(table->index, it.GetInnerIt());
   }
 }
 
-void DbSlice::PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* table) {
-  std::string tmp;
-  std::string_view key = del_it->first.GetSlice(&tmp);
+void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
+  return PerformDeletion(Iterator::FromPrime(del_it), table);
+}
 
+void DbSlice::PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* table) {
   if (!exp_it.is_done()) {
     table->expire.Erase(exp_it);
   }
@@ -1534,8 +1592,9 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* t
 
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(key, del_it->first.ObjType(), -del_it->first.MallocUsed(), table);  // Key
-  AccountObjectMemory(key, pv.ObjType(), -value_heap_size, table);                        // Value
+  AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -del_it->first.MallocUsed(),
+                      table);                                                // Key
+  AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
   } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
@@ -1543,12 +1602,12 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* t
   }
 
   if (ClusterConfig::IsEnabled()) {
-    SlotId sid = ClusterConfig::KeySlot(key);
+    SlotId sid = ClusterConfig::KeySlot(del_it.key());
     table->slots_stats[sid].key_count -= 1;
   }
 
-  table->prime.Erase(del_it);
-  SendInvalidationTrackingMessage(key);
+  table->prime.Erase(del_it.GetInnerIt());
+  SendInvalidationTrackingMessage(del_it.key());
 }
 
 void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {

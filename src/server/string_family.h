@@ -5,6 +5,7 @@
 #pragma once
 
 #include "server/common.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "util/proactor_pool.h"
 
@@ -53,7 +54,7 @@ class SetCmd {
                                            std::string_view value);
 
  private:
-  OpStatus SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
+  OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, ExpireIterator e_it,
                        std::string_view key, std::string_view value);
 
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);

@@ -197,7 +197,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs&
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  PrimeIterator& it = add_res.it;
+  auto& it = add_res.it;
   PrimeValue& pv = it->second;
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   if (add_res.is_new || zparams.override) {
@@ -790,7 +790,7 @@ void InterScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
     dest->swap(*src);
 }
 
-using KeyIterWeightVec = vector<pair<PrimeConstIterator, double>>;
+using KeyIterWeightVec = vector<pair<DbSlice::ConstIterator, double>>;
 
 ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type) {
   ScoredMap result;
@@ -901,7 +901,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
 
   for (unsigned j = 0; j < keys.size(); ++j) {
     auto it_res = db_slice.FindMutable(t->GetDbContext(), keys[j]);
-    if (!IsValid(it_res.it))
+    if (!it_res.it.IsValid())
       continue;  // we exit in the next loop
 
     // sets are supported for ZINTER* commands:
@@ -1265,7 +1265,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   auto& db_slice = shard->db_slice();
   auto it_res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_ZSET);
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
 
   ZSetFamily::RangeParams range_params;
   range_params.reverse = is_max;
@@ -1390,8 +1390,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
 
 auto OpRange(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
     -> OpResult<ScoredArray> {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1406,8 +1405,7 @@ auto OpRange(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args, st
 
 auto OpRanges(const std::vector<ZSetFamily::ZRangeSpec>& range_specs, const OpArgs& op_args,
               string_view key) -> OpResult<vector<ScoredArray>> {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1446,8 +1444,7 @@ OpResult<unsigned> OpRemRange(const OpArgs& op_args, string_view key,
 
 OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view member,
                           bool reverse) {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1493,8 +1490,7 @@ OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view me
 
 OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
                            const ZSetFamily::ScoreInterval& interval) {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1544,8 +1540,7 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
 
 OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
                               const ZSetFamily::LexInterval& interval) {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1610,14 +1605,12 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, ArgSlice member
 }
 
 OpResult<void> OpKeyExisted(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   return res_it.status();
 }
 
 OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view member) {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1634,8 +1627,7 @@ OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view mem
 }
 
 OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key, ArgSlice members) {
-  OpResult<PrimeConstIterator> res_it =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1656,13 +1648,12 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key, ArgSli
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
-  OpResult<PrimeConstIterator> find_res =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  auto find_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
 
   if (!find_res)
     return find_res.status();
 
-  PrimeConstIterator it = find_res.value();
+  auto it = find_res.value();
   const PrimeValue& pv = it->second;
   StringVec res;
   char buf[128];
@@ -1865,8 +1856,7 @@ void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeConstIterator> find_res =
-        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_ZSET);
+    auto find_res = shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_ZSET);
     if (!find_res) {
       return find_res.status();
     }

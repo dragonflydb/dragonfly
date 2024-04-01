@@ -14,6 +14,31 @@
 
 namespace dfly {
 
+// TODO: Move this, use it in all places we have variant<string, string_view>
+class StringOrView {
+ public:
+  static StringOrView FromString(std::string s);
+  static StringOrView FromView(std::string_view sv);
+
+  StringOrView() = default;
+
+  StringOrView(const StringOrView& o);
+  StringOrView(StringOrView&& o);
+  StringOrView& operator=(const StringOrView& o);
+  StringOrView& operator=(StringOrView&& o);
+
+  bool operator==(const StringOrView& o) const;
+  bool operator!=(const StringOrView& o) const;
+
+  std::string_view view() const;
+
+ private:
+  void Set(std::string s, std::string_view sv);
+
+  std::string s_;
+  std::string_view sv_;
+};
+
 using facade::OpResult;
 
 struct DbStats : public DbTableStats {
@@ -74,41 +99,61 @@ class DbSlice {
    public:
     IteratorT() = default;
 
-    IteratorT(T it, std::string_view key)
-        : it_(it), fiber_epoch_(util::fb2::FiberSwitchEpoch()), key_(key) {
+    IteratorT(T it, StringOrView key)
+        : it_(it), fiber_epoch_(util::fb2::FiberSwitchEpoch()), key_(std::move(key)) {
     }
 
-    // Do not store the result of dereference / arrow operators!
-    T* operator->() {
-      LaunderIfNeeded();
-      return &it_;
+    static IteratorT FromPrime(T it) {
+      std::string key;
+      it->first.GetString(&key);
+      return IteratorT(it, StringOrView::FromString(std::move(key)));
     }
 
-    T& operator*() {
-      LaunderIfNeeded();
-      return it_;
-    }
+    IteratorT(const IteratorT& o) = default;
+    IteratorT(IteratorT&& o) = default;
+    IteratorT& operator=(const IteratorT& o) = default;
+    IteratorT& operator=(IteratorT&& o) = default;
 
-    const T* operator->() const {
-      LaunderIfNeeded();
-      return &it_;
-    }
-
-    const T& operator*() const {
+    T GetInnerIt() {
       LaunderIfNeeded();
       return it_;
+    }
+
+    auto operator->() const {
+      LaunderIfNeeded();
+      return it_.operator->();
+    }
+
+    auto is_done() const {
+      LaunderIfNeeded();
+      return it_.is_done();
+    }
+
+    std::string_view key() const {
+      return key_.view();
+    }
+
+    auto IsOccupied() const {
+      LaunderIfNeeded();
+      return it_.IsOccupied();
+    }
+
+    bool IsValid() const {
+      LaunderIfNeeded();
+      return dfly::IsValid(it_);
     }
 
    private:
     void LaunderIfNeeded() const {  // const is a lie
-      if (!it_.IsOccupied()) {
+      if (!dfly::IsValid(it_)) {
         return;
       }
 
+      assert(!key_.view().empty());
       uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
       if (current_epoch != fiber_epoch_) {
-        if (key_ != it_->first) {
-          it_ = it_.owner().Find(key_);
+        if (key_.view() != it_->first) {
+          it_ = it_.owner().Find(key_.view());
         }
         fiber_epoch_ = current_epoch;
       }
@@ -116,11 +161,12 @@ class DbSlice {
 
     mutable T it_;
     mutable uint64_t fiber_epoch_ = 0;
-    std::string_view key_;
+    StringOrView key_;
   };
 
   using Iterator = IteratorT<PrimeIterator>;
   using ConstIterator = IteratorT<PrimeConstIterator>;
+  // TODO: Also add exp iterator
 
   class AutoUpdater {
    public:
@@ -382,9 +428,10 @@ class DbSlice {
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return Iterator{}.
   struct ItAndExp {
-    Iterator it;
+    PrimeIterator it;
     ExpireIterator exp_it;
   };
+  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
   ItAndExp ExpireIfNeeded(const Context& cntx, Iterator it);
 
   // Iterate over all expire table entries and delete expired.
@@ -458,6 +505,7 @@ class DbSlice {
 
   // Delete a key referred by its iterator.
   void PerformDeletion(Iterator del_it, DbTable* table);
+  void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // Releases a single key. `key` must have been normalized by GetLockKey().
   void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key);
