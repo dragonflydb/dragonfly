@@ -197,12 +197,10 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   entry.dbid = dbid_;
   entry.opcode = opcode;
 
-  if (opcode == journal::Op::PING) {
+  if (opcode == journal::Op::PING || opcode == journal::Op::FIN) {
     return entry;
   }
-  if (opcode == journal::Op::FIN) {
-    return entry;
-  }
+
   if (opcode == journal::Op::LSN) {
     SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.lsn);
     return entry;

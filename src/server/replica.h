@@ -234,7 +234,6 @@ class DflyShardReplica : public ProtocolClient {
   // **executed** records, which might be received interleaved when commands
   // run out-of-order on the master instance.
   std::atomic_uint64_t journal_rec_executed_ = 0;
-  uint64_t lsn_ = 0;
 
   util::fb2::Fiber sync_fb_;
 

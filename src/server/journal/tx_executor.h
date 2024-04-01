@@ -58,7 +58,8 @@ struct TransactionData {
 // The journal stream can contain interleaved data for multiple multi transactions,
 // expiries and out of order executed transactions that need to be grouped on the replica side.
 struct TransactionReader {
-  TransactionReader(bool accumulate_multi) : accumulate_multi_(accumulate_multi) {
+  TransactionReader(bool accumulate_multi, uint64_t lsn)
+      : accumulate_multi_(accumulate_multi), lsn_(lsn) {
   }
   std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
 
@@ -66,6 +67,7 @@ struct TransactionReader {
   // Stores ongoing multi transaction data.
   absl::flat_hash_map<TxId, TransactionData> current_;
   bool accumulate_multi_ = false;
+  uint64_t lsn_ = 0;
 };
 
 }  // namespace dfly

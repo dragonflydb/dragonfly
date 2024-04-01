@@ -11,15 +11,15 @@
 namespace dfly {
 using namespace util;
 
-void JournalStreamer::Start(io::Sink* dest, DflyVersion version) {
+void JournalStreamer::Start(io::Sink* dest, bool send_lsn) {
   using namespace journal;
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
   journal_cb_id_ =
-      journal_->RegisterOnChange([this, version](const JournalItem& item, bool allow_await) {
+      journal_->RegisterOnChange([this, send_lsn](const JournalItem& item, bool allow_await) {
         if (!ShouldWrite(item)) {
           return;
         }
-        if (item.opcode == Op::LSN && version < DflyVersion::VER4) {
+        if (item.opcode == Op::LSN && !send_lsn) {
           return;
         }
 
@@ -59,13 +59,13 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal
   DCHECK(slice != nullptr);
 }
 
-void RestoreStreamer::Start(io::Sink* dest, DflyVersion version) {
+void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
   VLOG(2) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   // TODO: get version between cluster nodes on migraion start
-  JournalStreamer::Start(dest, version);
+  JournalStreamer::Start(dest, send_lsn);
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;

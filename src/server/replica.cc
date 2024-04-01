@@ -794,7 +794,6 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
 
   if (auto jo = loader.journal_offset(); jo.has_value()) {
     this->journal_rec_executed_.store(*jo);
-    lsn_ = this->journal_rec_executed_;
   } else {
     if (master_context_.version > DflyVersion::VER0)
       cntx->ReportError(std::make_error_code(errc::protocol_error),
@@ -813,7 +812,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   io::PrefixSource ps{prefix, Sock()};
 
   JournalReader reader{&ps, 0};
-  TransactionReader tx_reader{use_multi_shard_exe_sync_};
+  TransactionReader tx_reader{use_multi_shard_exe_sync_, journal_rec_executed_};
 
   if (master_context_.version > DflyVersion::VER0) {
     acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
@@ -830,18 +829,12 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
     if (!tx_data)
       break;
 
-    lsn_ += tx_data->journal_rec_count;
-
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
     if (tx_data->opcode == journal::Op::LSN) {
-      DCHECK_NE(tx_data->lsn, 0u);
-
-      LOG_IF_EVERY_N(WARNING, tx_data->lsn != lsn_, 1000);
-      DCHECK_EQ(tx_data->lsn, lsn_);
-      journal_rec_executed_.fetch_add(1);
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
-      journal_rec_executed_.fetch_add(1);
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else if (tx_data->opcode == journal::Op::EXEC) {
       if (use_multi_shard_exe_sync_) {
         InsertTxDataToShardResource(std::move(*tx_data));
