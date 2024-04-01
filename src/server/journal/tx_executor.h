@@ -51,13 +51,15 @@ struct TransactionData {
   absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
   uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
   journal::Op opcode = journal::Op::NOOP;
+  uint64_t lsn = 0;
 };
 
 // Utility for reading TransactionData from a journal reader.
 // The journal stream can contain interleaved data for multiple multi transactions,
 // expiries and out of order executed transactions that need to be grouped on the replica side.
 struct TransactionReader {
-  TransactionReader(bool accumulate_multi) : accumulate_multi_(accumulate_multi) {
+  TransactionReader(bool accumulate_multi, std::optional<uint64_t> lsn = std::nullopt)
+      : accumulate_multi_(accumulate_multi), lsn_(lsn) {
   }
   std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
 
@@ -65,6 +67,7 @@ struct TransactionReader {
   // Stores ongoing multi transaction data.
   absl::flat_hash_map<TxId, TransactionData> current_;
   bool accumulate_multi_ = false;
+  std::optional<uint64_t> lsn_ = 0;
 };
 
 }  // namespace dfly

@@ -331,7 +331,8 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
   // We ignore EXEC and NOOP entries because we they have no meaning during
   // the LOAD phase on replica.
-  if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC)
+  if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC ||
+      item.opcode == journal::Op::LSN)
     return;
 
   serializer_->WriteJournalEntry(item.data);

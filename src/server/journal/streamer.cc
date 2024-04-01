@@ -11,22 +11,26 @@
 namespace dfly {
 using namespace util;
 
-void JournalStreamer::Start(io::Sink* dest) {
+void JournalStreamer::Start(io::Sink* dest, bool send_lsn) {
   using namespace journal;
   write_fb_ = fb2::Fiber("journal_stream", &JournalStreamer::WriterFb, this, dest);
-  journal_cb_id_ = journal_->RegisterOnChange([this](const JournalItem& item, bool allow_await) {
-    if (!ShouldWrite(item)) {
-      return;
-    }
+  journal_cb_id_ =
+      journal_->RegisterOnChange([this, send_lsn](const JournalItem& item, bool allow_await) {
+        if (!ShouldWrite(item)) {
+          return;
+        }
+        if (item.opcode == Op::LSN && !send_lsn) {
+          return;
+        }
 
-    if (item.opcode == Op::NOOP) {
-      // No record to write, just await if data was written so consumer will read the data.
-      return AwaitIfWritten();
-    }
+        if (item.opcode == Op::NOOP) {
+          // No record to write, just await if data was written so consumer will read the data.
+          return AwaitIfWritten();
+        }
 
-    Write(io::Buffer(item.data));
-    NotifyWritten(allow_await);
-  });
+        Write(io::Buffer(item.data));
+        NotifyWritten(allow_await);
+      });
 }
 
 void JournalStreamer::Cancel() {
@@ -55,12 +59,12 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal
   DCHECK(slice != nullptr);
 }
 
-void RestoreStreamer::Start(io::Sink* dest) {
+void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
   VLOG(2) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
-  JournalStreamer::Start(dest);
+  JournalStreamer::Start(dest, send_lsn);
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;

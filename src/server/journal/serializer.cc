@@ -75,6 +75,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
   switch (entry.opcode) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
+    case journal::Op::LSN:
+      return Write(entry.lsn);
     case journal::Op::PING:
       return;
     case journal::Op::COMMAND:
@@ -196,6 +198,11 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   entry.opcode = opcode;
 
   if (opcode == journal::Op::PING || opcode == journal::Op::FIN) {
+    return entry;
+  }
+
+  if (opcode == journal::Op::LSN) {
+    SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.lsn);
     return entry;
   }
 

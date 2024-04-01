@@ -25,7 +25,7 @@ class JournalStreamer : protected BufferedStreamerBase {
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(io::Sink* dest);
+  virtual void Start(io::Sink* dest, bool send_lsn);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -40,7 +40,6 @@ class JournalStreamer : protected BufferedStreamerBase {
     return true;
   }
 
- private:
   Context* cntx_;
 
   uint32_t journal_cb_id_{0};
@@ -56,7 +55,7 @@ class RestoreStreamer : public JournalStreamer {
   RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
-  void Start(io::Sink* dest) override;
+  void Start(io::Sink* dest, bool send_lsn = false) override;
   // Cancel() must be called if Start() is called
   void Cancel() override;
 

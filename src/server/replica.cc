@@ -812,7 +812,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   io::PrefixSource ps{prefix, Sock()};
 
   JournalReader reader{&ps, 0};
-  TransactionReader tx_reader{use_multi_shard_exe_sync_};
+  TransactionReader tx_reader{use_multi_shard_exe_sync_, journal_rec_executed_};
 
   if (master_context_.version > DflyVersion::VER0) {
     acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
@@ -830,8 +830,9 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       break;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
-
-    if (tx_data->opcode == journal::Op::PING) {
+    if (tx_data->opcode == journal::Op::LSN) {
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+    } else if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else if (tx_data->opcode == journal::Op::EXEC) {
