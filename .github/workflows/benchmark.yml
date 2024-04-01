@@ -70,7 +70,7 @@ jobs:
       - name: Install the CRD and Operator
         run: |
           # Install the CRD and Operator
-          kubectl --context=kind-chart-testing apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
+          sudo kubectl --context=kind-chart-testing apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
       - name: Apply Configuration
         run: |
           echo '${{ toJson(matrix.config) }}' | kubectl apply -f -
