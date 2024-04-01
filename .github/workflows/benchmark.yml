@@ -65,7 +65,7 @@ jobs:
 
       - run: |
             kubectl config get-contexts
-            kubectl cluster-info --context kind-chart-testing
+            kubectl config set-context --cluster kind-chart-testing
       
       - name: Install the CRD and Operator
         run: |
