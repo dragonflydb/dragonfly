@@ -56,11 +56,11 @@ jobs:
       #     kubectl_version: v1.28.0
       
       - name: Create KinD Cluster
-        run: kind create cluster
+        run: /usr/local/bin/kind create cluster
 
       - name: Set Kubeconfig
         run: |
-          echo "KUBECONFIG=$(kind get kubeconfig-path --name="kind")" >> $GITHUB_ENV
+          echo "KUBECONFIG=$(/usr/local/bin/kind get kubeconfig-path --name="kind")" >> $GITHUB_ENV
 
       - name: Run Kubectl Commands
         run: |
