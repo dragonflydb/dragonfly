@@ -166,7 +166,13 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
 
   if (num_thread < pool->size()) {
     if (int(num_thread) != ProactorBase::me()->GetPoolIndex()) {
-      cntx->conn()->Migrate(pool->at(num_thread));
+      if (!cntx->conn()->Migrate(pool->at(num_thread))) {
+        // Listener::PreShutdown() triggered
+        if (cntx->conn()->socket()->IsOpen()) {
+          return rb->SendError(kInvalidState);
+        }
+        return;
+      }
     }
 
     return rb->SendOk();
@@ -222,8 +228,13 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   flow.conn = cntx->conn();
   flow.eof_token = eof_token;
   flow.version = replica_ptr->version;
-
-  cntx->conn()->Migrate(shard_set->pool()->at(flow_id));
+  if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+    // Listener::PreShutdown() triggered
+    if (cntx->conn()->socket()->IsOpen()) {
+      return rb->SendError(kInvalidState);
+    }
+    return;
+  }
   sf_->journal()->StartInThread();
 
   std::string_view sync_type = "FULL";

@@ -241,7 +241,9 @@ class Connection : public util::Connection {
   void ShutdownSelf();
 
   // Migrate this connecton to a different thread.
-  void Migrate(util::fb2::ProactorBase* dest);
+  // Return true if Migrate succeeded
+  // Return false if dispatch_fb_ is active
+  bool Migrate(util::fb2::ProactorBase* dest);
 
   // Borrow weak reference to connection. Can be called from any thread.
   WeakRef Borrow();
@@ -374,7 +376,6 @@ class Connection : public util::Connection {
   bool ShouldEndDispatchFiber(const MessageHandle& msg);
 
   void LaunchDispatchFiberIfNeeded();  // Dispatch fiber is started lazily
-
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline(facade::SinkReplyBuilder*);
 
