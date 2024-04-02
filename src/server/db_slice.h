@@ -126,7 +126,7 @@ class DbSlice {
       assert(!key_.view().empty());
       uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
       if (current_epoch != fiber_epoch_) {
-        if (key_.view() != it_->first) {
+        if (it_->first != key_.view()) {
           it_ = it_.owner().Find(key_.view());
         }
         fiber_epoch_ = current_epoch;
