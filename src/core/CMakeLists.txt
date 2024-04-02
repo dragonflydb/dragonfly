@@ -7,7 +7,7 @@ add_library(dfly_core bloom.cc compact_object.cc dragonfly_core.cc extent_tree.c
     external_alloc.cc interpreter.cc mi_memory_resource.cc sds_utils.cc
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc
     tx_queue.cc dense_set.cc allocation_tracker.cc task_queue.cc
-    string_set.cc string_map.cc detail/bitpacking.cc)
+    string_set.cc string_map.cc string_or_view.cc detail/bitpacking.cc)
 
 cxx_link(dfly_core base absl::flat_hash_map absl::str_format redis_lib TRDP::lua lua_modules
     fibers2 ${SEARCH_LIB} jsonpath OpenSSL::Crypto TRDP::dconv)

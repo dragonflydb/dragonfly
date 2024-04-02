@@ -5,6 +5,7 @@
 #pragma once
 
 #include "core/mi_memory_resource.h"
+#include "core/string_or_view.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
 #include "server/common.h"
@@ -13,31 +14,6 @@
 #include "util/fibers/fibers.h"
 
 namespace dfly {
-
-// TODO: Move this, use it in all places we have variant<string, string_view>
-class StringOrView {
- public:
-  static StringOrView FromString(std::string s);
-  static StringOrView FromView(std::string_view sv);
-
-  StringOrView() = default;
-
-  StringOrView(const StringOrView& o);
-  StringOrView(StringOrView&& o);
-  StringOrView& operator=(const StringOrView& o);
-  StringOrView& operator=(StringOrView&& o);
-
-  bool operator==(const StringOrView& o) const;
-  bool operator!=(const StringOrView& o) const;
-
-  std::string_view view() const;
-
- private:
-  void Set(std::string s, std::string_view sv);
-
-  std::string s_;
-  std::string_view sv_;
-};
 
 using facade::OpResult;
 

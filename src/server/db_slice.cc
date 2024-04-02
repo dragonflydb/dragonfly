@@ -218,59 +218,6 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
 }  // namespace
 
-StringOrView StringOrView::FromString(string s) {
-  StringOrView sov;
-  sov.s_ = std::move(s);
-  sov.sv_ = sov.s_;
-  return sov;
-}
-
-StringOrView StringOrView::FromView(string_view sv) {
-  StringOrView sov;
-  sov.sv_ = sv;
-  return sov;
-}
-
-StringOrView::StringOrView(const StringOrView& o) {
-  *this = o;
-}
-
-StringOrView::StringOrView(StringOrView&& o) {
-  *this = std::move(o);
-}
-
-StringOrView& StringOrView::operator=(const StringOrView& o) {
-  Set(o.s_, o.sv_);
-  return *this;
-}
-
-StringOrView& StringOrView::operator=(StringOrView&& o) {
-  Set(std::move(o.s_), o.sv_);
-  return *this;
-}
-
-bool StringOrView::operator==(const StringOrView& o) const {
-  return view() == o.view();
-}
-
-bool StringOrView::operator!=(const StringOrView& o) const {
-  return !(*this == o);
-}
-
-string_view StringOrView::view() const {
-  return sv_;
-}
-
-void StringOrView::Set(string s, string_view sv) {
-  s_ = std::move(s);
-
-  if (s_.empty()) {
-    sv_ = sv;
-  } else {
-    sv_ = s_;
-  }
-}
-
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
