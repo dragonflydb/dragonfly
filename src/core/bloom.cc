@@ -51,18 +51,17 @@ void Bloom::Init(uint64_t entries, double fp_prob, PMR_NS::memory_resource* heap
   CHECK(bf_ == nullptr);
   CHECK(fp_prob > 0 && fp_prob < 1);
 
-  if (entries < 1024)
-    entries = 1024;
-
+  if (fp_prob > 0.5)
+    fp_prob = 0.5;
   double bpe = BPE(fp_prob);
 
   hash_cnt_ = ceil(M_LN2 * bpe);
 
   uint64_t bits = uint64_t(ceil(entries * bpe));
-  bits = absl::bit_ceil(bits);  // make it power of 2.
-  if (bits < 1024) {
-    bits = 1024;
+  if (bits < 512) {
+    bits = 512;
   }
+  bits = absl::bit_ceil(bits);  // make it power of 2.
 
   uint64_t length = bits / 8;
   bf_ = (uint8_t*)heap->allocate(length);
@@ -111,6 +110,8 @@ bool Bloom::Add(const uint64_t fp[2]) {
 }
 
 size_t Bloom::Capacity(double fp_prob) const {
+  if (fp_prob > 0.5)
+    fp_prob = 0.5;
   double bpe = BPE(fp_prob);
   return floor(bitlen() / bpe);
 }
@@ -195,6 +196,16 @@ bool SBF::Exists(std::string_view str) const {
   auto exists = [fp](const Bloom& b) { return b.Exists(fp); };
 
   return any_of(filters_.crbegin(), filters_.crend(), exists);
+}
+
+size_t SBF::MallocUsed() const {
+  size_t res = filters_.capacity() * sizeof(Bloom);
+  for (const auto& b : filters_) {
+    res += (b.bitlen() / 8);
+  }
+  res += sizeof(SBF);
+
+  return res;
 }
 
 }  // namespace dfly

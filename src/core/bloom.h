@@ -50,7 +50,8 @@ class Bloom {
     return 1ULL << bit_log_;
   }
 
-  // Note that max element capacity is floor(bit_len / bpe), where bpe (bits per element) is
+  // Max element capacity for this bloom filter.
+  // Note that capacity is floor(bit_len / bpe), where bpe (bits per element) is
   // derived from fp_prob.
   size_t Capacity(double fp_prob) const;
 
@@ -83,12 +84,23 @@ class SBF {
   bool Add(std::string_view str);
   bool Exists(std::string_view str) const;
 
+  size_t GetSize() const {
+    return prev_size_ + current_size_;
+  }
+
+  size_t MallocUsed() const;
+
+  double grow_factor() const {
+    return grow_factor_;
+  }
+
  private:
   // multiple filters from the smallest to the largest.
   std::vector<Bloom, PMR_NS::polymorphic_allocator<Bloom>> filters_;
   double grow_factor_;
   double fp_prob_;
   size_t current_size_ = 0;
+  size_t prev_size_ = 0;
   size_t max_capacity_;
 };
 
