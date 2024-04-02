@@ -853,7 +853,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
-    shard_replica_waker_.notify();
+    shard_replica_waker_.notifyAll();
   }
 }
 
@@ -1007,7 +1007,7 @@ void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
     auto& data = trans_data_queue_.front();
     ExecuteTx(std::move(data.first), data.second, cntx);
     trans_data_queue_.pop();
-    shard_replica_waker_.notify();
+    shard_replica_waker_.notifyAll();
   }
 }
 

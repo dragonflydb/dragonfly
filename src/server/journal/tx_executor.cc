@@ -113,6 +113,7 @@ std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* read
     // When LSN opcode is sent master does not increase journal lsn.
     if (lsn_.has_value() && res->opcode != journal::Op::LSN) {
       ++*lsn_;
+      VLOG(2) << "read lsn: " << *lsn_;
     }
 
     // Check if journal command can be executed right away.
