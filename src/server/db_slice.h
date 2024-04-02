@@ -71,6 +71,7 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  // Auto-laundering iterator wrapper.
   template <typename T> class IteratorT {
    public:
     IteratorT() = default;
@@ -90,7 +91,8 @@ class DbSlice {
     IteratorT& operator=(const IteratorT& o) = default;
     IteratorT& operator=(IteratorT&& o) = default;
 
-    T GetInnerIt() {
+    // Do NOT store this iterator in a variable, as it will not be laundered automatically.
+    T GetInnerIt() const {
       LaunderIfNeeded();
       return it_;
     }
