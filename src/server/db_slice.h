@@ -96,13 +96,11 @@ class DbSlice {
     }
 
     auto operator->() const {
-      LaunderIfNeeded();
-      return it_.operator->();
+      return GetInnerIt().operator->();
     }
 
     auto is_done() const {
-      LaunderIfNeeded();
-      return it_.is_done();
+      return GetInnerIt().is_done();
     }
 
     std::string_view key() const {
@@ -110,13 +108,11 @@ class DbSlice {
     }
 
     auto IsOccupied() const {
-      LaunderIfNeeded();
-      return it_.IsOccupied();
+      return GetInnerIt().IsOccupied();
     }
 
     bool IsValid() const {
-      LaunderIfNeeded();
-      return dfly::IsValid(it_);
+      return dfly::IsValid(GetInnerIt());
     }
 
    private:
