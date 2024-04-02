@@ -62,7 +62,7 @@ class ClusterFamilyTest : public BaseFamilyTest {
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "config", "invalid JSON"}),
-              ErrArg("Invalid JSON cluster config"));
+              ErrArg("Invalid cluster configuration."));
 
   string cluster_info = Run({"cluster", "info"}).GetString();
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
