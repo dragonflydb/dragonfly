@@ -723,6 +723,11 @@ void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_f
   }
 }
 
+SBF* CompactObj::GetSBF() const {
+  DCHECK_EQ(SBF_TAG, taglen_);
+  return u_.sbf;
+}
+
 void CompactObj::SetString(std::string_view str) {
   uint8_t mask = mask_ & ~kEncMask;
   CHECK(!IsExternal());

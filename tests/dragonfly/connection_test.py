@@ -766,4 +766,11 @@ async def test_http(df_server: DflyInstance):
             assert resp.status == 200
             text = await resp.text()
             assert text.strip() == '{"result":"МайяХилли"}'
+
+        body = '["foo", "bar"]'
+        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
+            assert resp.status == 200
+            text = await resp.text()
+            assert text.strip() == '{"error": "unknown command `FOO`"}'
+
     assert await client.ttl("foo") > 0

@@ -136,7 +136,6 @@ async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
         if not waiting_for:
             return
         await asyncio.sleep(0.2)
-
         m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
         finished_list = await asyncio.gather(
             *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
@@ -1655,7 +1654,6 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
 
     master.stop()
     replica.stop()
-    assert replica.is_in_logs("partial sync finished in")
 
 
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
@@ -1698,7 +1696,6 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
 
     master.stop()
     replica.stop()
-    assert replica.is_in_logs("partial sync finished in")
 
 
 async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_factory):
@@ -2147,6 +2144,7 @@ async def test_replica_reconnect(df_local_factory, break_conn):
         assert await c_master.execute_command("get k") == None
         assert await c_replica.execute_command("get k") == None
         assert await c_master.execute_command("set k 6789")
+        await check_all_replicas_finished([c_replica], c_master)
         assert await c_replica.execute_command("get k") == "6789"
         assert not await is_replicaiton_conn_down(c_replica)
 

@@ -63,7 +63,8 @@ void JournalWriter::Write(std::monostate) {
 
 void JournalWriter::Write(const journal::Entry& entry) {
   // Check if entry has a new db index and we need to emit a SELECT entry.
-  if (entry.opcode != journal::Op::SELECT && (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
+  if (entry.opcode != journal::Op::SELECT && entry.opcode != journal::Op::LSN &&
+      entry.opcode != journal::Op::PING && (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
     Write(journal::Entry{journal::Op::SELECT, entry.dbid, entry.slot});
     cur_dbid_ = entry.dbid;
   }
@@ -75,6 +76,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
   switch (entry.opcode) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
+    case journal::Op::LSN:
+      return Write(entry.lsn);
     case journal::Op::PING:
       return;
     case journal::Op::COMMAND:
@@ -196,6 +199,11 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   entry.opcode = opcode;
 
   if (opcode == journal::Op::PING || opcode == journal::Op::FIN) {
+    return entry;
+  }
+
+  if (opcode == journal::Op::LSN) {
+    SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.lsn);
     return entry;
   }
 

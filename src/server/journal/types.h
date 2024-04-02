@@ -22,7 +22,8 @@ enum class Op : uint8_t {
   MULTI_COMMAND = 11,
   EXEC = 12,
   PING = 13,
-  FIN = 14
+  FIN = 14,
+  LSN = 15
 };
 
 struct EntryBase {
@@ -31,6 +32,7 @@ struct EntryBase {
   DbIndex dbid;
   uint32_t shard_cnt;
   std::optional<SlotId> slot;
+  LSN lsn{0};
 };
 
 // This struct represents a single journal entry.
@@ -49,12 +51,15 @@ struct Entry : public EntryBase {
   }
 
   Entry(journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
-      : EntryBase{0, opcode, dbid, 0, slot_id}, payload{} {
+      : EntryBase{0, opcode, dbid, 0, slot_id, 0} {
+  }
+
+  Entry(journal::Op opcode, LSN lsn) : EntryBase{0, opcode, 0, 0, std::nullopt, lsn} {
   }
 
   Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt,
         std::optional<SlotId> slot_id)
-      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{} {
+      : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, 0} {
   }
 
   bool HasPayload() const {

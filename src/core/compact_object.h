@@ -301,6 +301,7 @@ class CompactObj {
   JsonType* GetJson() const;
 
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
+  SBF* GetSBF() const;
 
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
@@ -344,7 +345,7 @@ class CompactObj {
   template <typename T> static void DeleteMR(void* ptr) {
     T* t = (T*)ptr;
     t->~T();
-    memory_resource()->deallocate(ptr, alignof(T));
+    memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
  private:

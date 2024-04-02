@@ -124,7 +124,7 @@ struct CaptureVisitor {
   }
 
   void operator()(CapturingReplyBuilder::Error err) {
-    str = absl::StrCat(R"({"error": ")", err.first);
+    str = absl::StrCat(R"({"error": ")", err.first, "\"");
   }
 
   void operator()(facade::OpStatus status) {
@@ -132,7 +132,13 @@ struct CaptureVisitor {
   }
 
   void operator()(const CapturingReplyBuilder::StrArrPayload& sa) {
-    absl::StrAppend(&str, "not_implemented");
+    absl::StrAppend(&str, "[");
+    for (const auto& val : sa.arr) {
+      absl::StrAppend(&str, JsonEscape(val), ",");
+    }
+    if (sa.arr.size())
+      str.pop_back();
+    absl::StrAppend(&str, "]");
   }
 
   void operator()(unique_ptr<CapturingReplyBuilder::CollectionPayload> cp) {
@@ -152,7 +158,18 @@ struct CaptureVisitor {
   }
 
   void operator()(facade::SinkReplyBuilder::MGetResponse resp) {
-    absl::StrAppend(&str, "not_implemented");
+    absl::StrAppend(&str, "[");
+    for (const auto& val : resp.resp_arr) {
+      if (val) {
+        absl::StrAppend(&str, JsonEscape(val->value), ",");
+      } else {
+        absl::StrAppend(&str, "null,");
+      }
+    }
+
+    if (resp.resp_arr.size())
+      str.pop_back();
+    absl::StrAppend(&str, "]");
   }
 
   void operator()(const CapturingReplyBuilder::ScoredArray& sarr) {

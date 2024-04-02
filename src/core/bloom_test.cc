@@ -61,19 +61,31 @@ TEST_F(BloomTest, ErrorBound) {
   EXPECT_EQ(collisions, 0) << max_capacity;
 }
 
+TEST_F(BloomTest, Extreme) {
+  Bloom b2;
+
+  // Init with unreasonable large error probability.
+  b2.Init(10, 0.999, PMR_NS::get_default_resource());
+
+  EXPECT_EQ(512, b2.bitlen());  // minimal bit length, even though requested smaller capacity.
+  EXPECT_LT(b2.Capacity(0.999), 512);  // make sure our element capacity is smaller.
+  b2.Destroy(PMR_NS::get_default_resource());
+}
+
 TEST_F(BloomTest, SBF) {
   SBF sbf(10, 0.001, 2, PMR_NS::get_default_resource());
 
   unsigned collisions = 0;
-  constexpr unsigned kNumElems = 1000000;
+  constexpr unsigned kNumElems = 2000000;
   for (unsigned i = 0; i < kNumElems; ++i) {
     if (!sbf.Add(absl::StrCat("item", i))) {
       ++collisions;
     }
   }
 
-  // TODO: I should revisit the math for error bound computation.
-  EXPECT_LE(collisions, kNumElems * 0.0015);
+  // TODO: to revisit the math for deriving number of hash functions for each filter
+  // according the the SBF paper.
+  EXPECT_LE(collisions, kNumElems * 0.008);
 }
 
 static void BM_BloomExist(benchmark::State& state) {

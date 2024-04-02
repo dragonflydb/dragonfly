@@ -391,12 +391,17 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 
   auto it = DbSlice::Iterator(res->it, StringOrView::FromView(key));
   PreUpdate(cntx.db_index, it);
-  return {{it, res->exp_it,
-           AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                        .db_slice = this,
-                        .db_ind = cntx.db_index,
-                        .it = it,
-                        .key = key})}};
+  // PreUpdate() might have caused a deletion of `it`
+  if (res->it.IsOccupied()) {
+    return {{it, res->exp_it,
+             AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                          .db_slice = this,
+                          .db_ind = cntx.db_index,
+                          .it = it,
+                          .key = key})}};
+  } else {
+    return OpStatus::KEY_NOTFOUND;
+  }
 }
 
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
@@ -560,15 +565,20 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
     PreUpdate(cntx.db_index, it);
-    return DbSlice::AddOrFindResult{
-        .it = it,
-        .exp_it = res->exp_it,
-        .is_new = false,
-        .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
-                                     .db_slice = this,
-                                     .db_ind = cntx.db_index,
-                                     .it = it,
-                                     .key = key})};
+    // PreUpdate() might have caused a deletion of `it`
+    if (res->it.IsOccupied()) {
+      return DbSlice::AddOrFindResult{
+          .it = it,
+          .exp_it = res->exp_it,
+          .is_new = false,
+          .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
+                                       .db_slice = this,
+                                       .db_ind = cntx.db_index,
+                                       .it = it,
+                                       .key = key})};
+    } else {
+      res = OpStatus::KEY_NOTFOUND;
+    }
   }
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
@@ -688,7 +698,8 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
   // was made. Therefore we delete slots entries with version < next_version
-  uint64_t next_version = NextVersion();
+  uint64_t next_version = 0;
+
   std::string tmp;
   auto del_entry_cb = [&](PrimeTable::iterator it) {
     std::string_view key = it->first.GetSlice(&tmp);
@@ -698,6 +709,33 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     }
     return true;
   };
+
+  auto on_change = [&](DbIndex db_index, const ChangeReq& req) {
+    FiberAtomicGuard fg;
+    PrimeTable* table = GetTables(db_index).first;
+
+    auto iterate_bucket = [&](DbIndex db_index, PrimeTable::bucket_iterator it) {
+      while (!it.is_done()) {
+        del_entry_cb(it);
+        ++it;
+      }
+    };
+
+    if (const PrimeTable::bucket_iterator* bit = req.update()) {
+      if (bit->GetVersion() < next_version) {
+        iterate_bucket(db_index, *bit);
+      }
+    } else {
+      string_view key = get<string_view>(req.change);
+      table->CVCUponInsert(
+          next_version, key,
+          [this, db_index, next_version, iterate_bucket](PrimeTable::bucket_iterator it) {
+            DCHECK_LT(it.GetVersion(), next_version);
+            iterate_bucket(db_index, it);
+          });
+    }
+  };
+  next_version = RegisterOnChange(std::move(on_change));
 
   ServerState& etl = *ServerState::tlocal();
   PrimeTable* pt = &db_arr_[0]->prime;
@@ -712,6 +750,9 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     }
 
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+
+  UnregisterOnChange(next_version);
+
   etl.DecommitMemory(ServerState::kDataHeap);
 }
 
