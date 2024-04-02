@@ -11,7 +11,7 @@
 
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/slot_set.h"
 #include "server/conn_context.h"
 #include "server/detail/table.h"
 #include "server/top_keys.h"

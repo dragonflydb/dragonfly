@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include "server/cluster/cluster_config.h"
 #include "server/protocol_client.h"
 
 namespace dfly {

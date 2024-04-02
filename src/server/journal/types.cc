@@ -4,6 +4,8 @@
 
 #include "server/journal/types.h"
 
+#include "server/cluster/cluster_config.h"
+
 namespace dfly::journal {
 
 std::string Entry::ToString() const {

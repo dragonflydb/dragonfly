@@ -21,7 +21,6 @@ extern "C" {
 #include "core/mi_memory_resource.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
-#include "server/cluster/cluster_config.h"
 #include "server/db_slice.h"
 
 namespace dfly {

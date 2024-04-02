@@ -914,7 +914,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
-    ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);
+    ClusterNodeConfig master = cluster_config->GetMasterNodeForSlot(*keys_slot);
     return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
   }
 

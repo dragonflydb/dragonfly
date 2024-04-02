@@ -1,5 +1,7 @@
 #include "server/cluster/unique_slot_checker.h"
 
+#include "server/cluster/cluster_config.h"
+
 using namespace std;
 
 namespace dfly {

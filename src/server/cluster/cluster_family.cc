@@ -39,9 +39,9 @@ using namespace facade;
 using namespace util;
 
 using CI = CommandId;
-using ClusterShard = ClusterConfig::ClusterShard;
-using ClusterShards = ClusterConfig::ClusterShards;
-using Node = ClusterConfig::Node;
+using ClusterShardConfig = ClusterShardConfig;
+using ClusterShardConfigs = ClusterShardConfigs;
+using Node = ClusterNodeConfig;
 
 constexpr char kIdNotFound[] = "syncid not found";
 
@@ -70,11 +70,11 @@ ClusterConfig* ClusterFamily::cluster_config() {
   return tl_cluster_config.get();
 }
 
-ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
-  ClusterShard info{.slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
-                    .master = {},
-                    .replicas = {},
-                    .migrations = {}};
+ClusterShardConfig ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
+  ClusterShardConfig info{.slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
+                          .master = {},
+                          .replicas = {},
+                          .migrations = {}};
 
   optional<Replica::Info> replication_info = server_family_->GetReplicaInfo();
   ServerState& etl = *ServerState::tlocal();
@@ -123,7 +123,7 @@ void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterShardsImpl(const ClusterShards& config, ConnectionContext* cntx) {
+void ClusterShardsImpl(const ClusterShardConfigs& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-shards/
   constexpr unsigned int kEntrySize = 4;
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -179,7 +179,7 @@ void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
+void ClusterSlotsImpl(const ClusterShardConfigs& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-slots/
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   auto WriteNode = [&](const Node& node) {
@@ -223,7 +223,8 @@ void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterNodesImpl(const ClusterShards& config, string_view my_id, ConnectionContext* cntx) {
+void ClusterNodesImpl(const ClusterShardConfigs& config, string_view my_id,
+                      ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-nodes/
 
   string result;
@@ -278,7 +279,7 @@ void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
+void ClusterInfoImpl(const ClusterShardConfigs& config, ConnectionContext* cntx) {
   std::string msg;
   auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
     // Separate lines with \r\n, not \n, see #2726
@@ -489,13 +490,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   }
 
   string_view json_str = ArgS(args, 0);
-  optional<JsonType> json = JsonFromString(json_str, PMR_NS::get_default_resource());
-  if (!json.has_value()) {
-    LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
-    return cntx->SendError("Invalid JSON cluster config", kSyntaxErrType);
-  }
-
-  shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json.value());
+  shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json_str);
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
     return cntx->SendError("Invalid cluster configuration.");
@@ -503,7 +498,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
-  SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
+  auto prev_config = tl_cluster_config;
+  SlotSet before = prev_config ? prev_config->GetOwnedSlots() : SlotSet(true);
 
   // Ignore blocked commands because we filter them with CancelBlockingOnThread
   DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
@@ -523,8 +519,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
   DCHECK(tl_cluster_config != nullptr);
 
-  // TODO rewrite with outgoing migrations
-  if (!StartSlotMigrations(new_config->GetOutgoingMigrations(), cntx)) {
+  if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(prev_config), cntx)) {
     return cntx->SendError("Can't start the migration");
   }
   RemoveFinishedMigrations();
@@ -607,11 +602,12 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
   return cntx->SendOk();
 }
 
-bool ClusterFamily::StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
+bool ClusterFamily::StartSlotMigrations(std::vector<MigrationInfo> migrations,
                                         ConnectionContext* cntx) {
   // Add validating and error processing
   for (auto m : migrations) {
-    auto outgoing_migration = CreateOutgoingMigration(m.ip, m.port, m.slot_ranges);
+    auto outgoing_migration =
+        CreateOutgoingMigration(std::move(m.ip), m.port, std::move(m.slot_ranges));
     outgoing_migration->Start(cntx);
   }
   return true;

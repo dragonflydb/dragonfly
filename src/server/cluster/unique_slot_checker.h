@@ -7,7 +7,7 @@
 #include <optional>
 #include <string_view>
 
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/slot_set.h"
 
 namespace dfly {
 
