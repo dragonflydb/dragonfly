@@ -20,13 +20,15 @@ namespace dfly::tiering {
 class SmallBins {
  public:
   using FilledBin = std::pair<unsigned /* id */, std::string>;
-  using CutList = std::vector<std::pair<std::string /* key*/, DiskSegment>>;
+
+  // List of locations of values for corresponding keys
+  using KeySegmentList = std::vector<std::pair<std::string /* key*/, DiskSegment>>;
 
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
   std::optional<FilledBin> Stash(std::string_view key, std::string_view value);
 
   // Report that a stash succeeeded. Returns list of stored keys with calculated value locations.
-  CutList ReportStashed(unsigned id, DiskSegment segment);
+  KeySegmentList ReportStashed(unsigned id, DiskSegment segment);
 
   // Report that a stash was aborted. Returns list of keys that the entry contained.
   std::vector<std::string /* key */> ReportStashAborted(unsigned id);

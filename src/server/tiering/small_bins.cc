@@ -18,6 +18,7 @@ namespace dfly::tiering {
 std::optional<SmallBins::FilledBin> SmallBins::Stash(std::string_view key, std::string_view value) {
   DCHECK_LT(value.size(), 2_KB);
 
+  // See FlushBin() for format details
   size_t value_bytes = 8 /* hash */ + 2 /* length */ + value.size();
 
   std::optional<FilledBin> filled_bin;
@@ -40,15 +41,20 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   char* data = out.data();
   while (!current_bin_.empty()) {
     auto node = current_bin_.extract(current_bin_.begin());
+
+    // Each key/value pair is serialized as:
     auto& key = node.key();
     auto& value = node.mapped();
 
+    // 1. 8 byte key hash
     absl::little_endian::Store64(data, CompactObj::HashCode(key));
     data += sizeof(uint64_t);
 
+    // 2. 2 byte value length
     absl::little_endian::Store16(data, static_cast<uint16_t>(value.size()));
     data += sizeof(uint16_t);
 
+    // 3. X bytes value
     memcpy(data, value.data(), value.size());
     data += value.size();
 
@@ -56,13 +62,13 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   }
 
   current_bin_bytes_ = 0;
-  current_bin_.clear();
+  DCHECK(current_bin_.empty());
 
   return {id, std::move(out)};
 }
 
-SmallBins::CutList SmallBins::ReportStashed(unsigned id, DiskSegment segment) {
-  SmallBins::CutList out;
+SmallBins::KeySegmentList SmallBins::ReportStashed(unsigned id, DiskSegment segment) {
+  SmallBins::KeySegmentList out;
   auto key_list = pending_bins_.extract(id);
 
   size_t offset = 0;
