@@ -706,7 +706,7 @@ async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     """
 
     async def blpop_command():
-        res = await async_client.execute_command("blpop dest 2")
+        res = await async_client.execute_command("blpop dest 5")
         assert res == ["dest", "value"]
 
     async def brpoplpush_command():
