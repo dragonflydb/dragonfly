@@ -54,6 +54,9 @@ struct Entry : public EntryBase {
       : EntryBase{0, opcode, dbid, 0, slot_id, 0} {
   }
 
+  Entry(journal::Op opcode, LSN lsn) : EntryBase{0, opcode, 0, 0, std::nullopt, lsn} {
+  }
+
   Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt,
         std::optional<SlotId> slot_id)
       : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, 0} {
