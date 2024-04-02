@@ -2833,7 +2833,7 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
     return streamCompareID(&last_id, &sitem.group->last_id) > 0;
   };
 
-  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb), key_checker);
+  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb), key_checker, cntx);
       status != OpStatus::OK)
     return rb->SendNullArray();
 

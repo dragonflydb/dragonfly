@@ -87,10 +87,9 @@ using BlockingResultCb =
 // Block until a any key of the transaction becomes non-empty and executes the callback.
 // If multiple keys are non-empty when this function is called, the callback is executed
 // immediately with the first key listed in the tx arguments.
-// The block flag is set to true while the transaction is blocking.
 OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                                    BlockingResultCb cb, unsigned limit_ms,
-                                                   bool* block_flag);
+                                                   ConnectionContext* cntx);
 
 };  // namespace container_utils
 
