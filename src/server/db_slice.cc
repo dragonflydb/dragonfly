@@ -389,11 +389,12 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
     return res.status();
   }
 
-  auto it = DbSlice::Iterator(res->it, StringOrView::FromView(key));
+  auto it = Iterator(res->it, StringOrView::FromView(key));
+  auto exp_it = ExpIterator(res->exp_it, StringOrView::FromView(key));
   PreUpdate(cntx.db_index, it);
   // PreUpdate() might have caused a deletion of `it`
   if (res->it.IsOccupied()) {
-    return {{it, res->exp_it,
+    return {{it, exp_it,
              AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                           .db_slice = this,
                           .db_ind = cntx.db_index,
@@ -407,7 +408,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
-  return {ConstIterator(res->it, StringOrView::FromView(key)), res->exp_it};
+  return {ConstIterator(res->it, StringOrView::FromView(key)),
+          ExpConstIterator(res->exp_it, StringOrView::FromView(key))};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
@@ -564,12 +566,13 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
+    ExpIterator exp_it(res->exp_it, StringOrView::FromView(key));
     PreUpdate(cntx.db_index, it);
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
       return DbSlice::AddOrFindResult{
           .it = it,
-          .exp_it = res->exp_it,
+          .exp_it = exp_it,
           .is_new = false,
           .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                        .db_slice = this,
@@ -659,7 +662,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   return DbSlice::AddOrFindResult{
       .it = Iterator(it, StringOrView::FromView(key)),
-      .exp_it = ExpireIterator{},
+      .exp_it = ExpIterator{},
       .is_new = true,
       .post_updater = AutoUpdater({.action = AutoUpdater::DestructorAction::kRun,
                                    .db_slice = this,
@@ -892,7 +895,7 @@ pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms) const {
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
-                                        ExpireIterator expire_it, const ExpireParams& params) {
+                                        ExpIterator expire_it, const ExpireParams& params) {
   constexpr uint64_t kPersistValue = 0;
   DCHECK(params.IsDefined());
   DCHECK(prime_it.IsValid());
@@ -910,7 +913,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   if (rel_msec <= 0) {  // implicit - don't persist
     CHECK(Del(cntx.db_index, prime_it));
     return -1;
-  } else if (IsValid(expire_it) && !params.persist) {
+  } else if (expire_it.IsValid() && !params.persist) {
     auto current = ExpireTime(expire_it);
     if (params.expire_options & ExpireFlags::EXPIRE_NX) {
       return OpStatus::SKIPPED;
@@ -954,10 +957,11 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& c
   if (expire_at_ms) {
     it->second.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
-    if (IsValid(res.exp_it) && force_update) {
+    if (res.exp_it.IsValid() && force_update) {
       res.exp_it->second = ExpirePeriod(delta);
     } else {
-      res.exp_it = db.expire.InsertNew(it->first.AsRef(), ExpirePeriod(delta));
+      auto exp_it = db.expire.InsertNew(it->first.AsRef(), ExpirePeriod(delta));
+      res.exp_it = ExpIterator(exp_it, StringOrView::FromView(key));
     }
   }
 
@@ -1108,6 +1112,10 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it)
 
   auto expire_it = db->expire.Find(it->first);
 
+  // TODO: Accept Iterator instead of PrimeIterator, as this might save an allocation below.
+  string scratch;
+  string_view key = it->first.GetSlice(&scratch);
+
   if (IsValid(expire_it)) {
     // TODO: to employ multi-generation update of expire-base and the underlying values.
     time_t expire_time = ExpireTime(expire_it);
@@ -1121,10 +1129,6 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it)
                << ", expire table size: " << db->expire.size()
                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
-  // TODO: Accept Iterator instead of PrimeIterator, as this might save an allocation below.
-  string scratch;
-  string_view key = it->first.GetSlice(&scratch);
-
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
     RecordExpiry(cntx.db_index, key);
@@ -1135,7 +1139,8 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it)
     doc_del_cb_(key, cntx, it->second);
   }
 
-  PerformDeletion(Iterator(it, StringOrView::FromView(key)), expire_it, db.get());
+  PerformDeletion(Iterator(it, StringOrView::FromView(key)),
+                  ExpIterator(expire_it, StringOrView::FromView(key)), db.get());
   ++events_.expired_keys;
 
   return {PrimeIterator{}, ExpireIterator{}};
@@ -1562,9 +1567,9 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
   return PerformDeletion(Iterator::FromPrime(del_it), table);
 }
 
-void DbSlice::PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* table) {
+void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table) {
   if (!exp_it.is_done()) {
-    table->expire.Erase(exp_it);
+    table->expire.Erase(exp_it.GetInnerIt());
   }
 
   if (del_it->second.HasFlag()) {
@@ -1599,9 +1604,9 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* t
 }
 
 void DbSlice::PerformDeletion(Iterator del_it, DbTable* table) {
-  ExpireIterator exp_it;
+  ExpIterator exp_it;
   if (del_it->second.HasExpire()) {
-    exp_it = table->expire.Find(del_it->first);
+    exp_it = ExpIterator::FromPrime(table->expire.Find(del_it->first));
     DCHECK(!exp_it.is_done());
   }
 

@@ -443,7 +443,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 
   if (!limited) {
     if (res.it.IsValid()) {
-      if (IsValid(res.exp_it)) {
+      if (res.exp_it.IsValid()) {
         res.exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
       } else {
         db_slice.AddExpire(op_args.db_cntx.db_index, res.it, new_tat_ms);
@@ -619,8 +619,8 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   return std::move(result_builder).Return(OpStatus::OK);
 }
 
-OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it, ExpireIterator e_it,
-                             string_view key, string_view value) {
+OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
+                             DbSlice::ExpIterator e_it, string_view key, string_view value) {
   if (params.flags & SET_IF_NOTEXIST)
     return OpStatus::SKIPPED;
 
@@ -641,7 +641,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it, Expi
 
   if (!(params.flags & SET_KEEP_EXPIRE)) {
     if (at_ms) {  // Command has an expiry paramater.
-      if (IsValid(e_it)) {
+      if (e_it.IsValid()) {
         // Updated existing expiry information.
         e_it->second = db_slice.FromAbsoluteTime(at_ms);
       } else {

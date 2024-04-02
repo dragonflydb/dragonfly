@@ -410,7 +410,7 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key) {
   if (!res.it.IsValid()) {
     return OpStatus::KEY_NOTFOUND;
   } else {
-    if (IsValid(res.exp_it)) {
+    if (res.exp_it.IsValid()) {
       // The SKIPPED not really used, just placeholder for error
       return db_slice.UpdateExpire(op_args.db_cntx.db_index, res.it, 0) ? OpStatus::OK
                                                                         : OpStatus::SKIPPED;
@@ -1363,7 +1363,7 @@ OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, stri
   if (!it.IsValid())
     return OpStatus::KEY_NOTFOUND;
 
-  if (!IsValid(expire_it))
+  if (!expire_it.IsValid())
     return OpStatus::SKIPPED;
 
   int64_t ttl_ms = db_slice.ExpireTime(expire_it) - t->GetDbContext().time_now_ms;
@@ -1427,11 +1427,11 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
   PrimeValue from_obj = std::move(from_res.it->second);
 
   // Restore the expire flag on 'from' so we could delete it from expire table.
-  from_res.it->second.SetExpire(IsValid(from_res.exp_it));
+  from_res.it->second.SetExpire(from_res.exp_it.IsValid());
 
   if (to_res.it.IsValid()) {
     to_res.it->second = std::move(from_obj);
-    to_res.it->second.SetExpire(IsValid(to_res.exp_it));  // keep the expire flag on 'to'.
+    to_res.it->second.SetExpire(to_res.exp_it.IsValid());  // keep the expire flag on 'to'.
 
     // It is guaranteed that UpdateExpire() call does not erase the element because then
     // from_it would be invalid. Therefore, UpdateExpire does not invalidate any iterators,
@@ -1499,12 +1499,12 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   db_slice.ActivateDb(target_db);
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
+  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it.GetInnerIt());
   from_res.post_updater.Run();
   PrimeValue from_obj = std::move(from_res.it->second);
 
   // Restore expire flag after std::move.
-  from_res.it->second.SetExpire(IsValid(from_res.exp_it));
+  from_res.it->second.SetExpire(from_res.exp_it.IsValid());
 
   CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);

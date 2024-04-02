@@ -54,7 +54,7 @@ class SetCmd {
                                            std::string_view value);
 
  private:
-  OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, ExpireIterator e_it,
+  OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
                        std::string_view key, std::string_view value);
 
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);

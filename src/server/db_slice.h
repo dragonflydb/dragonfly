@@ -123,7 +123,6 @@ class DbSlice {
         return;
       }
 
-      assert(!key_.view().empty());
       uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
       if (current_epoch != fiber_epoch_) {
         if (it_->first != key_.view()) {
@@ -140,7 +139,8 @@ class DbSlice {
 
   using Iterator = IteratorT<PrimeIterator>;
   using ConstIterator = IteratorT<PrimeConstIterator>;
-  // TODO: Also add exp iterator
+  using ExpIterator = IteratorT<ExpireIterator>;
+  using ExpConstIterator = IteratorT<ExpireConstIterator>;
 
   class AutoUpdater {
    public:
@@ -257,6 +257,12 @@ class DbSlice {
   }
 
   // returns absolute time of the expiration.
+  time_t ExpireTime(ExpConstIterator it) const {
+    return ExpireTime(it.GetInnerIt());
+  }
+  time_t ExpireTime(ExpIterator it) const {
+    return ExpireTime(it.GetInnerIt());
+  }
   time_t ExpireTime(ExpireConstIterator it) const {
     return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
   }
@@ -267,7 +273,7 @@ class DbSlice {
 
   struct ItAndUpdater {
     Iterator it;
-    ExpireIterator exp_it;
+    ExpIterator exp_it;
     AutoUpdater post_updater;
   };
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
@@ -279,7 +285,7 @@ class DbSlice {
 
   struct ItAndExpConst {
     ConstIterator it;
-    ExpireConstIterator exp_it;
+    ExpConstIterator exp_it;
   };
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
@@ -294,7 +300,7 @@ class DbSlice {
 
   struct AddOrFindResult {
     Iterator it;
-    ExpireIterator exp_it;
+    ExpIterator exp_it;
     bool is_new = false;
     AutoUpdater post_updater;
 
@@ -316,8 +322,8 @@ class DbSlice {
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
-  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
-                                         ExpireIterator exp_it, const ExpireParams& params);
+  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it, ExpIterator exp_it,
+                                         const ExpireParams& params);
 
   // Adds expiry information.
   void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
@@ -501,7 +507,7 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const SlotSet& slot_ids);
 
-  void PerformDeletion(Iterator del_it, ExpireIterator exp_it, DbTable* table);
+  void PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table);
 
   // Send invalidation message to the clients that are tracking the change to a key.
   void SendInvalidationTrackingMessage(std::string_view key);
