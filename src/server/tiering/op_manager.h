@@ -74,9 +74,9 @@ class OpManager {
     bool delete_requested = false;             // whether to delete after reading the segment
   };
 
-  // Prepare read operation for segment or return pending if it exists.
+  // Prepare read operation for aligned segment or return pending if it exists.
   // Refernce is valid until any other read operations occur.
-  ReadOp& PrepareRead(DiskSegment segment);
+  ReadOp& PrepareRead(DiskSegment aligned_segment);
 
   // Called once read finished
   void ProcessRead(size_t offset, std::string_view value);

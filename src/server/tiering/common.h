@@ -13,6 +13,10 @@ namespace dfly::tiering {
 
 // Location on the offloaded blob, measured in bytes
 struct DiskSegment {
+  DiskSegment FillPages() const {
+    return {offset / 4096 * 4096, (length + 4096 - 1) / 4096 * 4096};
+  }
+
   DiskSegment() = default;
   DiskSegment(size_t offset, size_t length) : offset{offset}, length{length} {
   }

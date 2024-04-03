@@ -34,7 +34,8 @@ void OpManager::Close() {
 }
 
 util::fb2::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) {
-  return PrepareRead(segment).ForId(id, segment).futures.emplace_back().get_future();
+  // Fill pages for prepared read as it has no penalty and potentially covers more small segments
+  return PrepareRead(segment.FillPages()).ForId(id, segment).futures.emplace_back().get_future();
 }
 
 void OpManager::Delete(EntryId id) {
@@ -67,18 +68,15 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
   });
 }
 
-OpManager::ReadOp& OpManager::PrepareRead(DiskSegment segment) {
-  // If a read for a small key is requested, read the whole page.
-  // Small keys never begin at 0 because their keys are stored before values.
-  if (segment.offset % 4_KB != 0) {
-    DCHECK_LT(segment.length, 4_KB);
-    segment = {segment.offset / 4_KB * 4_KB, 4_KB};
-  }
+OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
+  DCHECK_EQ(aligned_segment.offset % 4_KB, 0u);
+  DCHECK_EQ(aligned_segment.length % 4_KB, 0u);
 
-  auto [it, inserted] = pending_reads_.try_emplace(segment.offset, segment);
+  auto [it, inserted] = pending_reads_.try_emplace(aligned_segment.offset, aligned_segment);
   if (inserted) {
-    storage_.Read(segment,
-                  [this, segment](std::string_view value) { ProcessRead(segment.offset, value); });
+    storage_.Read(aligned_segment, [this, aligned_segment](std::string_view value) {
+      ProcessRead(aligned_segment.offset, value);
+    });
   }
   return it->second;
 }
