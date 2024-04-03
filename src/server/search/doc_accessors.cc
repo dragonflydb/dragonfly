@@ -3,7 +3,7 @@
 //
 
 // GCC yields a spurious warning about uninitialized data in DocumentAccessor::StringList.
-#ifdef __GNUC__
+#ifndef __clang__
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 

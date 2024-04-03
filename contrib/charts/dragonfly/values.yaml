@@ -105,6 +105,9 @@ tls:
     kind: ClusterIssuer
     # -- name of the referenced issuer
     name: selfsigned
+    # -- group of the referenced issuer
+    # if you are using an external issuer, change this to that issuer group.
+    group: cert-manager.io
   # -- use TLS certificates from existing secret
   existing_secret: ""
   # -- TLS certificate

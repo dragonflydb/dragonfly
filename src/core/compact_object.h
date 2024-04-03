@@ -19,6 +19,8 @@ constexpr unsigned kEncodingStrMap = 1;   // for set/map encodings of strings
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
 constexpr unsigned kEncodingListPack = 3;
 
+class SBF;
+
 namespace detail {
 
 // redis objects or blobs of upto 4GB size.
@@ -101,6 +103,7 @@ class CompactObj {
     ROBJ_TAG = 19,
     EXTERNAL_TAG = 20,
     JSON_TAG = 21,
+    SBF_TAG = 22,
   };
 
   enum MaskBit {
@@ -297,6 +300,9 @@ class CompactObj {
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
 
+  void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
+  SBF* GetSBF() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -339,7 +345,7 @@ class CompactObj {
   template <typename T> static void DeleteMR(void* ptr) {
     T* t = (T*)ptr;
     t->~T();
-    memory_resource()->deallocate(ptr, alignof(T));
+    memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
  private:
@@ -388,6 +394,7 @@ class CompactObj {
     SmallString small_str;
     detail::RobjWrapper r_obj;
     JsonWrapper json_obj;
+    SBF* sbf __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
 

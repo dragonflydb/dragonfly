@@ -25,6 +25,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/pod_array.h"
+#include "core/bloom.h"
 #include "core/detail/bitpacking.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -631,6 +632,10 @@ unsigned CompactObj::ObjType() const {
     return OBJ_JSON;
   }
 
+  if (taglen_ == SBF_TAG) {
+    return OBJ_SBF;
+  }
+
   LOG(FATAL) << "TBD " << int(taglen_);
   return 0;
 }
@@ -649,6 +654,7 @@ string_view CompactObj::ObjTypeToString(unsigned type) {
     OBJECT_TYPE_CASE(OBJ_MODULE);
     OBJECT_TYPE_CASE(OBJ_STREAM);
     OBJECT_TYPE_CASE(OBJ_JSON);
+    OBJECT_TYPE_CASE(OBJ_SBF);
     default:
       DCHECK(false) << "Unknown object type " << type;
       return "OTHER";
@@ -705,6 +711,21 @@ void CompactObj::SetJson(JsonType&& j) {
     void* ptr = tl.local_mr->allocate(sizeof(JsonType), kAlignSize);
     u_.json_obj.json_ptr = new (ptr) JsonType(std::move(j));
   }
+}
+
+void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor) {
+  if (taglen_ == SBF_TAG) {  // already json
+    *u_.sbf = SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
+  } else {
+    SetMeta(SBF_TAG);
+    void* ptr = tl.local_mr->allocate(sizeof(SBF), alignof(SBF));
+    u_.sbf = new (ptr) SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
+  }
+}
+
+SBF* CompactObj::GetSBF() const {
+  DCHECK_EQ(SBF_TAG, taglen_);
+  return u_.sbf;
 }
 
 void CompactObj::SetString(std::string_view str) {
@@ -876,7 +897,7 @@ bool CompactObj::HasAllocated() const {
       (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
-  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG);
+  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG || taglen_ == SBF_TAG);
   return true;
 }
 
@@ -991,6 +1012,8 @@ void CompactObj::Free() {
     VLOG(1) << "Freeing JSON object";
     u_.json_obj.json_ptr->~JsonType();
     tl.local_mr->deallocate(u_.json_obj.json_ptr, sizeof(JsonType), kAlignSize);
+  } else if (taglen_ == SBF_TAG) {
+    DeleteMR<SBF>(u_.sbf);
   } else {
     LOG(FATAL) << "Unsupported tag " << int(taglen_);
   }
@@ -1015,6 +1038,9 @@ size_t CompactObj::MallocUsed() const {
     return u_.small_str.MallocUsed();
   }
 
+  if (taglen_ == SBF_TAG) {
+    return 0;  // TODO: to track SBF memory utilization.
+  }
   LOG(DFATAL) << "should not reach";
   return 0;
 }

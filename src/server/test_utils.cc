@@ -31,15 +31,6 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 
 namespace dfly {
 
-std::ostream& operator<<(std::ostream& os, ArgSlice list) {
-  os << "[";
-  if (!list.empty()) {
-    std::for_each(list.begin(), list.end() - 1, [&os](const auto& val) { os << val << ", "; });
-    os << (*(list.end() - 1));
-  }
-  return os << "]";
-}
-
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_size
      << ", tiered_entries: " << stats.tiered_entries << "\n";
@@ -374,6 +365,10 @@ RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
 }
 
 RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->Run(id, slice); });
+  }
+
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
 
   CmdArgVec args = conn_wrapper->Args(slice);
@@ -610,6 +605,8 @@ ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id)
 }
 
 auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {
+  DCHECK(ProactorBase::IsProactorThread());
+
   unique_lock lk(mu_);
 
   auto [it, inserted] = connections_.emplace(id, nullptr);

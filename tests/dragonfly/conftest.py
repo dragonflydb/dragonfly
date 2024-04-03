@@ -254,7 +254,7 @@ def port_picker():
 
 @pytest.fixture(scope="function")
 def memcached_client(df_server: DflyInstance):
-    client = pymemcache.Client(f"localhost:{df_server.mc_port}", default_noreply=False)
+    client = pymemcache.Client(f"127.0.0.1:{df_server.mc_port}", default_noreply=False)
 
     yield client
 
@@ -354,3 +354,15 @@ def copy_failed_logs_and_clean_tmp_folder(report):
 def pytest_exception_interact(node, call, report):
     if report.failed:
         copy_failed_logs_and_clean_tmp_folder(report)
+
+
+@pytest.fixture(autouse=True)
+def run_before_and_after_test():
+    # Setup: logic before any of the test starts
+    # Empty the log on each run
+    last_log_file = open("/tmp/last_test_log_files.txt", "w")
+    last_log_file.close()
+
+    yield  # this is where the testing happens
+
+    # Teardown

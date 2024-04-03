@@ -677,7 +677,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     coordinator_state_ &= ~COORD_CONCLUDING;
   }
 
-  // Log to jounrnal only once the command finished running
+  // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding))
     LogAutoJournalOnShard(shard, result);
 }

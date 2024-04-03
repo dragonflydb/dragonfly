@@ -41,6 +41,8 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_FLAG(bool, replica_partial_sync, true,
           "Use partial sync to reconnect when a replica connection is interrupted.");
+ABSL_FLAG(bool, replica_reconnect_on_master_restart, false,
+          "When in replica mode, and master restarts, break replication from master.");
 ABSL_DECLARE_FLAG(int32_t, port);
 
 namespace dfly {
@@ -67,8 +69,9 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
-Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
-    : ProtocolClient(std::move(host), port), service_(*se), id_{id} {
+Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
+                 std::optional<SlotRange> slot_range)
+    : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
   proactor_ = ProactorBase::me();
 }
 
@@ -303,10 +306,18 @@ std::error_code Replica::HandleCapaDflyResp() {
   }
 
   // If we're syncing a different replication ID, drop the saved LSNs.
-  if (master_context_.master_repl_id != ToSV(LastResponseArgs()[0].GetBuf())) {
+  string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+  if (master_context_.master_repl_id != master_repl_id) {
+    if (absl::GetFlag(FLAGS_replica_reconnect_on_master_restart) &&
+        !master_context_.master_repl_id.empty()) {
+      LOG(ERROR) << "Encountered different master repl id (" << master_repl_id << " vs "
+                 << master_context_.master_repl_id << ")";
+      state_mask_.store(0);
+      return make_error_code(errc::connection_aborted);
+    }
     last_journal_LSNs_.reset();
   }
-  master_context_.master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+  master_context_.master_repl_id = master_repl_id;
   master_context_.dfly_session_id = ToSV(LastResponseArgs()[1].GetBuf());
   num_df_flows_ = param_num_flows;
 
@@ -375,13 +386,15 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
     // Set LOADING state.
-    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
-          GlobalState::LOADING);
-    absl::Cleanup cleanup = [this]() {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    };
+    service_.RequestLoadingState();
+    absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
-    JournalExecutor{&service_}.FlushAll();
+    if (slot_range_.has_value()) {
+      JournalExecutor{&service_}.FlushSlots(slot_range_.value());
+    } else {
+      JournalExecutor{&service_}.FlushAll();
+    }
+
     RdbLoader loader(NULL);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
@@ -429,14 +442,6 @@ error_code Replica::InitiatePSync() {
 error_code Replica::InitiateDflySync() {
   auto start_time = absl::Now();
 
-  absl::Cleanup cleanup = [this]() {
-    // We do the following operations regardless of outcome.
-    JoinDflyFlows();
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    state_mask_.fetch_and(~R_SYNCING);
-    last_journal_LSNs_.reset();
-  };
-
   // Initialize MultiShardExecution.
   multi_shard_exe_.reset(new MultiShardExecution());
 
@@ -466,11 +471,19 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING).first ==
-        GlobalState::LOADING);
+  service_.RequestLoadingState();
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
+
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    JoinDflyFlows();
+    service_.RemoveLoadingState();
+    state_mask_.fetch_and(~R_SYNCING);
+    last_journal_LSNs_.reset();
+  };
+
   std::string_view sync_type = "full";
   {
     // Going out of the way to avoid using std::vector<bool>...
@@ -498,7 +511,11 @@ error_code Replica::InitiateDflySync() {
         std::accumulate(is_full_sync.get(), is_full_sync.get() + num_df_flows_, 0);
 
     if (num_full_flows == num_df_flows_) {
-      JournalExecutor{&service_}.FlushAll();
+      if (slot_range_.has_value()) {
+        JournalExecutor{&service_}.FlushSlots(slot_range_.value());
+      } else {
+        JournalExecutor{&service_}.FlushAll();
+      }
       RdbLoader::PerformPreLoad(&service_);
     } else if (num_full_flows == 0) {
       sync_type = "partial";
@@ -795,7 +812,9 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   io::PrefixSource ps{prefix, Sock()};
 
   JournalReader reader{&ps, 0};
-  TransactionReader tx_reader{use_multi_shard_exe_sync_};
+  DCHECK_GE(journal_rec_executed_, 1u);
+  TransactionReader tx_reader{use_multi_shard_exe_sync_,
+                              journal_rec_executed_.load(std::memory_order_relaxed) - 1};
 
   if (master_context_.version > DflyVersion::VER0) {
     acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
@@ -813,8 +832,9 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       break;
 
     last_io_time_ = Proactor()->GetMonotonicTimeNs();
-
-    if (tx_data->opcode == journal::Op::PING) {
+    if (tx_data->opcode == journal::Op::LSN) {
+      //  Do nothing
+    } else if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else if (tx_data->opcode == journal::Op::EXEC) {
@@ -833,7 +853,7 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
-    shard_replica_waker_.notify();
+    shard_replica_waker_.notifyAll();
   }
 }
 
@@ -845,7 +865,7 @@ void Replica::RedisStreamAcksFb() {
   auto next_ack_tp = std::chrono::steady_clock::now();
 
   while (!cntx_.IsCancelled()) {
-    VLOG(1) << "Sending an ACK with offset=" << repl_offs_;
+    VLOG(2) << "Sending an ACK with offset=" << repl_offs_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd); ec) {
@@ -987,7 +1007,7 @@ void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
     auto& data = trans_data_queue_.front();
     ExecuteTx(std::move(data.first), data.second, cntx);
     trans_data_queue_.pop();
-    shard_replica_waker_.notify();
+    shard_replica_waker_.notifyAll();
   }
 }
 

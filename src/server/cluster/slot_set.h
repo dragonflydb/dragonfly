@@ -13,11 +13,15 @@ namespace dfly {
 using SlotId = uint16_t;
 
 struct SlotRange {
+  static constexpr SlotId kMaxSlotId = 0x3FFF;
   SlotId start = 0;
   SlotId end = 0;
 
   bool operator==(const SlotRange& r) const {
     return start == r.start && end == r.end;
+  }
+  bool IsValid() {
+    return start <= end && start <= kMaxSlotId && end <= kMaxSlotId;
   }
 };
 
@@ -25,8 +29,7 @@ using SlotRanges = std::vector<SlotRange>;
 
 class SlotSet {
  public:
-  static constexpr SlotId kMaxSlot = 0x3FFF;
-  static constexpr SlotId kSlotsNumber = kMaxSlot + 1;
+  static constexpr SlotId kSlotsNumber = SlotRange::kMaxSlotId + 1;
 
   SlotSet(bool full_house = false) : slots_(std::make_unique<BitsetType>()) {
     if (full_house)

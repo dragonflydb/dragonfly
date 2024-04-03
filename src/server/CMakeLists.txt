@@ -14,11 +14,12 @@ set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-    SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc)
+    SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc tiering/disk_storage.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
     cxx_link(dfly_bench dfly_facade fibers2 absl::random_random)
     cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
+    cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
 
@@ -34,9 +35,9 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
 SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc
     search/aggregator.cc)
 
-add_library(dragonfly_lib engine_shard_set.cc channel_store.cc
+add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
-            generic_family.cc hset_family.cc json_family.cc
+            generic_family.cc hset_family.cc http_api.cc json_family.cc
             ${SEARCH_FILES}
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
@@ -58,6 +59,10 @@ endif()
 
 if (PRINT_STACKTRACES_ON_SIGNAL)
   target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
+endif()
+
+if (WITH_ASAN OR WITH_USAN)
+  target_compile_definitions(dfly_transaction PRIVATE SANITIZERS)
 endif()
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
@@ -96,6 +101,7 @@ cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
 cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
+cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)

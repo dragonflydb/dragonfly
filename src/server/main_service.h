@@ -84,9 +84,11 @@ class Service : public facade::ServiceInterface {
   // Returns: the new state.
   // if from equals the old state then the switch is performed "to" is returned.
   // Otherwise, does not switch and returns the current state in the system.
-  // true if operation is successed
   // Upon switch, updates cached global state in threadlocal ServerState struct.
-  std::pair<GlobalState, bool> SwitchState(GlobalState from, GlobalState to);
+  GlobalState SwitchState(GlobalState from, GlobalState to);
+
+  void RequestLoadingState();
+  void RemoveLoadingState();
 
   GlobalState GetGlobalState() const;
 
@@ -186,7 +188,8 @@ class Service : public facade::ServiceInterface {
   const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
 
   mutable util::fb2::Mutex mu_;
-  GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
+  GlobalState global_state_ ABSL_GUARDED_BY(mu_) = GlobalState::ACTIVE;
+  uint32_t loading_state_counter_ ABSL_GUARDED_BY(mu_) = 0;
 };
 
 uint64_t GetMaxMemoryFlag();

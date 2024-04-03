@@ -39,9 +39,6 @@ using namespace facade;
 using namespace util;
 
 using CI = CommandId;
-using ClusterShard = ClusterConfig::ClusterShard;
-using ClusterShards = ClusterConfig::ClusterShards;
-using Node = ClusterConfig::Node;
 
 constexpr char kIdNotFound[] = "syncid not found";
 
@@ -70,11 +67,11 @@ ClusterConfig* ClusterFamily::cluster_config() {
   return tl_cluster_config.get();
 }
 
-ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
-  ClusterShard info{.slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
-                    .master = {},
-                    .replicas = {},
-                    .migrations = {}};
+ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
+  ClusterShardInfo info{.slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
+                        .master = {},
+                        .replicas = {},
+                        .migrations = {}};
 
   optional<Replica::Info> replication_info = server_family_->GetReplicaInfo();
   ServerState& etl = *ServerState::tlocal();
@@ -123,12 +120,12 @@ void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterShardsImpl(const ClusterShards& config, ConnectionContext* cntx) {
+void ClusterShardsImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-shards/
   constexpr unsigned int kEntrySize = 4;
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
-  auto WriteNode = [&](const Node& node, string_view role) {
+  auto WriteNode = [&](const ClusterNodeInfo& node, string_view role) {
     constexpr unsigned int kNodeSize = 14;
     rb->StartArray(kNodeSize);
     rb->SendBulkString("id");
@@ -179,10 +176,10 @@ void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
+void ClusterSlotsImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-slots/
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  auto WriteNode = [&](const Node& node) {
+  auto WriteNode = [&](const ClusterNodeInfo& node) {
     constexpr unsigned int kNodeSize = 3;
     rb->StartArray(kNodeSize);
     rb->SendBulkString(node.ip);
@@ -223,12 +220,12 @@ void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterNodesImpl(const ClusterShards& config, string_view my_id, ConnectionContext* cntx) {
+void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-nodes/
 
   string result;
 
-  auto WriteNode = [&](const Node& node, string_view role, string_view master_id,
+  auto WriteNode = [&](const ClusterNodeInfo& node, string_view role, string_view master_id,
                        const vector<SlotRange>& ranges) {
     absl::StrAppend(&result, node.id, " ");
 
@@ -278,7 +275,7 @@ void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
+void ClusterInfoImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   std::string msg;
   auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
     // Separate lines with \r\n, not \n, see #2726
@@ -427,8 +424,8 @@ namespace {
 // Guards set configuration, so that we won't handle 2 in parallel.
 util::fb2::Mutex set_config_mu;
 
-void DeleteSlots(const SlotSet& slots) {
-  if (slots.Empty()) {
+void DeleteSlots(const SlotRanges& slots_ranges) {
+  if (slots_ranges.empty()) {
     return;
   }
 
@@ -437,23 +434,23 @@ void DeleteSlots(const SlotSet& slots) {
     if (shard == nullptr)
       return;
 
-    shard->db_slice().FlushSlots(slots);
+    shard->db_slice().FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
 
-void WriteFlushSlotsToJournal(const SlotSet& slots) {
-  if (slots.Empty()) {
+void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
+  if (slot_ranges.empty()) {
     return;
   }
 
   // Build args
   vector<string> args;
-  args.reserve(slots.Count() + 1);
+  args.reserve(slot_ranges.size() + 1);
   args.push_back("FLUSHSLOTS");
-  for (SlotId slot = 0; slot <= SlotSet::kMaxSlot; ++slot) {
-    if (slots.Contains(slot))
-      args.push_back(absl::StrCat(slot));
+  for (SlotRange range : slot_ranges) {
+    args.push_back(absl::StrCat(range.start));
+    args.push_back(absl::StrCat(range.end));
   }
 
   // Build view
@@ -489,13 +486,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   }
 
   string_view json_str = ArgS(args, 0);
-  optional<JsonType> json = JsonFromString(json_str, PMR_NS::get_default_resource());
-  if (!json.has_value()) {
-    LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
-    return cntx->SendError("Invalid JSON cluster config", kSyntaxErrType);
-  }
-
-  shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json.value());
+  shared_ptr<ClusterConfig> new_config = ClusterConfig::CreateFromConfig(id_, json_str);
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
     return cntx->SendError("Invalid cluster configuration.");
@@ -503,7 +494,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
-  SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
+  auto prev_config = tl_cluster_config;
+  SlotSet before = prev_config ? prev_config->GetOwnedSlots() : SlotSet(true);
 
   // Ignore blocked commands because we filter them with CancelBlockingOnThread
   DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
@@ -523,8 +515,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
   DCHECK(tl_cluster_config != nullptr);
 
-  // TODO rewrite with outgoing migrations
-  if (!StartSlotMigrations(new_config->GetOutgoingMigrations(), cntx)) {
+  if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(prev_config), cntx)) {
     return cntx->SendError("Can't start the migration");
   }
   RemoveFinishedMigrations();
@@ -535,7 +526,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
-    auto deleted_slots = before.GetRemovedSlots(after);
+    auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
@@ -591,25 +582,28 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 }
 
 void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx) {
-  SlotSet slots;
-  for (size_t i = 0; i < args.size(); ++i) {
-    unsigned slot;
-    if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
-      return cntx->SendError(kSyntaxErrType);
-    }
-    slots.Set(static_cast<SlotId>(slot), true);
-  }
+  SlotRanges slot_ranges;
 
-  DeleteSlots(slots);
+  CmdArgParser parser(args);
+  do {
+    auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
+    slot_ranges.emplace_back(SlotRange{slot_start, slot_end});
+  } while (parser.HasNext());
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  DeleteSlots(slot_ranges);
 
   return cntx->SendOk();
 }
 
-bool ClusterFamily::StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
+bool ClusterFamily::StartSlotMigrations(std::vector<MigrationInfo> migrations,
                                         ConnectionContext* cntx) {
   // Add validating and error processing
   for (auto m : migrations) {
-    auto outgoing_migration = CreateOutgoingMigration(m.ip, m.port, m.slot_ranges);
+    auto outgoing_migration =
+        CreateOutgoingMigration(std::move(m.ip), m.port, std::move(m.slot_ranges));
     outgoing_migration->Start(cntx);
   }
   return true;
@@ -690,7 +684,8 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
 }
 
 ClusterSlotMigration* ClusterFamily::CreateIncomingMigration(std::string host_ip, uint16_t port,
-                                                             SlotRanges slots) {
+                                                             SlotRanges slots,
+                                                             uint32_t shards_num) {
   lock_guard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
@@ -698,9 +693,20 @@ ClusterSlotMigration* ClusterFamily::CreateIncomingMigration(std::string host_ip
     }
   }
   return incoming_migrations_jobs_
-      .emplace_back(make_unique<ClusterSlotMigration>(this, std::string(host_ip), port,
-                                                      &server_family_->service(), std::move(slots)))
+      .emplace_back(make_shared<ClusterSlotMigration>(
+          std::string(host_ip), port, &server_family_->service(), std::move(slots), shards_num))
       .get();
+}
+
+std::shared_ptr<ClusterSlotMigration> ClusterFamily::GetIncomingMigration(std::string host_ip,
+                                                                          uint16_t port) {
+  lock_guard lk(migration_mu_);
+  for (const auto& mj : incoming_migrations_jobs_) {
+    if (auto info = mj->GetInfo(); info.host == host_ip && info.port == port) {
+      return mj;
+    }
+  }
+  return nullptr;
 }
 
 void ClusterFamily::RemoveFinishedMigrations() {
@@ -712,6 +718,7 @@ void ClusterFamily::RemoveFinishedMigrations() {
 
   for (auto it = outgoing_migration_jobs_.begin(); it != outgoing_migration_jobs_.end();) {
     if (it->second->GetState() == MigrationState::C_FINISHED) {
+      VLOG(1) << "erase finished migration " << it->first;
       it = outgoing_migration_jobs_.erase(it);
     } else {
       ++it;
@@ -722,7 +729,7 @@ void ClusterFamily::RemoveFinishedMigrations() {
 void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Create incoming migration, args: " << args;
   CmdArgParser parser{args};
-  auto [sync_id, port, flows_num] = parser.Next<uint32_t, uint32_t, uint32_t>();
+  auto [port, flows_num] = parser.Next<uint32_t, uint32_t>();
 
   SlotRanges slots;
   do {
@@ -733,11 +740,9 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  auto* node =
-      CreateIncomingMigration(cntx->conn()->RemoteEndpointAddress(), port, std::move(slots));
-
   VLOG(1) << "Init migration " << cntx->conn()->RemoteEndpointAddress() << ":" << port;
-  node->Init(sync_id, flows_num);
+
+  CreateIncomingMigration(cntx->conn()->RemoteEndpointAddress(), port, std::move(slots), flows_num);
 
   return cntx->SendOk();
 }
@@ -753,8 +758,8 @@ std::shared_ptr<OutgoingMigration> ClusterFamily::CreateOutgoingMigration(std::s
     // Todo add error processing, stop migration process
     // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
   };
-  auto migration = make_shared<OutgoingMigration>(host, port, std::move(slots), sync_id,
-                                                  err_handler, server_family_);
+  auto migration = make_shared<OutgoingMigration>(host, port, std::move(slots), this, err_handler,
+                                                  server_family_);
   auto [it, inserted] = outgoing_migration_jobs_.emplace(sync_id, migration);
   CHECK(inserted);
   return migration;
@@ -762,83 +767,62 @@ std::shared_ptr<OutgoingMigration> ClusterFamily::CreateOutgoingMigration(std::s
 
 void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
-  auto [sync_id, shard_id] = parser.Next<uint32_t, uint32_t>();
+  auto [port, shard_id] = parser.Next<uint32_t, uint32_t>();
 
   if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());
   }
 
-  VLOG(1) << "Create flow sync_id: " << sync_id << " shard_id: " << shard_id;
+  auto host_ip = cntx->conn()->RemoteEndpointAddress();
 
-  cntx->conn()->SetName(absl::StrCat("migration_flow_", sync_id));
+  VLOG(1) << "Create flow " << host_ip << ":" << port << " shard_id: " << shard_id;
 
-  auto migration = GetOutgoingMigration(sync_id);
+  cntx->conn()->SetName(absl::StrCat("migration_flow_", host_ip, ":", port));
+
+  auto migration = GetIncomingMigration(cntx->conn()->RemoteEndpointAddress(), port);
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
-  cntx->conn()->Migrate(shard_set->pool()->at(shard_id));
-  server_family_->journal()->StartInThread();
+  DCHECK(cntx->sync_dispatch);
+  // we do this to be ignored by the dispatch tracker
+  // TODO provide a more clear approach
+  cntx->sync_dispatch = false;
 
   cntx->SendOk();
 
-  EngineShard* shard = EngineShard::tlocal();
-  DCHECK(shard->shard_id() == shard_id);
-
-  migration->StartFlow(server_family_->journal(), cntx->conn()->socket());
+  migration->StartFlow(shard_id, cntx->conn()->socket());
 }
 
-void ClusterFamily::FinalizeIncomingMigration(uint32_t local_sync_id) {
-  lock_guard lk(migration_mu_);
-  auto it =
-      find_if(incoming_migrations_jobs_.cbegin(), incoming_migrations_jobs_.cend(),
-              [local_sync_id](const auto& el) { return el->GetLocalSyncId() == local_sync_id; });
-  DCHECK(it != incoming_migrations_jobs_.cend());
+void ClusterFamily::UpdateConfig(const std::vector<SlotRange>& slots, bool enable) {
+  lock_guard gu(set_config_mu);
 
-  {
-    lock_guard gu(set_config_mu);
+  auto new_config = tl_cluster_config->CloneWithChanges(slots, enable);
 
-    auto new_config = tl_cluster_config->CloneWithChanges((*it)->GetSlots(), true);
-
-    shard_set->pool()->AwaitFiberOnAll(
-        [&new_config](util::ProactorBase* pb) { tl_cluster_config = new_config; });
-    DCHECK(tl_cluster_config != nullptr);
-  }
+  shard_set->pool()->AwaitFiberOnAll(
+      [&new_config](util::ProactorBase* pb) { tl_cluster_config = new_config; });
+  DCHECK(tl_cluster_config != nullptr);
 }
 
 void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
-  auto sync_id = parser.Next<uint32_t>();
+  auto port = parser.Next<uint16_t>();
 
   if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());
   }
 
-  auto migration = GetOutgoingMigration(sync_id);
+  auto host_ip = cntx->conn()->RemoteEndpointAddress();
+  auto migration = GetIncomingMigration(host_ip, port);
   if (!migration)
     return cntx->SendError(kIdNotFound);
+
+  migration->Join();
 
   if (migration->GetState() != MigrationState::C_FINISHED) {
     return cntx->SendError("Migration process is not in C_FINISHED state");
   }
 
-  lock_guard lk(migration_mu_);
-  auto it = outgoing_migration_jobs_.find(sync_id);
-  DCHECK(it != outgoing_migration_jobs_.end());
-
-  {
-    lock_guard gu(set_config_mu);
-
-    auto new_config = tl_cluster_config->CloneWithChanges(it->second->GetSlots(), false);
-
-    shard_set->pool()->AwaitFiberOnAll(
-        [&new_config](util::ProactorBase* pb) { tl_cluster_config = new_config; });
-    DCHECK(tl_cluster_config != nullptr);
-  }
-
-  shard_set->pool()->AwaitFiberOnAll([&migration](auto*) mutable {
-    if (const auto* shard = EngineShard::tlocal(); shard)
-      migration->Cancel(shard->shard_id());
-  });
+  UpdateConfig(migration->GetSlots(), true);
 
   cntx->SendOk();
 }

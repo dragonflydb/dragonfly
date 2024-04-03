@@ -18,6 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -99,6 +100,9 @@ const char* ObjTypeName(int type) {
       return "stream";
     case OBJ_JSON:
       return "rejson-rl";
+    case OBJ_SBF:
+      return "MBbloom--";
+
     default:
       LOG(ERROR) << "Unsupported type " << type;
   }
@@ -393,6 +397,19 @@ bool AbslParseFlag(std::string_view in, dfly::MemoryBytesFlag* flag, std::string
 
 std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag) {
   return strings::HumanReadableNumBytes(flag.value);
+}
+
+std::ostream& operator<<(std::ostream& os, const GlobalState& state) {
+  return os << GlobalStateName(state);
+}
+
+std::ostream& operator<<(std::ostream& os, ArgSlice list) {
+  os << "[";
+  if (!list.empty()) {
+    std::for_each(list.begin(), list.end() - 1, [&os](const auto& val) { os << val << ", "; });
+    os << (*(list.end() - 1));
+  }
+  return os << "]";
 }
 
 }  // namespace dfly

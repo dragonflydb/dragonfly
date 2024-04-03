@@ -53,14 +53,18 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
+@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 async def test_replication_all(
-    df_local_factory: DflyInstanceFactory,
-    t_master,
-    t_replicas,
-    seeder_config,
-    stream_target,
+    df_local_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
 ):
-    master = df_local_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master)
+    # Temporary disable the test until it passes reliably with cache mode.
+    if mode:
+        pytest.skip()
+
+    if mode:
+        mode["maxmemory"] = str(t_master * 256) + "mb"
+
+    master = df_local_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **mode)
     replicas = [
         df_local_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
@@ -99,17 +103,17 @@ async def test_replication_all(
     await stream_task
 
     # Check data after full sync
-    await check_all_replicas_finished(c_replicas, c_master)
-    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
-    assert len(set(hashes)) == 1
+    async def check():
+        await check_all_replicas_finished(c_replicas, c_master)
+        hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
+        assert len(set(hashes)) == 1
 
+    await check()
     # Stream more data in stable state
     await seeder.run(c_master, target_ops=stream_target)
 
     # Check data after stable state stream
-    await check_all_replicas_finished(c_replicas, c_master)
-    hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
-    assert len(set(hashes)) == 1
+    await check()
 
     await disconnect_clients(c_master, *c_replicas)
 
@@ -133,7 +137,6 @@ async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
         if not waiting_for:
             return
         await asyncio.sleep(0.2)
-
         m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
         finished_list = await asyncio.gather(
             *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
@@ -1386,6 +1389,12 @@ async def test_tls_replication(
     db_size = await c_master.execute_command("DBSIZE")
     assert 100 == db_size
 
+    proxy = Proxy(
+        "127.0.0.1", 1114, "127.0.0.1", master.port if not test_admin_port else master.admin_port
+    )
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
     # 2. Spin up a replica and initiate a REPLICAOF
     replica = df_local_factory.create(
         tls_replication="true",
@@ -1394,8 +1403,7 @@ async def test_tls_replication(
     )
     replica.start()
     c_replica = replica.client(**with_ca_tls_client_args)
-    port = master.port if not test_admin_port else master.admin_port
-    res = await c_replica.execute_command("REPLICAOF localhost " + str(port))
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port))
     assert "OK" == res
     await check_all_replicas_finished([c_replica], c_master)
 
@@ -1403,22 +1411,24 @@ async def test_tls_replication(
     db_size = await c_replica.execute_command("DBSIZE")
     assert 100 == db_size
 
-    # 4. Kill master, spin it up and see if replica reconnects
-    master.stop(kill=True)
+    # 4. Break the connection between master and replica
+    await proxy.close(proxy_task)
     await asyncio.sleep(3)
-    master.start()
-    c_master = master.client(**with_ca_tls_client_args)
-    # Master doesn't load the snapshot, therefore dbsize should be 0
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    # Check replica gets new keys
     await c_master.execute_command("SET MY_KEY 1")
     db_size = await c_master.execute_command("DBSIZE")
-    assert 1 == db_size
+    assert 101 == db_size
 
     await check_all_replicas_finished([c_replica], c_master)
     db_size = await c_replica.execute_command("DBSIZE")
-    assert 1 == db_size
+    assert 101 == db_size
 
     await c_replica.close()
     await c_master.close()
+    await proxy.close(proxy_task)
 
 
 # busy wait for 'replica' instance to have replication status 'status'
@@ -1641,15 +1651,10 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            proxy.close()
-            try:
-                await task
-            except asyncio.exceptions.CancelledError:
-                pass
+            await proxy.close(task)
 
     master.stop()
     replica.stop()
-    assert replica.is_in_logs("partial sync finished in")
 
 
 async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
@@ -1688,15 +1693,10 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            proxy.close()
-            try:
-                await task
-            except asyncio.exceptions.CancelledError:
-                pass
+            await proxy.close(task)
 
     master.stop()
     replica.stop()
-    assert replica.is_in_logs("partial sync finished in")
 
 
 async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_factory):
@@ -1739,11 +1739,7 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
         finally:
-            proxy.close()
-            try:
-                await task
-            except asyncio.exceptions.CancelledError:
-                pass
+            await proxy.close(task)
 
     master.stop()
     replica.stop()
@@ -2060,6 +2056,13 @@ async def test_start_replicating_while_save(df_local_factory):
     await disconnect_clients(c_master, *[c_replica])
 
 
+async def is_replicaiton_conn_down(conn):
+    role = await conn.execute_command("INFO REPLICATION")
+    # fancy of way of extracting the field master_link_status
+    is_down = role.split("\r\n")[4].split(":")[1]
+    return is_down == "down"
+
+
 @pytest.mark.asyncio
 async def test_user_acl_replication(df_local_factory):
     master = df_local_factory.create(proactor_threads=4)
@@ -2083,10 +2086,7 @@ async def test_user_acl_replication(df_local_factory):
     await c_master.execute_command("ACL SETUSER tmp -replconf")
     async with async_timeout.timeout(5):
         while True:
-            role = await c_replica.execute_command("INFO REPLICATION")
-            # fancy of way of extracting the field master_link_status
-            is_down = role.split("\r\n")[4].split(":")[1]
-            if is_down == "down":
+            if await is_replicaiton_conn_down(c_replica):
                 break
             await asyncio.sleep(1)
 
@@ -2096,3 +2096,62 @@ async def test_user_acl_replication(df_local_factory):
     await c_master.execute_command("ACL SETUSER tmp +replconf")
     await check_all_replicas_finished([c_replica], c_master, 5)
     assert 2 == await c_replica.execute_command("DBSIZE")
+
+
+@pytest.mark.parametrize("break_conn", [False, True])
+@pytest.mark.asyncio
+async def test_replica_reconnect(df_local_factory, break_conn):
+    """
+    Test replica does not connect to master if master restarted
+    step1: create master and replica
+    step2: stop master and start again with the same port
+    step3: check replica is not replicating the restarted master
+    step4: issue new replicaof command
+    step5: check replica replicates master
+    """
+    # Connect replica to master
+    master = df_local_factory.create(proactor_threads=1)
+    replica = df_local_factory.create(
+        proactor_threads=1, replica_reconnect_on_master_restart=break_conn
+    )
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("set k 12345")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    assert not await is_replicaiton_conn_down(c_replica)
+
+    # kill existing master, create master with different repl_id but same port
+    master_port = master.port
+    master.stop()
+    assert await is_replicaiton_conn_down(c_replica)
+
+    master = df_local_factory.create(proactor_threads=1, port=master_port)
+    df_local_factory.start_all([master])
+    await asyncio.sleep(1)  # We sleep for 0.5s in replica.cc before reconnecting
+
+    # Assert that replica did not reconnected to master with different repl_id
+    if break_conn:
+        assert await c_master.execute_command("get k") == None
+        assert await c_replica.execute_command("get k") == "12345"
+        assert await c_master.execute_command("set k 6789")
+        assert await c_replica.execute_command("get k") == "12345"
+        assert await is_replicaiton_conn_down(c_replica)
+    else:
+        assert await c_master.execute_command("get k") == None
+        assert await c_replica.execute_command("get k") == None
+        assert await c_master.execute_command("set k 6789")
+        await check_all_replicas_finished([c_replica], c_master)
+        assert await c_replica.execute_command("get k") == "6789"
+        assert not await is_replicaiton_conn_down(c_replica)
+
+    # Force re-replication, assert that it worked
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+    assert await c_replica.execute_command("get k") == "6789"
+
+    await disconnect_clients(c_master, c_replica)

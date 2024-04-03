@@ -17,6 +17,7 @@ extern "C" {
 #include "base/logging.h"
 #include "io/proc_reader.h"
 #include "server/blocking_controller.h"
+#include "server/cluster/cluster_config.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"

@@ -366,6 +366,12 @@ TEST_F(CompactObjectTest, Hash) {
   EXPECT_EQ(1, cobj_.Size());
 }
 
+TEST_F(CompactObjectTest, SBF) {
+  cobj_.SetSBF(1000, 0.001, 2);
+  EXPECT_EQ(cobj_.ObjType(), OBJ_SBF);
+  EXPECT_EQ(0, cobj_.MallocUsed());
+}
+
 TEST_F(CompactObjectTest, MimallocUnderutilzation) {
   // We are testing with the same object size allocation here
   // This test is for https://github.com/dragonflydb/dragonfly/issues/448

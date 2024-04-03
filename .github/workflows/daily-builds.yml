@@ -67,7 +67,7 @@ jobs:
             ctest -V -L DFLY
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-12
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +89,16 @@ jobs:
               gradle maven openjdk postgresql r ant mongodb-community@5.0 mongosh \
               node@18 php composer
 
-          brew update && brew install --force ninja boost openssl automake gcc zstd bison c-ares \
+          # Preven updating these packages that bring in dependencies that sometimes break
+          # the update
+          brew pin azure-cli jpeg-xl aom lima pipx
+          # Remove Python3 symlinks in /usr/local/bin as workaround to brew update issues
+          # https://github.com/actions/setup-python/issues/577
+          rm /usr/local/bin/2to3* || :
+          rm /usr/local/bin/idle3* || :
+          rm /usr/local/bin/pydoc* || :
+          rm /usr/local/bin/python3* || :
+          brew update && brew install ninja boost openssl automake gcc zstd bison c-ares \
               autoconf libtool automake
 
           # brew info icu4c

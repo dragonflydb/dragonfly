@@ -21,6 +21,7 @@ spec:
   issuerRef:
     kind: {{ required "tls.issuer.kind is required, if createCerts is enabled" .Values.tls.issuer.kind }}
     name: {{ required "tls.issuer.name is required, if createCerts is enabled" .Values.tls.issuer.name }}
+    group: {{ .Values.tls.issuer.group }}
   secretName: '{{ include "dragonfly.fullname" . }}-server-tls'
   usages:
   - client auth

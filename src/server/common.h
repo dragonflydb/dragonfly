@@ -160,6 +160,10 @@ enum class GlobalState : uint8_t {
   TAKEN_OVER,
 };
 
+std::ostream& operator<<(std::ostream& os, const GlobalState& state);
+
+std::ostream& operator<<(std::ostream& os, ArgSlice list);
+
 enum class TimeUnit : uint8_t { SEC, MSEC };
 
 inline void ToUpper(const MutableSlice* val) {

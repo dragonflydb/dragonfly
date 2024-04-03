@@ -67,6 +67,11 @@ void JournalExecutor::FlushAll() {
   Execute(cmd);
 }
 
+void JournalExecutor::FlushSlots(const SlotRange& slot_range) {
+  auto cmd = BuildFromParts("DFLYCLUSTER", "FLUSHSLOTS", slot_range.start, slot_range.end);
+  Execute(cmd);
+}
+
 void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
   auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
   service_->DispatchCommand(span, &conn_context_);
