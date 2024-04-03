@@ -201,6 +201,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "no-key-transactional";
     case NO_KEY_TX_SPAN_ALL:
       return "no-key-tx-span-all";
+    case IDEMPOTENT:
+      return "idempotent";
   }
   return "unknown";
 }

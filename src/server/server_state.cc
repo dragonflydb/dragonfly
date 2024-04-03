@@ -24,19 +24,18 @@ namespace dfly {
 __thread ServerState* ServerState::state_ = nullptr;
 
 ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
-  tx_type_cnt.fill(0);
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 17 * 8, "Stats size mismatch");
-
-  for (int i = 0; i < NUM_TX_TYPES; ++i) {
-    this->tx_type_cnt[i] += other.tx_type_cnt[i];
-  }
+  static_assert(sizeof(Stats) == 16 * 8, "Stats size mismatch");
 
   this->eval_io_coordination_cnt += other.eval_io_coordination_cnt;
   this->eval_shardlocal_coordination_cnt += other.eval_shardlocal_coordination_cnt;
   this->eval_squashed_flushes += other.eval_squashed_flushes;
+
+  this->tx_global_cnt += other.tx_global_cnt;
+  this->tx_normal_cnt += other.tx_normal_cnt;
+  this->tx_inline_runs += other.tx_inline_runs;
   this->tx_schedule_cancel_cnt += other.tx_schedule_cancel_cnt;
 
   this->multi_squash_executions += other.multi_squash_executions;

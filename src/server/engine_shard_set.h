@@ -40,7 +40,10 @@ class EngineShard {
     uint64_t defrag_realloc_total = 0;
     uint64_t defrag_task_invocation_total = 0;
     uint64_t poll_execution_total = 0;
+
+    uint64_t tx_immediate_total = 0;
     uint64_t tx_ooo_total = 0;
+
     Stats& operator+=(const Stats&);
   };
 
@@ -104,6 +107,10 @@ class EngineShard {
   void RemoveContTx(Transaction* tx);
 
   const Stats& stats() const {
+    return stats_;
+  }
+
+  Stats& stats() {
     return stats_;
   }
 
