@@ -1043,9 +1043,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     await asyncio.sleep(0.5)
 
     while (
-        await c_nodes_admin[1].execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-        )
+        await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0])
         != "FINISHED"
     ):
         await asyncio.sleep(0.05)
