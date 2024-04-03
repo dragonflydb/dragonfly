@@ -708,7 +708,7 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 }
 
-TEST_F(ClusterFamilyEmulatedTest, ClusterShardConfigs) {
+TEST_F(ClusterFamilyEmulatedTest, ClusterShardInfos) {
   EXPECT_THAT(Run({"cluster", "shards"}),
               RespArray(ElementsAre("slots",                                           //
                                     RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //

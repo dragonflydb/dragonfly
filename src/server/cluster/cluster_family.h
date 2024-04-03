@@ -94,7 +94,7 @@ class ClusterFamily {
   OutgoingMigrationMap outgoing_migration_jobs_ ABSL_GUARDED_BY(migration_mu_);
 
  private:
-  ClusterShardConfig GetEmulatedShardInfo(ConnectionContext* cntx) const;
+  ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   std::string id_;
 

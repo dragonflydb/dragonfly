@@ -13,7 +13,7 @@
 
 using namespace std;
 using namespace testing;
-using Node = dfly::ClusterNodeConfig;
+using Node = dfly::ClusterNodeInfo;
 
 namespace dfly {
 
@@ -44,7 +44,7 @@ TEST_F(ClusterConfigTest, KeyTagTest) {
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ClusterShardConfigs{}), nullptr);
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ClusterShardInfos{}), nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {

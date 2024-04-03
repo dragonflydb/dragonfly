@@ -72,7 +72,7 @@ SlotId ClusterConfig::KeySlot(string_view key) {
 }
 
 namespace {
-bool HasValidNodeIds(const ClusterShardConfigs& new_config) {
+bool HasValidNodeIds(const ClusterShardInfos& new_config) {
   absl::flat_hash_set<string_view> nodes;
 
   auto CheckAndInsertNode = [&](string_view node) {
@@ -96,7 +96,7 @@ bool HasValidNodeIds(const ClusterShardConfigs& new_config) {
   return true;
 }
 
-bool IsConfigValid(const ClusterShardConfigs& new_config) {
+bool IsConfigValid(const ClusterShardInfos& new_config) {
   // Make sure that all slots are set exactly once.
   array<bool, ClusterConfig::kMaxSlotNum + 1> slots_found = {};
 
@@ -141,7 +141,7 @@ bool IsConfigValid(const ClusterShardConfigs& new_config) {
 
 /* static */
 shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
-                                                          const ClusterShardConfigs& config) {
+                                                          const ClusterShardInfos& config) {
   if (!IsConfigValid(config)) {
     return nullptr;
   }
@@ -153,7 +153,7 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
   for (const auto& shard : result->config_) {
     bool owned_by_me = shard.master.id == my_id ||
                        any_of(shard.replicas.begin(), shard.replicas.end(),
-                              [&](const ClusterNodeConfig& node) { return node.id == my_id; });
+                              [&](const ClusterNodeInfo& node) { return node.id == my_id; });
     if (owned_by_me) {
       result->my_slots_.Set(shard.slot_ranges, true);
       result->my_outgoing_migrations_ = shard.migrations;
@@ -207,13 +207,13 @@ optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
   return ranges;
 }
 
-optional<ClusterNodeConfig> ParseClusterNode(const JsonType& json) {
+optional<ClusterNodeInfo> ParseClusterNode(const JsonType& json) {
   if (!json.is_object()) {
     LOG(WARNING) << kInvalidConfigPrefix << "node config is not an object " << json;
     return nullopt;
   }
 
-  ClusterNodeConfig node;
+  ClusterNodeInfo node;
 
   {
     auto id = json.at_or_null("id");
@@ -274,8 +274,8 @@ optional<std::vector<MigrationInfo>> ParseMigrations(const JsonType& json) {
   return res;
 }
 
-optional<ClusterShardConfigs> BuildClusterConfigFromJson(const JsonType& json) {
-  ClusterShardConfigs config;
+optional<ClusterShardInfos> BuildClusterConfigFromJson(const JsonType& json) {
+  ClusterShardInfos config;
 
   if (!json.is_array()) {
     LOG(WARNING) << kInvalidConfigPrefix << "not an array " << json;
@@ -283,7 +283,7 @@ optional<ClusterShardConfigs> BuildClusterConfigFromJson(const JsonType& json) {
   }
 
   for (const auto& element : json.array_range()) {
-    ClusterShardConfig shard;
+    ClusterShardInfo shard;
 
     if (!element.is_object()) {
       LOG(WARNING) << kInvalidConfigPrefix << "shard element is not an object " << element;
@@ -338,7 +338,7 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
     return nullptr;
   }
 
-  optional<ClusterShardConfigs> config = BuildClusterConfigFromJson(json_config);
+  optional<ClusterShardInfos> config = BuildClusterConfigFromJson(json_config);
   if (!config.has_value()) {
     return nullptr;
   }
@@ -366,7 +366,7 @@ bool ClusterConfig::IsMySlot(std::string_view key) const {
   return IsMySlot(KeySlot(key));
 }
 
-ClusterNodeConfig ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
+ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
   CHECK_LE(id, ClusterConfig::kMaxSlotNum) << "Requesting a non-existing slot id " << id;
 
   for (const auto& shard : config_) {
@@ -381,7 +381,7 @@ ClusterNodeConfig ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
   return {};
 }
 
-ClusterShardConfigs ClusterConfig::GetConfig() const {
+ClusterShardInfos ClusterConfig::GetConfig() const {
   return config_;
 }
 
@@ -389,37 +389,37 @@ const SlotSet& ClusterConfig::GetOwnedSlots() const {
   return my_slots_;
 }
 
-static std::vector<MigrationInfo> GetMissingMigrations(const std::vector<MigrationInfo>& where,
-                                                       const std::vector<MigrationInfo>& which) {
+static std::vector<MigrationInfo> GetMissingMigrations(const std::vector<MigrationInfo>& haystack,
+                                                       const std::vector<MigrationInfo>& needle) {
   std::vector<MigrationInfo> res;
-  for (const auto& w : where) {
-    if (find(which.begin(), which.end(), w) == which.end()) {
-      res.push_back(w);
+  for (const auto& h : haystack) {
+    if (find(needle.begin(), needle.end(), h) == needle.end()) {
+      res.push_back(h);
     }
   }
   return res;
 }
 
 std::vector<MigrationInfo> ClusterConfig::GetNewOutgoingMigrations(
-    std::shared_ptr<ClusterConfig> prev) const {
+    const std::shared_ptr<ClusterConfig>& prev) const {
   return prev ? GetMissingMigrations(my_outgoing_migrations_, prev->my_outgoing_migrations_)
               : my_outgoing_migrations_;
 }
 
 std::vector<MigrationInfo> ClusterConfig::GetNewIncomingMigrations(
-    std::shared_ptr<ClusterConfig> prev) const {
+    const std::shared_ptr<ClusterConfig>& prev) const {
   return prev ? GetMissingMigrations(my_incoming_migrations_, prev->my_incoming_migrations_)
               : my_incoming_migrations_;
 }
 
 std::vector<MigrationInfo> ClusterConfig::GetFinishedOutgoingMigrations(
-    std::shared_ptr<ClusterConfig> prev) const {
+    const std::shared_ptr<ClusterConfig>& prev) const {
   return prev ? GetMissingMigrations(prev->my_outgoing_migrations_, my_outgoing_migrations_)
               : std::vector<MigrationInfo>();
 }
 
 std::vector<MigrationInfo> ClusterConfig::GetFinishedIncomingMigrations(
-    std::shared_ptr<ClusterConfig> prev) const {
+    const std::shared_ptr<ClusterConfig>& prev) const {
   return prev ? GetMissingMigrations(prev->my_incoming_migrations_, my_incoming_migrations_)
               : std::vector<MigrationInfo>();
 }

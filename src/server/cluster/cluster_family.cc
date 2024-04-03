@@ -39,9 +39,6 @@ using namespace facade;
 using namespace util;
 
 using CI = CommandId;
-using ClusterShardConfig = ClusterShardConfig;
-using ClusterShardConfigs = ClusterShardConfigs;
-using Node = ClusterNodeConfig;
 
 constexpr char kIdNotFound[] = "syncid not found";
 
@@ -70,11 +67,11 @@ ClusterConfig* ClusterFamily::cluster_config() {
   return tl_cluster_config.get();
 }
 
-ClusterShardConfig ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
-  ClusterShardConfig info{.slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
-                          .master = {},
-                          .replicas = {},
-                          .migrations = {}};
+ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
+  ClusterShardInfo info{.slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
+                        .master = {},
+                        .replicas = {},
+                        .migrations = {}};
 
   optional<Replica::Info> replication_info = server_family_->GetReplicaInfo();
   ServerState& etl = *ServerState::tlocal();
@@ -123,12 +120,12 @@ void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterShardsImpl(const ClusterShardConfigs& config, ConnectionContext* cntx) {
+void ClusterShardsImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-shards/
   constexpr unsigned int kEntrySize = 4;
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
-  auto WriteNode = [&](const Node& node, string_view role) {
+  auto WriteNode = [&](const ClusterNodeInfo& node, string_view role) {
     constexpr unsigned int kNodeSize = 14;
     rb->StartArray(kNodeSize);
     rb->SendBulkString("id");
@@ -179,10 +176,10 @@ void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterSlotsImpl(const ClusterShardConfigs& config, ConnectionContext* cntx) {
+void ClusterSlotsImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-slots/
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  auto WriteNode = [&](const Node& node) {
+  auto WriteNode = [&](const ClusterNodeInfo& node) {
     constexpr unsigned int kNodeSize = 3;
     rb->StartArray(kNodeSize);
     rb->SendBulkString(node.ip);
@@ -223,13 +220,12 @@ void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterNodesImpl(const ClusterShardConfigs& config, string_view my_id,
-                      ConnectionContext* cntx) {
+void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-nodes/
 
   string result;
 
-  auto WriteNode = [&](const Node& node, string_view role, string_view master_id,
+  auto WriteNode = [&](const ClusterNodeInfo& node, string_view role, string_view master_id,
                        const vector<SlotRange>& ranges) {
     absl::StrAppend(&result, node.id, " ");
 
@@ -279,7 +275,7 @@ void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterInfoImpl(const ClusterShardConfigs& config, ConnectionContext* cntx) {
+void ClusterInfoImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   std::string msg;
   auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
     // Separate lines with \r\n, not \n, see #2726

@@ -23,7 +23,7 @@ enum class MigrationState : uint8_t {
   C_MAX_INVALID = std::numeric_limits<uint8_t>::max()
 };
 
-struct ClusterNodeConfig {
+struct ClusterNodeInfo {
   std::string id;
   std::string ip;
   uint16_t port = 0;
@@ -40,14 +40,14 @@ struct MigrationInfo {
   }
 };
 
-struct ClusterShardConfig {
+struct ClusterShardInfo {
   SlotRanges slot_ranges;
-  ClusterNodeConfig master;
-  std::vector<ClusterNodeConfig> replicas;
+  ClusterNodeInfo master;
+  std::vector<ClusterNodeInfo> replicas;
   std::vector<MigrationInfo> migrations;
 };
 
-using ClusterShardConfigs = std::vector<ClusterShardConfig>;
+using ClusterShardInfos = std::vector<ClusterShardInfo>;
 
 class ClusterConfig {
  public:
@@ -74,9 +74,9 @@ class ClusterConfig {
   // Returns an instance with `config` if it is valid.
   // Returns heap-allocated object as it is too big for a stack frame.
   static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
-                                                         const ClusterShardConfigs& config);
+                                                         const ClusterShardInfos& config);
 
-  // Parses `json_config` into `ClusterShardConfigs` and calls the above overload.
+  // Parses `json_config` into `ClusterShardInfos` and calls the above overload.
   static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
                                                          std::string_view json_config);
 
@@ -88,28 +88,30 @@ class ClusterConfig {
   bool IsMySlot(std::string_view key) const;
 
   // Returns the master configured for `id`.
-  ClusterNodeConfig GetMasterNodeForSlot(SlotId id) const;
+  ClusterNodeInfo GetMasterNodeForSlot(SlotId id) const;
 
-  ClusterShardConfigs GetConfig() const;
+  ClusterShardInfos GetConfig() const;
 
   const SlotSet& GetOwnedSlots() const;
 
-  std::vector<MigrationInfo> GetNewOutgoingMigrations(std::shared_ptr<ClusterConfig> prev) const;
-  std::vector<MigrationInfo> GetNewIncomingMigrations(std::shared_ptr<ClusterConfig> prev) const;
+  std::vector<MigrationInfo> GetNewOutgoingMigrations(
+      const std::shared_ptr<ClusterConfig>& prev) const;
+  std::vector<MigrationInfo> GetNewIncomingMigrations(
+      const std::shared_ptr<ClusterConfig>& prev) const;
   std::vector<MigrationInfo> GetFinishedOutgoingMigrations(
-      std::shared_ptr<ClusterConfig> prev) const;
+      const std::shared_ptr<ClusterConfig>& prev) const;
   std::vector<MigrationInfo> GetFinishedIncomingMigrations(
-      std::shared_ptr<ClusterConfig> prev) const;
+      const std::shared_ptr<ClusterConfig>& prev) const;
 
  private:
   struct SlotEntry {
-    const ClusterShardConfig* shard = nullptr;
+    const ClusterShardInfo* shard = nullptr;
     bool owned_by_me = false;
   };
 
   ClusterConfig() = default;
 
-  ClusterShardConfigs config_;
+  ClusterShardInfos config_;
 
   SlotSet my_slots_;
   std::vector<MigrationInfo> my_outgoing_migrations_;
