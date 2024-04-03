@@ -168,7 +168,8 @@ class DflyInstance:
                 proc.kill()
             else:
                 proc.terminate()
-            proc.communicate(timeout=15)
+            if proc.wait(timeout=15) < 0:
+                raise Exception("Dragfonfly did not terminate gracefully")
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
             proc.send_signal(signal.SIGUSR1)
