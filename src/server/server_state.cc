@@ -27,7 +27,7 @@ ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 15 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 16 * 8, "Stats size mismatch");
 
   this->eval_io_coordination_cnt += other.eval_io_coordination_cnt;
   this->eval_shardlocal_coordination_cnt += other.eval_shardlocal_coordination_cnt;
