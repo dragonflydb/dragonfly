@@ -12,8 +12,17 @@ namespace dfly {
 
 class StringOrView {
  public:
-  static StringOrView FromString(std::string s);
-  static StringOrView FromView(std::string_view sv);
+  static StringOrView FromString(std::string s) {
+    StringOrView sov;
+    sov.val_ = std::move(s);
+    return sov;
+  }
+
+  static StringOrView FromView(std::string_view sv) {
+    StringOrView sov;
+    sov.val_ = sv;
+    return sov;
+  }
 
   StringOrView() = default;
   StringOrView(const StringOrView& o) = default;
@@ -21,12 +30,25 @@ class StringOrView {
   StringOrView& operator=(const StringOrView& o) = default;
   StringOrView& operator=(StringOrView&& o) = default;
 
-  bool operator==(const StringOrView& o) const;
-  bool operator==(std::string_view o) const;
-  bool operator!=(const StringOrView& o) const;
-  bool operator!=(std::string_view o) const;
+  bool operator==(const StringOrView& o) const {
+    return *this == o.view();
+  }
 
-  std::string_view view() const;
+  bool operator==(std::string_view o) const {
+    return view() == o;
+  }
+
+  bool operator!=(const StringOrView& o) const {
+    return *this != o.view();
+  }
+
+  bool operator!=(std::string_view o) const {
+    return !(*this == o);
+  }
+
+  std::string_view view() const {
+    return visit([](const auto& s) -> std::string_view { return s; }, val_);
+  }
 
   friend std::ostream& operator<<(std::ostream& o, const StringOrView& key) {
     return o << key.view();
@@ -38,7 +60,10 @@ class StringOrView {
   }
 
   // If the key is backed by a string_view, replace it with a string with the same value
-  void MakeOwned();
+  void MakeOwned() {
+    if (std::holds_alternative<std::string_view>(val_))
+      val_ = std::string{std::get<std::string_view>(val_)};
+  }
 
  private:
   std::variant<std::string_view, std::string> val_;

@@ -337,6 +337,11 @@ void DbSlice::AutoUpdater::Run() {
     return;
   }
 
+  // Check that AutoUpdater does not run after a key was removed.
+  // If this CHECK() failed for you, it probably means that you deleted a key while having an auto
+  // updater in scope. You'll probably want to call Run() (or Cancel() - but be careful).
+  DCHECK(IsValid(fields_.db_slice->db_arr_[fields_.db_ind]->prime.Find(fields_.key)));
+
   DCHECK(fields_.action == DestructorAction::kRun);
   CHECK_NE(fields_.db_slice, nullptr);
 

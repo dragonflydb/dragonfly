@@ -71,7 +71,8 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
-  // Auto-laundering iterator wrapper.
+  // Auto-laundering iterator wrapper. Laundering means re-finding keys if they moved between
+  // buckets.
   template <typename T> class IteratorT {
    public:
     IteratorT() = default;
@@ -118,19 +119,7 @@ class DbSlice {
     }
 
    private:
-    void LaunderIfNeeded() const {  // const is a lie
-      if (!dfly::IsValid(it_)) {
-        return;
-      }
-
-      uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
-      if (current_epoch != fiber_epoch_) {
-        if (it_->first != key_.view()) {
-          it_ = it_.owner().Find(key_.view());
-        }
-        fiber_epoch_ = current_epoch;
-      }
-    }
+    void LaunderIfNeeded() const;  // const is a lie
 
     mutable T it_;
     mutable uint64_t fiber_epoch_ = 0;
@@ -594,5 +583,21 @@ class DbSlice {
                       absl::container_internal::hash_default_eq<std::string>, AllocatorType>
       client_tracking_map_;
 };
+
+template <typename T> void DbSlice::IteratorT<T>::LaunderIfNeeded() const {
+  if (!dfly::IsValid(it_)) {
+    return;
+  }
+
+  // We currently do not shrink dashtables, but when we will, we must also check if "it.segment_id"
+  // falls into a valid range.
+  uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
+  if (current_epoch != fiber_epoch_) {
+    if (it_->first != key_.view()) {
+      it_ = it_.owner().Find(key_.view());
+    }
+    fiber_epoch_ = current_epoch;
+  }
+}
 
 }  // namespace dfly
