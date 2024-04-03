@@ -7,6 +7,7 @@
 #include <absl/functional/bind_front.h>
 
 #include "base/logging.h"
+#include "server/cluster/cluster_config.h"
 
 namespace dfly {
 using namespace util;

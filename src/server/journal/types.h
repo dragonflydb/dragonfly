@@ -7,7 +7,7 @@
 #include <string>
 #include <variant>
 
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/table.h"
 

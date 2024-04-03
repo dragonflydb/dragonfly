@@ -74,8 +74,7 @@ class ClusterFamily {
 
   std::shared_ptr<ClusterSlotMigration> GetIncomingMigration(std::string host_ip, uint16_t port);
 
-  bool StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
-                           ConnectionContext* cntx);
+  bool StartSlotMigrations(std::vector<MigrationInfo> migrations, ConnectionContext* cntx);
   void RemoveFinishedMigrations();
 
   // store info about migration and create unique session id
@@ -95,7 +94,7 @@ class ClusterFamily {
   OutgoingMigrationMap outgoing_migration_jobs_ ABSL_GUARDED_BY(migration_mu_);
 
  private:
-  ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
+  ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   std::string id_;
 
