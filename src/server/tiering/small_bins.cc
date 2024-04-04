@@ -19,10 +19,10 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(std::string_view key, std::
   DCHECK_LT(value.size(), 2_KB);
 
   // See FlushBin() for format details
-  size_t value_bytes = 8 /* hash */ + 2 /* length */ + value.size();
+  size_t value_bytes = 8 /* hash */ + 2 /* value length*/ + value.size();
 
   std::optional<FilledBin> filled_bin;
-  if (current_bin_bytes_ + value_bytes >= 4_KB) {
+  if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= 4_KB) {
     filled_bin = FlushBin();
   }
 
@@ -36,73 +36,54 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   out.resize(current_bin_bytes_ + 1);
 
   unsigned id = ++last_bin_id_;
-  auto& pending_list = pending_bins_[id];
+  auto& pending_set = pending_bins_[id];
 
   char* data = out.data();
-  while (!current_bin_.empty()) {
-    auto node = current_bin_.extract(current_bin_.begin());
 
-    // Each key/value pair is serialized as:
-    auto& key = node.key();
-    auto& value = node.mapped();
+  // Store number of entries, 2 bytes
+  absl::little_endian::Store16(data, current_bin_.size());
+  data += sizeof(uint16_t);
 
-    // 1. 8 byte key hash
+  // Store all hashes, n * 8 bytes
+  for (const auto& [key, _] : current_bin_) {
     absl::little_endian::Store64(data, CompactObj::HashCode(key));
     data += sizeof(uint64_t);
-
-    // 2. 2 byte value length
-    absl::little_endian::Store16(data, static_cast<uint16_t>(value.size()));
-    data += sizeof(uint16_t);
-
-    // 3. X bytes value
-    memcpy(data, value.data(), value.size());
-    data += value.size();
-
-    pending_list.emplace_back(key, value.size());
   }
 
-  current_bin_bytes_ = 0;
-  DCHECK(current_bin_.empty());
+  // Store all values with lengths, n * (2 + x) bytes
+  for (const auto& [key, value] : current_bin_) {
+    pending_set[key] = {size_t(data - out.data()), value.size()};
+
+    memcpy(data, value.data(), value.size());
+    data += value.size();
+  }
+
+  current_bin_bytes_ = 0;  // num hashes
+  current_bin_.erase(current_bin_.begin(), current_bin_.end());
 
   return {id, std::move(out)};
 }
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(unsigned id, DiskSegment segment) {
-  SmallBins::KeySegmentList out;
   auto key_list = pending_bins_.extract(id);
-
-  size_t offset = 0;
-  for (auto& [key, value_size] : key_list.mapped()) {
-    offset += 8 /* hash */ + 2 /* length */;
-    out.emplace_back(std::move(key), DiskSegment{segment.offset + offset, value_size});
-    offset += value_size;
-  }
-
-  stashed_bins_[id] = out.size();
-  return out;
+  return SmallBins::KeySegmentList{key_list.mapped().begin(), key_list.mapped().end()};
 }
 
 std::vector<std::string> SmallBins::ReportStashAborted(unsigned id) {
   std::vector<std::string> out;
 
   auto node = pending_bins_.extract(id);
-  for (auto& [key, _] : node.mapped())
-    out.emplace_back(std::move(key));
+  auto& entries = node.mapped();
+  while (!entries.empty())
+    out.emplace_back(std::move(entries.extract(entries.begin()).key()));
 
   return out;
 }
 
 std::optional<unsigned> SmallBins::Delete(std::string_view key) {
-  auto same_key = [key](const auto& p) { return p.first == key; };
   for (auto& [id, keys] : pending_bins_) {
-    if (auto it = std::find_if(keys.begin(), keys.end(), same_key); it != keys.end()) {
-      keys.erase(it);
-      if (keys.empty()) {
-        pending_bins_.erase(id);
-        return id;
-      }
-      return std::nullopt;
-    }
+    if (keys.erase(key))
+      return keys.empty() ? std::make_optional(id) : std::nullopt;
   }
   return std::nullopt;
 }

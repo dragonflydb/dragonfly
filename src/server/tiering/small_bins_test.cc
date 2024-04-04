@@ -55,4 +55,26 @@ TEST(SmallBins, SimpleDeleteAbort) {
     EXPECT_TRUE(binary_search(remaining.begin(), remaining.end(), absl::StrCat("k", j))) << j;
 }
 
+TEST(SmallBins, PartialStash) {
+  SmallBins bins;
+
+  // Fill single bin
+  std::optional<SmallBins::FilledBin> bin;
+  unsigned i = 0;
+  for (; !bin; i++)
+    bin = bins.Stash(absl::StrCat("k", i), absl::StrCat("v", i));
+
+  // Delete all even values
+  for (unsigned j = 0; j <= i; j += 2)
+    bins.Delete(absl::StrCat("k", j));
+
+  auto segments = bins.ReportStashed(bin->first, DiskSegment{0, 4_KB});
+
+  // Expect all odd keys still to exist
+  EXPECT_EQ(segments.size(), i / 2);
+  for (auto& [key, segment] : segments) {
+    EXPECT_EQ(key, "k"s + bin->second.substr(segment.offset, segment.length).substr(1));
+  }
+}
+
 }  // namespace dfly::tiering

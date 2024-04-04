@@ -50,8 +50,7 @@ class SmallBins {
   absl::flat_hash_map<std::string, std::string> current_bin_;
 
   // Pending stashes, their keys and value sizes
-  absl::flat_hash_map<unsigned /* id */,
-                      std::vector<std::pair<std::string /* key*/, size_t /* value length*/>>>
+  absl::flat_hash_map<unsigned /* id */, absl::flat_hash_map<std::string /* key*/, DiskSegment>>
       pending_bins_;
 
   // Map of bins that were stashed and should be deleted when refcount reaches 0
