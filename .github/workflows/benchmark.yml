@@ -58,6 +58,8 @@ jobs:
         uses: helm/kind-action@v1.9.0
         with:
           kubectl_version: v1.28.0
+          verbosity: 10
+          cluster_name: action
 
       - name: DEBUG
         run: |
