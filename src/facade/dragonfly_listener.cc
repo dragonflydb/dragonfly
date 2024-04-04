@@ -429,8 +429,12 @@ DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
 }
 
 void DispatchTracker::TrackOnThread() {
-  for (auto* listener : listeners_)
+  for (auto* listener : listeners_) {
+    if (listener->IsPrivilegedInterface()) {
+      continue;
+    }
     listener->TraverseConnectionsOnThread(absl::bind_front(&DispatchTracker::Handle, this));
+  }
 }
 
 bool DispatchTracker::Wait(absl::Duration duration) {
@@ -446,8 +450,12 @@ bool DispatchTracker::Wait(absl::Duration duration) {
 }
 
 void DispatchTracker::TrackAll() {
-  for (auto* listener : listeners_)
+  for (auto* listener : listeners_) {
+    if (listener->IsPrivilegedInterface()) {
+      continue;
+    }
     listener->TraverseConnections(absl::bind_front(&DispatchTracker::Handle, this));
+  }
 }
 
 void DispatchTracker::Handle(unsigned thread_index, util::Connection* conn) {
