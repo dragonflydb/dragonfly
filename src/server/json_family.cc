@@ -87,8 +87,15 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  res.it->second.SetJson(std::move(value));
-
+  if (absl::GetFlag(FLAGS_experimental_flat_json)) {
+    flexbuffers::Builder fbb;
+    json::FromJsonType(value, &fbb);
+    fbb.Finish();
+    const auto& buf = fbb.GetBuffer();
+    res.it->second.SetJson(buf.data(), buf.size());
+  } else {
+    res.it->second.SetJson(std::move(value));
+  }
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
   return OpStatus::OK;
 }
@@ -1226,22 +1233,9 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    if (absl::GetFlag(FLAGS_experimental_flat_json)) {
-      flatbuffers::Parser parser;
-      flexbuffers::Builder fbb;
-      string tmp(json_str);
-      CHECK_EQ(json_str.size(), strlen(tmp.c_str()));
-
-      parser.ParseFlexBuffer(tmp.c_str(), nullptr, &fbb);
-      fbb.Finish();
-      const auto& buffer = fbb.GetBuffer();
-      string_view buf_view{reinterpret_cast<const char*>(buffer.data()), buffer.size()};
-      SetCmd scmd(op_args, false);
-      scmd.Set(SetCmd::SetParams{}, key, buf_view);
-    } else {
-      if (SetJson(op_args, key, std::move(parsed_json.value())) == OpStatus::OUT_OF_MEMORY) {
-        return OpStatus::OUT_OF_MEMORY;
-      }
+    OpStatus st = SetJson(op_args, key, std::move(parsed_json.value()));
+    if (st != OpStatus::OK) {
+      return st;
     }
     return true;
   }
