@@ -179,6 +179,8 @@ void IoMgr::Shutdown() {
   while (grow_progress_) {
     ThisFiber::SleepFor(200us);  // TODO: hacky for now.
   }
+  backing_file_->Close();
+  backing_file_.reset();
 }
 
 }  // namespace dfly
