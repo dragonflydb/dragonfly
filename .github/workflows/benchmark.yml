@@ -36,7 +36,6 @@ jobs:
                   memory: "2000Mi"
 
     runs-on: [self-hosted, linux, x86, benchmark]
-#    runs-on: ubuntu-latest
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
@@ -50,41 +49,28 @@ jobs:
         run: |
           apt-get update
           apt-get install sudo
-          sudo -i 
-          echo " " > $HOME/.kube/config
-          cat  $HOME/.kube/config
 
 
       - name: Set up Python
         uses: actions/setup-python@v3
         with:
           python-version: 3.9
+
+      - name: FIX Network issue
+        run: |
+          export KUBECONFIG=$HOME/.kube/config
+          export KIND_EXPERIMENTAL_DOCKER_NETWORK=${{ job.container.network }}
+
       - name: Create k8s Kind Cluster
         uses: helm/kind-action@v1.9.0
         with:
-          kubectl_version: v1.29.2
+          kubectl_version: v1.28.0
           cluster_name: action
+          config: .github/workflows/kind-config.yaml
 
-      - name: install kubectl
-        run: |
-          sudo -i
-          curl -LO https://dl.k8s.io/release/v1.29.2/bin/linux/amd64/kubectl
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          docker ps -a
-          docker logs action-control-plane --tail=300
-          docker describe action-control-plane 
-
-
-      - name: DEBUG
-        run: |
-          sudo -i 
-          sleep 20
-          sudo cat $HOME/.kube/config
 
       - name: Install the CRD and Operator
         run: |
-          sudo -i 
-          
           # Install the CRD and Operator
           kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
       - name: Apply Configuration
