@@ -255,7 +255,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
                         GetFlag(FLAGS_list_compress_depth));
     dest_res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, dest_ql);
-    DCHECK(src_it.IsValid());
+    DCHECK(IsValid(src_it));
   } else {
     if (dest_res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;

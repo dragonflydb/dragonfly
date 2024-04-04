@@ -355,7 +355,7 @@ void DbSlice::AutoUpdater::Cancel() {
 
 DbSlice::AutoUpdater::AutoUpdater(const Fields& fields) : fields_(fields) {
   DCHECK(fields_.action == DestructorAction::kRun);
-  DCHECK(fields.it.IsValid());
+  DCHECK(IsValid(fields.it));
   fields_.orig_heap_size = fields.it->second.MallocUsed();
 }
 
@@ -683,7 +683,7 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 }
 
 bool DbSlice::Del(DbIndex db_ind, Iterator it) {
-  if (!it.IsValid()) {
+  if (!IsValid(it)) {
     return false;
   }
 
@@ -903,7 +903,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
                                         ExpIterator expire_it, const ExpireParams& params) {
   constexpr uint64_t kPersistValue = 0;
   DCHECK(params.IsDefined());
-  DCHECK(prime_it.IsValid());
+  DCHECK(IsValid(prime_it));
   // If this need to persist, then only set persist value and return
   if (params.persist) {
     RemoveExpire(cntx.db_index, prime_it);
@@ -918,7 +918,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   if (rel_msec <= 0) {  // implicit - don't persist
     CHECK(Del(cntx.db_index, prime_it));
     return -1;
-  } else if (expire_it.IsValid() && !params.persist) {
+  } else if (IsValid(expire_it) && !params.persist) {
     auto current = ExpireTime(expire_it);
     if (params.expire_options & ExpireFlags::EXPIRE_NX) {
       return OpStatus::SKIPPED;
@@ -962,7 +962,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& c
   if (expire_at_ms) {
     it->second.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
-    if (res.exp_it.IsValid() && force_update) {
+    if (IsValid(res.exp_it) && force_update) {
       res.exp_it->second = ExpirePeriod(delta);
     } else {
       auto exp_it = db.expire.InsertNew(it->first.AsRef(), ExpirePeriod(delta));

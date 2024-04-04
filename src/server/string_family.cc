@@ -177,7 +177,7 @@ OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_h
   auto res = op_args.shard->db_slice().FindAndFetchMutable(op_args.db_cntx, key);
   res.post_updater.Run();
 
-  if (!res.it.IsValid())
+  if (!IsValid(res.it))
     return OpStatus::KEY_NOTFOUND;
 
   if (res.it->second.ObjType() != OBJ_STRING)
@@ -262,7 +262,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
   auto res = db_slice.FindMutable(op_args.db_cntx, key);
 
-  if (!res.it.IsValid()) {
+  if (!IsValid(res.it)) {
     if (skip_on_missing)
       return OpStatus::KEY_NOTFOUND;
 
@@ -383,7 +383,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   const int64_t now_ms = op_args.db_cntx.time_now_ms;
 
   int64_t tat_ms = now_ms;
-  if (res.it.IsValid()) {
+  if (IsValid(res.it)) {
     if (res.it->second.ObjType() != OBJ_STRING) {
       return OpStatus::WRONG_TYPE;
     }
@@ -442,8 +442,8 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   reset_after_ms = ttl_ms;
 
   if (!limited) {
-    if (res.it.IsValid()) {
-      if (res.exp_it.IsValid()) {
+    if (IsValid(res.it)) {
+      if (IsValid(res.exp_it)) {
         res.exp_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
       } else {
         db_slice.AddExpire(op_args.db_cntx.db_index, res.it, new_tat_ms);
@@ -558,20 +558,20 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
     } else {
       find_res = db_slice.FindMutable(op_args_.db_cntx, key);
     }
-    if (find_res.it.IsValid()) {
+    if (IsValid(find_res.it)) {
       result_builder.CachePrevValueIfNeeded(find_res.it->second);
     }
 
     // Make sure that we have this key, and only add it if it does exists
     if (params.flags & SET_IF_EXISTS) {
-      if (find_res.it.IsValid()) {
+      if (IsValid(find_res.it)) {
         return std::move(result_builder)
             .Return(SetExisting(params, find_res.it, find_res.exp_it, key, value));
       } else {
         return std::move(result_builder).Return(OpStatus::SKIPPED);
       }
     } else {
-      if (find_res.it.IsValid()) {  // if the policy is not to overide and have the key, just return
+      if (IsValid(find_res.it)) {  // if the policy is not to overide and have the key, just return
         return std::move(result_builder).Return(OpStatus::SKIPPED);
       }
     }
@@ -641,7 +641,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
   if (!(params.flags & SET_KEEP_EXPIRE)) {
     if (at_ms) {  // Command has an expiry paramater.
-      if (e_it.IsValid()) {
+      if (IsValid(e_it)) {
         // Updated existing expiry information.
         e_it->second = db_slice.FromAbsoluteTime(at_ms);
       } else {
@@ -1283,7 +1283,7 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
     auto args = t->GetShardArgs(es->shard_id());
     for (size_t i = 0; i < args.size(); i += 2) {
       auto it = es->db_slice().FindReadOnly(t->GetDbContext(), args[i]).it;
-      if (it.IsValid()) {
+      if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);
         break;
       }

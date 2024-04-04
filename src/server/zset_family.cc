@@ -901,7 +901,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
 
   for (unsigned j = 0; j < keys.size(); ++j) {
     auto it_res = db_slice.FindMutable(t->GetDbContext(), keys[j]);
-    if (!it_res.it.IsValid())
+    if (!IsValid(it_res.it))
       continue;  // we exit in the next loop
 
     // sets are supported for ZINTER* commands:

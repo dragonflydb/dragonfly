@@ -114,10 +114,6 @@ class DbSlice {
       return GetInnerIt().IsOccupied();
     }
 
-    bool IsValid() const {
-      return dfly::IsValid(GetInnerIt());
-    }
-
    private:
     void LaunderIfNeeded() const;  // const is a lie
 
@@ -583,6 +579,22 @@ class DbSlice {
                       absl::container_internal::hash_default_eq<std::string>, AllocatorType>
       client_tracking_map_;
 };
+
+inline bool IsValid(DbSlice::Iterator it) {
+  return dfly::IsValid(it.GetInnerIt());
+}
+
+inline bool IsValid(DbSlice::ConstIterator it) {
+  return dfly::IsValid(it.GetInnerIt());
+}
+
+inline bool IsValid(DbSlice::ExpIterator it) {
+  return dfly::IsValid(it.GetInnerIt());
+}
+
+inline bool IsValid(DbSlice::ExpConstIterator it) {
+  return dfly::IsValid(it.GetInnerIt());
+}
 
 template <typename T> void DbSlice::IteratorT<T>::LaunderIfNeeded() const {
   if (!dfly::IsValid(it_)) {

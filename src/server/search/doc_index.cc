@@ -211,7 +211,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto key = key_index_.Get(search_results.ids[i]);
     auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 
-    if (!it || !it->IsValid()) {  // Item must have expired
+    if (!it || !IsValid(*it)) {  // Item must have expired
       expired_count++;
       continue;
     }
@@ -246,7 +246,7 @@ vector<absl::flat_hash_map<string, search::SortableValue>> ShardDocIndex::Search
     auto key = key_index_.Get(doc);
     auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 
-    if (!it || !it->IsValid())  // Item must have expired
+    if (!it || !IsValid(*it))  // Item must have expired
       continue;
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
