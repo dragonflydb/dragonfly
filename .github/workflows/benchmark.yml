@@ -64,7 +64,6 @@ jobs:
         run: |
           sleep 20
           cat $HOME/.kube/config
-          kubectl cluster-info --context kind-action
           kubectl cluster-info dump
 
       - name: Install the CRD and Operator
