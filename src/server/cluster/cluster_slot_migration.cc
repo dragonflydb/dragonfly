@@ -39,9 +39,9 @@ atomic_uint32_t next_local_sync_id{1};
 
 }  // namespace
 
-ClusterSlotMigration::ClusterSlotMigration(string host_ip, uint16_t port, Service* se,
-                                           SlotRanges slots, uint32_t shards_num)
-    : ProtocolClient(std::move(host_ip), port),
+ClusterSlotMigration::ClusterSlotMigration(string source_id, Service* se, SlotRanges slots,
+                                           uint32_t shards_num)
+    : source_id_(std::move(source_id)),
       service_(*se),
       slots_(std::move(slots)),
       state_(MigrationState::C_CONNECTING),
@@ -59,10 +59,10 @@ ClusterSlotMigration::~ClusterSlotMigration() {
   sync_fb_.JoinIfNeeded();
 }
 
-ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
-  const auto& ctx = server();
-  return {ctx.host, ctx.port};
-}
+// ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
+//   const auto& ctx = server();
+//   return {ctx.host, ctx.port};
+// }
 
 void ClusterSlotMigration::Join() {
   bc_->Wait();
