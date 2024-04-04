@@ -35,8 +35,8 @@ jobs:
                   cpu: "2"
                   memory: "2000Mi"
 
-#    runs-on: [self-hosted, linux, x86, benchmark]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x86, benchmark]
+#    runs-on: ubuntu-latest
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
@@ -60,6 +60,7 @@ jobs:
           kubectl_version: v1.28.0
 
       - run: |
+          sleep 10
           kubectl config get-contexts
           kubectl cluster-info --context kind-chart-testing
 
