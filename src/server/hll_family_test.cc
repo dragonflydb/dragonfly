@@ -30,17 +30,17 @@ TEST_F(HllFamilyTest, Simple) {
 }
 
 TEST_F(HllFamilyTest, Promote) {
-  int unique_values = 2000;
+  int unique_values = 20000;
   for (int i = 0; i < unique_values; ++i) {
     std::string newkey = GenerateUniqueValue(i);
-    // promote was triggered at 1660th insertion. But how to verify that?
+    // sparse hll is promoted to dense at the 1660th+- insertion. But how to verify that?
     Run({"pfadd", "key", newkey});
   }
-  // HyperLogLog is an advanced data structure in Redis, primarily used for cardinality estimation
-  // (counting unique elements) of massive datasets (up to 2^64 elements). Its characteristics
-  // include high speed and low memory footprint (12KB). However, its computations come with a
-  // margin of error, with a standard error rate of 0.81%. got 0.83% error rate when unique_values =
-  // 200000 EXPECT_LT(std::abs(Run({"pfcount", "key"}) - unique_values)/unique_values, 0.0081);
+  // HyperLogLog computations come with a
+  // margin of error, with a standard error rate of 0.81%.
+  // Set it to 5% so this test won't fail unless something went wrong badly.
+
+  EXPECT_LT(std::abs(CheckedInt({"pfcount", "key"}) - unique_values) / unique_values, 0.05);
 }
 
 TEST_F(HllFamilyTest, MultipleValues) {
