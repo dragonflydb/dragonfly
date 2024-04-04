@@ -19,7 +19,7 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(std::string_view key, std::
   DCHECK_LT(value.size(), 2_KB);
 
   // See FlushBin() for format details
-  size_t value_bytes = 8 /* hash */ + 2 /* value length*/ + value.size();
+  size_t value_bytes = 8 /* hash */ + value.size();
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= 4_KB) {
@@ -33,9 +33,9 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(std::string_view key, std::
 
 SmallBins::FilledBin SmallBins::FlushBin() {
   std::string out;
-  out.resize(current_bin_bytes_ + 1);
+  out.resize(current_bin_bytes_ + 2);
 
-  unsigned id = ++last_bin_id_;
+  BinId id = ++last_bin_id_;
   auto& pending_set = pending_bins_[id];
 
   char* data = out.data();
@@ -50,7 +50,7 @@ SmallBins::FilledBin SmallBins::FlushBin() {
     data += sizeof(uint64_t);
   }
 
-  // Store all values with lengths, n * (2 + x) bytes
+  // Store all values, n * x bytes
   for (const auto& [key, value] : current_bin_) {
     pending_set[key] = {size_t(data - out.data()), value.size()};
 
@@ -64,12 +64,12 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   return {id, std::move(out)};
 }
 
-SmallBins::KeySegmentList SmallBins::ReportStashed(unsigned id, DiskSegment segment) {
+SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
   auto key_list = pending_bins_.extract(id);
   return SmallBins::KeySegmentList{key_list.mapped().begin(), key_list.mapped().end()};
 }
 
-std::vector<std::string> SmallBins::ReportStashAborted(unsigned id) {
+std::vector<std::string> SmallBins::ReportStashAborted(BinId id) {
   std::vector<std::string> out;
 
   auto node = pending_bins_.extract(id);
@@ -80,7 +80,7 @@ std::vector<std::string> SmallBins::ReportStashAborted(unsigned id) {
   return out;
 }
 
-std::optional<unsigned> SmallBins::Delete(std::string_view key) {
+std::optional<SmallBins::BinId> SmallBins::Delete(std::string_view key) {
   for (auto& [id, keys] : pending_bins_) {
     if (keys.erase(key))
       return keys.empty() ? std::make_optional(id) : std::nullopt;

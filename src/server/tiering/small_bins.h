@@ -19,22 +19,25 @@ namespace dfly::tiering {
 // SIMPLEST VERSION for now.
 class SmallBins {
  public:
-  using FilledBin = std::pair<unsigned /* id */, std::string>;
+  using BinId = unsigned;
 
-  // List of locations of values for corresponding keys
+  // Bin filled with blob of serialized entries
+  using FilledBin = std::pair<BinId, std::string>;
+
+  // List of locations of values for corresponding keys of previously filled bin
   using KeySegmentList = std::vector<std::pair<std::string /* key*/, DiskSegment>>;
 
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
   std::optional<FilledBin> Stash(std::string_view key, std::string_view value);
 
   // Report that a stash succeeeded. Returns list of stored keys with calculated value locations.
-  KeySegmentList ReportStashed(unsigned id, DiskSegment segment);
+  KeySegmentList ReportStashed(BinId id, DiskSegment segment);
 
   // Report that a stash was aborted. Returns list of keys that the entry contained.
-  std::vector<std::string /* key */> ReportStashAborted(unsigned id);
+  std::vector<std::string /* key */> ReportStashAborted(BinId id);
 
   // Delete a key with pending io. Returns entry id if needs to be deleted.
-  std::optional<unsigned> Delete(std::string_view key);
+  std::optional<BinId> Delete(std::string_view key);
 
   // Delete a stored segment. Returns page segment if it became emtpy and needs to be deleted.
   std::optional<DiskSegment> Delete(DiskSegment segment);
@@ -44,7 +47,7 @@ class SmallBins {
   FilledBin FlushBin();
 
  private:
-  unsigned last_bin_id_ = 0;
+  BinId last_bin_id_ = 0;
 
   unsigned current_bin_bytes_ = 0;
   absl::flat_hash_map<std::string, std::string> current_bin_;
