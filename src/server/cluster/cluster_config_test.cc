@@ -422,7 +422,7 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
       "master": { "id": "id0", "ip": "localhost", "port": 3000 },
       "replicas": [],
       "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
-                     , "ip": "127.0.0.1", "port" : 9001, "target_id": "id1" }]
+                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
     },
     {
       "slot_ranges": [ { "start": 8001, "end": 16383 } ],
@@ -435,7 +435,7 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
   EXPECT_EQ(
       config1->GetNewOutgoingMigrations(nullptr),
       (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
 
   EXPECT_TRUE(config1->GetFinishedOutgoingMigrations(nullptr).empty());
   EXPECT_TRUE(config1->GetNewIncomingMigrations(nullptr).empty());
@@ -445,7 +445,7 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
   EXPECT_EQ(
       config2->GetNewIncomingMigrations(nullptr),
       (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id0", .ip = "127.0.0.1", .port = 9001}}));
 
   EXPECT_TRUE(config2->GetFinishedOutgoingMigrations(nullptr).empty());
   EXPECT_TRUE(config2->GetNewOutgoingMigrations(nullptr).empty());
@@ -477,7 +477,7 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
   EXPECT_EQ(
       config4->GetFinishedOutgoingMigrations(config1),
       (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
   EXPECT_TRUE(config4->GetNewIncomingMigrations(config1).empty());
   EXPECT_TRUE(config4->GetFinishedIncomingMigrations(config1).empty());
   EXPECT_TRUE(config4->GetNewOutgoingMigrations(config1).empty());
@@ -485,7 +485,7 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
   EXPECT_EQ(
       config5->GetFinishedIncomingMigrations(config2),
       (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id0", .ip = "127.0.0.1", .port = 9001}}));
   EXPECT_TRUE(config5->GetNewIncomingMigrations(config2).empty());
   EXPECT_TRUE(config5->GetFinishedOutgoingMigrations(config2).empty());
   EXPECT_TRUE(config5->GetNewOutgoingMigrations(config2).empty());
@@ -499,7 +499,7 @@ TEST_F(ClusterConfigTest, InvalidConfigMigrationsWithoutIP) {
       "master": { "id": "id0", "ip": "localhost", "port": 3000 },
       "replicas": [],
       "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
-                     , "port" : 9001, "target_id": "id1" }]
+                     , "port" : 9001, "node_id": "id1" }]
     },
     {
       "slot_ranges": [ { "start": 8001, "end": 16383 } ],

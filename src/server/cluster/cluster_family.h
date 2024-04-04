@@ -79,7 +79,8 @@ class ClusterFamily {
   std::shared_ptr<ClusterSlotMigration> GetIncomingMigration(std::string_view source_id);
 
   bool StartSlotMigrations(std::vector<MigrationInfo> migrations, ConnectionContext* cntx);
-  void RemoveFinishedMigrations();
+  void RemoveOutgoingMigrations(const std::vector<MigrationInfo>& migrations);
+  void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations);
 
   // store info about migration and create unique session id
   std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(MigrationInfo info);

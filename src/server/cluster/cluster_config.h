@@ -31,12 +31,12 @@ struct ClusterNodeInfo {
 
 struct MigrationInfo {
   std::vector<SlotRange> slot_ranges;
-  std::string target_id;
+  std::string node_id;
   std::string ip;
   uint16_t port = 0;
 
   bool operator==(const MigrationInfo& r) const {
-    return ip == r.ip && port == r.port && slot_ranges == r.slot_ranges && target_id == r.target_id;
+    return ip == r.ip && port == r.port && slot_ranges == r.slot_ranges && node_id == r.node_id;
   }
 };
 
