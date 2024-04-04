@@ -75,7 +75,6 @@ jobs:
           docker ps -a
           docker logs action-control-plane --tail=0 --follow
 
-
       - name: DEBUG
         run: |
           sudo -i 
