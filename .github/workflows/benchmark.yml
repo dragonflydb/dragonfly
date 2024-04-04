@@ -57,22 +57,25 @@ jobs:
         with:
           python-version: 3.9
 
-      - name: FIX Network issue
+#https://github.com/helm/kind-action/issues/30
+      - name: FIX Kind on container issue
         run: |
           export KUBECONFIG=$HOME/.kube/config
           export KIND_EXPERIMENTAL_DOCKER_NETWORK=${{ job.container.network }}
           echo ${KIND_EXPERIMENTAL_DOCKER_NETWORK}
-
+          # Install Kind
           [ $(uname -m) = x86_64 ] && curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
+          # Install Kind Cluster
           kind create cluster \
             --kubeconfig $KUBECONFIG \
             --config=.github/workflows/kind-config.yaml \
             --name action || true
+          # Install Kubectl
           curl -LO https://dl.k8s.io/release/v1.29.2/bin/linux/amd64/kubectl
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          docker ps -a
+          # Kubectl set context
           kubectl config set-cluster kind-action --server=https://action-control-plane:6443 
 
 #      - name: Create k8s Kind Cluster
