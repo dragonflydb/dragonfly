@@ -60,13 +60,18 @@ jobs:
         run: |
           export KUBECONFIG=$HOME/.kube/config
           export KIND_EXPERIMENTAL_DOCKER_NETWORK=${{ job.container.network }}
+          kind create cluster \
+            --kubeconfig $KUBECONFIG \
+            --config=.github/workflows/kind-config.yaml \
+            --name action
+          kubectl cluster-info --context kind-action
 
-      - name: Create k8s Kind Cluster
-        uses: helm/kind-action@v1.9.0
-        with:
-          kubectl_version: v1.28.0
-          cluster_name: action
-          config: .github/workflows/kind-config.yaml
+#      - name: Create k8s Kind Cluster
+#        uses: helm/kind-action@v1.9.0
+#        with:
+#          kubectl_version: v1.28.0
+#          cluster_name: action
+#          config: .github/workflows/kind-config.yaml
 
 
       - name: Install the CRD and Operator
