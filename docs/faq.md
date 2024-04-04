@@ -9,9 +9,9 @@
 
 
 ## What is the license model of Dragonfly? Is it an open source?
-Dragonfly is released under [BUSL 1.1](../LICENSE.md) (Business Source License).
-BUSL is considered to be "source available" license and it's not strictly open-source license.
-We believe that a [BUSL](https://spdx.org/licenses/BUSL-1.1.html) license is more permissive
+Dragonfly is released under [BSL 1.1](../LICENSE.md) (Business Source License).
+BSL 1.1 is considered to be "source available" license and it's not strictly open-source license.
+We believe that a [BSL 1.1](https://spdx.org/licenses/BUSL-1.1.html) license is more permissive
 than licenses like AGPL, and it will allow us to
 provide a competitive commercial service using our technology. In general terms,
 it means that Dragonfly's code is free to use and free to change as long as you do not sell services directly related to
