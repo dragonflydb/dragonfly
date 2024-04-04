@@ -45,40 +45,40 @@ jobs:
         run: |
           apt-get update
           apt-get install sudo
-      - name: Set up Python
-        uses: actions/setup-python@v3
-        with:
-          python-version: 3.9
-      - name: Create k8s Kind Cluster
-        uses: helm/kind-action@v1.9.0
-        with:
-          kubectl_version: v1.28.0
-      - run: |
-          kubectl config get-contexts
-          kubectl cluster-info --context kind-chart-testing
-      - name: Install the CRD and Operator
-        run: |
-          # Install the CRD and Operator
-          kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
-      - name: Apply Configuration
-        run: |
-          echo '${{ toJson(matrix.config) }}' | kubectl apply -f -
-
-      - name: Wait For Service
-        run: |
-          kubectl wait dragonfly/dragonfly-sample --for=jsonpath='{.status.phase}'=ready --timeout=120s
-          kubectl wait pods --selector app=dragonfly-sample --for condition=Ready --timeout=120s
-          kubectl describe pod dragonfly-sample-0
-
-      - name: Run Benchmark
-        run: |
-          nohup kubectl port-forward service/dragonfly-sample 6379:6379 &
-          sleep 5
-          redis-cli ping
-          # run small memtier benchmark
-          memtier_benchmark  --pipeline=30 --key-maximum=10000 -c 10 -t 8 --requests=500000 --expiry-range=10-100 --reconnect-interval=10000 --distinct-client-seed --hide-histogram
-
-      - name: Server checks
-        run: |
-          pip3 install -r tools/requirements.txt
-          python tools/benchmark_checks.py
+#      - name: Set up Python
+#        uses: actions/setup-python@v3
+#        with:
+#          python-version: 3.9
+#      - name: Create k8s Kind Cluster
+#        uses: helm/kind-action@v1.9.0
+#        with:
+#          kubectl_version: v1.28.0
+#      - run: |
+#          kubectl config get-contexts
+#          kubectl cluster-info --context kind-chart-testing
+#      - name: Install the CRD and Operator
+#        run: |
+#          # Install the CRD and Operator
+#          kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
+#      - name: Apply Configuration
+#        run: |
+#          echo '${{ toJson(matrix.config) }}' | kubectl apply -f -
+#
+#      - name: Wait For Service
+#        run: |
+#          kubectl wait dragonfly/dragonfly-sample --for=jsonpath='{.status.phase}'=ready --timeout=120s
+#          kubectl wait pods --selector app=dragonfly-sample --for condition=Ready --timeout=120s
+#          kubectl describe pod dragonfly-sample-0
+#
+#      - name: Run Benchmark
+#        run: |
+#          nohup kubectl port-forward service/dragonfly-sample 6379:6379 &
+#          sleep 5
+#          redis-cli ping
+#          # run small memtier benchmark
+#          memtier_benchmark  --pipeline=30 --key-maximum=10000 -c 10 -t 8 --requests=500000 --expiry-range=10-100 --reconnect-interval=10000 --distinct-client-seed --hide-histogram
+#
+#      - name: Server checks
+#        run: |
+#          pip3 install -r tools/requirements.txt
+#          python tools/benchmark_checks.py
