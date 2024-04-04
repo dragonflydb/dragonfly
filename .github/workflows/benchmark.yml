@@ -67,6 +67,8 @@ jobs:
             --kubeconfig $KUBECONFIG \
             --config=.github/workflows/kind-config.yaml \
             --name action
+          curl -LO https://dl.k8s.io/release/v1.29.2/bin/linux/amd64/kubectl
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
           kubectl cluster-info --context kind-action
 
 #      - name: Create k8s Kind Cluster
