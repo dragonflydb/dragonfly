@@ -60,7 +60,7 @@ jobs:
           kubectl_version: v1.28.0
 
       - run: |
-          sleep 10
+          kubectl wait --for=condition=ready node --all --timeout=300s
           kubectl config get-contexts
           kubectl cluster-info --context kind-chart-testing
 
