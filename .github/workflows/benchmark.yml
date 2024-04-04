@@ -70,7 +70,7 @@ jobs:
             --name action || true
           curl -LO https://dl.k8s.io/release/v1.29.2/bin/linux/amd64/kubectl
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          kubectl cluster-info --context kind-action
+          kubectl cluster-info --context kind-action --kubeconfig /github/home/.kube/config
 
 #      - name: Create k8s Kind Cluster
 #        uses: helm/kind-action@v1.9.0
