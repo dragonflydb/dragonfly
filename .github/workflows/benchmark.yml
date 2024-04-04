@@ -1,9 +1,12 @@
 name: benchmark-tests
 
 on:
-  schedule:
-    - cron: "0 9 * * *" # run at 6 AM UTC
+  pull_request:
   workflow_dispatch:
+  #  schedule:
+#    - cron: "0 9 * * *" # run at 6 AM UTC
+
+
 
 jobs:
   benchmark:
