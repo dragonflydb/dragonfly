@@ -45,9 +45,9 @@ void OpManager::Delete(EntryId id) {
 }
 
 void OpManager::Delete(DiskSegment segment) {
+  DCHECK_EQ(segment.offset % 4_KB, 0u);
   if (auto it = pending_reads_.find(segment.offset); it != pending_reads_.end()) {
     // If a read is pending, it will be deleted once the read finished
-    DCHECK_EQ(it->second.segment.length, segment.length);
     it->second.delete_requested = true;
   } else {
     // Otherwise, delete it immediately
