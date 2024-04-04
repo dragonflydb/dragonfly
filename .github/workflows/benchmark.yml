@@ -57,7 +57,7 @@ jobs:
       - name: Create k8s Kind Cluster
         uses: helm/kind-action@v1.9.0
         with:
-          kubectl_version: v1.28.0
+          kubectl_version: v1.29.2
           cluster_name: action
 
       - name: install kubectl
