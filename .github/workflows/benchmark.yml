@@ -40,6 +40,7 @@ jobs:
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
+      options: --cpus 2
 
     steps:
       - uses: actions/checkout@v3
@@ -49,6 +50,9 @@ jobs:
         run: |
           apt-get update
           apt-get install sudo
+          sudo -i 
+          echo " " > $HOME/.kube/config
+
 
       - name: Set up Python
         uses: actions/setup-python@v3
@@ -70,12 +74,14 @@ jobs:
 
       - name: DEBUG
         run: |
+          sudo -i 
           sleep 20
           sudo cat $HOME/.kube/config
-          sudo  kubectl cluster-info dump
 
       - name: Install the CRD and Operator
         run: |
+          sudo -i 
+          
           # Install the CRD and Operator
           kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
       - name: Apply Configuration
