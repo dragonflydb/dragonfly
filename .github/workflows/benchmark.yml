@@ -52,6 +52,7 @@ jobs:
           apt-get install sudo
           sudo -i 
           echo " " > $HOME/.kube/config
+          cat  $HOME/.kube/config
 
 
       - name: Set up Python
