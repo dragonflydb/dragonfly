@@ -53,8 +53,6 @@ jobs:
           sudo -i 
           echo " " > $HOME/.kube/config
           cat  $HOME/.kube/config
-          docker stop $(docker ps -a -q) 
-          docker system prune -a
 
 
       - name: Set up Python
