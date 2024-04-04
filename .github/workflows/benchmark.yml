@@ -62,6 +62,7 @@ jobs:
       - name: DEBUG
         run: |
           sleep 20
+          kubectl version
           kubectl wait --for=condition=ready node --all --timeout=300s
           kubectl config get-contexts
           kubectl cluster-info --context kind-chart-testing
