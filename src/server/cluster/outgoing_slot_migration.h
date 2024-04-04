@@ -21,8 +21,8 @@ class ClusterFamily;
 // Whole outgoing slots migration manager
 class OutgoingMigration : private ProtocolClient {
  public:
-  OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots, ClusterFamily* cf,
-                    Context::ErrHandler err_handler, ServerFamily* sf);
+  OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Context::ErrHandler err_handler,
+                    ServerFamily* sf);
   ~OutgoingMigration();
 
   // start migration process, sends INIT command to the target node
@@ -49,7 +49,11 @@ class OutgoingMigration : private ProtocolClient {
   };
 
   const SlotRanges& GetSlots() const {
-    return slots_;
+    return migration_info_.slot_ranges;
+  }
+
+  const MigrationInfo GetMigrationInfo() const {
+    return migration_info_;
   }
 
  private:
@@ -60,7 +64,7 @@ class OutgoingMigration : private ProtocolClient {
   void SyncFb();
 
  private:
-  SlotRanges slots_;
+  MigrationInfo migration_info_;
   Context cntx_;
   mutable util::fb2::Mutex flows_mu_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_ ABSL_GUARDED_BY(flows_mu_);

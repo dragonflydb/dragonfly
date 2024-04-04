@@ -1221,18 +1221,6 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     }
   }
 
-  const auto& tc = m.coordinator_stats.tx_type_cnt;
-  AppendMetricHeader("transaction_types_total", "Transaction counts by their types",
-                     MetricType::COUNTER, &resp->body());
-
-  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "quick", "inline"};
-  for (unsigned type = 0; type < ServerState::NUM_TX_TYPES; ++type) {
-    if (tc[type] > 0) {
-      AppendMetricValue("transaction_types_total", tc[type], {"type"}, {kTxTypeNames[type]},
-                        &resp->body());
-    }
-  }
-
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
@@ -2105,24 +2093,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TRANSACTION", true)) {
-    const auto& tc = m.coordinator_stats.tx_type_cnt;
-    string val = StrCat("global=", tc[ServerState::GLOBAL], ",normal=", tc[ServerState::NORMAL],
-                        ",quick=", tc[ServerState::QUICK], ",inline=", tc[ServerState::INLINE]);
-    append("tx_type_cnt", val);
-    val.clear();
-    for (unsigned width = 0; width < shard_set->size(); ++width) {
-      if (m.coordinator_stats.tx_width_freq_arr[width] > 0) {
-        absl::StrAppend(&val, "w", width + 1, "=", m.coordinator_stats.tx_width_freq_arr[width],
-                        ",");
-      }
-    }
-    if (!val.empty()) {
-      val.pop_back();  // last comma.
-      append("tx_width_freq", val);
-    }
+    append("tx_shard_immediate_total", m.shard_stats.tx_immediate_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
+
+    append("tx_global_total", m.coordinator_stats.tx_global_cnt);
+    append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
+    append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
+
+    append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
+
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);

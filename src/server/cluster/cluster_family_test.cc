@@ -62,7 +62,7 @@ class ClusterFamilyTest : public BaseFamilyTest {
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "config", "invalid JSON"}),
-              ErrArg("Invalid JSON cluster config"));
+              ErrArg("Invalid cluster configuration."));
 
   string cluster_info = Run({"cluster", "info"}).GetString();
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
@@ -708,7 +708,7 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 }
 
-TEST_F(ClusterFamilyEmulatedTest, ClusterShards) {
+TEST_F(ClusterFamilyEmulatedTest, ClusterShardInfos) {
   EXPECT_THAT(Run({"cluster", "shards"}),
               RespArray(ElementsAre("slots",                                           //
                                     RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //

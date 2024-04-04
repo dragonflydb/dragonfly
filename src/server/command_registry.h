@@ -46,8 +46,11 @@ enum CommandOpt : uint32_t {
 
   // Allows commands without keys to respect transaction ordering and enables journaling by default
   NO_KEY_TRANSACTIONAL = 1U << 16,
-  NO_KEY_TX_SPAN_ALL =
-      1U << 17,  // If set, all shards are active for the no-key-transactional command
+  NO_KEY_TX_SPAN_ALL = 1U << 17,  // All shards are active for the no-key-transactional command
+
+  // The same callback can be run multiple times without corrupting the result. Used for
+  // opportunistic optimizations where inconsistencies can only be detected afterwards.
+  IDEMPOTENT = 1U << 18,
 };
 
 const char* OptName(CommandOpt fl);

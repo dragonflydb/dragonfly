@@ -6,6 +6,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/cluster/cluster_config.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(bool, enable_top_keys_tracking, false,
