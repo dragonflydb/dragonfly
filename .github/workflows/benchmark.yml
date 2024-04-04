@@ -46,14 +46,14 @@ jobs:
           apt-get update
           apt-get install sudo
 
-#      - name: Set up Python
-#        uses: actions/setup-python@v3
-#        with:
-#          python-version: 3.9
-#      - name: Create k8s Kind Cluster
-#        uses: helm/kind-action@v1.9.0
-#        with:
-#          kubectl_version: v1.28.0
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3.9
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.9.0
+        with:
+          kubectl_version: v1.28.0
 #      - run: |
 #          kubectl config get-contexts
 #          kubectl cluster-info --context kind-chart-testing
