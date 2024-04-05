@@ -710,8 +710,7 @@ void CompactObj::SetJson(JsonType&& j) {
     u_.json_obj.json_ptr->swap(j);
   } else {
     SetMeta(JSON_TAG);
-    void* ptr = tl.local_mr->allocate(sizeof(JsonType), alignof(JsonType));
-    u_.json_obj.json_ptr = new (ptr) JsonType(std::move(j));
+    u_.json_obj.json_ptr = AllocateMR<JsonType>(std::move(j));
     u_.json_obj.encoding = kEncodingJsonCons;
   }
 }
@@ -729,8 +728,7 @@ void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_f
     *u_.sbf = SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
   } else {
     SetMeta(SBF_TAG);
-    void* ptr = tl.local_mr->allocate(sizeof(SBF), alignof(SBF));
-    u_.sbf = new (ptr) SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
+    u_.sbf = AllocateMR<SBF>(initial_capacity, fp_prob, grow_factor, tl.local_mr);
   }
 }
 

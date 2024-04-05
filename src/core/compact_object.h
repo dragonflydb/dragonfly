@@ -7,6 +7,7 @@
 #include <absl/base/internal/endian.h>
 
 #include <optional>
+#include <type_traits>
 
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
@@ -345,9 +346,22 @@ class CompactObj {
   static void InitThreadLocal(MemoryResource* mr);
   static MemoryResource* memory_resource();  // thread-local.
 
-  template <typename T> static T* AllocateMR() {
+  template <typename T>
+  inline static constexpr bool IsConstructibleFromMR =
+      std::is_constructible_v<T, decltype(memory_resource())>;
+
+  template <typename T> static std::enable_if_t<IsConstructibleFromMR<T>, T*> AllocateMR() {
     void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
     return new (ptr) T{memory_resource()};
+  }
+
+  template <typename T, typename... Args>
+  inline static constexpr bool IsConstructibleFromArgs = std::is_constructible_v<T, Args...>;
+
+  template <typename T, typename... Args>
+  static std::enable_if_t<IsConstructibleFromArgs<T, Args...>, T*> AllocateMR(Args&&... args) {
+    void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
+    return new (ptr) T{std::forward<Args&&>(args)...};
   }
 
   template <typename T> static void DeleteMR(void* ptr) {
