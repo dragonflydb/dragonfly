@@ -406,7 +406,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "FLUSHSLOTS") {
     return DflyClusterFlushSlots(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
-    return DflyClusterSlotMigrationStatus(args, cntx);
+    return DflyIncomingSlotMigrationStatus(args, cntx);
   }
 
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -626,7 +626,7 @@ static std::string_view state_to_str(MigrationState state) {
   return "UNDEFINED_STATE"sv;
 }
 
-void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
+void ClusterFamily::DflyIncomingSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
@@ -681,9 +681,9 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-ClusterSlotMigration* ClusterFamily::CreateIncomingMigration(std::string source_id,
-                                                             SlotRanges slots,
-                                                             uint32_t shards_num) {
+IncomingSlotMigration* ClusterFamily::CreateIncomingMigration(std::string source_id,
+                                                              SlotRanges slots,
+                                                              uint32_t shards_num) {
   lock_guard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (mj->GetSourceID() == source_id) {
@@ -691,12 +691,12 @@ ClusterSlotMigration* ClusterFamily::CreateIncomingMigration(std::string source_
     }
   }
   return incoming_migrations_jobs_
-      .emplace_back(make_shared<ClusterSlotMigration>(
+      .emplace_back(make_shared<IncomingSlotMigration>(
           std::move(source_id), &server_family_->service(), std::move(slots), shards_num))
       .get();
 }
 
-std::shared_ptr<ClusterSlotMigration> ClusterFamily::GetIncomingMigration(
+std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
     std::string_view source_id) {
   lock_guard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
