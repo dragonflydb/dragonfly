@@ -494,8 +494,14 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
-  auto prev_config = tl_cluster_config;
-  SlotSet before = prev_config ? prev_config->GetOwnedSlots() : SlotSet(true);
+  // TODO we shouldn't provide cntx into StartSlotMigrations
+  if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config), cntx)) {
+    return cntx->SendError("Can't start the migration");
+  }
+  RemoveOutgoingMigrations(new_config->GetFinishedOutgoingMigrations(tl_cluster_config));
+  RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
+
+  SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
 
   // Ignore blocked commands because we filter them with CancelBlockingOnThread
   DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
@@ -514,11 +520,6 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
   DCHECK(tl_cluster_config != nullptr);
-
-  if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(prev_config), cntx)) {
-    return cntx->SendError("Can't start the migration");
-  }
-  RemoveFinishedMigrations();
 
   if (!tracker.Wait(absl::Seconds(1))) {
     LOG(WARNING) << "Cluster config change timed out";
@@ -642,7 +643,7 @@ void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionCo
     }
     // find outgoing slot migration
     for (const auto& migration : outgoing_migration_jobs_) {
-      if (migration->GetMigrationInfo().target_id == node_id)
+      if (migration->GetMigrationInfo().node_id == node_id)
         return rb->SendSimpleString(state_to_str(migration->GetState()));
     }
   } else if (auto arr_size = incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size();
@@ -658,7 +659,7 @@ void ClusterFamily::DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionCo
       send_answer("in", m->GetSourceID(), m->GetState());
     }
     for (const auto& migration : outgoing_migration_jobs_) {
-      send_answer("out", migration->GetMigrationInfo().target_id, migration->GetState());
+      send_answer("out", migration->GetMigrationInfo().node_id, migration->GetState());
     }
     return;
   }
@@ -706,17 +707,26 @@ std::shared_ptr<ClusterSlotMigration> ClusterFamily::GetIncomingMigration(
   return nullptr;
 }
 
-void ClusterFamily::RemoveFinishedMigrations() {
+void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& migrations) {
   lock_guard lk(migration_mu_);
-  auto removed_incoming_it =
-      std::remove_if(incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(),
-                     [](const auto& m) { return m->GetState() == MigrationState::C_FINISHED; });
-  incoming_migrations_jobs_.erase(removed_incoming_it, incoming_migrations_jobs_.end());
+  for (const auto& m : migrations) {
+    auto it = std::find_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
+                           [&m](const auto& om) { return m == om->GetMigrationInfo(); });
+    DCHECK(it != outgoing_migration_jobs_.end());
+    outgoing_migration_jobs_.erase(it);
+  }
+}
 
-  auto removed_outgoing_it =
-      std::remove_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
-                     [](const auto& m) { return m->GetState() == MigrationState::C_FINISHED; });
-  outgoing_migration_jobs_.erase(removed_outgoing_it, outgoing_migration_jobs_.end());
+void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
+  lock_guard lk(migration_mu_);
+  for (const auto& m : migrations) {
+    auto it = std::find_if(
+        incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(), [&m](const auto& im) {
+          return m.node_id == im->GetSourceID() && m.slot_ranges == im->GetSlots();
+        });
+    DCHECK(it != incoming_migrations_jobs_.end());
+    incoming_migrations_jobs_.erase(it);
+  }
 }
 
 void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {

@@ -59,11 +59,6 @@ ClusterSlotMigration::~ClusterSlotMigration() {
   sync_fb_.JoinIfNeeded();
 }
 
-// ClusterSlotMigration::Info ClusterSlotMigration::GetInfo() const {
-//   const auto& ctx = server();
-//   return {ctx.host, ctx.port};
-// }
-
 void ClusterSlotMigration::Join() {
   bc_->Wait();
   state_ = MigrationState::C_FINISHED;
