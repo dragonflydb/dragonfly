@@ -38,8 +38,22 @@ class RdbLoaderBase {
     uint64_t uncompressed_len;
   };
 
+  struct RdbSBF {
+    double grow_factor, fp_prob;
+    size_t prev_size, current_size;
+    size_t max_capacity;
+
+    struct Filter {
+      unsigned hash_cnt;
+      std::string blob;
+      Filter(unsigned h, std::string b) : hash_cnt(h), blob(std::move(b)) {
+      }
+    };
+    std::vector<Filter> filters;
+  };
+
   using RdbVariant =
-      std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>>;
+      std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>, RdbSBF>;
 
   struct OpaqueObj {
     RdbVariant obj;
@@ -131,6 +145,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadStreams();
   ::io::Result<OpaqueObj> ReadRedisJson();
   ::io::Result<OpaqueObj> ReadJson();
+  ::io::Result<OpaqueObj> ReadSBF();
 
   std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
