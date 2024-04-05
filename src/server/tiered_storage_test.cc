@@ -2,13 +2,18 @@
 // See LICENSE for licensing terms.
 //
 
+#include "server/tiered_storage.h"
+
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/engine_shard_set.h"
 #include "server/test_utils.h"
+#include "util/fibers/fibers.h"
 
 using namespace std;
 using namespace testing;
@@ -31,6 +36,31 @@ class TieredStorageTest : public BaseFamilyTest {
   bool WaitUntilTieredEntriesEQ(size_t value, int db_index = 0);
 
   static void SetUpTestSuite();
+};
+
+class TieredStorageV2Test : public BaseFamilyTest {
+ protected:
+  TieredStorageV2Test() {
+    num_threads_ = 1;
+  }
+
+  void SetUp() override {
+    BaseFamilyTest::SetUp();
+    auto* shard = shard_set->Await(0, [] { return EngineShard::tlocal(); });
+    storage_.emplace(&shard->db_slice());
+    shard_set->Await(0, [storage = &*storage_] {
+      auto ec = storage->Open(absl::StrCat("/tmp/tiered_storage_test", 1));
+      EXPECT_FALSE(ec);
+    });
+  }
+
+  void TearDown() override {
+    shard_set->Await(0, [storage = &*storage_] { storage->Close(); });
+    BaseFamilyTest::TearDown();
+  }
+
+ public:
+  std::optional<TieredStorageV2> storage_;
 };
 
 void TieredStorageTest::SetUpTestSuite() {
@@ -316,6 +346,57 @@ TEST_F(TieredStorageTest, GetValueValidation) {
   }
   m = GetMetrics();
   EXPECT_EQ(m.db_stats[0].tiered_entries, 0);
+}
+
+TEST_F(TieredStorageV2Test, SimpleStash) {
+  // Create simple values
+  vector<pair<string, string>> values(10);
+  for (unsigned i = 0; i < values.size(); i++) {
+    // 3 kb is below small bins size
+    values[i] = {absl::StrCat("key", i), string(3_KB, char('A' + i))};
+    Run({"set", values[i].first, values[i].second});
+  }
+
+  vector<util::fb2::Future<string>> futures;
+  shard_set->Await(0, [this, &values, &futures] {
+    auto& db_slice = EngineShard::tlocal()->db_slice();
+
+    // Schedule STASH for values
+    for (const auto& [key, _] : values) {
+      auto it = db_slice.FindMutable(DbContext{}, key);
+      storage_->Stash(key, &it.it->second);
+    }
+
+    // Wait for all values to be stashed
+    ExpectConditionWithinTimeout([&values, &db_slice] {
+      for (auto [key, _] : values)
+        if (db_slice.FindMutable(DbContext{}, key).it->second.HasIoPending())
+          return false;
+      return true;
+    });
+
+    // Now read all the values
+    for (const auto& [key, _] : values) {
+      auto it = db_slice.FindMutable(DbContext{}, key);
+      EXPECT_TRUE(it.it->second.IsExternal());
+      futures.emplace_back(storage_->Read(key, it.it->second));
+    }
+  });
+
+  // Wait for futures and assert correct values were read
+  for (unsigned i = 0; i < values.size(); i++)
+    EXPECT_EQ(futures[i].get(), values[i].second);
+
+  shard_set->Await(0, [&values] {
+    auto& db_slice = EngineShard::tlocal()->db_slice();
+
+    // Make sure all values were loaded back to memory
+    for (const auto& [key, value] : values) {
+      auto it = db_slice.FindMutable(DbContext{}, key);
+      std::string buf;
+      EXPECT_EQ(it.it->second.GetSlice(&buf), value);
+    }
+  });
 }
 
 }  // namespace dfly

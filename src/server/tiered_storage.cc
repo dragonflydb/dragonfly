@@ -6,11 +6,17 @@
 
 #include <mimalloc.h>
 
+#include <variant>
+
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/overloaded.h"
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/tiering/common.h"
+#include "server/tiering/small_bins.h"
 #include "util/fibers/fibers.h"
 
 ABSL_FLAG(uint32_t, tiered_storage_max_pending_writes, 32,
@@ -768,6 +774,91 @@ void TieredStorage::InitiateGrow(size_t grow_size) {
 bool TieredStorage::CanExternalizeEntry(PrimeIterator it) {
   return it->first.ObjType() == OBJ_STRING && !it->second.HasIoPending() &&
          !it->second.IsExternal() && EligibleForOffload(it->second.Size());
+}
+
+std::error_code TieredStorageV2::Open(string_view path) {
+  return OpManager::Open(path);
+}
+
+void TieredStorageV2::Close() {
+  OpManager::Close();
+}
+
+util::fb2::Future<std::string> TieredStorageV2::Read(string_view key, const PrimeValue& value) {
+  DCHECK(value.IsExternal());
+  return OpManager::Read(key, value.GetExternalSlice());
+}
+
+void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
+  string buf;
+  string_view value_sv = value->GetSlice(&buf);
+  value->SetIoPending(true);
+
+  if (value->Size() >= 2_KB) {
+    if (auto ec = OpManager::Stash(key, value_sv); ec)
+      value->SetIoPending(false);
+  } else if (auto bin = bins_.Stash(key, value_sv); bin) {
+    if (auto ec = OpManager::Stash(bin->first, bin->second); ec) {
+      for (const string& key : bins_.ReportStashAborted(bin->first))
+        SetExternal(key, std::nullopt);  // clear IO_PENDING flag
+    }
+  }
+}
+void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
+  if (value->IsExternal()) {
+    tiering::DiskSegment segment = value->GetExternalSlice();
+    if (segment.length >= 2_KB) {
+      OpManager::Delete(segment);
+    } else if (auto bin = bins_.Delete(segment); bin) {
+      OpManager::Delete(*bin);
+    }
+  } else {
+    if (value->Size() >= 2_KB) {
+      OpManager::Delete(key);
+    } else if (auto bin = bins_.Delete(key); bin) {
+      OpManager::Delete(*bin);
+    }
+  }
+}
+
+void TieredStorageV2::SetExternal(string_view key, optional<tiering::DiskSegment> segment) {
+  if (auto it = db_slice_->FindMutable(DbContext{}, key); IsValid(it.it)) {
+    it.it->second.SetIoPending(false);
+    if (segment)
+      it.it->second.SetExternal(segment->offset, segment->length);
+  }
+}
+
+void TieredStorageV2::SetInMemory(string_view key, string_view value) {
+  if (auto it = db_slice_->FindMutable(DbContext{}, key); IsValid(it.it)) {
+    it.it->second.SetString(value);
+  }
+}
+
+void TieredStorageV2::ReportStashed(EntryId id, tiering::DiskSegment segment) {
+  if (std::holds_alternative<string_view>(id)) {
+    SetExternal(get<string_view>(id), segment);
+  } else {
+    for (const auto& [sub_key, sub_segment] :
+         bins_.ReportStashed(get<tiering::SmallBins::BinId>(id), segment))
+      SetExternal(string_view{sub_key}, sub_segment);
+  }
+}
+
+void TieredStorageV2::ReportFetched(EntryId id, std::string_view value,
+                                    tiering::DiskSegment segment) {
+  // TODO: Currently we always load back to memory
+
+  DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
+  SetInMemory(get<string_view>(id), value);
+
+  // Delete value
+  if (segment.length >= 2_KB) {
+    OpManager::Delete(segment);
+  } else {
+    if (auto bin_segment = bins_.Delete(segment); bin_segment)
+      OpManager::Delete(*bin_segment);
+  }
 }
 
 }  // namespace dfly

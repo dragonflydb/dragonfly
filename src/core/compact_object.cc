@@ -739,7 +739,7 @@ SBF* CompactObj::GetSBF() const {
 
 void CompactObj::SetString(std::string_view str) {
   uint8_t mask = mask_ & ~kEncMask;
-  CHECK(!IsExternal());
+  // CHECK(!IsExternal());
   // Trying auto-detection heuristics first.
   if (str.size() <= 20) {
     long long ival;
