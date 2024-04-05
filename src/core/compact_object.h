@@ -303,6 +303,11 @@ class CompactObj {
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
 
+  void SetSBF(SBF* sbf) {
+    SetMeta(SBF_TAG);
+    u_.sbf = sbf;
+  }
+
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
   SBF* GetSBF() const;
 
