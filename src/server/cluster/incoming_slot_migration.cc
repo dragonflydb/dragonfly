@@ -4,17 +4,11 @@
 
 #include "server/cluster/incoming_slot_migration.h"
 
-#include <absl/cleanup/cleanup.h>
-#include <absl/flags/flag.h>
-
 #include "base/logging.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/tx_executor.h"
 #include "server/main_service.h"
-
-ABSL_FLAG(int, source_connect_timeout_ms, 20000,
-          "Timeout for establishing connection to a source node");
 
 namespace dfly {
 

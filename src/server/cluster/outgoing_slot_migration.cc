@@ -17,7 +17,8 @@
 #include "server/journal/streamer.h"
 #include "server/server_family.h"
 
-ABSL_DECLARE_FLAG(int, source_connect_timeout_ms);
+ABSL_FLAG(int, source_connect_timeout_ms, 20000,
+          "Timeout for establishing connection to a source node");
 
 using namespace std;
 using namespace facade;
