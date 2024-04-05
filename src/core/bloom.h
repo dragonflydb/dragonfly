@@ -29,6 +29,9 @@ class Bloom {
   // heap
   void Init(uint64_t entries, double fp_prob, PMR_NS::memory_resource* resource);
 
+  // Direct initializer. len*8 must be power of 2.
+  void Init(uint8_t* blob, size_t len, unsigned hash_cnt);
+
   // Destroys the object, must be called before destructing the object.
   // resource - resource with which the object was initialized.
   void Destroy(PMR_NS::memory_resource* resource);
@@ -55,6 +58,14 @@ class Bloom {
   // derived from fp_prob.
   size_t Capacity(double fp_prob) const;
 
+  std::string_view data() const {
+    return std::string_view{reinterpret_cast<const char*>(bf_), bitlen() / 8};
+  }
+
+  unsigned hash_cnt() const {
+    return hash_cnt_;
+  }
+
  private:
   bool IsSet(size_t index) const;
   bool Set(size_t index);  // return true if bit was set (i.e was 0 before)
@@ -77,30 +88,63 @@ class SBF {
 
  public:
   SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::memory_resource* mr);
+
+  // C'tor used for loading persisted filters into SBF.
+  // Should be followed by AddFilter.
+  SBF(double grow_factor, double fp_prob, size_t max_capacity, size_t prev_size,
+      size_t current_size, PMR_NS::memory_resource* mr);
   ~SBF();
 
   SBF& operator=(SBF&& src);
 
+  void AddFilter(const std::string& blob, unsigned hash_cnt);
+
   bool Add(std::string_view str);
   bool Exists(std::string_view str) const;
 
-  size_t GetSize() const {
-    return prev_size_ + current_size_;
+  size_t current_size() const {
+    return current_size_;
   }
 
-  size_t MallocUsed() const;
+  size_t prev_size() const {
+    return prev_size_;
+  }
 
   double grow_factor() const {
     return grow_factor_;
   }
+
+  // expected fp probability for the current filter.
+  double fp_probability() const {
+    return fp_prob_;
+  }
+
+  uint32_t num_filters() const {
+    return filters_.size();
+  }
+
+  std::string_view data(size_t idx) const {
+    return filters_[idx].data();
+  }
+
+  unsigned hashfunc_cnt(size_t idx) const {
+    return filters_[idx].hash_cnt();
+  }
+
+  // max capacity of the current filter.
+  size_t max_capacity() const {
+    return max_capacity_;
+  }
+
+  size_t MallocUsed() const;
 
  private:
   // multiple filters from the smallest to the largest.
   std::vector<Bloom, PMR_NS::polymorphic_allocator<Bloom>> filters_;
   double grow_factor_;
   double fp_prob_;
-  size_t current_size_ = 0;
   size_t prev_size_ = 0;
+  size_t current_size_ = 0;
   size_t max_capacity_;
 };
 
