@@ -824,7 +824,7 @@ void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
 void TieredStorageV2::SetExternal(string_view key, optional<tiering::DiskSegment> segment) {
   if (auto it = db_slice_->FindMutable(DbContext{}, key); IsValid(it.it)) {
     it.it->second.SetIoPending(false);
-    if (segment)
+    if (segment)  // TODO: Handle memory stats (why is it done manually??)
       it.it->second.SetExternal(segment->offset, segment->length);
   }
 }

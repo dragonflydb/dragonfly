@@ -8,6 +8,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "absl/flags/internal/flag.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -45,6 +46,8 @@ class TieredStorageV2Test : public BaseFamilyTest {
   }
 
   void SetUp() override {
+    absl::SetFlag(&FLAGS_tiered_prefix, "");  // this tests can only be run last
+
     BaseFamilyTest::SetUp();
     auto* shard = shard_set->Await(0, [] { return EngineShard::tlocal(); });
     storage_.emplace(&shard->db_slice());
@@ -350,7 +353,7 @@ TEST_F(TieredStorageTest, GetValueValidation) {
 
 TEST_F(TieredStorageV2Test, SimpleStash) {
   // Create simple values
-  vector<pair<string, string>> values(10);
+  vector<pair<string, string>> values(20);
   for (unsigned i = 0; i < values.size(); i++) {
     // 3 kb is below small bins size
     values[i] = {absl::StrCat("key", i), string(3_KB, char('A' + i))};
