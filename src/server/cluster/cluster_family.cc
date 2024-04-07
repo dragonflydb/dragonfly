@@ -498,8 +498,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   SlotSet before = prev_config ? prev_config->GetOwnedSlots() : SlotSet(true);
 
   // Ignore blocked commands because we filter them with CancelBlockingOnThread
-  DispatchTracker tracker{server_family_->GetListeners(), cntx->conn(), false /* ignore paused */,
-                          true /* ignore blocked */};
+  DispatchTracker tracker{server_family_->GetNonPriviligedListeners(), cntx->conn(),
+                          false /* ignore paused */, true /* ignore blocked */};
 
   auto blocking_filter = [&new_config](ArgSlice keys) {
     bool moved = any_of(keys.begin(), keys.end(), [&](auto k) { return !new_config->IsMySlot(k); });

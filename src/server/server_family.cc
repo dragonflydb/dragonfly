@@ -418,8 +418,7 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
   return rb->SendVerbatimString(result);
 }
 
-void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
-                    ConnectionContext* cntx) {
+void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, ConnectionContext* cntx) {
   CmdArgParser parser(args);
 
   auto timeout = parser.Next<uint64_t>();
@@ -1262,6 +1261,17 @@ std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
   return nullopt;
 }
 
+vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
+  std::vector<facade::Listener*> listeners;
+  listeners.reserve(listeners.size());
+  for (facade::Listener* listener : listeners_) {
+    if (!listener->IsPrivilegedInterface()) {
+      listeners.push_back(listener);
+    }
+  }
+  return listeners;
+}
+
 bool ServerFamily::HasReplica() const {
   unique_lock lk(replicaof_mu_);
   return replica_ != nullptr;
@@ -1565,7 +1575,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPauseCmd(sub_args, absl::MakeSpan(listeners_), cntx);
+    return ClientPauseCmd(sub_args, GetNonPriviligedListeners(), cntx);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, cntx);
   } else if (sub_cmd == "KILL") {
