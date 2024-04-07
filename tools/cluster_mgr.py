@@ -343,7 +343,7 @@ def migrate(args):
     while True:
         sync_status = send_command(target_node, ["DFLYCLUSTER", "SLOT-MIGRATION-STATUS"])
         assert len(sync_status) == 1
-        if sync_status[0].endswith("STABLE_SYNC"):
+        if "STABLE_SYNC" in sync_status[0]:
             break
 
     print("Reached stable sync: ", sync_status)

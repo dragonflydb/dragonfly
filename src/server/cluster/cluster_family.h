@@ -56,7 +56,11 @@ class ClusterFamily {
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
 
  private:  // Slots migration section
-  void DflyIncomingSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+  void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(migration_mu_);
+  void SendSingleMigrationStatus(ConnectionContext* cntx, std::string_view node_id)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(migration_mu_);
+  void SendAllMigrationStatus(ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
