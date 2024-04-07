@@ -69,6 +69,14 @@ void Bloom::Init(uint64_t entries, double fp_prob, PMR_NS::memory_resource* heap
   bit_log_ = absl::countr_zero(bits);
 }
 
+void Bloom::Init(uint8_t* blob, size_t len, unsigned hash_cnt) {
+  DCHECK_EQ(len * 8, absl::bit_ceil(len * 8));  // must be power of two.
+  CHECK(bf_ == nullptr);
+  hash_cnt_ = hash_cnt;
+  bf_ = blob;
+  bit_log_ = absl::countr_zero(len * 8);
+}
+
 void Bloom::Destroy(PMR_NS::memory_resource* resource) {
   resource->deallocate(CHECK_NOTNULL(bf_), bitlen() / 8);
   bf_ = nullptr;
@@ -141,6 +149,16 @@ SBF::SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::
   max_capacity_ = filters_.front().Capacity(fp_prob_);
 }
 
+SBF::SBF(double grow_factor, double fp_prob, size_t max_capacity, size_t prev_size,
+         size_t current_size, PMR_NS::memory_resource* mr)
+    : filters_(mr),
+      grow_factor_(grow_factor),
+      fp_prob_(fp_prob),
+      prev_size_(prev_size),
+      current_size_(current_size),
+      max_capacity_(max_capacity) {
+}
+
 SBF::~SBF() {
   PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
   for (auto& f : filters_)
@@ -156,6 +174,13 @@ SBF& SBF::operator=(SBF&& src) {
   max_capacity_ = src.max_capacity_;
 
   return *this;
+}
+
+void SBF::AddFilter(const std::string& blob, unsigned hash_cnt) {
+  PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
+  uint8_t* ptr = (uint8_t*)mr->allocate(blob.size(), 1);
+  memcpy(ptr, blob.data(), blob.size());
+  filters_.emplace_back().Init(ptr, blob.size(), hash_cnt);
 }
 
 bool SBF::Add(std::string_view str) {

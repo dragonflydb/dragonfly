@@ -10,7 +10,7 @@
 
 #include "facade/conn_context.h"
 #include "server/cluster/cluster_config.h"
-#include "server/cluster/cluster_slot_migration.h"
+#include "server/cluster/incoming_slot_migration.h"
 #include "server/cluster/outgoing_slot_migration.h"
 #include "server/common.h"
 
@@ -56,7 +56,7 @@ class ClusterFamily {
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
 
  private:  // Slots migration section
-  void DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+  void DflyIncomingSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
@@ -72,21 +72,22 @@ class ClusterFamily {
 
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
-  // create a ClusterSlotMigration entity which will execute migration
-  ClusterSlotMigration* CreateIncomingMigration(std::string source_id, SlotRanges slots,
-                                                uint32_t shards_num);
+  // create a IncomingSlotMigration entity which will execute migration
+  IncomingSlotMigration* CreateIncomingMigration(std::string source_id, SlotRanges slots,
+                                                 uint32_t shards_num);
 
-  std::shared_ptr<ClusterSlotMigration> GetIncomingMigration(std::string_view source_id);
+  std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id);
 
   bool StartSlotMigrations(std::vector<MigrationInfo> migrations, ConnectionContext* cntx);
-  void RemoveFinishedMigrations();
+  void RemoveOutgoingMigrations(const std::vector<MigrationInfo>& migrations);
+  void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations);
 
   // store info about migration and create unique session id
   std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(MigrationInfo info);
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
-  std::vector<std::shared_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
+  std::vector<std::shared_ptr<IncomingSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
   // holds all outgoing slots migrations that are currently in progress

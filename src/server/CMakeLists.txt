@@ -14,12 +14,14 @@ set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-    SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc tiering/disk_storage.cc)
+    SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
     cxx_link(dfly_bench dfly_facade fibers2 absl::random_random)
     cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
+    cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
+    cxx_test(tiering/small_bins_test dfly_test_lib LABELS DFLY)
 endif()
 
 
@@ -47,8 +49,8 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
-            cluster/cluster_family.cc cluster/cluster_slot_migration.cc
-            cluster/cluster_shard_migration.cc cluster/outgoing_slot_migration.cc
+            cluster/cluster_family.cc cluster/incoming_slot_migration.cc
+            cluster/outgoing_slot_migration.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)
 

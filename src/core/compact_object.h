@@ -7,6 +7,7 @@
 #include <absl/base/internal/endian.h>
 
 #include <optional>
+#include <type_traits>
 
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
@@ -18,6 +19,8 @@ constexpr unsigned kEncodingIntSet = 0;
 constexpr unsigned kEncodingStrMap = 1;   // for set/map encodings of strings
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
 constexpr unsigned kEncodingListPack = 3;
+constexpr unsigned kEncodingJsonCons = 0;
+constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
 
@@ -296,9 +299,15 @@ class CompactObj {
   // you need to move an object that created with the function JsonFromString
   // into here, no copying is allowed!
   void SetJson(JsonType&& j);
+  void SetJson(const uint8_t* buf, size_t len);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
+
+  void SetSBF(SBF* sbf) {
+    SetMeta(SBF_TAG);
+    u_.sbf = sbf;
+  }
 
   void SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor);
   SBF* GetSBF() const;
@@ -337,9 +346,22 @@ class CompactObj {
   static void InitThreadLocal(MemoryResource* mr);
   static MemoryResource* memory_resource();  // thread-local.
 
-  template <typename T> static T* AllocateMR() {
+  template <typename T>
+  inline static constexpr bool IsConstructibleFromMR =
+      std::is_constructible_v<T, decltype(memory_resource())>;
+
+  template <typename T> static std::enable_if_t<IsConstructibleFromMR<T>, T*> AllocateMR() {
     void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
     return new (ptr) T{memory_resource()};
+  }
+
+  template <typename T, typename... Args>
+  inline static constexpr bool IsConstructibleFromArgs = std::is_constructible_v<T, Args...>;
+
+  template <typename T, typename... Args>
+  static std::enable_if_t<IsConstructibleFromArgs<T, Args...>, T*> AllocateMR(Args&&... args) {
+    void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
+    return new (ptr) T{std::forward<Args&&>(args)...};
   }
 
   template <typename T> static void DeleteMR(void* ptr) {
@@ -380,9 +402,13 @@ class CompactObj {
   } __attribute__((packed));
 
   struct JsonWrapper {
-    JsonType* json_ptr = nullptr;
-    size_t unneeded = 0;
-  } __attribute__((packed));
+    union {
+      JsonType* json_ptr;
+      uint8_t* flat_ptr;
+    };
+    uint32_t json_len = 0;
+    uint8_t encoding = 0;
+  };
 
   // My main data structure. Union of representations.
   // RobjWrapper is kInlineLen=16 bytes, so we employ SSO of that size via inline_str.
@@ -393,7 +419,9 @@ class CompactObj {
 
     SmallString small_str;
     detail::RobjWrapper r_obj;
-    JsonWrapper json_obj;
+
+    // using 'packed' to reduce alignement of U to 1.
+    JsonWrapper json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;

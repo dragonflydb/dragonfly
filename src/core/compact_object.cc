@@ -697,20 +697,30 @@ std::optional<int64_t> CompactObj::TryGetInt() const {
 
 auto CompactObj::GetJson() const -> JsonType* {
   if (ObjType() == OBJ_JSON) {
+    DCHECK_EQ(u_.json_obj.encoding, kEncodingJsonCons);
     return u_.json_obj.json_ptr;
   }
   return nullptr;
 }
 
 void CompactObj::SetJson(JsonType&& j) {
-  if (taglen_ == JSON_TAG) {                  // already json
+  if (taglen_ == JSON_TAG && u_.json_obj.encoding == kEncodingJsonCons) {
+    // already json
     DCHECK(u_.json_obj.json_ptr != nullptr);  // must be allocated
-    *u_.json_obj.json_ptr = std::move(j);
+    u_.json_obj.json_ptr->swap(j);
   } else {
     SetMeta(JSON_TAG);
-    void* ptr = tl.local_mr->allocate(sizeof(JsonType), kAlignSize);
-    u_.json_obj.json_ptr = new (ptr) JsonType(std::move(j));
+    u_.json_obj.json_ptr = AllocateMR<JsonType>(std::move(j));
+    u_.json_obj.encoding = kEncodingJsonCons;
   }
+}
+
+void CompactObj::SetJson(const uint8_t* buf, size_t len) {
+  SetMeta(JSON_TAG);
+  u_.json_obj.flat_ptr = (uint8_t*)tl.local_mr->allocate(len, kAlignSize);
+  memcpy(u_.json_obj.flat_ptr, buf, len);
+  u_.json_obj.encoding = kEncodingJsonFlat;
+  u_.json_obj.json_len = len;
 }
 
 void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor) {
@@ -718,8 +728,7 @@ void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_f
     *u_.sbf = SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
   } else {
     SetMeta(SBF_TAG);
-    void* ptr = tl.local_mr->allocate(sizeof(SBF), alignof(SBF));
-    u_.sbf = new (ptr) SBF(initial_capacity, fp_prob, grow_factor, tl.local_mr);
+    u_.sbf = AllocateMR<SBF>(initial_capacity, fp_prob, grow_factor, tl.local_mr);
   }
 }
 
@@ -1009,9 +1018,12 @@ void CompactObj::Free() {
     tl.small_str_bytes -= u_.small_str.MallocUsed();
     u_.small_str.Free();
   } else if (taglen_ == JSON_TAG) {
-    VLOG(1) << "Freeing JSON object";
-    u_.json_obj.json_ptr->~JsonType();
-    tl.local_mr->deallocate(u_.json_obj.json_ptr, sizeof(JsonType), kAlignSize);
+    DVLOG(1) << "Freeing JSON object";
+    if (u_.json_obj.encoding == kEncodingJsonCons) {
+      DeleteMR<JsonType>(u_.json_obj.json_ptr);
+    } else {
+      tl.local_mr->deallocate(u_.json_obj.flat_ptr, u_.json_obj.json_len, kAlignSize);
+    }
   } else if (taglen_ == SBF_TAG) {
     DeleteMR<SBF>(u_.sbf);
   } else {
