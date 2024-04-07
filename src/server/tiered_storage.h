@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <memory>
+
 #include "server/tiering/common.h"
 #include "util/fibers/future.h"
 #ifdef __linux__
@@ -13,19 +15,25 @@
 #include "server/common.h"
 #include "server/io_mgr.h"
 #include "server/table.h"
-#include "server/tiering/op_manager.h"
-#include "server/tiering/small_bins.h"
 
 namespace dfly {
 
 class DbSlice;
 
+namespace tiering {
+class SmallBins;
+};
+
 // Manages offloaded values
-// TODO: forward declare op manager and inherit from nested?
-class TieredStorageV2 : private tiering::OpManager {
+class TieredStorageV2 {
+  class ShardOpManager;
+
  public:
-  explicit TieredStorageV2(DbSlice* db_slice) : db_slice_{db_slice} {
-  }
+  explicit TieredStorageV2(DbSlice* db_slice);
+  ~TieredStorageV2();  // drop forward declared unique_ptrs
+
+  TieredStorageV2(TieredStorageV2&& other) = delete;
+  TieredStorageV2(const TieredStorageV2& other) = delete;
 
   std::error_code Open(std::string_view path);
   void Close();
@@ -40,18 +48,8 @@ class TieredStorageV2 : private tiering::OpManager {
   void Delete(std::string_view key, PrimeValue* value);
 
  private:
-  // Find entry by key in db_slice and store external segment in place of original value
-  void SetExternal(std::string_view key, std::optional<tiering::DiskSegment> segment);
-
-  // Find entry by key and store it's up-to-date value in place of external segment
-  void SetInMemory(std::string_view key, std::string_view value);
-
-  void ReportStashed(EntryId id, tiering::DiskSegment segment) override;
-  void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment) override;
-
- private:
-  DbSlice* db_slice_;
-  tiering::SmallBins bins_;  // todo: forward declare?
+  std::unique_ptr<ShardOpManager> op_manager_;
+  std::unique_ptr<tiering::SmallBins> bins_;
 };
 
 class TieredStorage {

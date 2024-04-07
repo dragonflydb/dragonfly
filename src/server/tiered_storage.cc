@@ -6,6 +6,8 @@
 
 #include <mimalloc.h>
 
+#include <memory>
+#include <optional>
 #include <variant>
 
 #include "absl/cleanup/cleanup.h"
@@ -15,7 +17,9 @@
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/table.h"
 #include "server/tiering/common.h"
+#include "server/tiering/op_manager.h"
 #include "server/tiering/small_bins.h"
 #include "util/fibers/fibers.h"
 
@@ -776,17 +780,82 @@ bool TieredStorage::CanExternalizeEntry(PrimeIterator it) {
          !it->second.IsExternal() && EligibleForOffload(it->second.Size());
 }
 
+class TieredStorageV2::ShardOpManager : public tiering::OpManager {
+ public:
+  ShardOpManager(TieredStorageV2* ts, DbSlice* db_slice) : ts_{ts}, db_slice_{db_slice} {
+  }
+
+  // Find entry by key in db_slice and store external segment in place of original value
+  void SetExternal(std::string_view key, tiering::DiskSegment segment) {
+    if (auto pv = Find(key); pv) {
+      pv->SetIoPending(false);
+      pv->SetExternal(segment.offset, segment.length);  // TODO: Handle memory stats
+    }
+  }
+
+  void ClearIoPending(std::string_view key) {
+    if (auto pv = Find(key); pv)
+      pv->SetIoPending(false);
+  }
+
+  // Find entry by key and store it's up-to-date value in place of external segment
+  void SetInMemory(std::string_view key, std::string_view value) {
+    if (auto pv = Find(key); pv)
+      pv->SetString(value);
+  }
+
+  void ReportStashed(EntryId id, tiering::DiskSegment segment) override {
+    if (holds_alternative<string_view>(id)) {
+      SetExternal(get<string_view>(id), segment);
+    } else {
+      for (const auto& [sub_key, sub_segment] :
+           ts_->bins_->ReportStashed(get<tiering::SmallBins::BinId>(id), segment))
+        SetExternal(string_view{sub_key}, sub_segment);
+    }
+  }
+
+  void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment) override {
+    DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
+    SetInMemory(get<string_view>(id), value);
+
+    // Delete value
+    if (segment.length >= 2_KB) {
+      Delete(segment);
+    } else {
+      if (auto bin_segment = ts_->bins_->Delete(segment); bin_segment)
+        Delete(*bin_segment);
+    }
+  }
+
+ private:
+  PrimeValue* Find(std::string_view key) {
+    auto it = db_slice_->FindMutable(DbContext{}, key);
+    return IsValid(it.it) ? &it.it->second : nullptr;
+  }
+
+  TieredStorageV2* ts_;
+  DbSlice* db_slice_;
+};
+
+TieredStorageV2::TieredStorageV2(DbSlice* db_slice)
+    : op_manager_{make_unique<ShardOpManager>(this, db_slice)},
+      bins_{make_unique<tiering::SmallBins>()} {
+}
+
+TieredStorageV2::~TieredStorageV2() {
+}
+
 std::error_code TieredStorageV2::Open(string_view path) {
-  return OpManager::Open(path);
+  return op_manager_->Open(path);
 }
 
 void TieredStorageV2::Close() {
-  OpManager::Close();
+  op_manager_->Close();
 }
 
 util::fb2::Future<std::string> TieredStorageV2::Read(string_view key, const PrimeValue& value) {
   DCHECK(value.IsExternal());
-  return OpManager::Read(key, value.GetExternalSlice());
+  return op_manager_->Read(key, value.GetExternalSlice());
 }
 
 void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
@@ -795,12 +864,12 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
   value->SetIoPending(true);
 
   if (value->Size() >= 2_KB) {
-    if (auto ec = OpManager::Stash(key, value_sv); ec)
+    if (auto ec = op_manager_->Stash(key, value_sv); ec)
       value->SetIoPending(false);
-  } else if (auto bin = bins_.Stash(key, value_sv); bin) {
-    if (auto ec = OpManager::Stash(bin->first, bin->second); ec) {
-      for (const string& key : bins_.ReportStashAborted(bin->first))
-        SetExternal(key, std::nullopt);  // clear IO_PENDING flag
+  } else if (auto bin = bins_->Stash(key, value_sv); bin) {
+    if (auto ec = op_manager_->Stash(bin->first, bin->second); ec) {
+      for (const string& key : bins_->ReportStashAborted(bin->first))
+        op_manager_->ClearIoPending(key);  // clear IO_PENDING flag
     }
   }
 }
@@ -808,56 +877,16 @@ void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
   if (value->IsExternal()) {
     tiering::DiskSegment segment = value->GetExternalSlice();
     if (segment.length >= 2_KB) {
-      OpManager::Delete(segment);
-    } else if (auto bin = bins_.Delete(segment); bin) {
-      OpManager::Delete(*bin);
+      op_manager_->Delete(segment);
+    } else if (auto bin = bins_->Delete(segment); bin) {
+      op_manager_->Delete(*bin);
     }
   } else {
     if (value->Size() >= 2_KB) {
-      OpManager::Delete(key);
-    } else if (auto bin = bins_.Delete(key); bin) {
-      OpManager::Delete(*bin);
+      op_manager_->Delete(key);
+    } else if (auto bin = bins_->Delete(key); bin) {
+      op_manager_->Delete(*bin);
     }
-  }
-}
-
-void TieredStorageV2::SetExternal(string_view key, optional<tiering::DiskSegment> segment) {
-  if (auto it = db_slice_->FindMutable(DbContext{}, key); IsValid(it.it)) {
-    it.it->second.SetIoPending(false);
-    if (segment)  // TODO: Handle memory stats (why is it done manually??)
-      it.it->second.SetExternal(segment->offset, segment->length);
-  }
-}
-
-void TieredStorageV2::SetInMemory(string_view key, string_view value) {
-  if (auto it = db_slice_->FindMutable(DbContext{}, key); IsValid(it.it)) {
-    it.it->second.SetString(value);
-  }
-}
-
-void TieredStorageV2::ReportStashed(EntryId id, tiering::DiskSegment segment) {
-  if (std::holds_alternative<string_view>(id)) {
-    SetExternal(get<string_view>(id), segment);
-  } else {
-    for (const auto& [sub_key, sub_segment] :
-         bins_.ReportStashed(get<tiering::SmallBins::BinId>(id), segment))
-      SetExternal(string_view{sub_key}, sub_segment);
-  }
-}
-
-void TieredStorageV2::ReportFetched(EntryId id, std::string_view value,
-                                    tiering::DiskSegment segment) {
-  // TODO: Currently we always load back to memory
-
-  DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
-  SetInMemory(get<string_view>(id), value);
-
-  // Delete value
-  if (segment.length >= 2_KB) {
-    OpManager::Delete(segment);
-  } else {
-    if (auto bin_segment = bins_.Delete(segment); bin_segment)
-      OpManager::Delete(*bin_segment);
   }
 }
 
