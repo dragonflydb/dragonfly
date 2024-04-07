@@ -13,7 +13,6 @@
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/overloaded.h"
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -21,7 +20,6 @@
 #include "server/tiering/common.h"
 #include "server/tiering/op_manager.h"
 #include "server/tiering/small_bins.h"
-#include "util/fibers/fibers.h"
 
 ABSL_FLAG(uint32_t, tiered_storage_max_pending_writes, 32,
           "Maximal number of pending writes per thread");

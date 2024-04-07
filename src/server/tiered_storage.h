@@ -5,7 +5,6 @@
 
 #include <memory>
 
-#include "server/tiering/common.h"
 #include "util/fibers/future.h"
 #ifdef __linux__
 
