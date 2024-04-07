@@ -874,7 +874,8 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
     return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
   };
   // Block
-  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, cntx); status != OpStatus::OK)
+  auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &(cntx->blocked), &(cntx->paused));
+  if (status != OpStatus::OK)
     return status;
 
   t->Execute(cb_move, true);
@@ -904,7 +905,8 @@ OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
     return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
   };
 
-  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, cntx); status != OpStatus::OK)
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);
+      status != OpStatus::OK)
     return status;
 
   return MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, true);
@@ -1196,7 +1198,8 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), cntx);
+      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
+      &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {

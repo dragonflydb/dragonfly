@@ -1320,7 +1320,7 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider,
-                                  KeyReadyChecker krc, ConnectionContext* cntx) {
+                                  KeyReadyChecker krc, bool* block_flag, bool* pause_flag) {
   DCHECK(!blocking_barrier_.IsClaimed());  // Blocking barrier can't be re-used
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
@@ -1336,16 +1336,16 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
 
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
-  cntx->blocked = true;
+  *block_flag = true;
   cv_status status = blocking_barrier_.Wait(tp);
-  cntx->blocked = false;
+  *block_flag = false;
 
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
   --stats->num_blocked_clients;
 
-  cntx->paused = true;
+  *pause_flag = true;
   ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
-  cntx->paused = false;
+  *pause_flag = false;
 
   OpStatus result = OpStatus::OK;
   if (status == cv_status::timeout) {

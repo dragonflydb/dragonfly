@@ -89,7 +89,7 @@ using BlockingResultCb =
 // immediately with the first key listed in the tx arguments.
 OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                                    BlockingResultCb cb, unsigned limit_ms,
-                                                   ConnectionContext* cntx);
+                                                   bool* block_flag, bool* pause_flag);
 
 };  // namespace container_utils
 

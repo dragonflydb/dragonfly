@@ -93,13 +93,14 @@ TEST_F(BlockingControllerTest, Basic) {
 
 TEST_F(BlockingControllerTest, Timeout) {
   time_point tp = steady_clock::now() + chrono::milliseconds(10);
-  ConnectionContext dummy_cntx{nullptr, nullptr};
+  bool blocked;
+  bool paused;
 
   trans_->Schedule();
   auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->GetShardArgs(0); };
 
   facade::OpStatus status = trans_->WaitOnWatch(
-      tp, cb, [](auto...) { return true; }, &dummy_cntx);
+      tp, cb, [](auto...) { return true; }, &blocked, &paused);
 
   EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(
