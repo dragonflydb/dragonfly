@@ -698,6 +698,7 @@ async def test_nested_client_pause(async_client: aioredis.Redis):
     await p3
 
 
+@dfly_args({"proactor_threads": "4"})
 async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     """
     1. Check client pause success when blocking transaction is running
@@ -706,11 +707,11 @@ async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     """
 
     async def blpop_command():
-        res = await async_client.execute_command("blpop dest 5")
-        assert res == ["dest", "value"]
+        res = await async_client.execute_command("blpop dest7 10")
+        assert res == ["dest7", "value"]
 
     async def brpoplpush_command():
-        res = await async_client.execute_command("brpoplpush src dest 2")
+        res = await async_client.execute_command("brpoplpush src dest7 2")
         assert res == "value"
 
     async def lpush_command():
