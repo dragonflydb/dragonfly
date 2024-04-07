@@ -208,6 +208,8 @@ class ServerFamily {
     return listeners_;
   }
 
+  std::vector<facade::Listener*> GetNonPriviligedListeners() const;
+
   bool HasReplica() const;
   std::optional<Replica::Info> GetReplicaInfo() const;
 
@@ -325,7 +327,7 @@ class ServerFamily {
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
-std::optional<util::fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
+std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners,
                                       facade::Connection* conn, ClientPause pause_state,
                                       std::function<bool()> is_pause_in_progress);
 

@@ -418,8 +418,7 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
   return rb->SendVerbatimString(result);
 }
 
-void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
-                    ConnectionContext* cntx) {
+void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, ConnectionContext* cntx) {
   CmdArgParser parser(args);
 
   auto timeout = parser.Next<uint64_t>();
@@ -604,15 +603,15 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
 
 }  // namespace
 
-std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
-                                facade::Connection* conn, ClientPause pause_state,
+std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, facade::Connection* conn,
+                                ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress) {
   // Track connections and set pause state to be able to wait untill all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
   // state after waking from blocking so if the trasaction was waken by another running
   //    command that did not pause on the new state yet we will pause after waking up.
-  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
+  DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
   shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
     // Commands don't suspend before checking the pause state, so
@@ -1262,6 +1261,17 @@ std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
   return nullopt;
 }
 
+vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
+  std::vector<facade::Listener*> listeners;
+  listeners.reserve(listeners.size());
+  for (facade::Listener* listener : listeners_) {
+    if (!listener->IsPrivilegedInterface()) {
+      listeners.push_back(listener);
+    }
+  }
+  return listeners;
+}
+
 bool ServerFamily::HasReplica() const {
   unique_lock lk(replicaof_mu_);
   return replica_ != nullptr;
@@ -1565,7 +1575,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPauseCmd(sub_args, absl::MakeSpan(listeners_), cntx);
+    return ClientPauseCmd(sub_args, GetNonPriviligedListeners(), cntx);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, cntx);
   } else if (sub_cmd == "KILL") {
