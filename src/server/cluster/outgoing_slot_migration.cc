@@ -117,8 +117,8 @@ void OutgoingMigration::SyncFb() {
 
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
-  auto pause_fb_opt =
-      Pause(server_family_->GetListeners(), nullptr, ClientPause::WRITE, is_pause_in_progress);
+  auto pause_fb_opt = Pause(server_family_->GetNonPriviligedListeners(), nullptr,
+                            ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {
     LOG(WARNING) << "Cluster migration finalization time out";
