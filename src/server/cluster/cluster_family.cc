@@ -645,9 +645,6 @@ void ClusterFamily::SendSingleMigrationStatus(ConnectionContext* cntx, string_vi
 void ClusterFamily::SendAllMigrationStatus(ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
-  auto arr_size = incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size();
-  DCHECK(arr_size != 0);
-
   auto get_key_count = [](const SlotRanges& slots) {
     atomic_uint64_t keys = 0;
 
@@ -674,6 +671,7 @@ void ClusterFamily::SendAllMigrationStatus(ConnectionContext* cntx) {
     rb->SendSimpleString(str);
   };
 
+  const size_t arr_size = incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size();
   rb->StartArray(arr_size);
 
   for (const auto& m : incoming_migrations_jobs_) {
