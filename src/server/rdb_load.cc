@@ -469,9 +469,9 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
-  void* ptr = CompactObj::memory_resource()->allocate(sizeof(SBF), alignof(SBF));
-  SBF* sbf = new (ptr) SBF(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
-                           src.current_size, CompactObj::memory_resource());
+  SBF* sbf =
+      CompactObj::AllocateMR<SBF>(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
+                                  src.current_size, CompactObj::memory_resource());
   for (unsigned i = 0; i < src.filters.size(); ++i) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
