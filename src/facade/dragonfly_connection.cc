@@ -659,6 +659,9 @@ void Connection::HandleRequests() {
       HttpConnection http_conn{http_listener_};
       http_conn.SetSocket(peer);
       http_conn.set_user_data(cc_.get());
+
+      // We validate the http request using basic-auth inside HttpConnection::HandleSingleRequest.
+      cc_->authenticated = true;
       auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
       io_buf_.ConsumeInput(io_buf_.InputLen());
       if (!ec) {
