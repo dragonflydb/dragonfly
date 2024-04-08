@@ -626,6 +626,26 @@ static string_view StateToStr(MigrationState state) {
   return "UNDEFINED_STATE"sv;
 }
 
+static uint64_t GetKeyCount(const SlotRanges& slots) {
+  atomic_uint64_t keys = 0;
+
+  shard_set->pool()->Await([&](auto*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    uint64_t shard_keys = 0;
+    for (const SlotRange& range : slots) {
+      for (SlotId slot = range.start; slot <= range.end; slot++) {
+        shard_keys += shard->db_slice().GetSlotStats(slot).key_count;
+      }
+    }
+    keys.fetch_add(shard_keys);
+  });
+
+  return keys.load();
+}
+
 void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   CmdArgParser parser(args);
@@ -643,40 +663,20 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   vector<string> reply;
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
-  auto get_key_count = [](const SlotRanges& slots) {  // TODO move to anon function
-    atomic_uint64_t keys = 0;
-
-    shard_set->pool()->Await([&](auto*) {
-      EngineShard* shard = EngineShard::tlocal();
-      if (shard == nullptr)
-        return;
-
-      uint64_t shard_keys = 0;
-      for (const SlotRange& range : slots) {
-        for (SlotId slot = range.start; slot <= range.end; slot++) {
-          shard_keys += shard->db_slice().GetSlotStats(slot).key_count;
-        }
-      }
-      keys.fetch_add(shard_keys);
-    });
-
-    return keys.load();
-  };
-
   auto append_answer = [rb, &reply](string_view direction, string_view node_id, string_view filter,
-                                    MigrationState state, uint64_t keys) {
+                                    MigrationState state, const SlotRanges& slots) {
     if (filter.empty() || filter == node_id) {
-      reply.push_back(
-          absl::StrCat(direction, " ", node_id, " ", StateToStr(state), " ", "keys:", keys));
+      reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state), " ",
+                                   "keys:", GetKeyCount(slots)));
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), get_key_count(m->GetSlots()));
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetSlots());
   }
   for (const auto& migration : outgoing_migration_jobs_) {
     append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  get_key_count(migration->GetSlots()));
+                  migration->GetSlots());
   }
 
   if (reply.empty()) {
