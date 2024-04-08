@@ -609,8 +609,6 @@ template <typename T> void DbSlice::IteratorT<T>::LaunderIfNeeded() const {
     return;
   }
 
-  // We currently do not shrink dashtables, but when we will, we must also check if "it.segment_id"
-  // falls into a valid range.
   uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
   if (current_epoch != fiber_epoch_) {
     if (!it_.IsOccupied() || it_->first != key_.view()) {
