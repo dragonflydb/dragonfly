@@ -309,11 +309,10 @@ void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  const auto is_successfull = LoadToRegistryFromFile(acl_file, cntx);
+  const auto has_failed = LoadToRegistryFromFile(acl_file, cntx);
 
-  if (is_successfull) {
-    cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", is_successfull->ToSv()));
-    return;
+  if (has_failed) {
+    cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", has_failed->ToSv()));
   }
 }
 
