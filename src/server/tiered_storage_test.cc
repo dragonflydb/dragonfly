@@ -22,6 +22,7 @@ using absl::SetFlag;
 using absl::StrCat;
 
 ABSL_DECLARE_FLAG(string, tiered_prefix);
+ABSL_DECLARE_FLAG(bool, tiered_storage_v2_cache_fetched);
 
 namespace dfly {
 
@@ -48,6 +49,7 @@ class TieredStorageV2Test : public BaseFamilyTest {
   void SetUp() override {
     // TODO: Use FlagSaver if there is need to run V1 tests after V2
     absl::SetFlag(&FLAGS_tiered_prefix, "");
+    absl::SetFlag(&FLAGS_tiered_storage_v2_cache_fetched, true);
 
     BaseFamilyTest::SetUp();
     auto* shard = shard_set->Await(0, [] { return EngineShard::tlocal(); });

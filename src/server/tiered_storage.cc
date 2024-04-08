@@ -785,7 +785,7 @@ bool TieredStorage::CanExternalizeEntry(PrimeIterator it) {
 class TieredStorageV2::ShardOpManager : public tiering::OpManager {
  public:
   ShardOpManager(TieredStorageV2* ts, DbSlice* db_slice) : ts_{ts}, db_slice_{db_slice} {
-    cache_fetched_ = !absl::GetFlag(FLAGS_tiered_storage_v2_cache_fetched);
+    cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_v2_cache_fetched);
   }
 
   // Find entry by key in db_slice and store external segment in place of original value
