@@ -370,7 +370,17 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (!tracker.Wait(timeout_dur)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
+
+    auto cb = [&](unsigned thread_index, util::Connection* conn) {
+      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+      LOG(INFO) << dcon->DebugInfo();
+    };
+
+    for (auto* listener : sf_->GetListeners()) {
+      listener->TraverseConnections(cb);
+    }
   }
+
   VLOG(1) << "AwaitCurrentDispatches done";
 
   // We have this guard to disable expirations: We don't want any writes to the journal after
