@@ -1042,9 +1042,8 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
     await asyncio.sleep(0.5)
 
-    while (
-        await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0])
-        != "FINISHED"
+    while "FINISHED" not in await c_nodes_admin[1].execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
     ):
         await asyncio.sleep(0.05)
 
@@ -1245,7 +1244,7 @@ async def test_cluster_fuzzymigration(
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             print(states)
-            if not all(s.endswith("FINISHED") for s in states) and not states == "NO_STATE":
+            if not all("FINISHED" in s for s in states) and not states == "NO_STATE":
                 break
         else:
             break
