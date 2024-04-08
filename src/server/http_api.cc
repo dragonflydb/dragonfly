@@ -204,7 +204,9 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
     }
   }
 
+  // TODO: to add a content-type/json check.
   if (!success) {
+    VLOG(1) << "Invalid body " << body;
     auto response = http::MakeStringResponse(h2::status::bad_request);
     http::SetMime(http::kTextMime, &response);
     response.body() = "Failed to parse json\r\n";
