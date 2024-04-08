@@ -92,13 +92,15 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   if (is_sparse) {
     hll_sds = sdsnewlen(hll.data(), hll.size());
   }
-  int promoted = 0;
+
   for (const auto& value : values) {
     int added;
     if (is_sparse) {
       // Inserting to sparse hll might extend it.
       // Referring to string.data() makes it unnecessarily complicated
       sds* hll_ptr = &hll_sds;
+      // 1 if sparse hll is promoted to dense
+      int promoted = 0;
       added = pfadd_sparse(hll_ptr, (unsigned char*)value.data(), value.size(), &promoted);
       hll_sds = *hll_ptr;
       if (promoted == 1) {
