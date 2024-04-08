@@ -1500,7 +1500,7 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   db_slice.ActivateDb(target_db);
 
   bool sticky = from_res.it->first.IsSticky();
-  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it.GetInnerIt());
+  uint64_t exp_ts = db_slice.ExpireTime(from_res.exp_it);
   from_res.post_updater.Run();
   PrimeValue from_obj = std::move(from_res.it->second);
 

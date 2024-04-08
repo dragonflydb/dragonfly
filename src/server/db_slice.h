@@ -114,6 +114,10 @@ class DbSlice {
       return GetInnerIt().IsOccupied();
     }
 
+    auto GetVersion() const {
+      return GetInnerIt().GetVersion();
+    }
+
    private:
     void LaunderIfNeeded() const;  // const is a lie
 
@@ -605,7 +609,7 @@ template <typename T> void DbSlice::IteratorT<T>::LaunderIfNeeded() const {
   // falls into a valid range.
   uint64_t current_epoch = util::fb2::FiberSwitchEpoch();
   if (current_epoch != fiber_epoch_) {
-    if (it_->first != key_.view()) {
+    if (!it_.IsOccupied() || it_->first != key_.view()) {
       it_ = it_.owner().Find(key_.view());
     }
     fiber_epoch_ = current_epoch;

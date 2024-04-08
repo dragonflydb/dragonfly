@@ -529,7 +529,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
       }
 
       if (fetch_mcver) {
-        resp.mc_ver = it.GetInnerIt().GetVersion();
+        resp.mc_ver = it.GetVersion();
       }
     }
   }
