@@ -46,7 +46,8 @@ class TieredStorageV2Test : public BaseFamilyTest {
   }
 
   void SetUp() override {
-    absl::SetFlag(&FLAGS_tiered_prefix, "");  // this tests can only be run last
+    // TODO: Use FlagSaver if there is need to run V1 tests after V2
+    absl::SetFlag(&FLAGS_tiered_prefix, "");
 
     BaseFamilyTest::SetUp();
     auto* shard = shard_set->Await(0, [] { return EngineShard::tlocal(); });
@@ -355,7 +356,7 @@ TEST_F(TieredStorageV2Test, SimpleStash) {
   // Create simple values
   vector<pair<string, string>> values(20);
   for (unsigned i = 0; i < values.size(); i++) {
-    // 3 kb is below small bins size
+    // 3 kb is above small bins size
     values[i] = {absl::StrCat("key", i), string(3_KB, char('A' + i))};
     Run({"set", values[i].first, values[i].second});
   }

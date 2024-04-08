@@ -11,6 +11,7 @@
 #include <variant>
 
 #include "absl/cleanup/cleanup.h"
+#include "absl/flags/internal/flag.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/common.h"
@@ -26,6 +27,9 @@ ABSL_FLAG(uint32_t, tiered_storage_max_pending_writes, 32,
 ABSL_FLAG(uint32_t, tiered_storage_throttle_us, 1,
           "Slow down tiered storage writes for at most this usec in case of I/O saturation "
           "specified by tiered_storage_max_pending_writes. 0 - do not throttle.");
+
+ABSL_FLAG(bool, tiered_storage_v2_cache_fetched, true,
+          "WIP: Load results of offloaded reads to memory");
 
 namespace dfly {
 
@@ -781,6 +785,7 @@ bool TieredStorage::CanExternalizeEntry(PrimeIterator it) {
 class TieredStorageV2::ShardOpManager : public tiering::OpManager {
  public:
   ShardOpManager(TieredStorageV2* ts, DbSlice* db_slice) : ts_{ts}, db_slice_{db_slice} {
+    cache_fetched_ = !absl::GetFlag(FLAGS_tiered_storage_v2_cache_fetched);
   }
 
   // Find entry by key in db_slice and store external segment in place of original value
@@ -798,8 +803,10 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
 
   // Find entry by key and store it's up-to-date value in place of external segment
   void SetInMemory(std::string_view key, std::string_view value) {
-    if (auto pv = Find(key); pv)
+    if (auto pv = Find(key); pv) {
+      pv->Reset();  // TODO: account for memory
       pv->SetString(value);
+    }
   }
 
   void ReportStashed(EntryId id, tiering::DiskSegment segment) override {
@@ -814,6 +821,10 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
 
   void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment) override {
     DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
+
+    if (!cache_fetched_)
+      return;
+
     SetInMemory(get<string_view>(id), value);
 
     // Delete value
@@ -827,10 +838,12 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
 
  private:
   PrimeValue* Find(std::string_view key) {
+    // TODO: Get DbContext for transaction for correct dbid and time
     auto it = db_slice_->FindMutable(DbContext{}, key);
     return IsValid(it.it) ? &it.it->second : nullptr;
   }
 
+  bool cache_fetched_ = false;
   TieredStorageV2* ts_;
   DbSlice* db_slice_;
 };
