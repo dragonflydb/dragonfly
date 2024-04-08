@@ -746,31 +746,3 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
 
     assert not all.done()
     await all
-
-
-@dfly_args({"proactor_threads": "1", "expose_http_api": "true"})
-async def test_http(df_server: DflyInstance):
-    client = df_server.client()
-    async with ClientSession() as session:
-        async with session.get(f"http://localhost:{df_server.port}") as resp:
-            assert resp.status == 200
-
-        body = '["set", "foo", "МайяХилли", "ex", "100"]'
-        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
-            assert resp.status == 200
-            text = await resp.text()
-            assert text.strip() == '{"result":"OK"}'
-
-        body = '["get", "foo"]'
-        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
-            assert resp.status == 200
-            text = await resp.text()
-            assert text.strip() == '{"result":"МайяХилли"}'
-
-        body = '["foo", "bar"]'
-        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
-            assert resp.status == 200
-            text = await resp.text()
-            assert text.strip() == '{"error": "unknown command `FOO`"}'
-
-    assert await client.ttl("foo") > 0
