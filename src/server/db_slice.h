@@ -82,6 +82,10 @@ class DbSlice {
     }
 
     static IteratorT FromPrime(T it) {
+      if (!IsValid(it)) {
+        return IteratorT();
+      }
+
       std::string key;
       it->first.GetString(&key);
       return IteratorT(it, StringOrView::FromString(std::move(key)));
