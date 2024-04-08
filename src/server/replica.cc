@@ -1137,7 +1137,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     // That could change due to redis failovers.
     // TODO: part sync
     dest->fullsync.emplace<size_t>(0);
-    LOG(ERROR) << "Partail replication not supported yet";
+    LOG(ERROR) << "Partial replication not supported yet";
     return std::make_error_code(std::errc::not_supported);
   } else {
     LOG(ERROR) << "Unknown replication header";
