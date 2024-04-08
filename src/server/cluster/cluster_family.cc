@@ -827,7 +827,7 @@ void ClusterFamily::UpdateConfig(const std::vector<SlotRange>& slots, bool enabl
 
 void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
-  auto source_id = parser.Next<std::string_view>();
+  auto [source_id, attempt] = parser.Next<std::string_view, long>();
 
   if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());
@@ -848,7 +848,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
 
   UpdateConfig(migration->GetSlots(), true);
 
-  cntx->SendOk();
+  cntx->SendLong(attempt);
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);

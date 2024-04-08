@@ -31,14 +31,7 @@ class OutgoingMigration : private ProtocolClient {
   // should be run for all shards
   void StartFlow(journal::Journal* journal, io::Sink* dest);
 
-  void Finalize(uint32_t shard_id);
-  void Cancel(uint32_t shard_id);
-
   MigrationState GetState() const;
-
-  // Temporary method, will be removed in one of the PR
-  // This method stop migration connections
-  void Ack();
 
   const std::string& GetHostIp() const {
     return server().host;
@@ -62,6 +55,7 @@ class OutgoingMigration : private ProtocolClient {
   class SliceSlotMigration;
 
   void SyncFb();
+  bool FinishMigration(long attempt);
 
  private:
   MigrationInfo migration_info_;
