@@ -237,7 +237,7 @@ void AclFamily::Save(CmdArgList args, ConnectionContext* cntx) {
 }
 
 std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_view full_path,
-                                                                    bool init) {
+                                                                    ConnectionContext* cntx) {
   auto is_file_read = io::ReadFileToString(full_path);
   if (!is_file_read) {
     auto error = absl::StrCat("Dragonfly could not load ACL file ", full_path, " with error ",
@@ -277,7 +277,8 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   auto registry_with_wlock = registry_->GetRegistryWithWriteLock();
   auto& registry = registry_with_wlock.registry;
   // TODO(see what redis is doing here)
-  if (!init) {
+  if (cntx) {
+    cntx->SendOk();
     // Evict open connections for old users
     EvictOpenConnectionsOnAllProactorsWithRegistry(registry);
     registry.clear();
@@ -298,7 +299,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
 
 bool AclFamily::Load() {
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  return !LoadToRegistryFromFile(acl_file, true).has_value();
+  return !LoadToRegistryFromFile(acl_file, nullptr).has_value();
 }
 
 void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
@@ -308,14 +309,12 @@ void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  const auto is_successfull = LoadToRegistryFromFile(acl_file, !cntx);
+  const auto is_successfull = LoadToRegistryFromFile(acl_file, cntx);
 
   if (is_successfull) {
     cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", is_successfull->ToSv()));
     return;
   }
-
-  cntx->SendOk();
 }
 
 void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
