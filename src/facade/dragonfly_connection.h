@@ -302,6 +302,9 @@ class Connection : public util::Connection {
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
 
+  // Get quick debug info for logs
+  std::string DebugInfo() const;
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
@@ -380,9 +383,6 @@ class Connection : public util::Connection {
 
   // Clear pipelined messages, disaptching only intrusive ones.
   void ClearPipelinedMessages();
-
-  // Get quick debug info for logs
-  std::string DebugInfo() const;
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
