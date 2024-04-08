@@ -626,31 +626,24 @@ static string_view StateToStr(MigrationState state) {
   return "UNDEFINED_STATE"sv;
 }
 
-void ClusterFamily::SendSingleMigrationStatus(ConnectionContext* cntx, string_view node_id) {
+void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  CmdArgParser parser(args);
 
-  // find incoming slot migration
-  for (const auto& m : incoming_migrations_jobs_) {
-    if (m->GetSourceID() == node_id)
-      return rb->SendSimpleString(StateToStr(m->GetState()));
-  }
-  // find outgoing slot migration
-  for (const auto& migration : outgoing_migration_jobs_) {
-    if (migration->GetMigrationInfo().node_id == node_id)
-      return rb->SendSimpleString(StateToStr(migration->GetState()));
-  }
-  return rb->SendSimpleString(StateToStr(MigrationState::C_NO_STATE));
-}
+  lock_guard lk(migration_mu_);
 
-void ClusterFamily::SendAllMigrationStatus(ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-
-  const size_t arr_size = incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size();
-  if (arr_size == 0) {
-    return rb->SendSimpleString(StateToStr(MigrationState::C_NO_STATE));
+  string_view node_id;
+  if (parser.HasNext()) {
+    node_id = parser.Next<std::string_view>();
+    if (auto err = parser.Error(); err) {
+      return rb->SendError(err->MakeReply());
+    }
   }
 
-  auto get_key_count = [](const SlotRanges& slots) {
+  vector<string> reply;
+  reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
+
+  auto get_key_count = [](const SlotRanges& slots) {  // TODO move to anon function
     atomic_uint64_t keys = 0;
 
     shard_set->pool()->Await([&](auto*) {
@@ -670,40 +663,26 @@ void ClusterFamily::SendAllMigrationStatus(ConnectionContext* cntx) {
     return keys.load();
   };
 
-  auto send_answer = [rb](std::string_view direction, std::string_view node_id,
-                          MigrationState state, uint64_t keys) {
-    auto str = absl::StrCat(direction, " ", node_id, " ", StateToStr(state), " ", "key:", keys);
-    rb->SendSimpleString(str);
+  auto append_answer = [rb, &reply](string_view direction, string_view node_id, string_view filter,
+                                    MigrationState state, uint64_t keys) {
+    if (filter.empty() || filter == node_id) {
+      reply.push_back(
+          absl::StrCat(direction, " ", node_id, " ", StateToStr(state), " ", "keys:", keys));
+    }
   };
 
-  rb->StartArray(arr_size);
-
   for (const auto& m : incoming_migrations_jobs_) {
-    send_answer("in", m->GetSourceID(), m->GetState(), get_key_count(m->GetSlots()));
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), get_key_count(m->GetSlots()));
   }
   for (const auto& migration : outgoing_migration_jobs_) {
-    send_answer("out", migration->GetMigrationInfo().node_id, migration->GetState(),
-                get_key_count(migration->GetSlots()));
+    append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
+                  get_key_count(migration->GetSlots()));
   }
 
-  return rb->SendSimpleString(StateToStr(MigrationState::C_NO_STATE));
-}
-
-void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
-  CmdArgParser parser(args);
-
-  lock_guard lk(migration_mu_);
-
-  if (parser.HasNext()) {
-    auto node_id = parser.Next<std::string_view>();
-    if (auto err = parser.Error(); err) {
-      auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-      return rb->SendError(err->MakeReply());
-    }
-
-    return SendSingleMigrationStatus(cntx, node_id);
+  if (reply.empty()) {
+    rb->SendSimpleString(StateToStr(MigrationState::C_NO_STATE));
   } else {
-    return SendAllMigrationStatus(cntx);
+    rb->SendStringArr(reply);
   }
 }
 
