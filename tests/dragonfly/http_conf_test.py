@@ -81,13 +81,13 @@ async def test_no_password_on_http_api(df_factory):
         port=1112,
     ) as server:
         async with aiohttp.ClientSession(auth=aiohttp.BasicAuth("default", "XXX")) as session:
-            resp = await session.post(f"http://localhost:{server.port}/api", json={["ping"]})
+            resp = await session.post(f"http://localhost:{server.port}/api", json=["ping"])
             assert resp.status == 200
         async with aiohttp.ClientSession(auth=aiohttp.BasicAuth("random")) as session:
-            resp = await session.post(f"http://localhost:{server.port}/api", json={["ping"]})
+            resp = await session.post(f"http://localhost:{server.port}/api", json=["ping"])
             assert resp.status == 200
         async with aiohttp.ClientSession() as session:
-            resp = await session.post(f"http://localhost:{server.port}/api", json={["ping"]})
+            resp = await session.post(f"http://localhost:{server.port}/api", json=["ping"])
             assert resp.status == 200
 
 async def test_password_on_http_api(df_factory):
@@ -96,11 +96,11 @@ async def test_password_on_http_api(df_factory):
         requirepass="XXX",
     ) as server:
         async with aiohttp.ClientSession(auth=aiohttp.BasicAuth("default", "badpass")) as session:
-            resp = await session.post(f"http://localhost:{server.port}/api", json={["ping"]})
+            resp = await session.post(f"http://localhost:{server.port}/api", json=["ping"])
             assert resp.status == 401
         async with aiohttp.ClientSession() as session:
-            resp = await session.post(f"http://localhost:{server.port}/api", json={["ping"]})
+            resp = await session.post(f"http://localhost:{server.port}/api", json=["ping"])
             assert resp.status == 401
         async with aiohttp.ClientSession(auth=aiohttp.BasicAuth("default", "XXX")) as session:
-            resp = await session.post(f"http://localhost:{server.port}/api", json={["ping"]})
+            resp = await session.post(f"http://localhost:{server.port}/api", json=["ping"])
             assert resp.status == 200
