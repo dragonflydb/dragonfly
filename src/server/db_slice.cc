@@ -439,15 +439,15 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cn
   return res.status();
 }
 
-OpResult<DbSlice::ItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
-                                                  std::optional<unsigned> req_obj_type,
-                                                  UpdateStatsMode stats_mode,
-                                                  LoadExternalMode load_mode) {
+OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
+                                                       std::optional<unsigned> req_obj_type,
+                                                       UpdateStatsMode stats_mode,
+                                                       LoadExternalMode load_mode) {
   if (!IsDbValid(cntx.db_index)) {
     return OpStatus::KEY_NOTFOUND;
   }
 
-  DbSlice::ItAndExp res;
+  DbSlice::PrimeItAndExp res;
   auto& db = *db_arr_[cntx.db_index];
   res.it = db.prime.Find(key);
 
@@ -1105,10 +1105,11 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 }
 
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) {
-  return ExpireIfNeeded(cntx, it.GetInnerIt());
+  auto res = ExpireIfNeeded(cntx, it.GetInnerIt());
+  return {.it = Iterator::FromPrime(res.it), .exp_it = ExpIterator::FromPrime(res.exp_it)};
 }
 
-DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
+DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
   if (!it->second.HasExpire()) {
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};

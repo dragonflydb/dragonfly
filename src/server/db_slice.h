@@ -397,10 +397,9 @@ class DbSlice {
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return Iterator{}.
   struct ItAndExp {
-    PrimeIterator it;
-    ExpireIterator exp_it;
+    Iterator it;
+    ExpIterator exp_it;
   };
-  ItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
   ItAndExp ExpireIfNeeded(const Context& cntx, Iterator it);
 
   // Iterate over all expire table entries and delete expired.
@@ -513,9 +512,14 @@ class DbSlice {
     kLoad,
     kDontLoad,
   };
-  OpResult<ItAndExp> FindInternal(const Context& cntx, std::string_view key,
-                                  std::optional<unsigned> req_obj_type, UpdateStatsMode stats_mode,
-                                  LoadExternalMode load_mode);
+  struct PrimeItAndExp {
+    PrimeIterator it;
+    ExpireIterator exp_it;
+  };
+  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
+  OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
+                                       std::optional<unsigned> req_obj_type,
+                                       UpdateStatsMode stats_mode, LoadExternalMode load_mode);
   OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key,
                                               LoadExternalMode load_mode);
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,

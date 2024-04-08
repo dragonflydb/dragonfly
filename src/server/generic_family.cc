@@ -472,10 +472,14 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
                     restore_args.ExpirationTime());
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator it, const ScanOpts& opts, StringVec* res) {
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
   auto& db_slice = op_args.shard->db_slice();
+
+  DbSlice::Iterator it;
   if (it->second.HasExpire()) {
     it = db_slice.ExpireIfNeeded(op_args.db_cntx, it).it;
+  } else {
+    it = DbSlice::Iterator::FromPrime(prime_it);
   }
 
   if (!IsValid(it))
@@ -486,7 +490,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator it, const ScanOpts& opts, Strin
   if (!matches)
     return false;
 
-  if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.bucket_id()) {
+  if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.GetInnerIt().bucket_id()) {
     return false;
   }
 

@@ -724,7 +724,7 @@ bool TieredStorage::FlushPending(DbIndex db_index, unsigned bin_index) {
     DCHECK(IsValid(it));
 
     if (it->second.HasExpire()) {
-      auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, it);
+      auto [pit, exp_it] = db_slice_.ExpireIfNeeded(db_context, DbSlice::Iterator::FromPrime(it));
       CHECK(!pit.is_done()) << "TBD: should abort in case of expired keys";
     }
 
