@@ -541,7 +541,8 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
 
 OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
                                        string_view value) {
-  SetResultBuilder result_builder(params.flags & SET_GET);
+  bool fetch_val = params.flags & SET_GET;
+  SetResultBuilder result_builder(fetch_val);
 
   EngineShard* shard = op_args_.shard;
   auto& db_slice = shard->db_slice();
@@ -550,15 +551,23 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
+  // if SET_GET is not set then prev_val is null.
+  DCHECK(fetch_val || params.prev_val == nullptr);
+
   if (params.IsConditionalSet()) {
-    bool fetch_value = params.prev_val || (params.flags & SET_GET);
+    // We do not always set prev_val and we use result_builder for that.
+    bool fetch_value = params.prev_val || fetch_val;
     DbSlice::ItAndUpdater find_res;
     if (fetch_value) {
       find_res = db_slice.FindAndFetchMutable(op_args_.db_cntx, key);
     } else {
       find_res = db_slice.FindMutable(op_args_.db_cntx, key);
     }
+
     if (IsValid(find_res.it)) {
+      if (find_res.it->second.ObjType() != OBJ_STRING) {
+        return OpStatus::WRONG_TYPE;
+      }
       result_builder.CachePrevValueIfNeeded(find_res.it->second);
     }
 
@@ -576,6 +585,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
       }
     }
   }
+
   // At this point we either need to add missing entry, or we
   // will override an existing one
   // Trying to add a new entry.
@@ -585,6 +595,9 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   auto it = add_res.it;
   if (!add_res.is_new) {
+    if (fetch_val && it->second.ObjType() != OBJ_STRING) {
+      return OpStatus::WRONG_TYPE;
+    }
     result_builder.CachePrevValueIfNeeded(it->second);
     return std::move(result_builder).Return(SetExisting(params, it, add_res.exp_it, key, value));
   }
@@ -774,6 +787,10 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   OpResult result{SetGeneric(cntx, sparams, key, value, true)};
+
+  if (result == OpStatus::WRONG_TYPE) {
+    return cntx->SendError(kWrongTypeErr);
+  }
 
   if (sparams.flags & SetCmd::SET_GET) {
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
