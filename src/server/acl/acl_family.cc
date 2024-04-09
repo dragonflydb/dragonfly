@@ -236,21 +236,21 @@ void AclFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
-std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_view full_path,
-                                                                    ConnectionContext* cntx) {
+GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
+                                               ConnectionContext* cntx) {
   auto is_file_read = io::ReadFileToString(full_path);
   if (!is_file_read) {
     auto error = absl::StrCat("Dragonfly could not load ACL file ", full_path, " with error ",
                               is_file_read.error().message());
 
     LOG(WARNING) << error;
-    return {ErrorReply(std::move(error))};
+    return {std::move(error)};
   }
 
   auto file_contents = std::move(is_file_read.value());
 
   if (file_contents.empty()) {
-    return {facade::ErrorReply("Empty file")};
+    return {"Empty file"};
   }
 
   std::vector<std::string> usernames;
@@ -259,7 +259,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
   if (!materialized) {
     std::string error = "Error materializing acl file";
     LOG(WARNING) << error;
-    return {ErrorReply(std::move(error))};
+    return {std::move(error)};
   }
 
   std::vector<User::UpdateRequest> requests;
@@ -269,14 +269,13 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
     if (std::holds_alternative<ErrorReply>(req)) {
       auto error = std::move(std::get<ErrorReply>(req));
       LOG(WARNING) << "Error while parsing aclfile: " << error.ToSv();
-      return {std::move(error)};
+      return {std::string(error.ToSv())};
     }
     requests.push_back(std::move(std::get<User::UpdateRequest>(req)));
   }
 
   auto registry_with_wlock = registry_->GetRegistryWithWriteLock();
   auto& registry = registry_with_wlock.registry;
-  // TODO(see what redis is doing here)
   if (cntx) {
     cntx->SendOk();
     // Evict open connections for old users
@@ -299,7 +298,7 @@ std::optional<facade::ErrorReply> AclFamily::LoadToRegistryFromFile(std::string_
 
 bool AclFamily::Load() {
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  return !LoadToRegistryFromFile(acl_file, nullptr).has_value();
+  return !LoadToRegistryFromFile(acl_file, nullptr);
 }
 
 void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
@@ -309,10 +308,10 @@ void AclFamily::Load(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  const auto has_failed = LoadToRegistryFromFile(acl_file, cntx);
+  const auto load_error = LoadToRegistryFromFile(acl_file, cntx);
 
-  if (has_failed) {
-    cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", has_failed->ToSv()));
+  if (load_error) {
+    cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", load_error.Format()));
   }
 }
 
