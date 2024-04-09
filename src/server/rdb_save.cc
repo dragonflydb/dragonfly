@@ -27,6 +27,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/bloom.h"
 #include "core/json/json_object.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -194,6 +195,8 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_JSON:
       return RDB_TYPE_JSON;  // save with RDB_TYPE_JSON, deprecate RDB_TYPE_JSON_OLD after July
                              // 2024.
+    case OBJ_SBF:
+      return RDB_TYPE_SBF;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -393,6 +396,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
   if (obj_type == OBJ_JSON) {
     return SaveJsonObject(pv);
+  }
+
+  if (obj_type == OBJ_SBF) {
+    return SaveSBFObject(pv);
   }
 
   LOG(ERROR) << "Not implemented " << obj_type;
@@ -618,6 +625,28 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
 error_code RdbSerializer::SaveJsonObject(const PrimeValue& pv) {
   auto json_string = pv.GetJson()->to_string();
   return SaveString(json_string);
+}
+
+std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
+  SBF* sbf = pv.GetSBF();
+
+  // options to allow format mutations in the future.
+  RETURN_ON_ERR(SaveLen(0));  // options - reserved
+  RETURN_ON_ERR(SaveBinaryDouble(sbf->grow_factor()));
+  RETURN_ON_ERR(SaveBinaryDouble(sbf->fp_probability()));
+  RETURN_ON_ERR(SaveLen(sbf->prev_size()));
+  RETURN_ON_ERR(SaveLen(sbf->current_size()));
+  RETURN_ON_ERR(SaveLen(sbf->max_capacity()));
+  RETURN_ON_ERR(SaveLen(sbf->num_filters()));
+
+  for (unsigned i = 0; i < sbf->num_filters(); ++i) {
+    RETURN_ON_ERR(SaveLen(sbf->hashfunc_cnt(i)));
+
+    string_view blob = sbf->data(i);
+    RETURN_ON_ERR(SaveString(blob));
+  }
+
+  return {};
 }
 
 /* Save a long long value as either an encoded string or a string. */

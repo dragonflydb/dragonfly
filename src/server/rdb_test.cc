@@ -534,4 +534,12 @@ TEST_F(RdbTest, RedisJson) {
             "{\"company\":\"DragonflyDB\",\"product\":\"Dragonfly\",\"website\":\"https://"
             "dragondlydb.io\",\"years-active\":[2021,2022,2023,2024,\"and more!\"]}");
 }
+
+TEST_F(RdbTest, SBF) {
+  EXPECT_THAT(Run({"BF.ADD", "k", "1"}), IntArg(1));
+  Run({"debug", "reload"});
+  EXPECT_EQ(Run({"type", "k"}), "MBbloom--");
+  EXPECT_THAT(Run({"BF.EXISTS", "k", "1"}), IntArg(1));
+}
+
 }  // namespace dfly

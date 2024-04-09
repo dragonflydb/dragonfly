@@ -29,6 +29,7 @@ extern "C" {
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/bloom.h"
 #include "core/json/json_object.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -382,6 +383,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const base::PODArray<char>& str);
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
+  void operator()(const RdbSBF& src);
 
   std::error_code ec() const {
     return ec_;
@@ -464,6 +466,16 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
     default:
       LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
+  SBF* sbf =
+      CompactObj::AllocateMR<SBF>(src.grow_factor, src.fp_prob, src.max_capacity, src.prev_size,
+                                  src.current_size, CompactObj::memory_resource());
+  for (unsigned i = 0; i < src.filters.size(); ++i) {
+    sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
+  }
+  pv_->SetSBF(sbf);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1367,6 +1379,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_MODULE_2:
       iores = ReadRedisJson();
       break;
+    case RDB_TYPE_SBF:
+      iores = ReadSBF();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
 
@@ -1825,6 +1840,39 @@ auto RdbLoaderBase::ReadJson() -> io::Result<OpaqueObj> {
     return make_unexpected(ec);
 
   return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
+}
+
+auto RdbLoaderBase::ReadSBF() -> io::Result<OpaqueObj> {
+  RdbSBF res;
+  uint64_t options;
+  SET_OR_UNEXPECT(LoadLen(nullptr), options);
+  if (options != 0)
+    return Unexpected(errc::rdb_file_corrupted);
+  SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
+  SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
+  if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
+  SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
+
+  unsigned num_filters = 0;
+  SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+  auto is_power2 = [](size_t n) { return (n & (n - 1)) == 0; };
+
+  for (unsigned i = 0; i < num_filters; ++i) {
+    unsigned hash_cnt;
+    string filter_data;
+    SET_OR_UNEXPECT(LoadLen(nullptr), hash_cnt);
+    SET_OR_UNEXPECT(FetchGenericString(), filter_data);
+    size_t bit_len = filter_data.size() * 8;
+    if (!is_power2(bit_len)) {  // must be power of two
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    res.filters.emplace_back(hash_cnt, std::move(filter_data));
+  }
+  return OpaqueObj{std::move(res), RDB_TYPE_SBF};
 }
 
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
