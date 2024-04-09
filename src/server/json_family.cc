@@ -1715,7 +1715,10 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
 
 void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
+  string_view path = "$";
+  if (args.size() == 2) {
+    path = ArgS(args, 1);
+  }
 
   JsonPathV2 expression = PARSE_PATHV2(path);
 
@@ -2011,7 +2014,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, acl::JSON}.HFUNC(Del);
   *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, acl::JSON}.HFUNC(
       Del);  // An alias of JSON.DEL.
-  *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(ObjKeys);
+  *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjKeys);
   *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(
       StrAppend);
   *registry << CI{"JSON.CLEAR", CO::WRITE | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Clear);
