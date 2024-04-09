@@ -56,7 +56,7 @@ class ClusterFamily {
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
 
  private:  // Slots migration section
-  void DflyIncomingSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+  void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);

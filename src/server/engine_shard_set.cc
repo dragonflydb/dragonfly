@@ -758,7 +758,7 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
         info.contended_locks++;
         if (lock.ContentionScore() > info.max_contention_score) {
           info.max_contention_score = lock.ContentionScore();
-          info.max_contention_lock_name = string_view{key};
+          info.max_contention_lock_name = key.view();
         }
       }
     }

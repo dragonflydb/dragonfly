@@ -369,7 +369,7 @@ TEST_F(CompactObjectTest, Hash) {
 TEST_F(CompactObjectTest, SBF) {
   cobj_.SetSBF(1000, 0.001, 2);
   EXPECT_EQ(cobj_.ObjType(), OBJ_SBF);
-  EXPECT_EQ(0, cobj_.MallocUsed());
+  EXPECT_GT(cobj_.MallocUsed(), 0);
 }
 
 TEST_F(CompactObjectTest, MimallocUnderutilzation) {
