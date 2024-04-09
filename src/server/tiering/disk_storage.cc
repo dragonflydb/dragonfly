@@ -7,6 +7,7 @@
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "server/error.h"
+#include "server/tiering/common.h"
 
 namespace dfly::tiering {
 
@@ -22,7 +23,7 @@ void DiskStorage::Close() {
 
 void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   DCHECK_GT(segment.length, 0u);
-  DCHECK_EQ(segment.offset % 4096, 0u);
+  DCHECK_EQ(segment.offset % kPageSize, 0u);
 
   // TODO: use registered buffers (UringProactor::RegisterBuffers)
   // TODO: Make it error safe, don't leak if cb isn't called
@@ -36,7 +37,7 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
 
 void DiskStorage::MarkAsFree(DiskSegment segment) {
   DCHECK_GT(segment.length, 0u);
-  DCHECK_EQ(segment.offset % 4096, 0u);
+  DCHECK_EQ(segment.offset % kPageSize, 0u);
 
   alloc_.Free(segment.offset, segment.length);
 }

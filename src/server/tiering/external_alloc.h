@@ -49,8 +49,8 @@ class ExternalAllocator {
   void operator=(const ExternalAllocator&) = delete;
 
  public:
-  static constexpr size_t kExtAlignment = 1ULL << 28;  // 256 MB
-  static constexpr size_t kMinBlockSize = 1 << 12;     // 4KB
+  static constexpr size_t kExtAlignment = 256_MB;     // 256 MB
+  static constexpr size_t kMinBlockSize = kPageSize;  // 4KB
 
   ExternalAllocator();
   ~ExternalAllocator();

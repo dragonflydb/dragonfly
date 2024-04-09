@@ -830,7 +830,7 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     SetInMemory(get<string_view>(id), value);
 
     // Delete value
-    if (segment.length >= 2_KB) {
+    if (segment.length >= TieredStorageV2::kMinValueSize) {
       Delete(segment);
     } else {
       if (auto bin_segment = ts_->bins_->Delete(segment); bin_segment)
@@ -876,7 +876,7 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
   string_view value_sv = value->GetSlice(&buf);
   value->SetIoPending(true);
 
-  if (value->Size() >= 2_KB) {
+  if (value->Size() >= kMinValueSize) {
     if (auto ec = op_manager_->Stash(key, value_sv); ec)
       value->SetIoPending(false);
   } else if (auto bin = bins_->Stash(key, value_sv); bin) {
@@ -889,13 +889,13 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
 void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
   if (value->IsExternal()) {
     tiering::DiskSegment segment = value->GetExternalSlice();
-    if (segment.length >= 2_KB) {
+    if (segment.length >= kMinValueSize) {
       op_manager_->Delete(segment);
     } else if (auto bin = bins_->Delete(segment); bin) {
       op_manager_->Delete(*bin);
     }
   } else {
-    if (value->Size() >= 2_KB) {
+    if (value->Size() >= kMinValueSize) {
       op_manager_->Delete(key);
     } else if (auto bin = bins_->Delete(key); bin) {
       op_manager_->Delete(*bin);

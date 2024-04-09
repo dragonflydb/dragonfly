@@ -23,10 +23,12 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
 
 }  // namespace literals
 
+constexpr size_t kPageSize = 4_KB;
+
 // Location on the offloaded blob, measured in bytes
 struct DiskSegment {
   DiskSegment FillPages() const {
-    return {offset / 4096 * 4096, (length + 4096 - 1) / 4096 * 4096};
+    return {offset / kPageSize * kPageSize, (length + kPageSize - 1) / kPageSize * kPageSize};
   }
 
   DiskSegment() = default;

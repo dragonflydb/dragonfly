@@ -5,6 +5,7 @@
 
 #include <memory>
 
+#include "server/tiering/common.h"
 #include "util/fibers/future.h"
 #ifdef __linux__
 
@@ -26,6 +27,8 @@ class SmallBins;
 // Manages offloaded values
 class TieredStorageV2 {
   class ShardOpManager;
+
+  const static size_t kMinValueSize = tiering::kPageSize / 2;
 
  public:
   explicit TieredStorageV2(DbSlice* db_slice);
