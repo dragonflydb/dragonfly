@@ -1183,7 +1183,7 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   FiberAtomicGuard fg;
-  uint64_t bucket_version = it.GetInnerIt().GetVersion();
+  uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
@@ -1194,7 +1194,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
       return;
     }
     if (bucket_version < cb_version) {
-      ccb.second(db_ind, ChangeReq{it.GetInnerIt()});  // Is it OK to pass PrimeIterator here???
+      ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
     }
   }
 }
