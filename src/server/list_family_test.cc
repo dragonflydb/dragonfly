@@ -642,6 +642,18 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
   ASSERT_EQ(0, NumWatched());
 }
 
+TEST_F(ListFamilyTest, BRPopLPushSingleShardBug2857) {
+  Run({"lpush", "src", "val1"});
+  RespExpr resp;
+  auto blpop = [&]() { resp = Run("id", {"blpop", "dest", "10"}); };
+  auto f = pp_->at(1)->LaunchFiber(Launch::dispatch, blpop);
+  ThisFiber::SleepFor(2s);
+  EXPECT_THAT(Run({"brpoplpush", "src", "dest", "2"}), "val1");
+  f.Join();
+  EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("dest", "val1"));
+}
+
 TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
   RespExpr resp;
 
