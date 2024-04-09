@@ -53,6 +53,10 @@ struct ExpireTablePolicy {
     return s.HashCode();
   }
 
+  static uint64_t HashFn(std::string_view u) {
+    return CompactObj::HashCode(u);
+  }
+
   static void DestroyKey(PrimeKey& cs) {
     cs.Reset();
   }
@@ -61,6 +65,10 @@ struct ExpireTablePolicy {
   }
 
   static void DestroyValue(uint32_t val) {
+  }
+
+  static bool Equal(const PrimeKey& s1, std::string_view s2) {
+    return s1 == s2;
   }
 
   static bool Equal(const PrimeKey& s1, const PrimeKey& s2) {
