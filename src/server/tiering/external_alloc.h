@@ -9,7 +9,6 @@
 
 #include "core/extent_tree.h"
 
-
 namespace dfly {
 
 constexpr inline unsigned long long operator""_MB(unsigned long long x) {
@@ -58,7 +57,7 @@ class ExternalAllocator {
 
  public:
   static constexpr size_t kExtAlignment = 1ULL << 28;  // 256 MB
-  static constexpr size_t kMinBlockSize = 1 << 12;  // 4KB
+  static constexpr size_t kMinBlockSize = 1 << 12;     // 4KB
 
   ExternalAllocator();
   ~ExternalAllocator();
