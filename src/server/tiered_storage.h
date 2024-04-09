@@ -10,10 +10,10 @@
 
 #include <absl/container/flat_hash_map.h>
 
-#include "core/external_alloc.h"
 #include "server/common.h"
-#include "server/io_mgr.h"
 #include "server/table.h"
+#include "server/tiering/external_alloc.h"
+#include "server/tiering/io_mgr.h"
 
 namespace dfly {
 
@@ -118,8 +118,8 @@ class TieredStorage {
   void SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest);
 
   DbSlice& db_slice_;
-  IoMgr io_mgr_;
-  ExternalAllocator alloc_;
+  tiering::IoMgr io_mgr_;
+  tiering::ExternalAllocator alloc_;
 
   uint32_t num_active_requests_ = 0;
 

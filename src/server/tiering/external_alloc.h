@@ -8,16 +8,9 @@
 #include <vector>
 
 #include "core/extent_tree.h"
+#include "server/tiering/common.h"
 
-namespace dfly {
-
-constexpr inline unsigned long long operator""_MB(unsigned long long x) {
-  return x << 20U;
-}
-
-constexpr inline unsigned long long operator""_KB(unsigned long long x) {
-  return x << 10U;
-}
+namespace dfly::tiering {
 
 /**
  *
@@ -113,4 +106,4 @@ class ExternalAllocator {
   size_t allocated_bytes_ = 0;
 };
 
-}  // namespace dfly
+}  // namespace dfly::tiering

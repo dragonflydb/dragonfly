@@ -11,6 +11,18 @@
 
 namespace dfly::tiering {
 
+inline namespace literals {
+
+constexpr inline unsigned long long operator""_MB(unsigned long long x) {
+  return x << 20U;
+}
+
+constexpr inline unsigned long long operator""_KB(unsigned long long x) {
+  return x << 10U;
+}
+
+}  // namespace literals
+
 // Location on the offloaded blob, measured in bytes
 struct DiskSegment {
   DiskSegment FillPages() const {

@@ -2,12 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/external_alloc.h"
+#include "server/tiering/external_alloc.h"
 
 #include "base/gtest.h"
 #include "base/logging.h"
 
-namespace dfly {
+namespace dfly::tiering {
 
 using namespace std;
 
@@ -117,4 +117,4 @@ TEST_F(ExternalAllocatorTest, Classes) {
   EXPECT_EQ(1_MB + 4_KB, ExternalAllocator::GoodSize(1_MB + 1));
 }
 
-}  // namespace dfly
+}  // namespace dfly::tiering

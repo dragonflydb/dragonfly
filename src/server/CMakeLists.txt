@@ -23,7 +23,7 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/small_bins_test dfly_test_lib LABELS DFLY)
-    cxx_test(tiering/external_alloc_test dfly_core LABELS DFLY)
+    cxx_test(tiering/external_alloc_test dfly_test_lib LABELS DFLY)
 endif()
 
 

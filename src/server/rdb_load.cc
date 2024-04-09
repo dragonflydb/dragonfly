@@ -45,6 +45,7 @@ extern "C" {
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/tiering/common.h"  // for _KB literal
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
@@ -60,6 +61,7 @@ using nonstd::make_unexpected;
 using namespace util;
 using absl::GetFlag;
 using rdb::errc;
+using namespace tiering::literals;
 
 namespace {
 

@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/io_mgr.h"
+#include "server/tiering/io_mgr.h"
 
 #include <fcntl.h>
 #include <mimalloc.h>
@@ -14,7 +14,7 @@
 
 ABSL_FLAG(bool, backing_file_direct, false, "If true uses O_DIRECT to open backing files");
 
-namespace dfly {
+namespace dfly::tiering {
 
 using namespace std;
 using namespace util;
@@ -183,4 +183,4 @@ void IoMgr::Shutdown() {
   backing_file_.reset();
 }
 
-}  // namespace dfly
+}  // namespace dfly::tiering
