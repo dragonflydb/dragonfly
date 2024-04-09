@@ -691,6 +691,7 @@ async def test_nested_client_pause(async_client: aioredis.Redis):
     await p3
 
 
+@dfly_args({"proactor_threads": "4"})
 async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     """
     1. Check client pause success when blocking transaction is running
@@ -698,14 +699,19 @@ async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     3. once puased is finished lpush will run and blpop will pop the pushed value
     """
 
-    async def blocking_command():
-        res = await async_client.execute_command("blpop key 2")
-        assert res == ["key", "value"]
+    async def blpop_command():
+        res = await async_client.execute_command("blpop dest7 10")
+        assert res == ["dest7", "value"]
+
+    async def brpoplpush_command():
+        res = await async_client.execute_command("brpoplpush src dest7 2")
+        assert res == "value"
 
     async def lpush_command():
-        await async_client.execute_command("lpush key value")
+        await async_client.execute_command("lpush src value")
 
-    blocking = asyncio.create_task(blocking_command())
+    blpop = asyncio.create_task(blpop_command())
+    brpoplpush = asyncio.create_task(brpoplpush_command())
     await asyncio.sleep(0.1)
 
     res = await async_client.execute_command("client pause 1000")
@@ -715,7 +721,8 @@ async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     assert not lpush.done()
 
     await lpush
-    await blocking
+    await brpoplpush
+    await blpop
 
 
 async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Redis):

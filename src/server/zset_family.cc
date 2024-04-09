@@ -1318,7 +1318,8 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked);
+      transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
+      &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {
