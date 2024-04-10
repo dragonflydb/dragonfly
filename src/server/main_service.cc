@@ -1022,7 +1022,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       allowed_by_state = false;
       break;
     case GlobalState::TAKEN_OVER:
-      allowed_by_state = cid->name() == "REPLCONF" || cid->name() == "SAVE";
+      allowed_by_state = !cid->IsWriteOnly();
       break;
     default:
       break;
