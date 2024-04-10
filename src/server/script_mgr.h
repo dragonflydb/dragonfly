@@ -62,7 +62,7 @@ class ScriptMgr {
 
   void OnScriptError(std::string_view sha, std::string_view error);
   uint32_t script_errors() {
-    return script_errors_.load(std::memory_order::relaxed);
+    return script_errors_.load(std::memory_order_relaxed);
   }
 
  private:
