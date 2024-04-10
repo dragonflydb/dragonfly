@@ -1146,6 +1146,17 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     }
   }
 
+  {
+    const auto& reply_stats = m.facade_stats.reply_stats;
+    string sript_error_type_metric;
+    AppendMetricHeader("script_error_type", "Error type returned by script", MetricType::GAUGE,
+                       &sript_error_type_metric);
+    for (const auto& [sha, error] : reply_stats.script_error_map) {
+      AppendMetricValue("script_error", error, {"sha"}, {sha}, &sript_error_type_metric);
+    }
+    absl::StrAppend(&resp->body(), sript_error_type_metric);
+  }
+
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
                             &resp->body());
@@ -1792,6 +1803,8 @@ void ServerFamily::ResetStat() {
     tl_facade_stats->reply_stats.io_write_bytes = 0;
     tl_facade_stats->reply_stats.io_write_cnt = 0;
     tl_facade_stats->reply_stats.send_stats = {};
+    tl_facade_stats->reply_stats.script_error_map.clear();
+    tl_facade_stats->reply_stats.err_count.clear();
 
     service_.mutable_registry()->ResetCallStats(index);
   });
@@ -2040,7 +2053,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
     append("ram_hits", m.events.ram_hits);
     append("ram_misses", m.events.ram_misses);
-    append("script_erros", script_mgr_->script_errors());
   }
 
   if (should_enter("TIERED", true)) {

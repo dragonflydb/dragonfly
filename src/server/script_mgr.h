@@ -61,9 +61,6 @@ class ScriptMgr {
   bool AreGlobalByDefault() const;
 
   void OnScriptError(std::string_view sha, std::string_view error);
-  uint32_t script_errors() {
-    return script_errors_.load(std::memory_order_relaxed);
-  }
 
  private:
   void ExistsCmd(CmdArgList args, ConnectionContext* cntx) const;
@@ -85,7 +82,6 @@ class ScriptMgr {
   ScriptParams default_params_;
 
   absl::flat_hash_map<ScriptKey, InternalScriptData> db_;
-  std::atomic_uint32_t script_errors_{0};
   mutable util::fb2::Mutex mu_;
 };
 

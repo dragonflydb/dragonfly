@@ -42,12 +42,16 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 64u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 96u + kSanitizerOverhead);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 
   for (const auto& k_v : o.err_count) {
     err_count[k_v.first] += k_v.second;
+  }
+
+  for (const auto& k_v : o.script_error_map) {
+    script_error_map[k_v.first] = k_v.second;
   }
 
   send_stats += o.send_stats;
