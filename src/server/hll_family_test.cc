@@ -35,15 +35,15 @@ TEST_F(HllFamilyTest, Promote) {
   // This value varies if any parameter in hyperloglog.c changes.
   int promote_i = 1660;
   // Keep consistent with hyperloglog.c
-  int HLL_SPARSE_MAX_BYTES = 3000;
-  int HLL_DENSE_SIZE = 12304;
+  int kHllSparseMaxBytes = 3000;
+  int kHllDenseSize = 12304;
   for (int i = 0; i < unique_values; ++i) {
     std::string newkey = GenerateUniqueValue(i);
     Run({"pfadd", "key", newkey});
     if (i < promote_i) {
-      EXPECT_LT(CheckedInt({"strlen", "key"}), HLL_SPARSE_MAX_BYTES + 1);
+      EXPECT_LT(CheckedInt({"strlen", "key"}), kHllSparseMaxBytes + 1);
     } else {
-      EXPECT_EQ(CheckedInt({"strlen", "key"}), HLL_DENSE_SIZE);
+      EXPECT_EQ(CheckedInt({"strlen", "key"}), kHllDenseSize);
     }
   }
   // HyperLogLog computations come with a
@@ -80,17 +80,17 @@ TEST_F(HllFamilyTest, MultipleValues_random) {
   // cumulated pfadd result
   for (int i = 0; i < insertions; ++i) {
     // Number of values to insert
-    int numValues = dis(gen);
-    unique_values += numValues;
+    int num_values = dis(gen);
+    unique_values += num_values;
 
     // Prepare the command
     std::vector<std::string> values;
-    values.reserve(numValues + 2);
+    values.reserve(num_values + 2);
     values.push_back("pfadd");
     values.push_back("key");
 
     // Generate and add unique values to the command
-    for (int j = 0; j < numValues; ++j) {
+    for (int j = 0; j < num_values; ++j) {
       values.push_back(GenerateUniqueValue(i * 20 + j));
     }
 
