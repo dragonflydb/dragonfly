@@ -1265,6 +1265,46 @@ async def test_take_over_seeder(
     await disconnect_clients(c_master, c_replica)
 
 
+@pytest.mark.parametrize("master_threads, replica_threads", [[4, 4]])
+@pytest.mark.asyncio
+async def test_take_over_read_commands(df_local_factory, master_threads, replica_threads):
+    master = df_local_factory.create(
+        proactor_threads=master_threads,
+        logtostderr=True,
+    )
+    replica = df_local_factory.create(proactor_threads=replica_threads)
+    df_local_factory.start_all([master, replica])
+
+    c_master = master.client()
+    await c_master.execute_command("SET foo bar")
+
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    async def prompt():
+        client = replica.client()
+        for i in range(50):
+            # TODO remove try block when we no longer shut down master after take over
+            try:
+                res = await c_master.execute_command("GET foo")
+                assert res == "bar"
+                res = await c_master.execute_command("CONFIG SET aclfile myfile")
+                assert res == "OK"
+            except:
+                pass
+            res = await client.execute_command("GET foo")
+            assert res == "bar"
+
+    promt_task = asyncio.create_task(prompt())
+    await c_replica.execute_command(f"REPLTAKEOVER 5")
+
+    assert await c_replica.execute_command("role") == ["master", []]
+    await promt_task
+
+    await disconnect_clients(c_master, c_replica)
+
+
 @pytest.mark.asyncio
 async def test_take_over_timeout(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(proactor_threads=2, logtostderr=True)
