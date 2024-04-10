@@ -2,6 +2,7 @@ serviceMonitor:
   enabled: true
 prometheusRule:
   enabled: true
+  namespace: dragonfly
   spec:
     - alert: RedisDown
       expr: absent(dragonfly_master > 0)
