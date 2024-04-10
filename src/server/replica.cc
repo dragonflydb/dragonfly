@@ -359,7 +359,8 @@ error_code Replica::InitiatePSync() {
   int64_t offs = -1;
   if (!master_context_.master_repl_id.empty()) {  // in case we synced before
     id = master_context_.master_repl_id;          // provide the replication offset and master id
-    offs = repl_offs_;                            // to try incremental sync.
+    // TBD: for incremental sync send repl_offs_, not supported yet.
+    // offs = repl_offs_;
   }
 
   RETURN_ON_ERR(SendCommand(StrCat("PSYNC ", id, " ", offs)));
@@ -1136,6 +1137,11 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     // That could change due to redis failovers.
     // TODO: part sync
     dest->fullsync.emplace<size_t>(0);
+    LOG(ERROR) << "Partial replication not supported yet";
+    return std::make_error_code(std::errc::not_supported);
+  } else {
+    LOG(ERROR) << "Unknown replication header";
+    return bad_header();
   }
 
   return error_code{};
