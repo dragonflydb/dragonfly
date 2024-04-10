@@ -654,6 +654,7 @@ void Connection::HandleRequests() {
   if (http_res) {
     cc_.reset(service_->CreateContext(peer, this));
     if (*http_res) {
+      stats_ = &tl_facade_stats->conn_stats;
       VLOG(1) << "HTTP1.1 identified";
       is_http_ = true;
       HttpConnection http_conn{http_listener_};
@@ -1635,6 +1636,10 @@ void Connection::StartTrafficLogging(string_view path) {
 void Connection::StopTrafficLogging() {
   lock_guard lk(tl_traffic_logger.mutex);
   tl_traffic_logger.ResetLocked();
+}
+
+bool Connection::IsHttp() const {
+  return is_http_;
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {
