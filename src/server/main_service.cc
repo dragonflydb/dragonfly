@@ -4,6 +4,8 @@
 
 #include "server/main_service.h"
 
+#include "facade/reply_builder.h"
+
 #ifdef __FreeBSD__
 #include <pthread_np.h>
 #endif
@@ -291,6 +293,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   unsigned num_elems_ = 0;
 };
 
+// Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
   EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
@@ -326,6 +329,13 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnArrayEnd() final {
+  }
+
+  void OnMapStart(unsigned len) final {
+    rb_->StartCollection(len, RedisReplyBuilder::MAP);
+  }
+
+  void OnMapEnd() final {
   }
 
   void OnNil() final {

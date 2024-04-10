@@ -827,7 +827,29 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
         break;
       }
 
+      fres = FetchKey(lua_, "map");
+      if (fres && *fres == LUA_TTABLE) {
+        // Calculate length of map part, there is sadly no other way
+        unsigned len = 0;
+        for (lua_pushnil(lua_); lua_next(lua_, -2) != 0; lua_pop(lua_, 1))
+          len++;
+
+        serializer->OnMapStart(len);
+        for (lua_pushnil(lua_); lua_next(lua_, -2) != 0;) {
+          // Push key to stack top: key value key
+          lua_pushnil(lua_);
+          lua_copy(lua_, -3, -1);
+          SerializeResult(serializer);  // pops key
+          SerializeResult(serializer);  // pop value
+        }
+        serializer->OnMapEnd();
+
+        lua_pop(lua_, 2);
+        break;
+      }
+
       unsigned len = lua_rawlen(lua_, -1);
+
       serializer->OnArrayStart(len);
       for (unsigned i = 0; i < len; ++i) {
         t = lua_rawgeti(lua_, -1, i + 1);  // push table element

@@ -28,6 +28,14 @@ class ObjectExplorer {
   virtual void OnNil() = 0;
   virtual void OnStatus(std::string_view str) = 0;
   virtual void OnError(std::string_view str) = 0;
+
+  virtual void OnMapStart(unsigned len) {
+    OnArrayStart(len * 2);
+  }
+
+  virtual void OnMapEnd() {
+    OnArrayEnd();
+  }
 };
 
 class Interpreter {
