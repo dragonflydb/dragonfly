@@ -336,6 +336,9 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
+// DFLY TAKEOVER [timeout_sec] [SAVE]
+// timeout_sec - number of seconds to wait for TAKEOVER to converge. A float.
+// SAVE if create a snapshot before shutting down.
 void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   CmdArgParser parser{args};
