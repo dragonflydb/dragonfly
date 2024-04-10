@@ -11,9 +11,6 @@
 
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
-#include "core/string_or_view.h"
-#include "server/cluster/cluster_config.h"
-#include "server/cluster/slot_set.h"
 #include "server/conn_context.h"
 #include "server/detail/table.h"
 #include "server/top_keys.h"
@@ -92,17 +89,24 @@ class LockTable {
   bool Acquire(std::string_view key, IntentLock::Mode mode);
   void Release(std::string_view key, IntentLock::Mode mode);
 
+  static uint64_t Fingerprint(std::string_view key);
+
   auto begin() const {
     return locks_.cbegin();
   }
 
   auto end() const {
-    return locks_.cbegin();
+    return locks_.cend();
   }
 
  private:
-  using Key = StringOrView;
-  absl::flat_hash_map<Key, IntentLock> locks_;
+  // We use fingerprinting before accessing locks - no need to mix more.
+  struct Hasher {
+    size_t operator()(uint64_t val) const {
+      return val;
+    }
+  };
+  absl::flat_hash_map<uint64_t, IntentLock, Hasher> locks_;
 };
 
 // A single Db table that represents a table that can be chosen with "SELECT" command.

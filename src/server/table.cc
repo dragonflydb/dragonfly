@@ -4,6 +4,8 @@
 
 #include "server/table.h"
 
+#include <xxhash.h>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_config.h"
@@ -12,8 +14,8 @@
 ABSL_FLAG(bool, enable_top_keys_tracking, false,
           "Enables / disables tracking of hot keys debugging feature");
 
+using namespace std;
 namespace dfly {
-
 #define ADD(x) (x) += o.x
 
 // It should be const, but we override this variable in our tests so that they run faster.
@@ -62,29 +64,32 @@ size_t LockTable::Size() const {
   return locks_.size();
 }
 
-std::optional<const IntentLock> LockTable::Find(std::string_view key) const {
+uint64_t LockTable::Fingerprint(string_view key) {
+  return XXH64(key.data(), key.size(), 0x1C69B3F74AC4AE35UL);
+}
+
+std::optional<const IntentLock> LockTable::Find(string_view key) const {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
 
-  if (auto it = locks_.find(Key::FromView(key)); it != locks_.end())
+  uint64_t fp = Fingerprint(key);
+  if (auto it = locks_.find(fp); it != locks_.end())
     return it->second;
   return std::nullopt;
 }
 
-bool LockTable::Acquire(std::string_view key, IntentLock::Mode mode) {
+bool LockTable::Acquire(string_view key, IntentLock::Mode mode) {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
-
-  auto [it, inserted] = locks_.try_emplace(Key::FromView(key));
-  if (!inserted)                              // If more than one transaction refers to a key
-    const_cast<Key&>(it->first).MakeOwned();  // we must fall back to using a self-contained string
-
+  uint64_t fp = Fingerprint(key);
+  auto [it, inserted] = locks_.try_emplace(fp);
   return it->second.Acquire(mode);
 }
 
-void LockTable::Release(std::string_view key, IntentLock::Mode mode) {
+void LockTable::Release(string_view key, IntentLock::Mode mode) {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
 
-  auto it = locks_.find(Key::FromView(key));
-  CHECK(it != locks_.end()) << key;
+  uint64_t fp = Fingerprint(key);
+  auto it = locks_.find(fp);
+  DCHECK(it != locks_.end()) << key;
 
   it->second.Release(mode);
   if (it->second.IsFree())
@@ -115,7 +120,7 @@ void DbTable::Clear() {
   stats = DbTableStats{};
 }
 
-PrimeIterator DbTable::Launder(PrimeIterator it, std::string_view key) {
+PrimeIterator DbTable::Launder(PrimeIterator it, string_view key) {
   if (!it.IsOccupied() || it->first != key) {
     it = prime.Find(key);
   }

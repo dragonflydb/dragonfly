@@ -2103,9 +2103,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TRANSACTION", true)) {
+    append("tx_shard_polls", m.shard_stats.poll_execution_total);
     append("tx_shard_immediate_total", m.shard_stats.tx_immediate_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
-
     append("tx_global_total", m.coordinator_stats.tx_global_cnt);
     append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
     append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);

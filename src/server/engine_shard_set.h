@@ -181,8 +181,8 @@ class EngineShard {
     // The score of the lock with maximum contention (see IntentLock::ContetionScore for details).
     unsigned max_contention_score = 0;
 
-    // the lock name with maximum contention
-    std::string max_contention_lock_name;
+    // the lock fingerprint with maximum contention score.
+    uint64_t max_contention_lock;
   };
 
   TxQueueInfo AnalyzeTxQueue() const;

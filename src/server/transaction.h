@@ -170,7 +170,6 @@ class Transaction {
     RAN_IMMEDIATELY = 1 << 7,  // Whether the shard executed immediately (during schedule)
   };
 
- public:
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
@@ -475,7 +474,6 @@ class Transaction {
     util::fb2::EventCount ec_{};
   };
 
- private:
   // Init basic fields and reset re-usable.
   void InitBase(DbIndex dbid, CmdArgList args);
 

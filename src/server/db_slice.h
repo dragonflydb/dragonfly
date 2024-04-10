@@ -8,6 +8,7 @@
 #include "core/string_or_view.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/op_status.h"
+#include "server/cluster/slot_set.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/table.h"
@@ -366,9 +367,6 @@ class DbSlice {
 
   // Returns true if the key can be locked under m. Does not lock.
   bool CheckLock(IntentLock::Mode m, DbIndex dbid, std::string_view key) const;
-
-  // Returns true if all keys can be locked under m. Does not lock.
-  bool CheckLock(IntentLock::Mode m, const KeyLockArgs& lock_args) const;
 
   size_t db_array_size() const {
     return db_arr_.size();
