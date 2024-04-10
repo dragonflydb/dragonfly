@@ -968,9 +968,11 @@ Connection::ParserStatus Connection::ParseRedis(SinkReplyBuilder* orig_builder) 
 
       bool has_more = consumed < io_buf_.InputLen();
 
-      if (tl_traffic_logger.log_file)  // Log command as soon as we receive it
-        LogTraffic(id_, has_more, absl::MakeSpan(parse_args));
-
+      if (tl_traffic_logger.log_file) {
+        if (IsMain()) {  // log only on the main interface.
+          LogTraffic(id_, has_more, absl::MakeSpan(parse_args));
+        }
+      }
       DispatchCommand(has_more, dispatch_sync, dispatch_async);
     }
     io_buf_.ConsumeInput(consumed);
