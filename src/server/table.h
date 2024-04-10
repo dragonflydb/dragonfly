@@ -25,6 +25,7 @@ using PrimeValue = detail::PrimeValue;
 
 using PrimeTable = DashTable<PrimeKey, PrimeValue, detail::PrimeTablePolicy>;
 using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>;
+using LockFp = uint64_t;  // a key fingerprint used by the LockTable.
 
 /// Iterators are invalidated when new keys are added to the table or some entries are deleted.
 /// Iterators are still valid if a different entry in the table was mutated.
@@ -89,7 +90,7 @@ class LockTable {
   bool Acquire(std::string_view key, IntentLock::Mode mode);
   void Release(std::string_view key, IntentLock::Mode mode);
 
-  static uint64_t Fingerprint(std::string_view key);
+  static LockFp Fingerprint(std::string_view key);
 
   auto begin() const {
     return locks_.cbegin();
@@ -102,11 +103,11 @@ class LockTable {
  private:
   // We use fingerprinting before accessing locks - no need to mix more.
   struct Hasher {
-    size_t operator()(uint64_t val) const {
+    size_t operator()(LockFp val) const {
       return val;
     }
   };
-  absl::flat_hash_map<uint64_t, IntentLock, Hasher> locks_;
+  absl::flat_hash_map<LockFp, IntentLock, Hasher> locks_;
 };
 
 // A single Db table that represents a table that can be chosen with "SELECT" command.

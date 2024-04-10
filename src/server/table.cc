@@ -64,14 +64,14 @@ size_t LockTable::Size() const {
   return locks_.size();
 }
 
-uint64_t LockTable::Fingerprint(string_view key) {
+LockFp LockTable::Fingerprint(string_view key) {
   return XXH64(key.data(), key.size(), 0x1C69B3F74AC4AE35UL);
 }
 
 std::optional<const IntentLock> LockTable::Find(string_view key) const {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
 
-  uint64_t fp = Fingerprint(key);
+  LockFp fp = Fingerprint(key);
   if (auto it = locks_.find(fp); it != locks_.end())
     return it->second;
   return std::nullopt;
@@ -79,7 +79,7 @@ std::optional<const IntentLock> LockTable::Find(string_view key) const {
 
 bool LockTable::Acquire(string_view key, IntentLock::Mode mode) {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
-  uint64_t fp = Fingerprint(key);
+  LockFp fp = Fingerprint(key);
   auto [it, inserted] = locks_.try_emplace(fp);
   return it->second.Acquire(mode);
 }
@@ -87,7 +87,7 @@ bool LockTable::Acquire(string_view key, IntentLock::Mode mode) {
 void LockTable::Release(string_view key, IntentLock::Mode mode) {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
 
-  uint64_t fp = Fingerprint(key);
+  LockFp fp = Fingerprint(key);
   auto it = locks_.find(fp);
   DCHECK(it != locks_.end()) << key;
 
