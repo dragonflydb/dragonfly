@@ -850,18 +850,20 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
   auto cb_move = [&](Transaction* t, EngineShard* shard) {
     OpArgs op_args = t->GetOpArgs(shard);
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
-    if (op_res && op_args.shard->journal()) {
-      std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
-      RecordJournal(op_args, "LMOVE", arr, 1);
+    if (op_res) {
+      if (op_args.shard->journal()) {
+        std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
+        RecordJournal(op_args, "LMOVE", arr, 1);
+      }
+      if (shard->blocking_controller()) {
+        string tmp;
+
+        shard->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, push_key_);
+        absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", push_key_, " by ",
+                        op_args.tx->DebugId());
+      }
     }
 
-    if (shard->blocking_controller()) {
-      string tmp;
-
-      shard->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, push_key_);
-      absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", push_key_, " by ",
-                      op_args.tx->DebugId());
-    }
     return OpStatus::OK;
   };
   t->Execute(cb_move, false);
