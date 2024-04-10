@@ -564,6 +564,8 @@ error_code Replica::ConsumeRedisStream() {
   io::NullSink null_sink;  // we never reply back on the commands.
   ConnectionContext conn_context{&null_sink, nullptr};
   conn_context.is_replicating = true;
+  conn_context.journal_emulated = true;
+  conn_context.skip_acl_validation = true;
   ResetParser(true);
 
   // Master waits for this command in order to start sending replication stream.
