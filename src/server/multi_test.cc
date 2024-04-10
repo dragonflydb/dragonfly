@@ -381,13 +381,22 @@ TEST_F(MultiTest, Eval) {
   resp = Run({"incrby", "foo", "42"});
   EXPECT_THAT(resp, IntArg(42));
 
+  // first time running the script will return error and will change the script flag to allow
+  // undeclared
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
   EXPECT_THAT(resp, ErrArg("undeclared"));
 
+  // running the same script the second time will succeed
+  resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
+  EXPECT_THAT(resp, "42");
+
+  Run({"script", "flush"});
+
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "bar"});
   EXPECT_THAT(resp, ErrArg("undeclared"));
-
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
+
+  Run({"script", "flush"});
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
@@ -395,7 +404,6 @@ TEST_F(MultiTest, Eval) {
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
   EXPECT_THAT(resp, "42");
-
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
   ASSERT_FALSE(service_->IsShardSetLocked());
 
