@@ -17,6 +17,7 @@ extern "C" {
 #include "base/logging.h"
 #include "io/proc_reader.h"
 #include "server/blocking_controller.h"
+#include "server/cluster/cluster_config.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -204,13 +205,14 @@ EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 40);
+  static_assert(sizeof(Stats) == 48);
 
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
   defrag_task_invocation_total += o.defrag_task_invocation_total;
   poll_execution_total += o.poll_execution_total;
   tx_ooo_total += o.tx_ooo_total;
+  tx_immediate_total += o.tx_immediate_total;
 
   return *this;
 }
@@ -756,7 +758,7 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
         info.contended_locks++;
         if (lock.ContentionScore() > info.max_contention_score) {
           info.max_contention_score = lock.ContentionScore();
-          info.max_contention_lock_name = string_view{key};
+          info.max_contention_lock_name = key.view();
         }
       }
     }

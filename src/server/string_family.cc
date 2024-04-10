@@ -5,6 +5,7 @@
 #include "server/string_family.h"
 
 #include <absl/container/inlined_vector.h>
+#include <absl/strings/match.h>
 
 #include <algorithm>
 #include <array>
@@ -14,6 +15,8 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "base/stl_util.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -95,8 +98,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeConstIterator> it_res =
-      db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -126,7 +128,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val,
+size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view key, string_view val,
                       bool prepend) {
   string tmp, new_val;
   string_view slice = it->second.GetSlice(&tmp);
@@ -496,12 +498,11 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   auto& db_slice = shard->db_slice();
 
   SinkReplyBuilder::MGetResponse response(keys.size());
-  absl::InlinedVector<PrimeConstIterator, 32> iters(keys.size());
+  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.size());
 
   size_t total_size = 0;
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeConstIterator> it_res =
-        db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
+    auto it_res = db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
     if (!it_res)
       continue;
     iters[i] = *it_res;
@@ -512,7 +513,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   char* next = response.storage_list->data;
 
   for (size_t i = 0; i < keys.size(); ++i) {
-    PrimeConstIterator it = iters[i];
+    auto it = iters[i];
     if (it.is_done())
       continue;
 
@@ -540,7 +541,8 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
 
 OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
                                        string_view value) {
-  SetResultBuilder result_builder(params.flags & SET_GET);
+  bool fetch_val = params.flags & SET_GET;
+  SetResultBuilder result_builder(fetch_val);
 
   EngineShard* shard = op_args_.shard;
   auto& db_slice = shard->db_slice();
@@ -549,15 +551,23 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
+  // if SET_GET is not set then prev_val is null.
+  DCHECK(fetch_val || params.prev_val == nullptr);
+
   if (params.IsConditionalSet()) {
-    bool fetch_value = params.prev_val || (params.flags & SET_GET);
+    // We do not always set prev_val and we use result_builder for that.
+    bool fetch_value = params.prev_val || fetch_val;
     DbSlice::ItAndUpdater find_res;
     if (fetch_value) {
       find_res = db_slice.FindAndFetchMutable(op_args_.db_cntx, key);
     } else {
       find_res = db_slice.FindMutable(op_args_.db_cntx, key);
     }
+
     if (IsValid(find_res.it)) {
+      if (find_res.it->second.ObjType() != OBJ_STRING) {
+        return OpStatus::WRONG_TYPE;
+      }
       result_builder.CachePrevValueIfNeeded(find_res.it->second);
     }
 
@@ -575,6 +585,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
       }
     }
   }
+
   // At this point we either need to add missing entry, or we
   // will override an existing one
   // Trying to add a new entry.
@@ -582,8 +593,11 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  PrimeIterator it = add_res.it;
+  auto it = add_res.it;
   if (!add_res.is_new) {
+    if (fetch_val && it->second.ObjType() != OBJ_STRING) {
+      return OpStatus::WRONG_TYPE;
+    }
     result_builder.CachePrevValueIfNeeded(it->second);
     return std::move(result_builder).Return(SetExisting(params, it, add_res.exp_it, key, value));
   }
@@ -607,7 +621,8 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   if (shard->tiered_storage() &&
       TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
-    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it, key);
+    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it.GetInnerIt(),
+                                                         key);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -617,8 +632,8 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
   return std::move(result_builder).Return(OpStatus::OK);
 }
 
-OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
-                             string_view key, string_view value) {
+OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
+                             DbSlice::ExpIterator e_it, string_view key, string_view value) {
   if (params.flags & SET_IF_NOTEXIST)
     return OpStatus::SKIPPED;
 
@@ -685,6 +700,10 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   if (params.flags & SET_STICK) {
     cmds.push_back("STICK");
   }
+  if (params.memcache_flags) {
+    cmds.push_back("_MCFLAGS");
+    cmds.push_back(absl::StrCat(params.memcache_flags));
+  }
 
   // Skip NX/XX because SET operation was exectued.
   // Skip GET, because its not important on replica.
@@ -693,49 +712,48 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
 }
 
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view value = ArgS(args, 1);
+  facade::CmdArgParser parser{args};
+
+  auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
 
-  int64_t int_arg;
-  SinkReplyBuilder* builder = cntx->reply_builder();
+  facade::SinkReplyBuilder* builder = cntx->reply_builder();
 
-  for (size_t i = 2; i < args.size(); ++i) {
-    ToUpper(&args[i]);
+  while (parser.HasNext()) {
+    parser.ToUpper();
+    if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
+      auto [opt, int_arg] = parser.Next<string_view, int64_t>();
 
-    string_view cur_arg = ArgS(args, i);
+      if (auto err = parser.Error(); err) {
+        return builder->SendError(err->MakeReply());
+      }
 
-    if ((cur_arg == "EX" || cur_arg == "PX" || cur_arg == "EXAT" || cur_arg == "PXAT") &&
-        !(sparams.flags & SetCmd::SET_KEEP_EXPIRE) &&
-        !(sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)) {
-      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-      bool is_ms = (cur_arg == "PX" || cur_arg == "PXAT");
-      ++i;
-      if (i == args.size()) {
+      // We can set expiry only once.
+      if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
         return builder->SendError(kSyntaxErr);
-      }
 
-      string_view ex = ArgS(args, i);
-      if (!absl::SimpleAtoi(ex, &int_arg)) {
-        return builder->SendError(kInvalidIntErr);
-      }
+      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
       // Since PXAT/EXAT can change this, we need to check this ahead
       if (int_arg <= 0) {
         return builder->SendError(InvalidExpireTime("set"));
       }
+
+      bool is_ms = (opt[0] == 'P');
+
       // for []AT we need to take expiration time as absolute from the value given
       // check here and if the time is in the past, return OK but don't set it
       // Note that the time pass here for PXAT is in milliseconds, we must not change it!
-      if (cur_arg == "EXAT" || cur_arg == "PXAT") {
+      if (absl::EndsWith(opt, "AT")) {
         int_arg = AbsExpiryToTtl(int_arg, is_ms);
         if (int_arg < 0) {
           // this happened in the past, just return, for some reason Redis reports OK in this case
           return builder->SendStored();
         }
       }
+
       if (is_ms) {
         if (int_arg > kMaxExpireDeadlineMs) {
           int_arg = kMaxExpireDeadlineMs;
@@ -747,22 +765,32 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         int_arg *= 1000;
       }
       sparams.expire_after_ms = int_arg;
-    } else if (cur_arg == "NX" && !(sparams.flags & SetCmd::SET_IF_EXISTS)) {
-      sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-    } else if (cur_arg == "XX" && !(sparams.flags & SetCmd::SET_IF_NOTEXIST)) {
-      sparams.flags |= SetCmd::SET_IF_EXISTS;
-    } else if (cur_arg == "KEEPTTL" && !(sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)) {
-      sparams.flags |= SetCmd::SET_KEEP_EXPIRE;
-    } else if (cur_arg == "GET") {
-      sparams.flags |= SetCmd::SET_GET;
-    } else if (cur_arg == "STICK") {
-      sparams.flags |= SetCmd::SET_STICK;
+    } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
+      sparams.memcache_flags = parser.Next<uint16_t>();
     } else {
-      return builder->SendError(kSyntaxErr);
+      uint16_t flag = parser.Switch(  //
+          "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
+          "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
+      sparams.flags |= flag;
     }
   }
 
-  const auto result{SetGeneric(cntx, sparams, key, value, true)};
+  if (auto err = parser.Error(); err) {
+    return builder->SendError(err->MakeReply());
+  }
+
+  auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
+
+  if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
+      has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
+    return builder->SendError(kSyntaxErr);
+  }
+
+  OpResult result{SetGeneric(cntx, sparams, key, value, true)};
+
+  if (result == OpStatus::WRONG_TYPE) {
+    return cntx->SendError(kWrongTypeErr);
+  }
 
   if (sparams.flags & SetCmd::SET_GET) {
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -783,7 +811,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     return builder->SendError(kOutOfMemory);
   }
 
-  CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
+  DCHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
 
   builder->SendSetSkipped();
 }
@@ -826,7 +854,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     auto op_args = t->GetOpArgs(shard);
     DbSlice& db_slice = op_args.shard->db_slice();
 
-    OpResult<PrimeConstIterator> res;
+    OpResult<DbSlice::ConstIterator> res;
 
     // A temporary code that allows running dragonfly without filling up memory store
     // when reading data from disk.
@@ -1302,8 +1330,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<PrimeConstIterator> it_res =
-        shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto it_res = shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -1545,8 +1572,9 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, acl::kGetEx}
              .HFUNC(GetEx)
       << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::kGetSet}.HFUNC(GetSet)
-      << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, acl::kMGet}.HFUNC(
-             MGet)
+      << CI{"MGET",    CO::READONLY | CO::FAST | CO::REVERSE_MAPPING | CO::IDEMPOTENT, -2, 1, -1,
+            acl::kMGet}
+             .HFUNC(MGet)
       << CI{"MSET", kMSetMask, -3, 1, -1, acl::kMSet}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1, acl::kMSetNx}.HFUNC(MSetNx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kStrLen}.HFUNC(StrLen)

@@ -87,8 +87,15 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  res.it->second.SetJson(std::move(value));
-
+  if (absl::GetFlag(FLAGS_experimental_flat_json)) {
+    flexbuffers::Builder fbb;
+    json::FromJsonType(value, &fbb);
+    fbb.Finish();
+    const auto& buf = fbb.GetBuffer();
+    res.it->second.SetJson(buf.data(), buf.size());
+  } else {
+    res.it->second.SetJson(std::move(value));
+  }
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
   return OpStatus::OK;
 }
@@ -189,7 +196,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
     return it_res.status();
   }
 
-  PrimeConstIterator entry_it = it_res->it;
+  auto entry_it = it_res->it;
   JsonType* json_val = entry_it->second.GetJson();
   DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
                    << entry_it->second.ObjType() << "'";
@@ -234,8 +241,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, string_view key, const json::Path& p
 }
 
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeConstIterator> it_res =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok())
     return it_res.status();
 
@@ -1129,8 +1135,7 @@ vector<OptString> OpJsonMGet(JsonPathV2 expression, const Transaction* t, Engine
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeConstIterator> it_res =
-        db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_JSON);
+    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_JSON);
     if (!it_res.ok())
       continue;
 
@@ -1214,8 +1219,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // and its not JSON, it would return an error.
   if (path == "." || path == "$") {
     if (is_nx_condition || is_xx_condition) {
-      OpResult<PrimeConstIterator> it_res =
-          op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+      auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
       bool key_exists = (it_res.status() != OpStatus::KEY_NOTFOUND);
       if (is_nx_condition && key_exists) {
         return false;
@@ -1226,22 +1230,9 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    if (absl::GetFlag(FLAGS_experimental_flat_json)) {
-      flatbuffers::Parser parser;
-      flexbuffers::Builder fbb;
-      string tmp(json_str);
-      CHECK_EQ(json_str.size(), strlen(tmp.c_str()));
-
-      parser.ParseFlexBuffer(tmp.c_str(), nullptr, &fbb);
-      fbb.Finish();
-      const auto& buffer = fbb.GetBuffer();
-      string_view buf_view{reinterpret_cast<const char*>(buffer.data()), buffer.size()};
-      SetCmd scmd(op_args, false);
-      scmd.Set(SetCmd::SetParams{}, key, buf_view);
-    } else {
-      if (SetJson(op_args, key, std::move(parsed_json.value())) == OpStatus::OUT_OF_MEMORY) {
-        return OpStatus::OUT_OF_MEMORY;
-      }
+    OpStatus st = SetJson(op_args, key, std::move(parsed_json.value()));
+    if (st != OpStatus::OK) {
+      return st;
     }
     return true;
   }
@@ -1724,7 +1715,10 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
 
 void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
+  string_view path = "$";
+  if (args.size() == 2) {
+    path = ArgS(args, 1);
+  }
 
   JsonPathV2 expression = PARSE_PATHV2(path);
 
@@ -2020,7 +2014,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, acl::JSON}.HFUNC(Del);
   *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, acl::JSON}.HFUNC(
       Del);  // An alias of JSON.DEL.
-  *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(ObjKeys);
+  *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjKeys);
   *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(
       StrAppend);
   *registry << CI{"JSON.CLEAR", CO::WRITE | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Clear);

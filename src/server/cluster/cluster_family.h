@@ -10,7 +10,7 @@
 
 #include "facade/conn_context.h"
 #include "server/cluster/cluster_config.h"
-#include "server/cluster/cluster_slot_migration.h"
+#include "server/cluster/incoming_slot_migration.h"
 #include "server/cluster/outgoing_slot_migration.h"
 #include "server/common.h"
 
@@ -28,7 +28,11 @@ class ClusterFamily {
   // Returns a thread-local pointer.
   ClusterConfig* cluster_config();
 
-  void FinalizeIncomingMigration(uint32_t local_sync_id);
+  void UpdateConfig(const std::vector<SlotRange>& slots, bool enable);
+
+  const std::string& MyID() const {
+    return id_;
+  }
 
  private:
   // Cluster commands compatible with Redis
@@ -52,7 +56,7 @@ class ClusterFamily {
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
 
  private:  // Slots migration section
-  void DflyClusterSlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+  void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
@@ -68,32 +72,30 @@ class ClusterFamily {
 
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
-  // create a ClusterSlotMigration entity which will execute migration
-  ClusterSlotMigration* CreateIncomingMigration(std::string host_ip, uint16_t port,
-                                                SlotRanges slots);
+  // create a IncomingSlotMigration entity which will execute migration
+  IncomingSlotMigration* CreateIncomingMigration(std::string source_id, SlotRanges slots,
+                                                 uint32_t shards_num);
 
-  bool StartSlotMigrations(const std::vector<ClusterConfig::MigrationInfo>& migrations,
-                           ConnectionContext* cntx);
-  void RemoveFinishedMigrations();
+  std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id);
+
+  bool StartSlotMigrations(std::vector<MigrationInfo> migrations, ConnectionContext* cntx);
+  void RemoveOutgoingMigrations(const std::vector<MigrationInfo>& migrations);
+  void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations);
 
   // store info about migration and create unique session id
-  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(std::string host_ip, uint16_t port,
-                                                             SlotRanges slots);
-
-  std::shared_ptr<OutgoingMigration> GetOutgoingMigration(uint32_t sync_id);
+  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(MigrationInfo info);
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.
-  std::vector<std::unique_ptr<ClusterSlotMigration>> incoming_migrations_jobs_
+  std::vector<std::shared_ptr<IncomingSlotMigration>> incoming_migrations_jobs_
       ABSL_GUARDED_BY(migration_mu_);
 
-  uint32_t next_sync_id_ ABSL_GUARDED_BY(migration_mu_) = 1;
   // holds all outgoing slots migrations that are currently in progress
-  using OutgoingMigrationMap = absl::btree_map<uint32_t, std::shared_ptr<OutgoingMigration>>;
-  OutgoingMigrationMap outgoing_migration_jobs_ ABSL_GUARDED_BY(migration_mu_);
+  std::vector<std::shared_ptr<OutgoingMigration>> outgoing_migration_jobs_
+      ABSL_GUARDED_BY(migration_mu_);
 
  private:
-  ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
+  ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   std::string id_;
 

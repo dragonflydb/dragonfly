@@ -94,7 +94,6 @@ class ServerState {  // public struct - to allow initialization.
   void operator=(const ServerState&) = delete;
 
  public:
-  enum TxType { GLOBAL, NORMAL, QUICK, INLINE, NUM_TX_TYPES };
   struct Stats {
     Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
 
@@ -105,7 +104,9 @@ class ServerState {  // public struct - to allow initialization.
 
     Stats& Add(const Stats& other);
 
-    std::array<uint64_t, NUM_TX_TYPES> tx_type_cnt;
+    uint64_t tx_global_cnt = 0;
+    uint64_t tx_normal_cnt = 0;
+    uint64_t tx_inline_runs = 0;
     uint64_t tx_schedule_cancel_cnt = 0;
 
     uint64_t eval_io_coordination_cnt = 0;

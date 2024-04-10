@@ -940,7 +940,7 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
           "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
           "replicas": [],
           "migrations": [{{ "slot_ranges": [ {{ "start": 5200, "end": 5259 }} ]
-                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "target_id": "{node_ids[1]}" }}]
+                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "node_id": "{node_ids[1]}" }}]
         }},
         {{
           "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
@@ -1025,7 +1025,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
           "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
           "replicas": [],
           "migrations": [{{ "slot_ranges": [ {{ "start": 3000, "end": 9000 }} ]
-                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "target_id": "{node_ids[1]}" }}]
+                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "node_id": "{node_ids[1]}" }}]
         }},
         {{
           "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
@@ -1042,11 +1042,8 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
     await asyncio.sleep(0.5)
 
-    while (
-        await c_nodes_admin[1].execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-        )
-        != "FINISHED"
+    while "FINISHED" not in await c_nodes_admin[1].execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
     ):
         await asyncio.sleep(0.05)
 
@@ -1077,6 +1074,13 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[1].get("KEY19") == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 17
 
+    assert (
+        await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
+    )
+    assert (
+        await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
+    )
+
     await close_clients(*c_nodes, *c_nodes_admin)
 
 
@@ -1085,7 +1089,7 @@ class MigrationInfo:
     ip: str
     port: int
     slots: list
-    target_id: str
+    node_id: str
 
 
 @dataclass
@@ -1151,7 +1155,7 @@ async def test_cluster_fuzzymigration(
                 "migrations": [
                     {
                         "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
-                        "target_id": m.target_id,
+                        "node_id": m.node_id,
                         "ip": m.ip,
                         "port": m.port,
                     }
@@ -1224,7 +1228,7 @@ async def test_cluster_fuzzymigration(
                     ip="127.0.0.1",
                     port=nodes[dest_idx].instance.admin_port,
                     slots=dest_slots,
-                    target_id=nodes[dest_idx].id,
+                    node_id=nodes[dest_idx].id,
                 )
             )
 
@@ -1240,7 +1244,7 @@ async def test_cluster_fuzzymigration(
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             print(states)
-            if not all(s.endswith("FINISHED") for s in states) and not states == "NO_STATE":
+            if not all("FINISHED" in s for s in states) and not states == "NO_STATE":
                 break
         else:
             break

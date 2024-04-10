@@ -258,7 +258,7 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
-                                              bool* block_flag) {
+                                              bool* block_flag, bool* pause_flag) {
   string result_key;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
@@ -317,9 +317,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return owner->db_slice().FindReadOnly(context, key, req_obj_type).ok();
   };
 
-  *block_flag = true;
-  auto status = trans->WaitOnWatch(limit_tp, std::move(wcb), key_checker);
-  *block_flag = false;
+  auto status = trans->WaitOnWatch(limit_tp, std::move(wcb), key_checker, block_flag, pause_flag);
 
   if (status != OpStatus::OK)
     return status;

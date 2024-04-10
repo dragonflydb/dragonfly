@@ -5,6 +5,7 @@
 #include "server/test_utils.h"
 
 #include "server/acl/acl_commands_def.h"
+#include "util/fibers/fibers.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -365,6 +366,10 @@ RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
 }
 
 RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->Run(id, slice); });
+  }
+
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
 
   CmdArgVec args = conn_wrapper->Args(slice);
@@ -601,6 +606,8 @@ ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id)
 }
 
 auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {
+  DCHECK(ProactorBase::IsProactorThread());
+
   unique_lock lk(mu_);
 
   auto [it, inserted] = connections_.emplace(id, nullptr);
@@ -655,7 +662,8 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
     if (condition()) {
       break;
     }
-    absl::SleepFor(absl::Milliseconds(10));
+    ThisFiber::SleepFor(5ms);
+    // absl::SleepFor(absl::Milliseconds(10)); ??
   }
 
   EXPECT_LE(absl::Now(), deadline)

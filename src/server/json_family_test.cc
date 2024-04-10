@@ -581,10 +581,19 @@ TEST_F(JsonFamilyTest, ObjKeys) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
+  resp = Run({"JSON.OBJKEYS", "json"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b", "c", "d", "e"));
+
   resp = Run({"JSON.OBJKEYS", "json", "$.a"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   resp = Run({"JSON.OBJKEYS", "json", "$.b"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
+
+  resp = Run({"JSON.OBJKEYS", "json", ".b"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
+
+  resp = Run({"JSON.OBJKEYS", "json", "b"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
 
   resp = Run({"JSON.OBJKEYS", "json", "$.*"});

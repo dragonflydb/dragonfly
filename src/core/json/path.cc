@@ -261,4 +261,16 @@ void FromJsonType(const JsonType& src, flexbuffers::Builder* fbb) {
   fbb->EndVector(start, false, false);
 }
 
+unsigned MutatePath(const Path& path, MutateCallback callback, FlatJson json,
+                    flexbuffers::Builder* fbb) {
+  JsonType mut_json = FromFlat(json);
+  unsigned res = MutatePath(path, std::move(callback), &mut_json);
+  if (res) {
+    FromJsonType(mut_json, fbb);
+    fbb->Finish();
+  }
+
+  return res;
+}
+
 }  // namespace dfly::json

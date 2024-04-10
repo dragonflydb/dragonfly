@@ -16,12 +16,13 @@ class Journal;
 
 class DbSlice;
 class ServerFamily;
+class ClusterFamily;
 
 // Whole outgoing slots migration manager
 class OutgoingMigration : private ProtocolClient {
  public:
-  OutgoingMigration(std::string ip, uint16_t port, SlotRanges slots, uint32_t sync_id,
-                    Context::ErrHandler, ServerFamily* sf);
+  OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Context::ErrHandler err_handler,
+                    ServerFamily* sf);
   ~OutgoingMigration();
 
   // start migration process, sends INIT command to the target node
@@ -35,16 +36,24 @@ class OutgoingMigration : private ProtocolClient {
 
   MigrationState GetState() const;
 
+  // Temporary method, will be removed in one of the PR
+  // This method stop migration connections
+  void Ack();
+
   const std::string& GetHostIp() const {
-    return host_ip_;
+    return server().host;
   };
 
   uint16_t GetPort() const {
-    return port_;
+    return server().port;
   };
 
   const SlotRanges& GetSlots() const {
-    return slots_;
+    return migration_info_.slot_ranges;
+  }
+
+  const MigrationInfo GetMigrationInfo() const {
+    return migration_info_;
   }
 
  private:
@@ -55,16 +64,17 @@ class OutgoingMigration : private ProtocolClient {
   void SyncFb();
 
  private:
-  std::string host_ip_;
-  uint16_t port_;
-  uint32_t sync_id_;
-  SlotRanges slots_;
+  MigrationInfo migration_info_;
   Context cntx_;
   mutable util::fb2::Mutex flows_mu_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_ ABSL_GUARDED_BY(flows_mu_);
   ServerFamily* server_family_;
+  ClusterFamily* cf_;
 
   util::fb2::Fiber main_sync_fb_;
+
+  // Atomic only for simple read operation, writes - from the same thread, reads - from any thread
+  std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
 };
 
 }  // namespace dfly

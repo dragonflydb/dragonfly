@@ -124,7 +124,7 @@ struct CaptureVisitor {
   }
 
   void operator()(CapturingReplyBuilder::Error err) {
-    str = absl::StrCat(R"({"error": ")", err.first);
+    str = absl::StrCat(R"({"error": ")", err.first, "\"");
   }
 
   void operator()(facade::OpStatus status) {
@@ -132,7 +132,13 @@ struct CaptureVisitor {
   }
 
   void operator()(const CapturingReplyBuilder::StrArrPayload& sa) {
-    absl::StrAppend(&str, "not_implemented");
+    absl::StrAppend(&str, "[");
+    for (const auto& val : sa.arr) {
+      absl::StrAppend(&str, JsonEscape(val), ",");
+    }
+    if (sa.arr.size())
+      str.pop_back();
+    absl::StrAppend(&str, "]");
   }
 
   void operator()(unique_ptr<CapturingReplyBuilder::CollectionPayload> cp) {
@@ -152,7 +158,18 @@ struct CaptureVisitor {
   }
 
   void operator()(facade::SinkReplyBuilder::MGetResponse resp) {
-    absl::StrAppend(&str, "not_implemented");
+    absl::StrAppend(&str, "[");
+    for (const auto& val : resp.resp_arr) {
+      if (val) {
+        absl::StrAppend(&str, JsonEscape(val->value), ",");
+      } else {
+        absl::StrAppend(&str, "null,");
+      }
+    }
+
+    if (resp.resp_arr.size())
+      str.pop_back();
+    absl::StrAppend(&str, "]");
   }
 
   void operator()(const CapturingReplyBuilder::ScoredArray& sarr) {
@@ -187,7 +204,9 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
     }
   }
 
+  // TODO: to add a content-type/json check.
   if (!success) {
+    VLOG(1) << "Invalid body " << body;
     auto response = http::MakeStringResponse(h2::status::bad_request);
     http::SetMime(http::kTextMime, &response);
     response.body() = "Failed to parse json\r\n";

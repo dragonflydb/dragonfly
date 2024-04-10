@@ -22,9 +22,9 @@ class JournalWriter {
 
   // Write single entry to sink.
   void Write(const journal::Entry& entry);
+  void Write(uint64_t v);  // Write packed unsigned integer.
 
  private:
-  void Write(uint64_t v);           // Write packed unsigned integer.
   void Write(std::string_view sv);  // Write string.
 
   template <typename C>  // CmdArgList or ArgSlice.

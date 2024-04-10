@@ -375,43 +375,60 @@ TYPED_TEST(JsonPathTest, Mutate) {
   ASSERT_EQ(0, this->Parse("$[*]"));
   Path path = this->driver_.TakePath();
 
-  // Currently this code compiles only for JsonType.
-  if constexpr (std::is_same_v<TypeParam, JsonType>) {
-    TypeParam json = ValidJson<TypeParam>(R"([1, 2, 3, 5, 6])");
-    MutateCallback cb = [&](optional<string_view>, JsonType* val) {
-      int intval = val->as<int>();
-      *val = intval + 1;
-      return false;
-    };
+  TypeParam json = ValidJson<TypeParam>(R"([1, 2, 3, 5, 6])");
+  MutateCallback cb = [&](optional<string_view>, JsonType* val) {
+    int intval = val->as<int>();
+    *val = intval + 1;
+    return false;
+  };
 
+  vector<int> arr;
+
+  if constexpr (std::is_same_v<TypeParam, JsonType>) {
     MutatePath(path, cb, &json);
-    vector<int> arr;
+
     for (JsonType& el : json.array_range()) {
       arr.push_back(to_int(el));
     }
-    ASSERT_THAT(arr, ElementsAre(2, 3, 4, 6, 7));
+  } else {
+    flexbuffers::Builder fbb;
+    MutatePath(path, cb, json, &fbb);
+    FlatJson fj = flexbuffers::GetRoot(fbb.GetBuffer());
+    auto vec = fj.AsVector();
+    for (unsigned i = 0; i < vec.size(); ++i) {
+      arr.push_back(to_int(vec[i]));
+    }
+  }
+  ASSERT_THAT(arr, ElementsAre(2, 3, 4, 6, 7));
 
-    json = ValidJson<TypeParam>(R"(
-      {"a":[7], "inner": {"a": {"bool": true, "c": 42}}}
-    )");
-    ASSERT_EQ(0, this->Parse("$..a.*"));
-    path = this->driver_.TakePath();
-    MutatePath(
-        path,
-        [&](optional<string_view> key, JsonType* val) {
-          if (val->is_int64() && !key) {  // array element
-            *val = 42;
-            return false;
-          }
-          if (val->is_bool()) {
-            *val = false;
-            return false;
-          }
-          return true;
-        },
-        &json);
+  json = ValidJson<TypeParam>(R"(
+    {"a":[7], "inner": {"a": {"bool": true, "c": 42}}}
+  )");
+  ASSERT_EQ(0, this->Parse("$..a.*"));
+  path = this->driver_.TakePath();
 
-    ASSERT_EQ(R"({"a":[42],"inner":{"a":{"bool":false}}})", json.to_string());
+  MutateCallback cb2 = [&](optional<string_view> key, JsonType* val) {
+    if (val->is_int64() && !key) {  // array element
+      *val = 42;
+      return false;
+    }
+    if (val->is_bool()) {
+      *val = false;
+      return false;
+    }
+    return true;
+  };
+
+  auto expected = ValidJson<JsonType>(R"({"a":[42],"inner":{"a":{"bool":false}}})");
+  if constexpr (std::is_same_v<TypeParam, JsonType>) {
+    MutatePath(path, cb2, &json);
+
+    ASSERT_EQ(expected, json);
+  } else {
+    flexbuffers::Builder fbb;
+    MutatePath(path, cb2, json, &fbb);
+    FlatJson fj = flexbuffers::GetRoot(fbb.GetBuffer());
+    ASSERT_EQ(expected, FromFlat(fj));
   }
 }
 

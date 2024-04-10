@@ -114,7 +114,7 @@ void PFAdd(CmdArgList args, ConnectionContext* cntx) {
 OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.shard->db_slice();
 
-  OpResult<PrimeConstIterator> it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  auto it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
     string hll;
     string_view hll_view = it.value()->second.GetSlice(&hll);
@@ -147,8 +147,7 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
   try {
     vector<string> values;
     for (size_t i = 0; i < keys.size(); ++i) {
-      OpResult<PrimeConstIterator> it =
-          op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, keys[i], OBJ_STRING);
+      auto it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, keys[i], OBJ_STRING);
       if (it.ok()) {
         string hll;
         it.value()->second.GetString(&hll);

@@ -49,8 +49,7 @@ TEST_F(StringFamilyTest, SetGet) {
   EXPECT_THAT(Run({"get", "key3"}), ArgType(RespExpr::NIL));
 
   auto metrics = GetMetrics();
-  auto tc = metrics.coordinator_stats.tx_type_cnt;
-  EXPECT_EQ(7, tc[ServerState::QUICK] + tc[ServerState::INLINE]);
+  EXPECT_EQ(7, metrics.coordinator_stats.tx_normal_cnt);
   EXPECT_EQ(3, metrics.events.hits);
   EXPECT_EQ(1, metrics.events.misses);
   EXPECT_EQ(3, metrics.events.mutations);
@@ -198,6 +197,9 @@ TEST_F(StringFamilyTest, Set) {
 
   resp = Run({"set", "foo", "bar", "ex", "1"});
   ASSERT_THAT(resp, "OK");
+
+  ASSERT_THAT(Run({"sadd", "s1", "1"}), IntArg(1));
+  ASSERT_THAT(Run({"set", "s1", "2"}), "OK");
 }
 
 TEST_F(StringFamilyTest, SetHugeKey) {
@@ -778,6 +780,10 @@ TEST_F(StringFamilyTest, SetWithGetParam) {
   EXPECT_THAT(Run({"set", "key3", "not used", "xx", "get"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"set", "key2", "val3", "xx", "get"}), "val2");
   EXPECT_EQ(Run({"get", "key2"}), "val3");
+
+  EXPECT_THAT(Run({"sadd", "key4", "1"}), IntArg(1));
+  EXPECT_THAT(Run({"set", "key4", "2", "get"}), ErrArg("wrong kind of value"));
+  EXPECT_THAT(Run({"set", "key4", "2", "xx", "get"}), ErrArg("wrong kind of value"));
 }
 
 TEST_F(StringFamilyTest, SetWithHashtagsNoCluster) {

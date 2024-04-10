@@ -166,7 +166,13 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
 
   if (num_thread < pool->size()) {
     if (int(num_thread) != ProactorBase::me()->GetPoolIndex()) {
-      cntx->conn()->Migrate(pool->at(num_thread));
+      if (!cntx->conn()->Migrate(pool->at(num_thread))) {
+        // Listener::PreShutdown() triggered
+        if (cntx->conn()->socket()->IsOpen()) {
+          return rb->SendError(kInvalidState);
+        }
+        return;
+      }
     }
 
     return rb->SendOk();
@@ -222,8 +228,13 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   flow.conn = cntx->conn();
   flow.eof_token = eof_token;
   flow.version = replica_ptr->version;
-
-  cntx->conn()->Migrate(shard_set->pool()->at(flow_id));
+  if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+    // Listener::PreShutdown() triggered
+    if (cntx->conn()->socket()->IsOpen()) {
+      return rb->SendError(kInvalidState);
+    }
+    return;
+  }
   sf_->journal()->StartInThread();
 
   std::string_view sync_type = "FULL";
@@ -361,7 +372,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
-  facade::DispatchTracker tracker{sf_->GetListeners(), cntx->conn()};
+  facade::DispatchTracker tracker{sf_->GetNonPriviligedListeners(), cntx->conn()};
   shard_set->pool()->Await([&](unsigned index, auto* pb) {
     sf_->CancelBlockingOnThread();
     tracker.TrackOnThread();
@@ -370,7 +381,17 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (!tracker.Wait(timeout_dur)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
+
+    auto cb = [&](unsigned thread_index, util::Connection* conn) {
+      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+      LOG(INFO) << dcon->DebugInfo();
+    };
+
+    for (auto* listener : sf_->GetListeners()) {
+      listener->TraverseConnections(cb);
+    }
   }
+
   VLOG(1) << "AwaitCurrentDispatches done";
 
   // We have this guard to disable expirations: We don't want any writes to the journal after
@@ -503,7 +524,8 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
 
   if (shard != nullptr) {
     flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
-    flow->streamer->Start(flow->conn->socket());
+    bool send_lsn = flow->version >= DflyVersion::VER4;
+    flow->streamer->Start(flow->conn->socket(), send_lsn);
   }
 
   // Register cleanup.

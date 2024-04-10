@@ -620,7 +620,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
     add_res = std::move(*op_res);
   }
 
-  PrimeIterator& it = add_res.it;
+  auto& it = add_res.it;
 
   if (add_res.is_new) {
     stream* s = streamNew();
@@ -658,7 +658,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -805,7 +805,7 @@ OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
 
   vector<pair<string_view, streamID>> last_ids;
   for (string_view key : args) {
-    OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
+    auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
     if (!res_it) {
       if (res_it.status() == OpStatus::KEY_NOTFOUND) {
         continue;
@@ -867,7 +867,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ArgSlice& args, const Read
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
   const CompactObj& cobj = (*res_it)->second;
@@ -878,7 +878,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
 OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
                                          EngineShard* shard) {
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -1010,7 +1010,7 @@ void GetConsumers(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard,
                                int full, size_t count) {
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
+  auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -1073,7 +1073,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
 OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard* shard,
                                            string_view stream_name, string_view group_name) {
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeConstIterator> res_it = db_slice.FindReadOnly(db_cntx, stream_name, OBJ_STREAM);
+  auto res_it = db_slice.FindReadOnly(db_cntx, stream_name, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -2833,7 +2833,8 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
     return streamCompareID(&last_id, &sitem.group->last_id) > 0;
   };
 
-  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb), key_checker);
+  if (auto status = cntx->transaction->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked,
+                                                   &cntx->paused);
       status != OpStatus::OK)
     return rb->SendNullArray();
 

@@ -288,47 +288,40 @@ Test PUBSUB NUMSUB command.
 """
 
 
-async def test_pubsub_subcommand_for_numsub(async_client):
-    subs1 = [async_client.pubsub() for i in range(5)]
-    for s in subs1:
-        await s.subscribe("channel_name1")
-    result = await async_client.pubsub_numsub("channel_name1")
-    assert result[0][0] == "channel_name1" and result[0][1] == 5
-
-    for s in subs1:
-        await s.unsubscribe("channel_name1")
-    result = await async_client.pubsub_numsub("channel_name1")
-
-    retry = 5
-    for i in range(0, retry):
-        result = await async_client.pubsub_numsub("channel_name1")
-        if result[0][0] == "channel_name1" and result[0][1] == 0:
-            break
+async def test_pubsub_subcommand_for_numsub(async_client: aioredis.Redis):
+    async def resub(s: "aioredis.PubSub", sub: bool, chan: str):
+        if sub:
+            await s.subscribe(chan)
         else:
-            time.sleep(1)
+            await s.unsubscribe(chan)
+        # Wait for PUSH message to be parsed to make sure upadte was performed
+        await s.get_message(timeout=0.1)
 
-    assert result[0][0] == "channel_name1" and result[0][1] == 0
+    # Subscribe 5 times to chan1
+    subs1 = [async_client.pubsub() for i in range(5)]
+    await asyncio.gather(*(resub(s, True, "chan1") for s in subs1))
+    assert await async_client.pubsub_numsub("chan1") == [("chan1", 5)]
 
-    result = await async_client.pubsub_numsub()
-    assert len(result) == 0
+    # Unsubscribe all from chan1
+    await asyncio.gather(*(resub(s, False, "chan1") for s in subs1))
+
+    # Make sure numsub drops to 0
+    with async_timeout.timeout(1):
+        while (await async_client.pubsub_numsub("chan1"))[0][1] > 0:
+            await asyncio.sleep(0.05)
+
+    # Check empty numsub
+    assert await async_client.pubsub_numsub() == []
 
     subs2 = [async_client.pubsub() for i in range(5)]
-    for s in subs2:
-        await s.subscribe("channel_name2")
+    await asyncio.gather(*(resub(s, True, "chan2") for s in subs2))
 
     subs3 = [async_client.pubsub() for i in range(10)]
-    for s in subs3:
-        await s.subscribe("channel_name3")
+    await asyncio.gather(*(resub(s, True, "chan3") for s in subs3))
 
-    result = await async_client.pubsub_numsub("channel_name2", "channel_name3")
-    assert result[0][0] == "channel_name2" and result[0][1] == 5
-    assert result[1][0] == "channel_name3" and result[1][1] == 10
+    assert await async_client.pubsub_numsub("chan2", "chan3") == [("chan2", 5), ("chan3", 10)]
 
-    for s in subs2:
-        await s.unsubscribe("channel_name2")
-
-    for s in subs3:
-        await s.unsubscribe("channel_name3")
+    await asyncio.gather(*(s.unsubscribe() for s in subs2 + subs3))
 
 
 """
@@ -698,6 +691,7 @@ async def test_nested_client_pause(async_client: aioredis.Redis):
     await p3
 
 
+@dfly_args({"proactor_threads": "4"})
 async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     """
     1. Check client pause success when blocking transaction is running
@@ -705,14 +699,19 @@ async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     3. once puased is finished lpush will run and blpop will pop the pushed value
     """
 
-    async def blocking_command():
-        res = await async_client.execute_command("blpop key 2")
-        assert res == ["key", "value"]
+    async def blpop_command():
+        res = await async_client.execute_command("blpop dest7 10")
+        assert res == ["dest7", "value"]
+
+    async def brpoplpush_command():
+        res = await async_client.execute_command("brpoplpush src dest7 2")
+        assert res == "value"
 
     async def lpush_command():
-        await async_client.execute_command("lpush key value")
+        await async_client.execute_command("lpush src value")
 
-    blocking = asyncio.create_task(blocking_command())
+    blpop = asyncio.create_task(blpop_command())
+    brpoplpush = asyncio.create_task(brpoplpush_command())
     await asyncio.sleep(0.1)
 
     res = await async_client.execute_command("client pause 1000")
@@ -722,7 +721,8 @@ async def test_blocking_command_client_pause(async_client: aioredis.Redis):
     assert not lpush.done()
 
     await lpush
-    await blocking
+    await brpoplpush
+    await blpop
 
 
 async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Redis):
@@ -746,24 +746,3 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
 
     assert not all.done()
     await all
-
-
-@dfly_args({"proactor_threads": "1", "expose_http_api": "true"})
-async def test_http(df_server: DflyInstance):
-    client = df_server.client()
-    async with ClientSession() as session:
-        async with session.get(f"http://localhost:{df_server.port}") as resp:
-            assert resp.status == 200
-
-        body = '["set", "foo", "МайяХилли", "ex", "100"]'
-        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
-            assert resp.status == 200
-            text = await resp.text()
-            assert text.strip() == '{"result":"OK"}'
-
-        body = '["get", "foo"]'
-        async with session.post(f"http://localhost:{df_server.port}/api", data=body) as resp:
-            assert resp.status == 200
-            text = await resp.text()
-            assert text.strip() == '{"result":"МайяХилли"}'
-    assert await client.ttl("foo") > 0

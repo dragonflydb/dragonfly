@@ -51,23 +51,30 @@ void Bloom::Init(uint64_t entries, double fp_prob, PMR_NS::memory_resource* heap
   CHECK(bf_ == nullptr);
   CHECK(fp_prob > 0 && fp_prob < 1);
 
-  if (entries < 1024)
-    entries = 1024;
-
+  if (fp_prob > 0.5)
+    fp_prob = 0.5;
   double bpe = BPE(fp_prob);
 
   hash_cnt_ = ceil(M_LN2 * bpe);
 
   uint64_t bits = uint64_t(ceil(entries * bpe));
-  bits = absl::bit_ceil(bits);  // make it power of 2.
-  if (bits < 1024) {
-    bits = 1024;
+  if (bits < 512) {
+    bits = 512;
   }
+  bits = absl::bit_ceil(bits);  // make it power of 2.
 
   uint64_t length = bits / 8;
   bf_ = (uint8_t*)heap->allocate(length);
   memset(bf_, 0, length);
   bit_log_ = absl::countr_zero(bits);
+}
+
+void Bloom::Init(uint8_t* blob, size_t len, unsigned hash_cnt) {
+  DCHECK_EQ(len * 8, absl::bit_ceil(len * 8));  // must be power of two.
+  CHECK(bf_ == nullptr);
+  hash_cnt_ = hash_cnt;
+  bf_ = blob;
+  bit_log_ = absl::countr_zero(len * 8);
 }
 
 void Bloom::Destroy(PMR_NS::memory_resource* resource) {
@@ -111,6 +118,8 @@ bool Bloom::Add(const uint64_t fp[2]) {
 }
 
 size_t Bloom::Capacity(double fp_prob) const {
+  if (fp_prob > 0.5)
+    fp_prob = 0.5;
   double bpe = BPE(fp_prob);
   return floor(bitlen() / bpe);
 }
@@ -140,6 +149,16 @@ SBF::SBF(uint64_t initial_capacity, double fp_prob, double grow_factor, PMR_NS::
   max_capacity_ = filters_.front().Capacity(fp_prob_);
 }
 
+SBF::SBF(double grow_factor, double fp_prob, size_t max_capacity, size_t prev_size,
+         size_t current_size, PMR_NS::memory_resource* mr)
+    : filters_(mr),
+      grow_factor_(grow_factor),
+      fp_prob_(fp_prob),
+      prev_size_(prev_size),
+      current_size_(current_size),
+      max_capacity_(max_capacity) {
+}
+
 SBF::~SBF() {
   PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
   for (auto& f : filters_)
@@ -155,6 +174,13 @@ SBF& SBF::operator=(SBF&& src) {
   max_capacity_ = src.max_capacity_;
 
   return *this;
+}
+
+void SBF::AddFilter(const std::string& blob, unsigned hash_cnt) {
+  PMR_NS::memory_resource* mr = filters_.get_allocator().resource();
+  uint8_t* ptr = (uint8_t*)mr->allocate(blob.size(), 1);
+  memcpy(ptr, blob.data(), blob.size());
+  filters_.emplace_back().Init(ptr, blob.size(), hash_cnt);
 }
 
 bool SBF::Add(std::string_view str) {
@@ -195,6 +221,16 @@ bool SBF::Exists(std::string_view str) const {
   auto exists = [fp](const Bloom& b) { return b.Exists(fp); };
 
   return any_of(filters_.crbegin(), filters_.crend(), exists);
+}
+
+size_t SBF::MallocUsed() const {
+  size_t res = filters_.capacity() * sizeof(Bloom);
+  for (const auto& b : filters_) {
+    res += (b.bitlen() / 8);
+  }
+  res += sizeof(SBF);
+
+  return res;
 }
 
 }  // namespace dfly

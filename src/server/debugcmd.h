@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/slot_set.h"
 #include "server/conn_context.h"
 
 namespace dfly {

@@ -13,7 +13,7 @@
 
 using namespace std;
 using namespace testing;
-using Node = dfly::ClusterConfig::Node;
+using Node = dfly::ClusterNodeInfo;
 
 namespace dfly {
 
@@ -23,12 +23,6 @@ MATCHER_P(NodeMatches, expected, "") {
 
 class ClusterConfigTest : public ::testing::Test {
  protected:
-  JsonType ParseJson(string_view json_str) {
-    optional<JsonType> opt_json = JsonFromString(json_str, PMR_NS::get_default_resource());
-    CHECK(opt_json.has_value());
-    return opt_json.value();
-  }
-
   const string kMyId = "my-id";
 };
 
@@ -50,7 +44,7 @@ TEST_F(ClusterConfigTest, KeyTagTest) {
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ClusterConfig::ClusterShards{}), nullptr);
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ClusterShardInfos{}), nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
@@ -154,7 +148,7 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRanges) {
   // Note that slot_ranges is not an object
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": "0,16383",
@@ -165,13 +159,13 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRanges) {
                     },
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRangeStart) {
   // Note that slot_ranges.start is not a number
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -187,13 +181,13 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRangeStart) {
                     },
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRangeEnd) {
   // Note that slot_ranges.end is not a number
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -209,12 +203,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRangeEnd) {
                     },
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMissingMaster) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -224,13 +218,13 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMissingMaster) {
                       }
                     ]
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMasterNotObject) {
   // Note that master is not an object
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -242,12 +236,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMasterNotObject) {
                     "master": 123,
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingId) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -262,12 +256,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingId) {
                     },
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingIp) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -282,12 +276,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingIp) {
                     },
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingPort) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -302,12 +296,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingPort) {
                     },
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMissingReplicas) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -322,12 +316,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMissingReplicas) {
                       "port": 8000
                     }
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingMasterId) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -357,12 +351,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingMasterId) {
                     },
                     "replicas": []
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingReplicaId) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -389,12 +383,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingReplicaId) {
                       }
                     ]
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingMasterAndReplicaId) {
-  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, ParseJson(R"json(
+  EXPECT_EQ(ClusterConfig::CreateFromConfig(kMyId, R"json(
                 [
                   {
                     "slot_ranges": [
@@ -416,7 +410,7 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingMasterAndReplicaId) {
                       }
                     ]
                   }
-                ])json")),
+                ])json"),
             nullptr);
 }
 
@@ -428,7 +422,7 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
       "master": { "id": "id0", "ip": "localhost", "port": 3000 },
       "replicas": [],
       "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
-                     , "ip": "127.0.0.1", "port" : 9001, "target_id": "id1" }]
+                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
     },
     {
       "slot_ranges": [ { "start": 8001, "end": 16383 } ],
@@ -437,43 +431,82 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
     }
   ])json";
 
-  auto config1 = ClusterConfig::CreateFromConfig("id0", ParseJson(config_str));
+  auto config1 = ClusterConfig::CreateFromConfig("id0", config_str);
   EXPECT_EQ(
-      config1->GetOutgoingMigrations(),
-      (std::vector<ClusterConfig::MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+      config1->GetNewOutgoingMigrations(nullptr),
+      (std::vector<MigrationInfo>{
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
 
-  EXPECT_TRUE(config1->GetIncomingMigrations().empty());
+  EXPECT_TRUE(config1->GetFinishedOutgoingMigrations(nullptr).empty());
+  EXPECT_TRUE(config1->GetNewIncomingMigrations(nullptr).empty());
+  EXPECT_TRUE(config1->GetFinishedIncomingMigrations(nullptr).empty());
 
-  auto config2 = ClusterConfig::CreateFromConfig("id1", ParseJson(config_str));
+  auto config2 = ClusterConfig::CreateFromConfig("id1", config_str);
   EXPECT_EQ(
-      config2->GetIncomingMigrations(),
-      (std::vector<ClusterConfig::MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .target_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+      config2->GetNewIncomingMigrations(nullptr),
+      (std::vector<MigrationInfo>{
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id0", .ip = "127.0.0.1", .port = 9001}}));
 
-  EXPECT_TRUE(config2->GetOutgoingMigrations().empty());
+  EXPECT_TRUE(config2->GetFinishedOutgoingMigrations(nullptr).empty());
+  EXPECT_TRUE(config2->GetNewOutgoingMigrations(nullptr).empty());
+  EXPECT_TRUE(config2->GetFinishedIncomingMigrations(nullptr).empty());
 
-  auto config3 = ClusterConfig::CreateFromConfig("id2", ParseJson(config_str));
-  EXPECT_TRUE(config3->GetIncomingMigrations().empty());
-  EXPECT_TRUE(config3->GetOutgoingMigrations().empty());
+  auto config3 = ClusterConfig::CreateFromConfig("id2", config_str);
+  EXPECT_TRUE(config3->GetFinishedOutgoingMigrations(nullptr).empty());
+  EXPECT_TRUE(config3->GetNewIncomingMigrations(nullptr).empty());
+  EXPECT_TRUE(config3->GetFinishedIncomingMigrations(nullptr).empty());
+  EXPECT_TRUE(config3->GetNewOutgoingMigrations(nullptr).empty());
+
+  const auto* config_str2 = R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 6999 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000 },
+      "replicas": []
+    },
+    {
+      "slot_ranges": [ { "start": 7000, "end": 16383 } ],
+      "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    }
+  ])json";
+
+  auto config4 = ClusterConfig::CreateFromConfig("id0", config_str2);
+  auto config5 = ClusterConfig::CreateFromConfig("id1", config_str2);
+
+  EXPECT_EQ(
+      config4->GetFinishedOutgoingMigrations(config1),
+      (std::vector<MigrationInfo>{
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+  EXPECT_TRUE(config4->GetNewIncomingMigrations(config1).empty());
+  EXPECT_TRUE(config4->GetFinishedIncomingMigrations(config1).empty());
+  EXPECT_TRUE(config4->GetNewOutgoingMigrations(config1).empty());
+
+  EXPECT_EQ(
+      config5->GetFinishedIncomingMigrations(config2),
+      (std::vector<MigrationInfo>{
+          {.slot_ranges = {{7000, 8000}}, .node_id = "id0", .ip = "127.0.0.1", .port = 9001}}));
+  EXPECT_TRUE(config5->GetNewIncomingMigrations(config2).empty());
+  EXPECT_TRUE(config5->GetFinishedOutgoingMigrations(config2).empty());
+  EXPECT_TRUE(config5->GetNewOutgoingMigrations(config2).empty());
 }
 
 TEST_F(ClusterConfigTest, InvalidConfigMigrationsWithoutIP) {
-  auto config = ClusterConfig::CreateFromConfig("id0", ParseJson(R"json(
+  auto config = ClusterConfig::CreateFromConfig("id0", R"json(
   [
     {
       "slot_ranges": [ { "start": 0, "end": 8000 } ],
       "master": { "id": "id0", "ip": "localhost", "port": 3000 },
       "replicas": [],
       "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
-                     , "port" : 9001, "target_id": "id1" }]
+                     , "port" : 9001, "node_id": "id1" }]
     },
     {
       "slot_ranges": [ { "start": 8001, "end": 16383 } ],
       "master": { "id": "id1", "ip": "localhost", "port": 3001 },
       "replicas": []
     }
-  ])json"));
+  ])json");
 
   EXPECT_EQ(config, nullptr);
 }

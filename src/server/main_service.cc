@@ -914,7 +914,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
-    ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);
+    ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(*keys_slot);
     return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
   }
 
@@ -1122,7 +1122,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
               << args << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
-  if (!dispatching_in_multi) {  // Don't interrupt running multi commands
+  // Don't interrupt running multi commands or admin connections.
+  if (!dispatching_in_multi && (!cntx->conn() || !cntx->conn()->IsPrivileged())) {
     bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;

@@ -168,7 +168,9 @@ class DflyInstance:
                 proc.kill()
             else:
                 proc.terminate()
-            proc.communicate(timeout=15)
+            if proc.wait(timeout=15) < 0 and not kill:
+                raise Exception("Dragfonfly did not terminate gracefully")
+
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
             proc.send_signal(signal.SIGUSR1)
@@ -208,6 +210,7 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
+                self.proc = None
                 raise DflyStartException(f"Failed to start instance, return code {return_code}")
 
     def __getitem__(self, k):

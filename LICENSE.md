@@ -1,12 +1,12 @@
-Dragonfly Business Source License 1.1
+# Dragonfly Business Source License 1.1
 
-<u>License</u>: BSL 1.1
+<u>License</u>: Business Source License 1.1 [BSL 1.1](https://spdx.org/licenses/BUSL-1.1.html)
 
 <u>Licensor</u>: DragonflyDB, Ltd.
 
 <u>Licensed Work</u>: Dragonfly including the software components, or any portion of them, and any modification.
 
-<u>Change Date</u>: March 15, 2028
+<u>Change Date</u>: September 1, 2028
 
 <u>Change License</u>: [Apache License, Version
 2.0](https://www.apache.org/licenses/LICENSE-2.0), as published by the
@@ -22,7 +22,7 @@ derivative works, redistribute, and make non-production use of the
 Licensed Work. The Licensor may make an Additional Use Grant, above,
 permitting limited production use.
 
-Effective on the Change Date, or the fifth anniversary of the first
+Effective on the Change Date, or the forth anniversary of the first
 publicly available distribution of a specific version of the Licensed
 Work under this License, whichever comes first, the Licensor hereby
 grants you rights under the terms of the Change License, and the rights

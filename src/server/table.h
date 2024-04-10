@@ -11,7 +11,9 @@
 
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
+#include "core/string_or_view.h"
 #include "server/cluster/cluster_config.h"
+#include "server/cluster/slot_set.h"
 #include "server/conn_context.h"
 #include "server/detail/table.h"
 #include "server/top_keys.h"
@@ -99,25 +101,7 @@ class LockTable {
   }
 
  private:
-  struct Key {
-    operator std::string_view() const {
-      return visit([](const auto& s) -> std::string_view { return s; }, val_);
-    }
-
-    bool operator==(const Key& o) const {
-      return *this == std::string_view(o);
-    }
-
-    friend std::ostream& operator<<(std::ostream& o, const Key& key) {
-      return o << std::string_view(key);
-    }
-
-    // If the key is backed by a string_view, replace it with a string with the same value
-    void MakeOwned() const;
-
-    mutable std::variant<std::string_view, std::string> val_;
-  };
-
+  using Key = StringOrView;
   absl::flat_hash_map<Key, IntentLock> locks_;
 };
 

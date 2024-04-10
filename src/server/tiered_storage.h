@@ -3,6 +3,9 @@
 //
 #pragma once
 
+#include <memory>
+
+#include "util/fibers/future.h"
 #ifdef __linux__
 
 #include <absl/container/flat_hash_map.h>
@@ -15,6 +18,38 @@
 namespace dfly {
 
 class DbSlice;
+
+namespace tiering {
+class SmallBins;
+};
+
+// Manages offloaded values
+class TieredStorageV2 {
+  class ShardOpManager;
+
+ public:
+  explicit TieredStorageV2(DbSlice* db_slice);
+  ~TieredStorageV2();  // drop forward declared unique_ptrs
+
+  TieredStorageV2(TieredStorageV2&& other) = delete;
+  TieredStorageV2(const TieredStorageV2& other) = delete;
+
+  std::error_code Open(std::string_view path);
+  void Close();
+
+  // Read offloaded value. It must be of external type
+  util::fb2::Future<std::string> Read(std::string_view key, const PrimeValue& value);
+
+  // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
+  void Stash(std::string_view key, PrimeValue* value);
+
+  // Delete value. Must either have pending IO or be offloaded (of external type)
+  void Delete(std::string_view key, PrimeValue* value);
+
+ private:
+  std::unique_ptr<ShardOpManager> op_manager_;
+  std::unique_ptr<tiering::SmallBins> bins_;
+};
 
 class TieredStorage {
  public:

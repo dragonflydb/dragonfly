@@ -6,6 +6,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/cluster/cluster_config.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(bool, enable_top_keys_tracking, false,
@@ -57,11 +58,6 @@ SlotStats& SlotStats::operator+=(const SlotStats& o) {
   return *this;
 }
 
-void LockTable::Key::MakeOwned() const {
-  if (std::holds_alternative<std::string_view>(val_))
-    val_ = std::string{std::get<std::string_view>(val_)};
-}
-
 size_t LockTable::Size() const {
   return locks_.size();
 }
@@ -69,7 +65,7 @@ size_t LockTable::Size() const {
 std::optional<const IntentLock> LockTable::Find(std::string_view key) const {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
 
-  if (auto it = locks_.find(Key{key}); it != locks_.end())
+  if (auto it = locks_.find(Key::FromView(key)); it != locks_.end())
     return it->second;
   return std::nullopt;
 }
@@ -77,9 +73,9 @@ std::optional<const IntentLock> LockTable::Find(std::string_view key) const {
 bool LockTable::Acquire(std::string_view key, IntentLock::Mode mode) {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
 
-  auto [it, inserted] = locks_.try_emplace(Key{key});
-  if (!inserted)            // If more than one transaction refers to a key
-    it->first.MakeOwned();  // we must fall back to using a self-contained string
+  auto [it, inserted] = locks_.try_emplace(Key::FromView(key));
+  if (!inserted)                              // If more than one transaction refers to a key
+    const_cast<Key&>(it->first).MakeOwned();  // we must fall back to using a self-contained string
 
   return it->second.Acquire(mode);
 }
@@ -87,7 +83,7 @@ bool LockTable::Acquire(std::string_view key, IntentLock::Mode mode) {
 void LockTable::Release(std::string_view key, IntentLock::Mode mode) {
   DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
 
-  auto it = locks_.find(Key{key});
+  auto it = locks_.find(Key::FromView(key));
   CHECK(it != locks_.end()) << key;
 
   it->second.Release(mode);

@@ -418,8 +418,7 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
   return rb->SendVerbatimString(result);
 }
 
-void ClientPauseCmd(CmdArgList args, absl::Span<facade::Listener*> listeners,
-                    ConnectionContext* cntx) {
+void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, ConnectionContext* cntx) {
   CmdArgParser parser(args);
 
   auto timeout = parser.Next<uint64_t>();
@@ -604,15 +603,15 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
 
 }  // namespace
 
-std::optional<fb2::Fiber> Pause(absl::Span<facade::Listener* const> listeners,
-                                facade::Connection* conn, ClientPause pause_state,
+std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, facade::Connection* conn,
+                                ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress) {
   // Track connections and set pause state to be able to wait untill all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
   // state after waking from blocking so if the trasaction was waken by another running
   //    command that did not pause on the new state yet we will pause after waking up.
-  DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
+  DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
   shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
     // Commands don't suspend before checking the pause state, so
@@ -1221,18 +1220,6 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     }
   }
 
-  const auto& tc = m.coordinator_stats.tx_type_cnt;
-  AppendMetricHeader("transaction_types_total", "Transaction counts by their types",
-                     MetricType::COUNTER, &resp->body());
-
-  const char* kTxTypeNames[ServerState::NUM_TX_TYPES] = {"global", "normal", "quick", "inline"};
-  for (unsigned type = 0; type < ServerState::NUM_TX_TYPES; ++type) {
-    if (tc[type] > 0) {
-      AppendMetricValue("transaction_types_total", tc[type], {"type"}, {kTxTypeNames[type]},
-                        &resp->body());
-    }
-  }
-
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
@@ -1272,6 +1259,17 @@ std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
     return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
   }
   return nullopt;
+}
+
+vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
+  std::vector<facade::Listener*> listeners;
+  listeners.reserve(listeners.size());
+  for (facade::Listener* listener : listeners_) {
+    if (!listener->IsPrivilegedInterface()) {
+      listeners.push_back(listener);
+    }
+  }
+  return listeners;
 }
 
 bool ServerFamily::HasReplica() const {
@@ -1577,7 +1575,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPauseCmd(sub_args, absl::MakeSpan(listeners_), cntx);
+    return ClientPauseCmd(sub_args, GetNonPriviligedListeners(), cntx);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, cntx);
   } else if (sub_cmd == "KILL") {
@@ -2105,24 +2103,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TRANSACTION", true)) {
-    const auto& tc = m.coordinator_stats.tx_type_cnt;
-    string val = StrCat("global=", tc[ServerState::GLOBAL], ",normal=", tc[ServerState::NORMAL],
-                        ",quick=", tc[ServerState::QUICK], ",inline=", tc[ServerState::INLINE]);
-    append("tx_type_cnt", val);
-    val.clear();
-    for (unsigned width = 0; width < shard_set->size(); ++width) {
-      if (m.coordinator_stats.tx_width_freq_arr[width] > 0) {
-        absl::StrAppend(&val, "w", width + 1, "=", m.coordinator_stats.tx_width_freq_arr[width],
-                        ",");
-      }
-    }
-    if (!val.empty()) {
-      val.pop_back();  // last comma.
-      append("tx_width_freq", val);
-    }
+    append("tx_shard_immediate_total", m.shard_stats.tx_immediate_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
+
+    append("tx_global_total", m.coordinator_stats.tx_global_cnt);
+    append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
+    append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
+
+    append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
+
     append("eval_io_coordination_total", m.coordinator_stats.eval_io_coordination_cnt);
     append("eval_shardlocal_coordination_total",
            m.coordinator_stats.eval_shardlocal_coordination_cnt);
