@@ -33,7 +33,7 @@ ABSL_FLAG(
     bool, lua_auto_async, false,
     "If enabled, call/pcall with discarded values are automatically replaced with acall/apcall.");
 
-ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, true,
+ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
           "If enabled, when a script that is not allowed to run with undeclared keys is trying to "
           "access undeclared keys, automaticaly set the script flag to be able to run with "
           "undeclared key.");

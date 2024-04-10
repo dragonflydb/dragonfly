@@ -19,6 +19,7 @@
 ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
+ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
 ABSL_DECLARE_FLAG(std::string, default_lua_flags);
 
 namespace dfly {
@@ -375,6 +376,7 @@ TEST_F(MultiTest, Eval) {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
     return;
   }
+  absl::SetFlag(&FLAGS_lua_allow_undeclared_auto_correct, true);
 
   RespExpr resp;
 
