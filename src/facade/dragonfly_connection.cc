@@ -801,7 +801,14 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
       return make_unexpected(recv_sz.error());
     }
     io_buf_.CommitWrite(*recv_sz);
-    string_view ib = ToSV(io_buf_.InputBuffer().subspan(last_len));
+    string_view ib = ToSV(io_buf_.InputBuffer());
+    if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
+      // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
+      // Reject the connection.
+      return make_unexpected(make_error_code(errc::protocol_not_supported));
+    }
+
+    ib = ib.substr(last_len);
     size_t pos = ib.find('\n');
     if (pos != string_view::npos) {
       ib = ToSV(io_buf_.InputBuffer().first(last_len + pos));
