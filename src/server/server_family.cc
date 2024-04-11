@@ -2466,6 +2466,8 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ReplicaOfInternal(args_list, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
+// REPLTAKEOVER <seconds> [SAVE]
+// SAVE is used only by tests.
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "ReplTakeOver start";
 
@@ -2473,9 +2475,9 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgParser parser{args};
 
-  auto timeout_sec = parser.Next<float>();
-  if (timeout_sec < 0) {
-    return cntx->SendError("timeout is negative");
+  auto timeout_sec = parser.Next<unsigned>();
+  if (timeout_sec <= 0) {
+    return cntx->SendError("timeout is non-positive");
   }
 
   bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
@@ -2486,8 +2488,10 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
+  // We return OK, to support idempotency semantics.
   if (ServerState::tlocal()->is_master)
-    return cntx->SendError("Already a master instance");
+    return cntx->SendOk();
+
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 

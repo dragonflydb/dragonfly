@@ -100,6 +100,32 @@ struct TransactionGuard {
   Transaction* t;
 };
 
+OpStatus WaitReplicaFlowToCatchup(absl::Time end_time, shared_ptr<DflyCmd::ReplicaInfo> replica,
+                                  EngineShard* shard) {
+  // We don't want any writes to the journal after we send the `PING`,
+  // and expirations could ruin that.
+  shard->db_slice().SetExpireAllowed(false);
+  shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
+
+  FlowInfo* flow = &replica->flows[shard->shard_id()];
+  while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
+    if (absl::Now() > end_time) {
+      LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
+                   << ":" << replica->listening_port << ", last acked: " << flow->last_acked_lsn
+                   << ", expecting " << shard->journal()->GetLsn();
+      return OpStatus::TIMED_OUT;
+    }
+    if (replica->cntx.IsCancelled()) {
+      return OpStatus::CANCELLED;
+    }
+    VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
+            << " master lsn:" << shard->journal()->GetLsn();
+    ThisFiber::SleepFor(1ms);
+  }
+
+  return OpStatus::OK;
+}
+
 }  // namespace
 
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
@@ -336,16 +362,16 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
-// DFLY TAKEOVER [timeout_sec] [SAVE]
-// timeout_sec - number of seconds to wait for TAKEOVER to converge. A float.
-// SAVE if create a snapshot before shutting down.
+// DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>
+// timeout_sec - number of seconds to wait for TAKEOVER to converge.
+// SAVE option is used only by tests.
 void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   CmdArgParser parser{args};
   parser.Next();
-  float timeout = parser.Next<float>();
-  if (timeout < 0) {
-    return cntx->SendError("timeout is negative");
+  float timeout = std::ceil(parser.Next<float>());
+  if (timeout <= 0) {
+    return cntx->SendError("timeout is not positive");
   }
 
   bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
@@ -370,7 +396,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
 
   absl::Duration timeout_dur = absl::Seconds(timeout);
-  absl::Time start = absl::Now();
+  absl::Time end_time = absl::Now() + timeout_dur;
   AggregateStatus status;
 
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
@@ -397,12 +423,6 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "AwaitCurrentDispatches done";
 
-  // We have this guard to disable expirations: We don't want any writes to the journal after
-  // we send the `PING`, and expirations could ruin that.
-  shard_set->RunBriefInParallel(
-      [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(false); });
-  VLOG(2) << "Disable expiration";
-
   absl::Cleanup([] {
     shard_set->RunBriefInParallel(
         [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
@@ -410,28 +430,8 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   });
 
   if (*status == OpStatus::OK) {
-    auto cb = [&cntx = replica_ptr->cntx, replica_ptr = replica_ptr, timeout_dur, start,
-               &status](EngineShard* shard) {
-      FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
-
-      shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
-      while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
-        if (absl::Now() - start > timeout_dur) {
-          LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: "
-                       << replica_ptr->address << ":" << replica_ptr->listening_port
-                       << ", last acked: " << flow->last_acked_lsn << ", expecting "
-                       << shard->journal()->GetLsn();
-          status = OpStatus::TIMED_OUT;
-          return;
-        }
-        if (cntx.IsCancelled()) {
-          status = OpStatus::CANCELLED;
-          return;
-        }
-        VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
-                << " master lsn:" << shard->journal()->GetLsn();
-        ThisFiber::SleepFor(1ms);
-      }
+    auto cb = [replica_ptr = std::move(replica_ptr), end_time, &status](EngineShard* shard) {
+      status = WaitReplicaFlowToCatchup(end_time, std::move(replica_ptr), shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
   }
