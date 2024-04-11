@@ -746,6 +746,7 @@ bool Interpreter::AddInternal(const char* f_id, string_view body, string* error)
   return true;
 }
 
+// Stack is cleaned for us, we can leave it dirty
 bool Interpreter::IsTableSafe() const {
   auto fres = FetchKey(lua_, "err");
   if (fres && *fres == LUA_TSTRING) {
@@ -757,40 +758,34 @@ bool Interpreter::IsTableSafe() const {
     return true;
   }
 
-  vector<pair<unsigned, unsigned>> lens;
-  unsigned len = lua_rawlen(lua_, -1);
-  unsigned i = 0;
+  // Copy root table because we remove it upon finishing traveral
+  lua_pushnil(lua_);
+  lua_copy(lua_, -2, -1);
 
-  // implement dfs traversal
-  while (true) {
-    while (i < len) {
-      DVLOG(1) << "Stack " << lua_gettop(lua_) << "/" << i << "/" << len;
-      int t = lua_rawgeti(lua_, -1, i + 1);  // push table element
-      if (t == LUA_TTABLE) {
-        if (lens.size() >= 127)  // reached depth 128
-          return false;
+  int depth = 1;
+  lua_pushnil(lua_);
 
-        CHECK(lua_checkstack(lua_, 1));
-        lens.emplace_back(i + 1, len);  // save the parent state.
+  // DFS based on lua stack: [parent-table] [parent-key] [parent-value = table] [key]
+  while (depth > 0) {
+    if (lua_checkstack(lua_, 3) == 0 || depth > 128)
+      return false;
 
-        // reset to iterate on the next table.
-        i = 0;
-        len = lua_rawlen(lua_, -1);
-      } else {
-        lua_pop(lua_, 1);  // pop table element
-        ++i;
-      }
+    bool interrupted = false;
+    for (; lua_next(lua_, -2) != 0; lua_pop(lua_, 1)) {
+      if (lua_type(lua_, -1) != LUA_TTABLE)
+        continue;
+
+      depth++;
+      lua_pushnil(lua_);
+      interrupted = true;
+      break;
     }
 
-    if (lens.empty())  // exit criteria
-      break;
-
-    // unwind to the state before we went down the stack.
-    tie(i, len) = lens.back();
-    lens.pop_back();
-
-    lua_pop(lua_, 1);
-  };
+    if (!interrupted) {
+      lua_pop(lua_, 1);
+      depth--;
+    }
+  }
 
   return true;
 }
