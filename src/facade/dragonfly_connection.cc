@@ -605,6 +605,7 @@ void Connection::HandleRequests() {
     DCHECK_EQ(res, 0);
   }
 
+  stats_ = &tl_facade_stats->conn_stats;
   auto remote_ep = RemoteEndpointStr();
 
   FiberSocketBase* peer = socket_.get();
@@ -654,7 +655,6 @@ void Connection::HandleRequests() {
   if (http_res) {
     cc_.reset(service_->CreateContext(peer, this));
     if (*http_res) {
-      stats_ = &tl_facade_stats->conn_stats;
       VLOG(1) << "HTTP1.1 identified";
       is_http_ = true;
       HttpConnection http_conn{http_listener_};
@@ -820,8 +820,6 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 }
 
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
-  stats_ = &tl_facade_stats->conn_stats;
-
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
