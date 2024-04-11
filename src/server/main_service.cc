@@ -60,7 +60,6 @@ extern "C" {
 
 using namespace std;
 using facade::ErrorReply;
-using dfly::operator""_KB;
 
 ABSL_FLAG(int32_t, port, 6379,
           "Redis port. 0 disables the port, -1 will bind on a random available port.");
@@ -78,7 +77,7 @@ ABSL_FLAG(bool, multi_exec_squash, true,
 ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
-ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
+ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,

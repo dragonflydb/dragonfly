@@ -21,6 +21,7 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "server/tiering/common.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 #include "util/varz.h"
@@ -67,6 +68,8 @@ ABSL_FLAG(string, shard_round_robin_prefix, "",
           "cluster mode is enabled.");
 
 namespace dfly {
+
+using namespace tiering::literals;
 
 using namespace util;
 using absl::GetFlag;

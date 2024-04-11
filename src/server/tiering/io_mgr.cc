@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/io_mgr.h"
+#include "server/tiering/io_mgr.h"
 
 #include <fcntl.h>
 #include <mimalloc.h>
@@ -10,11 +10,12 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
+#include "server/tiering/common.h"
 #include "util/fibers/uring_proactor.h"
 
 ABSL_FLAG(bool, backing_file_direct, false, "If true uses O_DIRECT to open backing files");
 
-namespace dfly {
+namespace dfly::tiering {
 
 using namespace std;
 using namespace util;
@@ -127,12 +128,12 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
   DCHECK(!dest.empty());
 
   if (absl::GetFlag(FLAGS_backing_file_direct)) {
-    size_t read_offs = offset & ~4095ULL;
-    size_t end_range = alignup(offset + dest.size(), 4096);
+    size_t read_offs = offset & ~(kPageSize - 1);
+    size_t end_range = alignup(offset + dest.size(), kPageSize);
     size_t space_needed = end_range - read_offs;
-    DCHECK_EQ(0u, space_needed % 4096);
+    DCHECK_EQ(0u, space_needed % kPageSize);
 
-    uint8_t* space = (uint8_t*)mi_malloc_aligned(space_needed, 4096);
+    uint8_t* space = (uint8_t*)mi_malloc_aligned(space_needed, kPageSize);
     iovec v{.iov_base = space, .iov_len = space_needed};
     uint64_t from_ts = ProactorBase::GetMonotonicTimeNs();
     error_code ec = backing_file_->Read(&v, 1, read_offs, 0);
@@ -147,7 +148,7 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
     }
 
     memcpy(dest.data(), space + offset - read_offs, dest.size());
-    mi_free_size_aligned(space, space_needed, 4096);
+    mi_free_size_aligned(space, space_needed, kPageSize);
     return ec;
   }
 
@@ -183,4 +184,4 @@ void IoMgr::Shutdown() {
   backing_file_.reset();
 }
 
-}  // namespace dfly
+}  // namespace dfly::tiering

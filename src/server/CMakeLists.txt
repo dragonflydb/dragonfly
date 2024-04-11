@@ -14,7 +14,8 @@ set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-    SET(TX_LINUX_SRCS io_mgr.cc tiered_storage.cc tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc)
+    SET(TX_LINUX_SRCS tiered_storage.cc tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc
+      tiering/io_mgr.cc tiering/external_alloc.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
     cxx_link(dfly_bench dfly_facade fibers2 absl::random_random)
@@ -22,6 +23,7 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/small_bins_test dfly_test_lib LABELS DFLY)
+    cxx_test(tiering/external_alloc_test dfly_test_lib LABELS DFLY)
 endif()
 
 
