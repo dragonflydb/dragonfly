@@ -1084,7 +1084,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
         CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
 
     if (status == OpStatus::KEY_NOTFOUND)
-      return ErrorReply{"script tried accessing undeclared key"};
+      return ErrorReply(kUndeclaredKeyErr);
 
     if (status != OpStatus::OK)
       return ErrorReply{status};
@@ -1943,6 +1943,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
+    server_family_.script_mgr()->OnScriptError(eval_args.sha, error);
     return cntx->SendError(resp, facade::kScriptErrType);
   }
 

@@ -1146,6 +1146,9 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     }
   }
 
+  AppendMetricWithoutLabels("script_error_total", "", m.facade_stats.reply_stats.script_error_count,
+                            MetricType::COUNTER, &resp->body());
+
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
                             &resp->body());
@@ -1792,6 +1795,8 @@ void ServerFamily::ResetStat() {
     tl_facade_stats->reply_stats.io_write_bytes = 0;
     tl_facade_stats->reply_stats.io_write_cnt = 0;
     tl_facade_stats->reply_stats.send_stats = {};
+    tl_facade_stats->reply_stats.script_error_count = 0;
+    tl_facade_stats->reply_stats.err_count.clear();
 
     service_.mutable_registry()->ResetCallStats(index);
   });
