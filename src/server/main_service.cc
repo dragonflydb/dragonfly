@@ -4,8 +4,6 @@
 
 #include "server/main_service.h"
 
-#include "facade/reply_builder.h"
-
 #ifdef __FreeBSD__
 #include <pthread_np.h>
 #endif
@@ -28,8 +26,8 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
-#include "facade/resp_expr.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
