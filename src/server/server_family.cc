@@ -2475,11 +2475,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgParser parser{args};
 
-  auto timeout_sec = parser.Next<unsigned>();
-  if (timeout_sec <= 0) {
-    return cntx->SendError("timeout is non-positive");
-  }
-
+  int timeout_sec = parser.Next<int>();
   bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
 
   if (parser.HasNext())
@@ -2487,6 +2483,11 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
+
+  // We allow zero timeouts for tests.
+  if (timeout_sec < 0) {
+    return cntx->SendError("timeout is negative");
+  }
 
   // We return OK, to support idempotency semantics.
   if (ServerState::tlocal()->is_master)

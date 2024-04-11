@@ -370,8 +370,9 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.Next();
   float timeout = std::ceil(parser.Next<float>());
-  if (timeout <= 0) {
-    return cntx->SendError("timeout is not positive");
+  if (timeout < 0) {
+    // allow 0s timeout for tests.
+    return cntx->SendError("timeout is negative");
   }
 
   bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
