@@ -95,8 +95,7 @@ struct ReplyStats {
   size_t io_write_cnt = 0;
   size_t io_write_bytes = 0;
   absl::flat_hash_map<std::string, uint64_t> err_count;
-  absl::flat_hash_map<std::string, std::string>
-      script_error_map;  // map of script sha to last script error
+  size_t script_error_count = 0;
 
   ReplyStats& operator+=(const ReplyStats& other);
 };

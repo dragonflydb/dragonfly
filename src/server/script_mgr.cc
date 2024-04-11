@@ -288,7 +288,7 @@ optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
 }
 
 void ScriptMgr::OnScriptError(std::string_view sha, std::string_view error) {
-  tl_facade_stats->reply_stats.script_error_map[sha] = error;
+  ++tl_facade_stats->reply_stats.script_error_count;
   lock_guard lk{mu_};
   auto it = db_.find(sha);
   if (it == db_.end()) {
