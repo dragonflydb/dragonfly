@@ -25,7 +25,8 @@ class ClusterShardMigration {
     executor_ = std::make_unique<JournalExecutor>(service);
   }
 
-  void Start(Context* cntx, io::Source* source) {
+  void Start(Context* cntx, util::FiberSocketBase* source) {
+    socket_ = source;
     JournalReader reader{source, 0};
     TransactionReader tx_reader{false};
 
@@ -33,7 +34,9 @@ class ClusterShardMigration {
       if (cntx->IsCancelled())
         break;
 
+      // LOG(ERROR) << "XXX Reading tx for " << source_shard_id_;
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
+      // LOG(ERROR) << "XXX Finished reading a tx for " << source_shard_id_;
       if (!tx_data) {
         VLOG(1) << "No tx data";
         break;
@@ -47,6 +50,18 @@ class ClusterShardMigration {
       } else {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
+    }
+  }
+
+  void Cancel() {
+    if (socket_ != nullptr && 1 == 2) {
+      LOG(ERROR) << "XXX Cancelling incoming migration " << source_shard_id_;
+      socket_->proactor()->Dispatch([s = socket_, sid = source_shard_id_]() {
+        LOG(ERROR) << "XXX Closing socket for " << sid;
+        s->Shutdown(SHUT_RDWR);
+        s->Close();
+        LOG(ERROR) << "XXX socket closed for " << sid;
+      });
     }
   }
 
@@ -68,6 +83,7 @@ class ClusterShardMigration {
 
  private:
   uint32_t source_shard_id_;
+  util::FiberSocketBase* socket_ = nullptr;
   std::unique_ptr<JournalExecutor> executor_;
 };
 
@@ -85,7 +101,6 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 }
 
 IncomingSlotMigration::~IncomingSlotMigration() {
-  sync_fb_.JoinIfNeeded();
 }
 
 void IncomingSlotMigration::Join() {
@@ -93,7 +108,16 @@ void IncomingSlotMigration::Join() {
   state_ = MigrationState::C_FINISHED;
 }
 
-void IncomingSlotMigration::StartFlow(uint32_t shard, io::Source* source) {
+void IncomingSlotMigration::Cancel() {
+  cntx_.Cancel();
+  for (auto& flow : shard_flows_) {
+    if (flow != nullptr) {
+      flow->Cancel();
+    }
+  }
+}
+
+void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   VLOG(1) << "Start flow for shard: " << shard;
 
   shard_flows_[shard]->Start(&cntx_, source);

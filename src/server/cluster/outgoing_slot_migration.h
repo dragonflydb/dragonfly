@@ -33,6 +33,7 @@ class OutgoingMigration : private ProtocolClient {
 
   void Finalize(uint32_t shard_id);
   void Cancel(uint32_t shard_id);
+  void CancelAll();
 
   MigrationState GetState() const;
 

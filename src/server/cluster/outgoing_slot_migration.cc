@@ -46,7 +46,11 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
     LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
 
-    sync_fb_ = fb2::Fiber("slot-snapshot", [this] { streamer_.Start(Sock()); });
+    sync_fb_ = fb2::Fiber("slot-snapshot", [this] {
+      LOG(ERROR) << "XXX Outdoing migration worker fiber started";
+      streamer_.Start(Sock());
+      LOG(ERROR) << "XXX Outdoing migration worker fiber finished";
+    });
     return {};
   }
 
@@ -89,11 +93,23 @@ void OutgoingMigration::Cancel(uint32_t shard_id) {
   slot_migrations_[shard_id]->Cancel();
 }
 
+void OutgoingMigration::CancelAll() {
+  state_.store(MigrationState::C_CANCELLED);
+
+  auto start_cb = [this](util::ProactorBase* pb) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      slot_migrations_[shard->shard_id()]->Cancel();
+    }
+  };
+  shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
+}
+
 MigrationState OutgoingMigration::GetState() const {
   return state_.load();
 }
 
 void OutgoingMigration::SyncFb() {
+  LOG(ERROR) << "XXX OutgoingMigration fiber start";
   auto start_cb = [this](util::ProactorBase* pb) {
     if (auto* shard = EngineShard::tlocal(); shard) {
       server_family_->journal()->StartInThread();
@@ -107,14 +123,24 @@ void OutgoingMigration::SyncFb() {
   state_.store(MigrationState::C_SYNC);
 
   shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
+  LOG(ERROR) << "XXX OutgoingMigration fiber finished start";
 
   for (auto& migration : slot_migrations_) {
+    LOG(ERROR) << "XXX Waiting for snapshot";
     migration->WaitForSnapshotFinished();
+    LOG(ERROR) << "XXX Waiting done";
   }
-  VLOG(1) << "Migrations snapshot is finihed";
+
+  if (state_.load() == MigrationState::C_CANCELLED) {
+    LOG(INFO) << "Outgoing migration cancelled";
+    return;
+  }
+
+  VLOG(1) << "Migrations snapshot is finished";
 
   // TODO implement blocking on migrated slots only
 
+  LOG(ERROR) << "XXX Pausing";
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt = Pause(server_family_->GetNonPriviligedListeners(), nullptr,
@@ -137,7 +163,9 @@ void OutgoingMigration::SyncFb() {
     }
   };
 
+  LOG(ERROR) << "XXX Finalizing";
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+  LOG(ERROR) << "XXX Finalizing done";
 
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID());
   VLOG(1) << "send " << cmd;
@@ -154,9 +182,11 @@ void OutgoingMigration::SyncFb() {
     });
 
     state_.store(MigrationState::C_FINISHED);
+    LOG(ERROR) << "XXX Updating config";
+    cf_->UpdateConfig(migration_info_.slot_ranges, false);
+    LOG(ERROR) << "XXX Config updated";
   }
-
-  cf_->UpdateConfig(migration_info_.slot_ranges, false);
+  LOG(ERROR) << "XXX fiber done";
 }
 
 void OutgoingMigration::Ack() {

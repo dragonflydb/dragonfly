@@ -41,6 +41,7 @@ void JournalStreamer::Start(io::Sink* dest, bool send_lsn) {
 }
 
 void JournalStreamer::Cancel() {
+  LOG(ERROR) << "XXX Cancelling journal streamer id " << journal_cb_id_;
   Finalize();  // Finalize must be called before UnregisterOnChange because we first need to stop
                // writing to buffer and notify the all the producers.
                // Writing to journal holds mutex protecting change_cb_arr_, than the fiber can

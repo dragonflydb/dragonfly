@@ -528,10 +528,16 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
+    LOG(ERROR) << "XXX XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXX";
+    LOG(ERROR) << "XXX Before slots " << SlotRange::ToString(before.ToSlotRanges());
+    LOG(ERROR) << "XXX After slots " << SlotRange::ToString(after.ToSlotRanges());
+    LOG(ERROR) << "XXX Deleting slots " << SlotRange::ToString(deleted_slots);
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
+    LOG(ERROR) << "XXX Done deleting slots";
   }
 
+  LOG(ERROR) << "XXX Replying OK";
   return cntx->SendOk();
 }
 
@@ -619,6 +625,8 @@ static string_view StateToStr(MigrationState state) {
       return "SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
+    case MigrationState::C_CANCELLED:
+      return "CANCELLED"sv;
     case MigrationState::C_MAX_INVALID:
       break;
   }
@@ -730,24 +738,32 @@ std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
   return nullptr;
 }
 
-// TODO:
-// - Cancel migration process (what does that mean?)
-// - Remove migration objects
-// - Flush source slots upon migration removal (with WARNING if not finished)
 void ClusterFamily::RemoveOutgoingMigrations(const ClusterConfig& new_config) {
   auto migrations = new_config.GetFinishedOutgoingMigrations(tl_cluster_config);
+  LOG(ERROR) << "XXX Inside RemoveOutgoingMigrations " << migrations.size();
+  LOG(ERROR) << "XXX Inside RemoveOutgoingMigrations " << migrations.size();
 
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
     auto it = std::find_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
                            [&m](const auto& om) { return m == om->GetMigrationInfo(); });
     DCHECK(it != outgoing_migration_jobs_.end());
+    DCHECK(it->get() != nullptr);
+    LOG(ERROR) << "XXX Removing mig";
+    if (it->get()->GetState() != MigrationState::C_FINISHED) {
+      LOG(INFO) << "Migration cancelled.";  // TODO: add more info: node, slots, etc
+      it->get()->CancelAll();
+    }
     outgoing_migration_jobs_.erase(it);
+    LOG(ERROR) << "XXX Removed mig";
   }
+
+  // Flushing of removed slots is done outside this function.
 }
 
 void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
   auto migrations = new_config.GetFinishedIncomingMigrations(tl_cluster_config);
+  LOG(ERROR) << "XXX Inside RemoveIncomingMigrations " << migrations.size();
 
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
@@ -759,15 +775,15 @@ void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
     DCHECK(it->get() != nullptr);
 
     // Flush non-owned migrations
+    LOG(ERROR) << "XXX Checking whether to flush slots";
     SlotSet migration_slots(it->get()->GetSlots());
     SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
     if (!removed.Empty()) {
       auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
+      LOG(ERROR) << "XXX Flushing slots " << SlotRange::ToString(*removed_ranges);
       LOG_IF(WARNING, it->get()->GetState() == MigrationState::C_FINISHED)
           << "Flushing slots of removed FINISHED migration " << it->get()->GetSourceID()
-          << ", slots: " << absl::StrJoin(*removed_ranges, ", ", [](string* out, SlotRange range) {
-               absl::StrAppend(out, "[", range.start, ", ", range.end, "]");
-             });
+          << ", slots: " << SlotRange::ToString(*removed_ranges);
       shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
         EngineShard* shard = EngineShard::tlocal();
         if (!shard) {
@@ -775,10 +791,17 @@ void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
         }
         shard->db_slice().FlushSlots(*removed_ranges);
       });
+      LOG(ERROR) << "XXX Done dispatching flush slots";
     }
 
+    LOG(ERROR) << "XXX Cancelling migration";
+    it->get()->Cancel();
+    LOG(ERROR) << "XXX Migration cancelled";
+
     incoming_migrations_jobs_.erase(it);
+    LOG(ERROR) << "XXX Migration erased";
   }
+  LOG(ERROR) << "XXX Exiting";
 }
 
 void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {

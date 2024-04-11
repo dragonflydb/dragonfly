@@ -1312,38 +1312,56 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     nodes[0].slots = [(0, 8000)]
     nodes[1].slots = [(8001, 16383)]
 
+    SIZE = 10_000
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
-    assert await nodes[0].client.set("key50", "value")  # key50 belongs to slot 6686
-    assert [1, 0] == [await node.client.dbsize() for node in nodes]
+    for i in range(SIZE):
+        assert await nodes[0].client.set(f"{{key50}}:{i}", i)  # key50 belongs to slot 6686
+    assert [SIZE, 0] == [await node.client.dbsize() for node in nodes]
 
-    nodes[0].migrations.append(
+    nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].port, [(6000, 8000)], nodes[1].id)
-    )
+    ]
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
     await asyncio.sleep(0.1)
-    assert [1, 1] == [await node.client.dbsize() for node in nodes]
+    assert SIZE == await nodes[0].client.dbsize()
+    assert SIZE > await nodes[1].client.dbsize(), "weak test case"
 
-    # Cancel migration
+    logging.debug("Cancelling migration")
     nodes[0].migrations = []
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
-    await asyncio.sleep(0.1)
-    assert [1, 0] == [await node.client.dbsize() for node in nodes]
+    while True:
+        db_sizes = [await node.client.dbsize() for node in nodes]
+        if [SIZE, 0] == db_sizes:
+            break
+        # logging.debug("db sizes ", ', '.join(map(str, db_sizes)))
+        logging.debug(f"db sizes {db_sizes[0]} {db_sizes[1]}")
+        await asyncio.sleep(0.1)
 
-    # Reissue migration
+    logging.debug("Reissuing migration")
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", instances[1].port, [(6001, 8000)], nodes[1].id)
     )
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
     await asyncio.sleep(0.1)
-    assert [1, 1] == [await node.client.dbsize() for node in nodes]
+    assert SIZE == await nodes[0].client.dbsize()
+    for i in range(100):
+        if SIZE == await nodes[1].client.dbsize():
+            break
+        await asyncio.sleep(0.1)
+    else:
+        assert False, "Target node not synced"
 
+    logging.debug("Finalizing migration")
     nodes[0].migrations = []
     nodes[0].slots = [(0, 6000)]
     nodes[1].slots = [(6001, 16383)]
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
     await asyncio.sleep(0.1)
-    assert [0, 1] == [await node.client.dbsize() for node in nodes]
-    assert "value" == await nodes[1].client.get("key50")
+    assert [0, SIZE] == [await node.client.dbsize() for node in nodes]
+    for i in range(SIZE):
+        assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
+
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 def parse_lag(replication_info: str):
