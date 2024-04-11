@@ -7,10 +7,10 @@
 #include <string>
 #include <system_error>
 
-#include "core/external_alloc.h"
 #include "io/io.h"
-#include "server/io_mgr.h"
 #include "server/tiering/common.h"
+#include "server/tiering/external_alloc.h"
+#include "server/tiering/io_mgr.h"
 
 namespace dfly::tiering {
 

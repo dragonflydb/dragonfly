@@ -17,7 +17,6 @@ extern "C" {
 #include "util/sliding_counter.h"
 
 //
-#include "core/external_alloc.h"
 #include "core/mi_memory_resource.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"

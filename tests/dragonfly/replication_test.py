@@ -1326,7 +1326,7 @@ async def test_take_over_timeout(df_local_factory, df_seeder_factory):
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
     try:
-        await c_replica.execute_command(f"REPLTAKEOVER 0.00001")
+        await c_replica.execute_command(f"REPLTAKEOVER 0")
     except redis.exceptions.ResponseError as e:
         assert str(e) == "Couldn't execute takeover"
     else:
