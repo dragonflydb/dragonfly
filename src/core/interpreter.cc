@@ -758,7 +758,7 @@ bool Interpreter::IsTableSafe() const {
     return true;
   }
 
-  // Copy root table because we remove it upon finishing traveral
+  // Copy root table because we remove it upon finishing traversal
   lua_pushnil(lua_);
   lua_copy(lua_, -2, -1);
 
@@ -770,18 +770,19 @@ bool Interpreter::IsTableSafe() const {
     if (lua_checkstack(lua_, 3) == 0 || depth > 128)
       return false;
 
-    bool interrupted = false;
+    bool descending = false;
     for (; lua_next(lua_, -2) != 0; lua_pop(lua_, 1)) {
       if (lua_type(lua_, -1) != LUA_TTABLE)
         continue;
 
+      // If we descend, keep value as new table and push nil for start key
       depth++;
       lua_pushnil(lua_);
-      interrupted = true;
+      descending = true;
       break;
     }
 
-    if (!interrupted) {
+    if (!descending) {
       lua_pop(lua_, 1);
       depth--;
     }
