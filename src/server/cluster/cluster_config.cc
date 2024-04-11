@@ -55,14 +55,21 @@ bool ClusterConfig::IsEmulated() {
 }
 
 string_view ClusterConfig::KeyTag(string_view key) {
-  size_t start = key.find('{');
+  auto options = KeyLockArgs::GetHashtagLockOptions();
+  const size_t start = key.find(options.open_hashtag);
   if (start == key.npos) {
     return key;
   }
-  size_t end = key.find('}', start + 1);
-  if (end == key.npos || end == start + 1) {
-    return key;
+
+  size_t end = start;
+  for (int i = 0; i <= options.close_n_occurrence; ++i) {
+    size_t next = end + 1;
+    end = key.find(options.close_hashtag, next);
+    if (end == key.npos || end == next) {
+      return key;
+    }
   }
+
   return key.substr(start + 1, end - start - 1);
 }
 

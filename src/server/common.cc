@@ -29,6 +29,15 @@ extern "C" {
 ABSL_FLAG(bool, lock_on_hashtags, false,
           "When true, locks are done in the {hashtag} level instead of key level.");
 
+// We would have used `char` instead of `string` for the following 2 flags, but that's impossible.
+ABSL_FLAG(std::string, hashtag_open, "{", "Opening hashtag character. Must be a single character.");
+ABSL_FLAG(std::string, hashtag_close, "}",
+          "Closing hashtag character. Must be a single character.");
+
+ABSL_FLAG(int, hashtag_close_n_occurrence, 0,
+          "How many closing hashtags should we skip. 0 for no skipping. For example, when set to "
+          "2, the hashtag for '{a}b}c}d}e' will be 'a}b}c'.");
+
 namespace dfly {
 
 using namespace std;
@@ -36,26 +45,38 @@ using namespace util;
 
 namespace {
 // Thread-local cache with static linkage.
-thread_local std::optional<bool> is_enabled_flag_cache;
+thread_local std::optional<HashtagsLockOptions> hashtag_lock_options;
 }  // namespace
 
 void TEST_InvalidateLockHashTag() {
-  is_enabled_flag_cache = nullopt;
+  hashtag_lock_options = nullopt;  // For test main thread
   CHECK(shard_set != nullptr);
   shard_set->pool()->Await(
-      [](ShardId shard, ProactorBase* proactor) { is_enabled_flag_cache = nullopt; });
+      [](ShardId shard, ProactorBase* proactor) { hashtag_lock_options = nullopt; });
 }
 
-bool KeyLockArgs::IsLockHashTagEnabled() {
-  if (!is_enabled_flag_cache.has_value()) {
-    is_enabled_flag_cache = absl::GetFlag(FLAGS_lock_on_hashtags);
+/* static */ HashtagsLockOptions KeyLockArgs::GetHashtagLockOptions() {
+  if (!hashtag_lock_options.has_value()) {
+    string open = absl::GetFlag(FLAGS_hashtag_open);
+    string close = absl::GetFlag(FLAGS_hashtag_close);
+    if (open.size() != 1 || close.size() != 1) {
+      LOG(ERROR) << "Invalid valud for hashtag open / close - must be a single char";
+      exit(-1);
+    }
+
+    hashtag_lock_options = {
+        .enabled = absl::GetFlag(FLAGS_lock_on_hashtags),
+        .open_hashtag = open[0],
+        .close_hashtag = close[0],
+        .close_n_occurrence = absl::GetFlag(FLAGS_hashtag_close_n_occurrence),
+    };
   }
 
-  return *is_enabled_flag_cache;
+  return *hashtag_lock_options;
 }
 
 string_view KeyLockArgs::GetLockKey(string_view key) {
-  if (IsLockHashTagEnabled()) {
+  if (GetHashtagLockOptions().enabled) {
     return ClusterConfig::KeyTag(key);
   }
 
