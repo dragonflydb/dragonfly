@@ -7,7 +7,6 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <array>
-#include <atomic>
 #include <optional>
 
 #include "server/conn_context.h"
