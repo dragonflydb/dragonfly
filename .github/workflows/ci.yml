@@ -55,7 +55,7 @@ jobs:
       image: ghcr.io/romange/${{ matrix.container }}
       volumes:
         - /:/hostroot
-
+      options: --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
