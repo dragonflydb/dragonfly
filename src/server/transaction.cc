@@ -1205,7 +1205,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
     return OpStatus::CANCELLED;
   }
 
-  DCHECK(!IsAtomicMulti());
+  DCHECK(!IsAtomicMulti());  // blocking inside MULTI is not allowed
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
   auto cb = [&](Transaction* t, EngineShard* shard) {
