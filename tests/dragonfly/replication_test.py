@@ -1473,14 +1473,16 @@ async def test_tls_replication(
 
 async def test_ipv6_replication(df_local_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
-    master = df_local_factory.create(bind="::1", port=1111)
-    replica = df_local_factory.create(bind="::1", port=1112)
+    master = df_local_factory.create(proactor_threads=1, bind="::1", port=1111)
+    replica = df_local_factory.create(proactor_threads=1, bind="::1", port=1112)
 
     df_local_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
 
-    assert await c_replica.execute_command("REPLICAOF", "::1", "1111") == "OK"
+    assert await c_master.ping()
+    assert await c_replica.ping()
+    assert await c_replica.execute_command("REPLICAOF", master["bind"], master["port"]) == "OK"
 
 
 # busy wait for 'replica' instance to have replication status 'status'

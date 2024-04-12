@@ -90,7 +90,8 @@ class DflyInstance:
         assert self.proc == None
 
     def client(self, *args, **kwargs) -> RedisClient:
-        return RedisClient(port=self.port, decode_responses=True, *args, **kwargs)
+        host = "localhost" if self["bind"] is None else self["bind"]
+        return RedisClient(host=host, port=self.port, decode_responses=True, *args, **kwargs)
 
     def admin_client(self, *args, **kwargs) -> RedisClient:
         return RedisClient(
