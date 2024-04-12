@@ -1200,7 +1200,12 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider,
                                   KeyReadyChecker krc, bool* block_flag, bool* pause_flag) {
-  DCHECK(!blocking_barrier_.IsClaimed());  // Blocking barrier can't be re-used
+  if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
+    Conclude();
+    return OpStatus::CANCELLED;
+  }
+
+  DCHECK(!IsAtomicMulti());  // blocking inside MULTI is not allowed
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
   auto cb = [&](Transaction* t, EngineShard* shard) {
