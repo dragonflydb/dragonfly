@@ -25,6 +25,7 @@ Fully compatible with Redis and Memcached APIs, Dragonfly requires no code chang
 - [Roadmap and status](#roadmap-status)
 - [Design decisions](#design-decisions)
 - [Background](#background)
+- [Build from source](./docs/build-from-source.md)
 
 ## <a name="benchmarks"><a/>Benchmarks
 
