@@ -52,8 +52,10 @@ using namespace std;
 using namespace util;
 
 namespace {
+
 // Thread-local cache with static linkage.
 thread_local std::optional<LockTagOptions> locktag_lock_options;
+
 }  // namespace
 
 void TEST_InvalidateLockTagOptions() {
@@ -63,7 +65,7 @@ void TEST_InvalidateLockTagOptions() {
       [](ShardId shard, ProactorBase* proactor) { locktag_lock_options = nullopt; });
 }
 
-/* static */ LockTagOptions KeyLockArgs::GetLockTagOptions() {
+const LockTagOptions& LockTagOptions::instance() {
   if (!locktag_lock_options.has_value()) {
     string delimiter = absl::GetFlag(FLAGS_locktag_delimiter);
     if (delimiter.empty()) {
@@ -87,12 +89,26 @@ void TEST_InvalidateLockTagOptions() {
   return *locktag_lock_options;
 }
 
-string_view KeyLockArgs::GetLockKey(string_view key) {
-  if (GetLockTagOptions().enabled) {
-    return ClusterConfig::KeyTag(key);
+std::string_view LockTagOptions::Tag(std::string_view key) const {
+  if (!absl::StartsWith(key, prefix)) {
+    return key;
   }
 
-  return key;
+  const size_t start = key.find(open_locktag);
+  if (start == key.npos) {
+    return key;
+  }
+
+  size_t end = start;
+  for (unsigned i = 0; i <= skip_n_end_delimiters; ++i) {
+    size_t next = end + 1;
+    end = key.find(close_locktag, next);
+    if (end == key.npos || end == next) {
+      return key;
+    }
+  }
+
+  return key.substr(start + 1, end - start - 1);
 }
 
 atomic_uint64_t used_mem_peak(0);
@@ -443,6 +459,17 @@ std::ostream& operator<<(std::ostream& os, ArgSlice list) {
     os << (*(list.end() - 1));
   }
   return os << "]";
+}
+
+LockTag::LockTag(std::string_view key) {
+  if (LockTagOptions::instance().enabled)
+    str_ = LockTagOptions::instance().Tag(key);
+  else
+    str_ = key;
+}
+
+LockFp LockTag::Fingerprint() const {
+  return XXH64(str_.data(), str_.size(), 0x1C69B3F74AC4AE35UL);
 }
 
 }  // namespace dfly

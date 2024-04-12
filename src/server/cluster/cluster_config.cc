@@ -55,32 +55,8 @@ bool ClusterConfig::IsEmulated() {
   return cluster_mode == ClusterMode::kEmulatedCluster;
 }
 
-string_view ClusterConfig::KeyTag(string_view key) {
-  auto options = KeyLockArgs::GetLockTagOptions();
-
-  if (!absl::StartsWith(key, options.prefix)) {
-    return key;
-  }
-
-  const size_t start = key.find(options.open_locktag);
-  if (start == key.npos) {
-    return key;
-  }
-
-  size_t end = start;
-  for (unsigned i = 0; i <= options.skip_n_end_delimiters; ++i) {
-    size_t next = end + 1;
-    end = key.find(options.close_locktag, next);
-    if (end == key.npos || end == next) {
-      return key;
-    }
-  }
-
-  return key.substr(start + 1, end - start - 1);
-}
-
 SlotId ClusterConfig::KeySlot(string_view key) {
-  string_view tag = KeyTag(key);
+  string_view tag = LockTagOptions::instance().Tag(key);
   return crc16(tag.data(), tag.length()) & kMaxSlotNum;
 }
 

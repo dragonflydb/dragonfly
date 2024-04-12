@@ -25,7 +25,6 @@ using PrimeValue = detail::PrimeValue;
 
 using PrimeTable = DashTable<PrimeKey, PrimeValue, detail::PrimeTablePolicy>;
 using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>;
-using LockFp = uint64_t;  // a key fingerprint used by the LockTable.
 
 /// Iterators are invalidated when new keys are added to the table or some entries are deleted.
 /// Iterators are still valid if a different entry in the table was mutated.
@@ -79,18 +78,17 @@ struct DbTableStats {
   DbTableStats& operator+=(const DbTableStats& o);
 };
 
-// Table for recording locks that uses string_views where possible. LockTable falls back to
-// strings for locks that are used by multiple transactions. Keys used with the lock table
-// should be normalized with GetLockKey
+// Table for recording locks. Keys used with the lock table should be normalized with LockTag.
 class LockTable {
  public:
-  size_t Size() const;
-  std::optional<const IntentLock> Find(std::string_view key) const;
+  size_t Size() const {
+    return locks_.size();
+  }
+  std::optional<const IntentLock> Find(LockTag tag) const;
+  std::optional<const IntentLock> Find(LockFp fp) const;
 
-  bool Acquire(std::string_view key, IntentLock::Mode mode);
-  void Release(std::string_view key, IntentLock::Mode mode);
-
-  static LockFp Fingerprint(std::string_view key);
+  bool Acquire(LockTag tag, IntentLock::Mode mode);
+  void Release(LockTag tag, IntentLock::Mode mode);
 
   auto begin() const {
     return locks_.cbegin();

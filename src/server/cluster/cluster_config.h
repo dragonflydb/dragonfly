@@ -64,11 +64,8 @@ class ClusterConfig {
   }
 
   static bool IsShardedByTag() {
-    return IsEnabledOrEmulated() || KeyLockArgs::GetLockTagOptions().enabled;
+    return IsEnabledOrEmulated() || LockTagOptions::instance().enabled;
   }
-
-  // If the key contains the {...} pattern, return only the part between { and }
-  static std::string_view KeyTag(std::string_view key);
 
   // Returns an instance with `config` if it is valid.
   // Returns heap-allocated object as it is too big for a stack frame.

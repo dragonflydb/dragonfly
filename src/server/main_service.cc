@@ -594,7 +594,7 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFami
                                                 : "Disabled");
 
   if (ClusterConfig::IsEnabledOrEmulated()) {
-    print_kb("Lock on hashtags", KeyLockArgs::GetLockTagOptions().enabled);
+    print_kb("Lock on hashtags", LockTagOptions::instance().enabled);
   }
 
   if (ClusterConfig::IsEnabled()) {
@@ -945,19 +945,18 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
   // TODO: Switch to transaction internal locked keys once single hop multi transactions are merged
   // const auto& locked_keys = trans->GetMultiKeys();
-  const auto& locked_keys = eval_info.keys;
+  const auto& locked_tags = eval_info.lock_tags;
 
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = KeyLockArgs::GetLockKey(ArgS(args, i));
-    if (!locked_keys.contains(key)) {
-      VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
+    LockTag tag{ArgS(args, i)};
+    if (!locked_tags.contains(tag)) {
+      VLOG(1) << "Key " << string_view(tag) << " is not declared for command " << cid->name();
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
-  if (key_index.bonus &&
-      !locked_keys.contains(KeyLockArgs::GetLockKey(ArgS(args, *key_index.bonus))))
+  if (key_index.bonus && !locked_tags.contains(LockTag{ArgS(args, *key_index.bonus)}))
     return OpStatus::KEY_NOTFOUND;
 
   return OpStatus::OK;
@@ -1867,7 +1866,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   // we can do it once during script insertion into script mgr.
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
-  sinfo->keys.reserve(eval_args.keys.size());
+  sinfo->lock_tags.reserve(eval_args.keys.size());
 
   optional<ShardId> sid;
 
@@ -1875,7 +1874,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
     slot_checker.Add(key);
-    sinfo->keys.insert(KeyLockArgs::GetLockKey(key));
+    sinfo->lock_tags.insert(LockTag(key));
 
     ShardId cur_sid = Shard(key, shard_count());
     if (i == 0) {
