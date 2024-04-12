@@ -18,12 +18,38 @@ namespace dfly {
 
 class HllFamilyTest : public BaseFamilyTest {
  protected:
+  std::string GenerateUniqueValue(int index) {
+    return "Value_{" + std::to_string(index) + "}";
+  }
 };
 
 TEST_F(HllFamilyTest, Simple) {
   EXPECT_EQ(CheckedInt({"pfadd", "key", "1"}), 1);
   EXPECT_EQ(CheckedInt({"pfadd", "key", "1"}), 0);
   EXPECT_EQ(CheckedInt({"pfcount", "key"}), 1);
+}
+
+TEST_F(HllFamilyTest, Promote) {
+  int unique_values = 20000;
+  // Sparse hll is promoted to dense at the 1660th+- insertion
+  // This value varies if any parameter in hyperloglog.c changes.
+  int promote_i = 1660;
+  // Keep consistent with hyperloglog.c
+  int kHllSparseMaxBytes = 3000;
+  int kHllDenseSize = 12304;
+  for (int i = 0; i < unique_values; ++i) {
+    std::string newkey = GenerateUniqueValue(i);
+    Run({"pfadd", "key", newkey});
+    if (i < promote_i) {
+      EXPECT_LT(CheckedInt({"strlen", "key"}), kHllSparseMaxBytes + 1);
+    } else {
+      EXPECT_EQ(CheckedInt({"strlen", "key"}), kHllDenseSize);
+    }
+  }
+  // HyperLogLog computations come with a
+  // margin of error, with a standard error rate of 0.81%.
+  // Set it to 5% so this test won't fail unless something went wrong badly.
+  EXPECT_LT(std::abs(CheckedInt({"pfcount", "key"}) - unique_values * 1.0) / unique_values, 0.05);
 }
 
 TEST_F(HllFamilyTest, MultipleValues) {
@@ -43,6 +69,41 @@ TEST_F(HllFamilyTest, MultipleValues) {
   EXPECT_EQ(CheckedInt({"pfcount", "key"}), 5);
   EXPECT_EQ(CheckedInt({"pfadd", "key", "1", "2", "3", "4", "5"}), 0);
   EXPECT_EQ(CheckedInt({"pfcount", "key"}), 5);
+}
+
+TEST_F(HllFamilyTest, MultipleValues_random) {
+  int insertions = 20000;
+  int unique_values = 0;
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(1, 20);
+  // cumulated pfadd result
+  for (int i = 0; i < insertions; ++i) {
+    // Number of values to insert
+    int num_values = dis(gen);
+    unique_values += num_values;
+
+    // Prepare the command
+    std::vector<std::string> values;
+    values.reserve(num_values + 2);
+    values.push_back("pfadd");
+    values.push_back("key");
+
+    // Generate and add unique values to the command
+    for (int j = 0; j < num_values; ++j) {
+      values.push_back(GenerateUniqueValue(i * 20 + j));
+    }
+
+    std::vector<std::string_view> commandViews;
+    for (const auto& val : values) {
+      commandViews.push_back(val);
+    }
+    Run(commandViews);
+  }
+  // HyperLogLog computations come with a
+  // margin of error, with a standard error rate of 0.81%.
+  // Set it to 5% so this test won't fail unless something went wrong badly.
+  EXPECT_LT(std::abs(CheckedInt({"pfcount", "key"}) - unique_values * 1.0) / unique_values, 0.05);
 }
 
 TEST_F(HllFamilyTest, AddInvalid) {

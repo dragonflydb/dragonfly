@@ -93,7 +93,7 @@ void JournalWriter::Write(const journal::Entry& entry) {
 }
 
 JournalReader::JournalReader(io::Source* source, DbIndex dbid)
-    : source_{source}, buf_{4_KB}, dbid_{dbid} {
+    : source_{source}, buf_{4096}, dbid_{dbid} {
 }
 
 void JournalReader::SetSource(io::Source* source) {

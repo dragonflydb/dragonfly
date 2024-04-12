@@ -59,6 +59,8 @@ class ScriptMgr {
   // Returns if scripts run as global transactions by default
   bool AreGlobalByDefault() const;
 
+  void OnScriptError(std::string_view sha, std::string_view error);
+
  private:
   void ExistsCmd(CmdArgList args, ConnectionContext* cntx) const;
   void FlushCmd(CmdArgList args, ConnectionContext* cntx);
@@ -73,6 +75,7 @@ class ScriptMgr {
   struct InternalScriptData : public ScriptParams {
     std::unique_ptr<char[]> body{};
     std::unique_ptr<char[]> orig_body{};
+    uint32_t error_resp = 0;
   };
 
   ScriptParams default_params_;

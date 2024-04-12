@@ -53,22 +53,22 @@ type FileWorker struct {
 	clientGroup sync.WaitGroup
 	timeOffset  time.Duration
 	// stats for output, updated by clients, read by rendering goroutine
-	processed atomic.Uint64
-	delayed   atomic.Uint64
-	parsed    atomic.Uint64
-	clients   atomic.Uint64
+	processed uint64
+	delayed   uint64
+	parsed    uint64
+	clients   uint64
 }
 
 func (c ClientWorker) Run(worker *FileWorker) {
 	for msg := range c.incoming {
 		lag := time.Until(worker.HappensAt(time.Unix(0, int64(msg.Time))))
 		if lag < 0 {
-			worker.delayed.Add(1)
+			atomic.AddUint64(&worker.delayed, 1)
 		}
 		time.Sleep(lag)
 
 		c.redis.Do(context.Background(), msg.values...).Result()
-		worker.processed.Add(1)
+		atomic.AddUint64(&worker.processed, 1)
 	}
 	worker.clientGroup.Done()
 }
@@ -78,7 +78,7 @@ func NewClient(w *FileWorker) *ClientWorker {
 		redis:    redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true}),
 		incoming: make(chan Record, *fClientBuffer),
 	}
-	w.clients.Add(1)
+	atomic.AddUint64(&w.clients, 1)
 	w.clientGroup.Add(1)
 	go client.Run(w)
 	return client
@@ -92,7 +92,7 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 			client = NewClient(w)
 			clients[r.Client] = client
 		}
-		w.parsed.Add(1)
+		atomic.AddUint64(&w.parsed, 1)
 
 		client.incoming <- r
 		return true
@@ -114,10 +114,10 @@ func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) 
 	for i := range workers {
 		tableData = append(tableData, []string{
 			files[i],
-			fmt.Sprint(workers[i].parsed.Load()),
-			fmt.Sprint(workers[i].processed.Load()),
-			fmt.Sprint(workers[i].delayed.Load()),
-			fmt.Sprint(workers[i].clients.Load()),
+			fmt.Sprint(atomic.LoadUint64(&workers[i].parsed)),
+			fmt.Sprint(atomic.LoadUint64(&workers[i].processed)),
+			fmt.Sprint(atomic.LoadUint64(&workers[i].delayed)),
+			fmt.Sprint(atomic.LoadUint64(&workers[i].clients)),
 		})
 	}
 	content, _ := pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(tableData).Srender()

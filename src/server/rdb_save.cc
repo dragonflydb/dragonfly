@@ -39,6 +39,7 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
+#include "server/tiering/common.h"
 #include "util/fibers/simple_channel.h"
 
 ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_ENTRY_LZ4,
@@ -53,6 +54,8 @@ namespace dfly {
 using namespace std;
 using base::IoBuf;
 using io::Bytes;
+
+using namespace tiering::literals;
 
 namespace {
 

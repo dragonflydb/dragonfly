@@ -60,7 +60,6 @@ extern "C" {
 
 using namespace std;
 using facade::ErrorReply;
-using dfly::operator""_KB;
 
 ABSL_FLAG(int32_t, port, 6379,
           "Redis port. 0 disables the port, -1 will bind on a random available port.");
@@ -78,7 +77,7 @@ ABSL_FLAG(bool, multi_exec_squash, true,
 ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
-ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
+ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(bool, admin_nopass, false,
@@ -1022,7 +1021,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       allowed_by_state = false;
       break;
     case GlobalState::TAKEN_OVER:
-      allowed_by_state = cid->name() == "REPLCONF" || cid->name() == "SAVE";
+      allowed_by_state = !cid->IsWriteOnly();
       break;
     default:
       break;
@@ -1084,7 +1083,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
         CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
 
     if (status == OpStatus::KEY_NOTFOUND)
-      return ErrorReply{"script tried accessing undeclared key"};
+      return ErrorReply(kUndeclaredKeyErr);
 
     if (status != OpStatus::OK)
       return ErrorReply{status};
@@ -1943,6 +1942,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   if (result == Interpreter::RUN_ERR) {
     string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
+    server_family_.script_mgr()->OnScriptError(eval_args.sha, error);
     return cntx->SendError(resp, facade::kScriptErrType);
   }
 

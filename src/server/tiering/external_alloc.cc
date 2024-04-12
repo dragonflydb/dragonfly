@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/external_alloc.h"
+#include "src/server/tiering/external_alloc.h"
 
 #include <mimalloc.h>
 
@@ -11,7 +11,7 @@
 
 #include "base/logging.h"
 
-namespace dfly {
+namespace dfly::tiering {
 using namespace std;
 using detail::PageClass;
 
@@ -512,4 +512,4 @@ inline auto ExternalAllocator::ToSegDescr(Page* page) -> SegmentDescr* {
   return res;
 }
 
-}  // namespace dfly
+}  // namespace dfly::tiering

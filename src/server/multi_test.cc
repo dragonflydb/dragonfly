@@ -19,6 +19,7 @@
 ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
+ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
 ABSL_DECLARE_FLAG(std::string, default_lua_flags);
 
 namespace dfly {
@@ -375,19 +376,29 @@ TEST_F(MultiTest, Eval) {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
     return;
   }
+  absl::SetFlag(&FLAGS_lua_allow_undeclared_auto_correct, true);
 
   RespExpr resp;
 
   resp = Run({"incrby", "foo", "42"});
   EXPECT_THAT(resp, IntArg(42));
 
+  // first time running the script will return error and will change the script flag to allow
+  // undeclared
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
   EXPECT_THAT(resp, ErrArg("undeclared"));
 
+  // running the same script the second time will succeed
+  resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
+  EXPECT_THAT(resp, "42");
+
+  Run({"script", "flush"});
+
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "bar"});
   EXPECT_THAT(resp, ErrArg("undeclared"));
-
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
+
+  Run({"script", "flush"});
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
@@ -395,7 +406,6 @@ TEST_F(MultiTest, Eval) {
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
   EXPECT_THAT(resp, "42");
-
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
   ASSERT_FALSE(service_->IsShardSetLocked());
 

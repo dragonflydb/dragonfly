@@ -1050,19 +1050,12 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 }
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) const {
-  KeyLockArgs args;
-  args.db_index = dbid;
-  args.args = ArgSlice{&key, 1};
-  args.key_step = 1;
-  return CheckLock(mode, args);
-}
+  const auto& lt = db_arr_[dbid]->trans_locks;
+  string_view s = KeyLockArgs::GetLockKey(key);
 
-bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
-  const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
-  for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-    if (auto lock = lt.Find(s); lock && !lock->Check(mode))
-      return false;
+  auto lock = lt.Find(s);
+  if (lock) {
+    return lock->Check(mode);
   }
   return true;
 }
@@ -1327,7 +1320,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
             continue;
 
           // check if the key is locked by looking up transaction table.
-          auto& lt = db_table->trans_locks;
+          const auto& lt = db_table->trans_locks;
           string_view key = evict_it->first.GetSlice(&tmp);
           if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
             continue;

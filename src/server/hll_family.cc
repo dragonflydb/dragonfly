@@ -75,26 +75,52 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
   if (res.is_new) {
-    hll.resize(getDenseHllSize());
-    createDenseHll(StringToHllPtr(hll));
+    hll.resize(getSparseHllInitSize());
+    initSparseHll(StringToHllPtr(hll));
   } else if (res.it->second.ObjType() != OBJ_STRING) {
     return OpStatus::WRONG_TYPE;
   } else {
     res.it->second.GetString(&hll);
-    ConvertToDenseIfNeeded(&hll);
+  }
+  if (isValidHLL(StringToHllPtr(hll)) == HLL_INVALID) {
+    return OpStatus::INVALID_VALUE;
   }
 
   int updated = 0;
+  bool is_sparse = isValidHLL(StringToHllPtr(hll)) == HLL_VALID_SPARSE;
+  sds hll_sds;
+  if (is_sparse) {
+    hll_sds = sdsnewlen(hll.data(), hll.size());
+  }
+
   for (const auto& value : values) {
-    int added = pfadd(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
+    int added;
+    if (is_sparse) {
+      // Inserting to sparse hll might extend it.
+      // We can't use std::string with sds
+      // `promoted` will be assigned 1 if sparse hll was promoted to dense
+      int promoted = 0;
+      added = pfadd_sparse(&hll_sds, (unsigned char*)value.data(), value.size(), &promoted);
+      if (promoted == 1) {
+        is_sparse = false;
+        hll = string{hll_sds, sdslen(hll_sds)};
+        sdsfree(hll_sds);
+        DCHECK_EQ(isValidHLL(StringToHllPtr(hll)), HLL_VALID_DENSE);
+      }
+    } else {
+      added = pfadd_dense(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
+    }
     if (added < 0) {
       return OpStatus::INVALID_VALUE;
     }
     updated += added;
   }
 
+  if (is_sparse) {
+    hll = string{hll_sds, sdslen(hll_sds)};
+    sdsfree(hll_sds);
+  }
   res.it->second.SetString(hll);
-
   return std::min(updated, 1);
 }
 

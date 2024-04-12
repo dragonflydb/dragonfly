@@ -10,7 +10,7 @@
 #include "server/common.h"
 #include "util/fibers/uring_file.h"
 
-namespace dfly {
+namespace dfly::tiering {
 
 class IoMgr {
  public:
@@ -67,4 +67,4 @@ class IoMgr {
   IoMgrStats stats_;
 };
 
-}  // namespace dfly
+}  // namespace dfly::tiering
