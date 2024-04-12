@@ -57,7 +57,8 @@ struct HashtagsLockOptions {
   bool enabled = false;
   char open_hashtag = '{';
   char close_hashtag = '}';
-  int close_n_occurrence = 0;
+  int close_skip_n_occurrence = 0;
+  std::string prefix;
 };
 
 struct KeyLockArgs {

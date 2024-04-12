@@ -10,6 +10,7 @@ extern "C" {
 #include <shared_mutex>
 #include <string_view>
 
+#include "absl/strings/match.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_config.h"
@@ -56,13 +57,18 @@ bool ClusterConfig::IsEmulated() {
 
 string_view ClusterConfig::KeyTag(string_view key) {
   auto options = KeyLockArgs::GetHashtagLockOptions();
+
+  if (!absl::StartsWith(key, options.prefix)) {
+    return key;
+  }
+
   const size_t start = key.find(options.open_hashtag);
   if (start == key.npos) {
     return key;
   }
 
   size_t end = start;
-  for (int i = 0; i <= options.close_n_occurrence; ++i) {
+  for (int i = 0; i <= options.close_skip_n_occurrence; ++i) {
     size_t next = end + 1;
     end = key.find(options.close_hashtag, next);
     if (end == key.npos || end == next) {

@@ -30,11 +30,13 @@ ABSL_FLAG(bool, lock_on_hashtags, false,
           "When true, locks are done in the {hashtag} level instead of key level.");
 
 // We would have used `char` instead of `string` for the following 2 flags, but that's impossible.
-ABSL_FLAG(std::string, hashtag_open, "{", "Opening hashtag character. Must be a single character.");
-ABSL_FLAG(std::string, hashtag_close, "}",
-          "Closing hashtag character. Must be a single character.");
+ABSL_FLAG(std::string, hashtag_open, "{", "Opening hashtag character. Must be a single char.");
+ABSL_FLAG(std::string, hashtag_close, "}", "Closing hashtag character. Must be a single char.");
 
-ABSL_FLAG(int, hashtag_close_n_occurrence, 0,
+ABSL_FLAG(std::string, hashtag_prefix, "",
+          "Only keys with this prefix participate in hashtag extraction.");
+
+ABSL_FLAG(int, hashtag_close_skip_n_occurrence, 0,
           "How many closing hashtags should we skip. 0 for no skipping. For example, when set to "
           "2, the hashtag for '{a}b}c}d}e' will be 'a}b}c'.");
 
@@ -68,7 +70,8 @@ void TEST_InvalidateLockHashTag() {
         .enabled = absl::GetFlag(FLAGS_lock_on_hashtags),
         .open_hashtag = open[0],
         .close_hashtag = close[0],
-        .close_n_occurrence = absl::GetFlag(FLAGS_hashtag_close_n_occurrence),
+        .close_skip_n_occurrence = absl::GetFlag(FLAGS_hashtag_close_skip_n_occurrence),
+        .prefix = absl::GetFlag(FLAGS_hashtag_prefix),
     };
   }
 

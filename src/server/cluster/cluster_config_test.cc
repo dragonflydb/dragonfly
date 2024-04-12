@@ -58,7 +58,19 @@ TEST_F(ClusterConfigTest, KeyTagTest) {
 
   SetTestFlag("hashtag_open", ":");
   SetTestFlag("hashtag_close", ":");
-  SetTestFlag("hashtag_close_n_occurrence", "1");
+  SetTestFlag("hashtag_close_skip_n_occurrence", "0");
+  SetTestFlag("hashtag_prefix", "bull");
+  TEST_InvalidateLockHashTag();
+  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:123"), "queue");
+  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:123:456:789:1000"), "queue");
+
+  key = "not-bull:queue1:123";
+  EXPECT_EQ(ClusterConfig::KeyTag(key), key);
+
+  SetTestFlag("hashtag_open", ":");
+  SetTestFlag("hashtag_close", ":");
+  SetTestFlag("hashtag_close_skip_n_occurrence", "1");
+  SetTestFlag("hashtag_prefix", "bull");
   TEST_InvalidateLockHashTag();
 
   key = "bull:queue1:123";
@@ -71,7 +83,8 @@ TEST_F(ClusterConfigTest, KeyTagTest) {
 
   SetTestFlag("hashtag_open", "(");
   SetTestFlag("hashtag_close", ")");
-  SetTestFlag("hashtag_close_n_occurrence", "2");
+  SetTestFlag("hashtag_close_skip_n_occurrence", "2");
+  SetTestFlag("hashtag_prefix", "");
   TEST_InvalidateLockHashTag();
 
   EXPECT_EQ(ClusterConfig::KeyTag("(a)b)c)d)e"), "a)b)c");
