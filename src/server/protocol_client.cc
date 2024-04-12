@@ -321,6 +321,14 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
   return nonstd::make_unexpected(ec);
 }
 
+io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t timeout) {
+  auto prev_timeout = sock_->timeout();
+  sock_->set_timeout(timeout);
+  auto res = ReadRespReply();
+  sock_->set_timeout(prev_timeout);
+  return res;
+}
+
 error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
   size_t eol_pos;
   std::string_view input_str = ToSV(io_buf->InputBuffer());
