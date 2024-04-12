@@ -287,6 +287,16 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   return *this;
 }
 
+TieredStatsV2& TieredStatsV2::operator+=(const TieredStatsV2& o) {
+  static_assert(sizeof(TieredStatsV2) == 24);
+
+  ADD(total_stashes);
+  ADD(total_fetches);
+  ADD(allocated_bytes);
+
+  return *this;
+}
+
 SearchStats& SearchStats::operator+=(const SearchStats& o) {
   static_assert(sizeof(SearchStats) == 24);
   ADD(used_memory);

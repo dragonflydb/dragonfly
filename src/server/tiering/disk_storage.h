@@ -17,6 +17,10 @@ namespace dfly::tiering {
 // Disk storage controlled by asynchronous operations.
 class DiskStorage {
  public:
+  struct Stats {
+    size_t allocated_bytes = 0;
+  };
+
   using ReadCb = std::function<void(std::string_view)>;
   using StashCb = std::function<void(DiskSegment)>;
 
@@ -33,6 +37,8 @@ class DiskStorage {
   // grow backing file. Returns error code if operation failed  immediately (most likely it failed
   // to grow the backing file) or passes an empty segment if the final write operation failed.
   std::error_code Stash(io::Bytes bytes, StashCb cb);
+
+  Stats GetStats() const;
 
  private:
   IoMgr io_mgr_;

@@ -49,6 +49,8 @@ class TieredStorageV2 {
   // Delete value. Must either have pending IO or be offloaded (of external type)
   void Delete(std::string_view key, PrimeValue* value);
 
+  TieredStatsV2 GetStats() const;
+
  private:
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
