@@ -26,8 +26,8 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
-#include "facade/resp_expr.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
@@ -290,6 +290,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   unsigned num_elems_ = 0;
 };
 
+// Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
   EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
@@ -325,6 +326,13 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnArrayEnd() final {
+  }
+
+  void OnMapStart(unsigned len) final {
+    rb_->StartCollection(len, RedisReplyBuilder::MAP);
+  }
+
+  void OnMapEnd() final {
   }
 
   void OnNil() final {
