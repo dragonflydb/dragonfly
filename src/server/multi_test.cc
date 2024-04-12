@@ -371,6 +371,10 @@ TEST_F(MultiTest, FlushDb) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
+// Triggers a false possitive and therefore we turn it off
+// There seem not to be a good solution to handle these false positives
+// since sanitizers work well with u_context which is *very* slow
+#ifndef SANITIZERS
 TEST_F(MultiTest, Eval) {
   if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
@@ -456,6 +460,7 @@ TEST_F(MultiTest, Eval) {
             "42");
   fb.Join();
 }
+#endif
 
 TEST_F(MultiTest, Watch) {
   auto kExecFail = ArgType(RespExpr::NIL);
