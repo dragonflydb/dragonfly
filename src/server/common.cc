@@ -29,17 +29,19 @@ extern "C" {
 // We've generalized "hashtags" so that users can specify custom delimiter and closures, see below.
 // If I had a time machine, I'd rename this to lock_on_tags.
 ABSL_FLAG(bool, lock_on_hashtags, false,
-          "When true, locks are done in the {hashtag} level instead of key level.");
+          "When true, locks are done in the {hashtag} level instead of key level. Hashtag "
+          "extraction can be further configured with locktag_* flags.");
 
 // We would have used `char` instead of `string`, but that's impossible.
 ABSL_FLAG(
     std::string, locktag_delimiter, "",
-    "If set, this char is used to extract a lock key by looking at delimiters, like hash tags. If "
-    "unset, regular hashtag extraction is done. Must be used with --lock_on_hashtags");
+    "If set, this char is used to extract a lock tag by looking at delimiters, like hash tags. If "
+    "unset, regular hashtag extraction is done (with {}). Must be used with --lock_on_hashtags");
 
 ABSL_FLAG(unsigned, locktag_skip_n_end_delimiters, 0,
-          "How many closing hashtags should we skip. 0 for no skipping. For example, when set to "
-          "2, the hashtag for '{a}b}c}d}e' will be 'a}b}c'.");
+          "How many closing tag delimiters should we skip when extracting lock tags. 0 for no "
+          "skipping. For example, when delimiter is ':' and this flag is 2, the hashtag for "
+          "':a:b:c:d:e' will be 'a:b:c'.");
 
 ABSL_FLAG(std::string, locktag_prefix, "",
           "Only keys with this prefix participate in tag extraction.");
