@@ -56,21 +56,21 @@ bool ClusterConfig::IsEmulated() {
 }
 
 string_view ClusterConfig::KeyTag(string_view key) {
-  auto options = KeyLockArgs::GetHashtagLockOptions();
+  auto options = KeyLockArgs::GetLocktagOptions();
 
   if (!absl::StartsWith(key, options.prefix)) {
     return key;
   }
 
-  const size_t start = key.find(options.open_hashtag);
+  const size_t start = key.find(options.open_locktag);
   if (start == key.npos) {
     return key;
   }
 
   size_t end = start;
-  for (int i = 0; i <= options.close_skip_n_occurrence; ++i) {
+  for (unsigned i = 0; i <= options.skip_n_end_delimiters; ++i) {
     size_t next = end + 1;
-    end = key.find(options.close_hashtag, next);
+    end = key.find(options.close_locktag, next);
     if (end == key.npos || end == next) {
       return key;
     }

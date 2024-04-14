@@ -21,7 +21,7 @@ using util::fb2::Fiber;
 using util::fb2::Launch;
 
 // Test hook defined in common.cc.
-void TEST_InvalidateLockHashTag();
+void TEST_InvalidateLocktagOptions();
 
 class TestConnection : public facade::Connection {
  public:

@@ -26,19 +26,23 @@ extern "C" {
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
+// We've generalized "hashtags" so that users can specify custom delimiter and closures, see below.
+// If I had a time machine, I'd rename this to lock_on_tags.
 ABSL_FLAG(bool, lock_on_hashtags, false,
           "When true, locks are done in the {hashtag} level instead of key level.");
 
-// We would have used `char` instead of `string` for the following 2 flags, but that's impossible.
-ABSL_FLAG(std::string, hashtag_open, "{", "Opening hashtag character. Must be a single char.");
-ABSL_FLAG(std::string, hashtag_close, "}", "Closing hashtag character. Must be a single char.");
+// We would have used `char` instead of `string`, but that's impossible.
+ABSL_FLAG(
+    std::string, locktag_delimiter, "",
+    "If set, this char is used to extract a lock key by looking at delimiters, like hash tags. If "
+    "unset, regular hashtag extraction is done. Must be used with --lock_on_hashtags");
 
-ABSL_FLAG(std::string, hashtag_prefix, "",
-          "Only keys with this prefix participate in hashtag extraction.");
-
-ABSL_FLAG(int, hashtag_close_skip_n_occurrence, 0,
+ABSL_FLAG(unsigned, locktag_skip_n_end_delimiters, 0,
           "How many closing hashtags should we skip. 0 for no skipping. For example, when set to "
           "2, the hashtag for '{a}b}c}d}e' will be 'a}b}c'.");
+
+ABSL_FLAG(std::string, locktag_prefix, "",
+          "Only keys with this prefix participate in tag extraction.");
 
 namespace dfly {
 
@@ -47,39 +51,42 @@ using namespace util;
 
 namespace {
 // Thread-local cache with static linkage.
-thread_local std::optional<HashtagsLockOptions> hashtag_lock_options;
+thread_local std::optional<LocktagsLockOptions> locktag_lock_options;
 }  // namespace
 
-void TEST_InvalidateLockHashTag() {
-  hashtag_lock_options = nullopt;  // For test main thread
+void TEST_InvalidateLocktagOptions() {
+  locktag_lock_options = nullopt;  // For test main thread
   CHECK(shard_set != nullptr);
   shard_set->pool()->Await(
-      [](ShardId shard, ProactorBase* proactor) { hashtag_lock_options = nullopt; });
+      [](ShardId shard, ProactorBase* proactor) { locktag_lock_options = nullopt; });
 }
 
-/* static */ HashtagsLockOptions KeyLockArgs::GetHashtagLockOptions() {
-  if (!hashtag_lock_options.has_value()) {
-    string open = absl::GetFlag(FLAGS_hashtag_open);
-    string close = absl::GetFlag(FLAGS_hashtag_close);
-    if (open.size() != 1 || close.size() != 1) {
-      LOG(ERROR) << "Invalid valud for hashtag open / close - must be a single char";
+/* static */ LocktagsLockOptions KeyLockArgs::GetLocktagOptions() {
+  if (!locktag_lock_options.has_value()) {
+    string delimiter = absl::GetFlag(FLAGS_locktag_delimiter);
+    if (delimiter.empty()) {
+      delimiter = "{}";
+    } else if (delimiter.size() == 1) {
+      delimiter = delimiter + delimiter;
+    } else {
+      LOG(ERROR) << "Invalid value for locktag_delimiter - must be a single char";
       exit(-1);
     }
 
-    hashtag_lock_options = {
+    locktag_lock_options = {
         .enabled = absl::GetFlag(FLAGS_lock_on_hashtags),
-        .open_hashtag = open[0],
-        .close_hashtag = close[0],
-        .close_skip_n_occurrence = absl::GetFlag(FLAGS_hashtag_close_skip_n_occurrence),
-        .prefix = absl::GetFlag(FLAGS_hashtag_prefix),
+        .open_locktag = delimiter[0],
+        .close_locktag = delimiter[1],
+        .skip_n_end_delimiters = absl::GetFlag(FLAGS_locktag_skip_n_end_delimiters),
+        .prefix = absl::GetFlag(FLAGS_locktag_prefix),
     };
   }
 
-  return *hashtag_lock_options;
+  return *locktag_lock_options;
 }
 
 string_view KeyLockArgs::GetLockKey(string_view key) {
-  if (GetHashtagLockOptions().enabled) {
+  if (GetLocktagOptions().enabled) {
     return ClusterConfig::KeyTag(key);
   }
 

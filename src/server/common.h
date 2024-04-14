@@ -53,16 +53,16 @@ class CommandId;
 class Transaction;
 class EngineShard;
 
-struct HashtagsLockOptions {
+struct LocktagsLockOptions {
   bool enabled = false;
-  char open_hashtag = '{';
-  char close_hashtag = '}';
-  int close_skip_n_occurrence = 0;
+  char open_locktag = '{';
+  char close_locktag = '}';
+  unsigned skip_n_end_delimiters = 0;
   std::string prefix;
 };
 
 struct KeyLockArgs {
-  static HashtagsLockOptions GetHashtagLockOptions();
+  static LocktagsLockOptions GetLocktagOptions();
 
   // Before acquiring and releasing keys, one must "normalize" them via GetLockKey().
   static std::string_view GetLockKey(std::string_view key);

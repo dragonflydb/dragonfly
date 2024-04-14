@@ -180,7 +180,7 @@ void BaseFamilyTest::TearDown() {
 
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
-    TEST_InvalidateLockHashTag();
+    TEST_InvalidateLocktagOptions();
 
     ShutdownService();
   }
