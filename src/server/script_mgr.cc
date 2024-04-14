@@ -33,8 +33,12 @@ ABSL_FLAG(
     bool, lua_auto_async, false,
     "If enabled, call/pcall with discarded values are automatically replaced with acall/apcall.");
 
-namespace dfly {
+ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
+          "If enabled, when a script that is not allowed to run with undeclared keys is trying to "
+          "access undeclared keys, automaticaly set the script flag to be able to run with "
+          "undeclared key.");
 
+namespace dfly {
 using namespace std;
 using namespace facade;
 using namespace util;
@@ -281,6 +285,29 @@ optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
     return ScriptData{it->second, it->second.body.get(), {}};
 
   return std::nullopt;
+}
+
+void ScriptMgr::OnScriptError(std::string_view sha, std::string_view error) {
+  ++tl_facade_stats->reply_stats.script_error_count;
+  lock_guard lk{mu_};
+  auto it = db_.find(sha);
+  if (it == db_.end()) {
+    return;
+  }
+
+  if (++it->second.error_resp < 5) {
+    LOG(ERROR) << "Error running script (call to " << sha << "): " << error;
+  }
+  // If script has undeclared_keys and was not flaged to run in this mode we will change the
+  // script flag - this will make script next run to not fail but run as global.
+  if (absl::GetFlag(FLAGS_lua_allow_undeclared_auto_correct)) {
+    size_t pos = error.rfind(kUndeclaredKeyErr);
+    if (pos != string::npos) {
+      it->second.undeclared_keys = true;
+      LOG(WARNING) << "Setting undeclared_keys flag for script with sha : (" << sha << ")";
+      UpdateScriptCaches(sha, it->second);
+    }
+  }
 }
 
 void ScriptMgr::FlushAllScript() {

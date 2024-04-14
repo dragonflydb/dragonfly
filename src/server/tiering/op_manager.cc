@@ -45,7 +45,7 @@ void OpManager::Delete(EntryId id) {
 }
 
 void OpManager::Delete(DiskSegment segment) {
-  DCHECK_EQ(segment.offset % 4_KB, 0u);
+  DCHECK_EQ(segment.offset % kPageSize, 0u);
   if (auto it = pending_reads_.find(segment.offset); it != pending_reads_.end()) {
     // If a read is pending, it will be deleted once the read finished
     it->second.delete_requested = true;
@@ -69,8 +69,8 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
-  DCHECK_EQ(aligned_segment.offset % 4_KB, 0u);
-  DCHECK_EQ(aligned_segment.length % 4_KB, 0u);
+  DCHECK_EQ(aligned_segment.offset % kPageSize, 0u);
+  DCHECK_EQ(aligned_segment.length % kPageSize, 0u);
 
   auto [it, inserted] = pending_reads_.try_emplace(aligned_segment.offset, aligned_segment);
   if (inserted) {
@@ -92,18 +92,18 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
 }
 
 void OpManager::ProcessRead(size_t offset, std::string_view value) {
-  auto node = pending_reads_.extract(offset);
-  ReadOp& info = node.mapped();
+  ReadOp* info = &pending_reads_.at(offset);
 
-  for (auto& ko : info.key_ops) {
-    auto key_value = value.substr(ko.segment.offset - info.segment.offset, ko.segment.length);
+  for (auto& ko : info->key_ops) {
+    auto key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
     for (auto& fut : ko.futures)
       fut.set_value(std::string{key_value});
     ReportFetched(Borrowed(ko.id), key_value, ko.segment);
   }
 
-  if (info.delete_requested)
-    storage_.MarkAsFree(info.segment);
+  if (info->delete_requested)
+    storage_.MarkAsFree(info->segment);
+  pending_reads_.erase(offset);
 }
 
 OpManager::EntryOps& OpManager::ReadOp::ForId(EntryId id, DiskSegment key_segment) {

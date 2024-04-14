@@ -170,7 +170,6 @@ class Transaction {
     RAN_IMMEDIATELY = 1 << 7,  // Whether the shard executed immediately (during schedule)
   };
 
- public:
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
@@ -214,7 +213,8 @@ class Transaction {
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
-  facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeysProvider cb, KeyReadyChecker krc);
+  facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeysProvider cb, KeyReadyChecker krc,
+                               bool* block_flag, bool* pause_flag);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue.
@@ -474,7 +474,6 @@ class Transaction {
     util::fb2::EventCount ec_{};
   };
 
- private:
   // Init basic fields and reset re-usable.
   void InitBase(DbIndex dbid, CmdArgList args);
 

@@ -11,6 +11,7 @@
 #include "absl/base/internal/endian.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
 
 namespace dfly::tiering {
@@ -22,7 +23,7 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(std::string_view key, std::
   size_t value_bytes = 8 /* hash */ + value.size();
 
   std::optional<FilledBin> filled_bin;
-  if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= 4_KB) {
+  if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
     filled_bin = FlushBin();
   }
 

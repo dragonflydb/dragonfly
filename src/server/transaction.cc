@@ -51,7 +51,7 @@ void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
                  ", runnable:", info.tx_runnable, ", total locks: ", info.total_locks,
                  ", contended locks: ", info.contended_locks, "\n");
       absl::StrAppend(&msg, "max contention score: ", info.max_contention_score,
-                      ", lock: ", info.max_contention_lock_name,
+                      ", lock: ", info.max_contention_lock,
                       ", poll_executions:", shard->stats().poll_execution_total);
       const Transaction* cont_tx = shard->GetContTx();
       if (cont_tx) {
@@ -80,6 +80,15 @@ std::ostream& operator<<(std::ostream& os, Transaction::time_point tp) {
 
 uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
+}
+
+bool CheckLocks(const DbSlice& db_slice, IntentLock::Mode mode, const KeyLockArgs& lock_args) {
+  for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
+    string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+    if (!db_slice.CheckLock(mode, lock_args.db_index, s))
+      return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -1076,7 +1085,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool can_run_immediately) 
     bool shard_unlocked = shard->shard_lock()->Check(mode);
 
     // Check if we can run immediately
-    if (shard_unlocked && can_run_immediately && shard->db_slice().CheckLock(mode, lock_args)) {
+    if (shard_unlocked && can_run_immediately && CheckLocks(shard->db_slice(), mode, lock_args)) {
       sd.local_mask |= RAN_IMMEDIATELY;
       shard->stats().tx_immediate_total++;
 
@@ -1190,8 +1199,13 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider,
-                                  KeyReadyChecker krc) {
-  DCHECK(!blocking_barrier_.IsClaimed());  // Blocking barrier can't be re-used
+                                  KeyReadyChecker krc, bool* block_flag, bool* pause_flag) {
+  if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
+    Conclude();
+    return OpStatus::CANCELLED;
+  }
+
+  DCHECK(!IsAtomicMulti());  // blocking inside MULTI is not allowed
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1206,16 +1220,19 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
   auto* stats = ServerState::tl_connection_stats();
   ++stats->num_blocked_clients;
   DVLOG(1) << "WaitOnWatch wait for " << tp << " " << DebugId();
-  // TBD set connection blocking state
+
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
+  *block_flag = true;
   cv_status status = blocking_barrier_.Wait(tp);
+  *block_flag = false;
 
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
   --stats->num_blocked_clients;
 
-  // TBD set connection pause state
+  *pause_flag = true;
   ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
+  *pause_flag = false;
 
   OpStatus result = OpStatus::OK;
   if (status == cv_status::timeout) {

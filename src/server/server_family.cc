@@ -1146,6 +1146,9 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     }
   }
 
+  AppendMetricWithoutLabels("script_error_total", "", m.facade_stats.reply_stats.script_error_count,
+                            MetricType::COUNTER, &resp->body());
+
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
                             &resp->body());
@@ -1792,6 +1795,8 @@ void ServerFamily::ResetStat() {
     tl_facade_stats->reply_stats.io_write_bytes = 0;
     tl_facade_stats->reply_stats.io_write_cnt = 0;
     tl_facade_stats->reply_stats.send_stats = {};
+    tl_facade_stats->reply_stats.script_error_count = 0;
+    tl_facade_stats->reply_stats.err_count.clear();
 
     service_.mutable_registry()->ResetCallStats(index);
   });
@@ -2103,9 +2108,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TRANSACTION", true)) {
+    append("tx_shard_polls", m.shard_stats.poll_execution_total);
     append("tx_shard_immediate_total", m.shard_stats.tx_immediate_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
-
     append("tx_global_total", m.coordinator_stats.tx_global_cnt);
     append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
     append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);
@@ -2466,6 +2471,8 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   ReplicaOfInternal(args_list, &ctxt, ActionOnConnectionFail::kContinueReplication);
 }
 
+// REPLTAKEOVER <seconds> [SAVE]
+// SAVE is used only by tests.
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "ReplTakeOver start";
 
@@ -2473,11 +2480,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgParser parser{args};
 
-  auto timeout_sec = parser.Next<float>();
-  if (timeout_sec < 0) {
-    return cntx->SendError("timeout is negative");
-  }
-
+  int timeout_sec = parser.Next<int>();
   bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
 
   if (parser.HasNext())
@@ -2486,8 +2489,15 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
+  // We allow zero timeouts for tests.
+  if (timeout_sec < 0) {
+    return cntx->SendError("timeout is negative");
+  }
+
+  // We return OK, to support idempotency semantics.
   if (ServerState::tlocal()->is_master)
-    return cntx->SendError("Already a master instance");
+    return cntx->SendOk();
+
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 

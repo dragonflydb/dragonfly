@@ -42,13 +42,15 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 64u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 72u + kSanitizerOverhead);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
 
   for (const auto& k_v : o.err_count) {
     err_count[k_v.first] += k_v.second;
   }
+
+  ADD(script_error_count);
 
   send_stats += o.send_stats;
 
@@ -91,6 +93,7 @@ const char kOutOfMemory[] = "Out of memory";
 const char kInvalidNumericResult[] = "result is not a number";
 const char kClusterNotConfigured[] = "Cluster is not yet configured";
 const char kLoadingErr[] = "-LOADING Dragonfly is loading the dataset in memory";
+const char kUndeclaredKeyErr[] = "script tried accessing undeclared key";
 
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";

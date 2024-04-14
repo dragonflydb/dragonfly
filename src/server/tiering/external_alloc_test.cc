@@ -2,12 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/external_alloc.h"
+#include "server/tiering/external_alloc.h"
 
 #include "base/gtest.h"
 #include "base/logging.h"
 
-namespace dfly {
+namespace dfly::tiering {
 
 using namespace std;
 
@@ -50,17 +50,17 @@ TEST_F(ExternalAllocatorTest, Basic) {
   EXPECT_EQ(-kSegSize, res);
 
   ext_alloc_.AddStorage(0, kSegSize);
-  EXPECT_EQ(0, ext_alloc_.Malloc(kMinBlockSize - 96));   //  page0: 1
+  EXPECT_EQ(0, ext_alloc_.Malloc(kMinBlockSize - 96));         //  page0: 1
   EXPECT_EQ(kMinBlockSize, ext_alloc_.Malloc(kMinBlockSize));  // page0: 2
   constexpr auto kAnotherLen = kMinBlockSize * 2 - 10;
-  size_t offset2 = ext_alloc_.Malloc(kAnotherLen);   // page1: 1
-  EXPECT_EQ(offset2, 1_MB);  // another page.
+  size_t offset2 = ext_alloc_.Malloc(kAnotherLen);  // page1: 1
+  EXPECT_EQ(offset2, 1_MB);                         // another page.
 
-  ext_alloc_.Free(offset2, kAnotherLen);                // should return the page to the segment.
+  ext_alloc_.Free(offset2, kAnotherLen);         // should return the page to the segment.
   EXPECT_EQ(offset2, ext_alloc_.Malloc(16_KB));  // another page.  page1: 1
 
-  ext_alloc_.Free(0, kMinBlockSize - 96);   // page0: 1
-  ext_alloc_.Free(kMinBlockSize, kMinBlockSize); // page0: 0
+  ext_alloc_.Free(0, kMinBlockSize - 96);              // page0: 1
+  ext_alloc_.Free(kMinBlockSize, kMinBlockSize);       // page0: 0
   EXPECT_EQ(0, ext_alloc_.Malloc(kMinBlockSize * 2));  // page0
 }
 
@@ -117,4 +117,4 @@ TEST_F(ExternalAllocatorTest, Classes) {
   EXPECT_EQ(1_MB + 4_KB, ExternalAllocator::GoodSize(1_MB + 1));
 }
 
-}  // namespace dfly
+}  // namespace dfly::tiering

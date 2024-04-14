@@ -315,13 +315,9 @@ ObjInfo InspectOp(string_view key, DbIndex db_index) {
     }
   }
 
-  KeyLockArgs lock_args;
-  lock_args.args = ArgSlice{&key, 1};
-  lock_args.key_step = 1;
-  lock_args.db_index = db_index;
-
-  if (!db_slice.CheckLock(IntentLock::EXCLUSIVE, lock_args)) {
-    oinfo.lock_status = db_slice.CheckLock(IntentLock::SHARED, lock_args) ? ObjInfo::S : ObjInfo::X;
+  if (!db_slice.CheckLock(IntentLock::EXCLUSIVE, db_index, key)) {
+    oinfo.lock_status =
+        db_slice.CheckLock(IntentLock::SHARED, db_index, key) ? ObjInfo::S : ObjInfo::X;
   }
 
   return oinfo;
@@ -890,7 +886,7 @@ void DebugCmd::TxAnalysis() {
     StrAppend(&result, "  locks total:", info.total_locks, ",contended:", info.contended_locks,
               "\n");
     StrAppend(&result, "  max contention score: ", info.max_contention_score,
-              ",lock_name:", info.max_contention_lock_name, "\n");
+              ",lock_name:", info.max_contention_lock, "\n");
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   rb->SendVerbatimString(result);

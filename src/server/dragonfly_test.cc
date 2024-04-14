@@ -35,6 +35,7 @@ using absl::SetFlag;
 using absl::StrCat;
 using fb2::Fiber;
 using ::io::Result;
+using testing::AnyOf;
 using testing::ElementsAre;
 using testing::HasSubstr;
 
@@ -144,6 +145,11 @@ TEST_F(DflyEngineTest, EvalResp) {
   resp = Run({"eval", "return {5, 'foo', 17.5}", "0"});
   ASSERT_THAT(resp, ArrLen(3));
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(5), "foo", "17.5"));
+
+  resp = Run({"eval", "return {map={a=1,b=2}}", "0"});
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), AnyOf(ElementsAre("a", IntArg(1), "b", IntArg(2)),
+                                   ElementsAre("b", IntArg(2), "a", IntArg(1))));
 }
 
 TEST_F(DflyEngineTest, EvalPublish) {

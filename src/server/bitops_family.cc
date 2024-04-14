@@ -279,7 +279,7 @@ bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry) {
 
 class ElementAccess {
   bool added_ = false;
-  PrimeIterator element_iter_;
+  DbSlice::Iterator element_iter_;
   std::string_view key_;
   DbContext context_;
   EngineShard* shard_ = nullptr;
@@ -450,8 +450,7 @@ OpResult<std::string> RunBitOpNot(const OpArgs& op_args, ArgSlice keys) {
   EngineShard* es = op_args.shard;
   // if we found the value, just return, if not found then skip, otherwise report an error
   auto key = keys.front();
-  OpResult<PrimeConstIterator> find_res =
-      es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  auto find_res = es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
     return GetString(find_res.value()->second);
   } else {
@@ -472,8 +471,7 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
 
   // collect all the value for this shard
   for (auto& key : keys) {
-    OpResult<PrimeConstIterator> find_res =
-        es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+    auto find_res = es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
     if (find_res) {
       values.emplace_back(GetString(find_res.value()->second));
     } else {
@@ -1250,8 +1248,7 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
 
 OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
                                 EngineShard* shard) {
-  OpResult<PrimeConstIterator> it_res =
-      shard->db_slice().FindAndFetchReadOnly(context, key, OBJ_STRING);
+  auto it_res = shard->db_slice().FindAndFetchReadOnly(context, key, OBJ_STRING);
   if (!it_res.ok()) {
     return it_res.status();
   }

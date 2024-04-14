@@ -4,7 +4,7 @@ add_subdirectory(json)
 set(SEARCH_LIB query_parser)
 
 add_library(dfly_core bloom.cc compact_object.cc dragonfly_core.cc extent_tree.cc
-    external_alloc.cc interpreter.cc mi_memory_resource.cc sds_utils.cc
+    interpreter.cc mi_memory_resource.cc sds_utils.cc
     segment_allocator.cc score_map.cc small_string.cc sorted_map.cc
     tx_queue.cc dense_set.cc allocation_tracker.cc task_queue.cc
     string_set.cc string_map.cc detail/bitpacking.cc)
@@ -18,7 +18,6 @@ cxx_link(dash_bench dfly_core redis_test_lib)
 cxx_test(dfly_core_test dfly_core LABELS DFLY)
 cxx_test(compact_object_test dfly_core LABELS DFLY)
 cxx_test(extent_tree_test dfly_core LABELS DFLY)
-cxx_test(external_alloc_test dfly_core LABELS DFLY)
 cxx_test(dash_test dfly_core file redis_test_lib DATA testdata/ids.txt LABELS DFLY)
 cxx_test(interpreter_test dfly_core LABELS DFLY)
 cxx_test(lru_test dfly_core LABELS DFLY)

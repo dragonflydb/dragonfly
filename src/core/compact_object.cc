@@ -1051,7 +1051,7 @@ size_t CompactObj::MallocUsed() const {
   }
 
   if (taglen_ == SBF_TAG) {
-    return 0;  // TODO: to track SBF memory utilization.
+    return u_.sbf->MallocUsed();
   }
   LOG(DFATAL) << "should not reach";
   return 0;

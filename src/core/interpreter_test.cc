@@ -54,6 +54,16 @@ class TestSerializer : public ObjectExplorer {
     absl::StrAppend(&res, "nil ");
   }
 
+  void OnMapStart(unsigned len) final {
+    absl::StrAppend(&res, "{");
+  }
+
+  void OnMapEnd() final {
+    if (res.back() == ' ')
+      res.pop_back();
+    absl::StrAppend(&res, "} ");
+  }
+
   void OnStatus(std::string_view str) {
     absl::StrAppend(&res, "status(", str, ") ");
   }
@@ -254,6 +264,9 @@ TEST_F(InterpreterTest, Execute) {
 
   EXPECT_TRUE(Execute("return {1,2,3,'ciao', {1,2}}"));
   EXPECT_EQ("[i(1) i(2) i(3) str(ciao) [i(1) i(2)]]", ser_.res);
+
+  EXPECT_TRUE(Execute("return {map={a=1,b=2}}"));
+  EXPECT_THAT(ser_.res, testing::AnyOf("{str(a) i(1) str(b) i(2)}", "{str(b) i(2) str(a) i(1)}"));
 }
 
 TEST_F(InterpreterTest, Call) {

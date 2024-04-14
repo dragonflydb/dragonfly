@@ -164,11 +164,11 @@ class BPopPusher {
 
   // Returns WRONG_TYPE, OK.
   // If OK is returned then use result() to fetch the value.
-  OpResult<string> Run(Transaction* t, unsigned limit_ms);
+  OpResult<string> Run(ConnectionContext* cntx, unsigned limit_ms);
 
  private:
-  OpResult<string> RunSingle(Transaction* t, time_point tp);
-  OpResult<string> RunPair(Transaction* t, time_point tp);
+  OpResult<string> RunSingle(ConnectionContext* cntx, time_point tp);
+  OpResult<string> RunPair(ConnectionContext* cntx, time_point tp);
 
   string_view pop_key_, push_key_;
   ListDir popdir_, pushdir_;
@@ -198,7 +198,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   absl::StrAppend(debugMessages.Next(), "OpBPop: ", key, " by ", t->DebugId());
@@ -228,7 +228,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   if (!src_res)
     return src_res.status();
 
-  PrimeIterator src_it = src_res->it;
+  auto src_it = src_res->it;
   quicklist* src_ql = GetQL(src_it->second);
 
   if (src == dest) {  // simple case.
@@ -368,7 +368,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   StringVec res;
@@ -499,8 +499,7 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
                                  std::string_view element, int rank, int count, int max_len) {
-  OpResult<PrimeConstIterator> it_res =
-      op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
 
@@ -580,7 +579,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   int iter_direction = AL_START_HEAD;
@@ -622,7 +621,7 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
   int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
@@ -639,7 +638,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   if (!it_res)
     return it_res.status();
 
-  PrimeIterator it = it_res->it;
+  auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
   long llen = quicklistCount(ql);
 
@@ -765,7 +764,7 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
   }
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
-  OpResult<string> op_res = bpop_pusher.Run(cntx->transaction, unsigned(timeout * 1000));
+  OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (op_res) {
@@ -808,7 +807,7 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
   }
 
   BPopPusher bpop_pusher(src, dest, *src_dir, *dest_dir);
-  OpResult<string> op_res = bpop_pusher.Run(cntx->transaction, unsigned(timeout * 1000));
+  OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (op_res) {
@@ -831,29 +830,40 @@ BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir
     : pop_key_(pop_key), push_key_(push_key), popdir_(popdir), pushdir_(pushdir) {
 }
 
-OpResult<string> BPopPusher::Run(Transaction* t, unsigned limit_ms) {
+OpResult<string> BPopPusher::Run(ConnectionContext* cntx, unsigned limit_ms) {
   time_point tp =
       limit_ms ? chrono::steady_clock::now() + chrono::milliseconds(limit_ms) : time_point::max();
 
-  t->Schedule();
+  cntx->transaction->Schedule();
 
-  if (t->GetUniqueShardCnt() == 1) {
-    return RunSingle(t, tp);
+  if (cntx->transaction->GetUniqueShardCnt() == 1) {
+    return RunSingle(cntx, tp);
   }
 
-  return RunPair(t, tp);
+  return RunPair(cntx, tp);
 }
 
-OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
+OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
+  Transaction* t = cntx->transaction;
   OpResult<string> op_res;
   bool is_multi = t->IsMulti();
   auto cb_move = [&](Transaction* t, EngineShard* shard) {
     OpArgs op_args = t->GetOpArgs(shard);
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
-    if (op_res && op_args.shard->journal()) {
-      std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
-      RecordJournal(op_args, "LMOVE", arr, 1);
+    if (op_res) {
+      if (op_args.shard->journal()) {
+        std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
+        RecordJournal(op_args, "LMOVE", arr, 1);
+      }
+      if (shard->blocking_controller()) {
+        string tmp;
+
+        shard->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, push_key_);
+        absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", push_key_, " by ",
+                        op_args.tx->DebugId());
+      }
     }
+
     return OpStatus::OK;
   };
   t->Execute(cb_move, false);
@@ -873,14 +883,16 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
     return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
   };
   // Block
-  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker); status != OpStatus::OK)
+  auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &(cntx->blocked), &(cntx->paused));
+  if (status != OpStatus::OK)
     return status;
 
   t->Execute(cb_move, true);
   return op_res;
 }
 
-OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
+OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
+  Transaction* t = cntx->transaction;
   bool is_multi = t->IsMulti();
   OpResult<string> op_res = MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, false);
 
@@ -902,7 +914,8 @@ OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
     return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
   };
 
-  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker); status != OpStatus::OK)
+  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);
+      status != OpStatus::OK)
     return status;
 
   return MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, true);
@@ -1194,7 +1207,8 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked);
+      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
+      &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {

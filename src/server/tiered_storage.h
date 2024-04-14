@@ -3,18 +3,56 @@
 //
 #pragma once
 
+#include <memory>
+
+#include "server/tiering/common.h"
+#include "util/fibers/future.h"
 #ifdef __linux__
 
 #include <absl/container/flat_hash_map.h>
 
-#include "core/external_alloc.h"
 #include "server/common.h"
-#include "server/io_mgr.h"
 #include "server/table.h"
+#include "server/tiering/external_alloc.h"
+#include "server/tiering/io_mgr.h"
 
 namespace dfly {
 
 class DbSlice;
+
+namespace tiering {
+class SmallBins;
+};
+
+// Manages offloaded values
+class TieredStorageV2 {
+  class ShardOpManager;
+
+  const static size_t kMinValueSize = tiering::kPageSize / 2;
+
+ public:
+  explicit TieredStorageV2(DbSlice* db_slice);
+  ~TieredStorageV2();  // drop forward declared unique_ptrs
+
+  TieredStorageV2(TieredStorageV2&& other) = delete;
+  TieredStorageV2(const TieredStorageV2& other) = delete;
+
+  std::error_code Open(std::string_view path);
+  void Close();
+
+  // Read offloaded value. It must be of external type
+  util::fb2::Future<std::string> Read(std::string_view key, const PrimeValue& value);
+
+  // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
+  void Stash(std::string_view key, PrimeValue* value);
+
+  // Delete value. Must either have pending IO or be offloaded (of external type)
+  void Delete(std::string_view key, PrimeValue* value);
+
+ private:
+  std::unique_ptr<ShardOpManager> op_manager_;
+  std::unique_ptr<tiering::SmallBins> bins_;
+};
 
 class TieredStorage {
  public:
@@ -83,8 +121,8 @@ class TieredStorage {
   void SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest);
 
   DbSlice& db_slice_;
-  IoMgr io_mgr_;
-  ExternalAllocator alloc_;
+  tiering::IoMgr io_mgr_;
+  tiering::ExternalAllocator alloc_;
 
   uint32_t num_active_requests_ = 0;
 

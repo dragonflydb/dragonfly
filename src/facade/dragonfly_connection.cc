@@ -566,7 +566,7 @@ void Connection::OnPreMigrateThread() {
 
 void Connection::OnPostMigrateThread() {
   // Once we migrated, we should rearm OnBreakCb callback.
-  if (breaker_cb_) {
+  if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
 
@@ -801,7 +801,14 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
       return make_unexpected(recv_sz.error());
     }
     io_buf_.CommitWrite(*recv_sz);
-    string_view ib = ToSV(io_buf_.InputBuffer().subspan(last_len));
+    string_view ib = ToSV(io_buf_.InputBuffer());
+    if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
+      // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
+      // Reject the connection.
+      return make_unexpected(make_error_code(errc::protocol_not_supported));
+    }
+
+    ib = ib.substr(last_len);
     size_t pos = ib.find('\n');
     if (pos != string_view::npos) {
       ib = ToSV(io_buf_.InputBuffer().first(last_len + pos));
@@ -968,9 +975,11 @@ Connection::ParserStatus Connection::ParseRedis(SinkReplyBuilder* orig_builder) 
 
       bool has_more = consumed < io_buf_.InputLen();
 
-      if (tl_traffic_logger.log_file)  // Log command as soon as we receive it
-        LogTraffic(id_, has_more, absl::MakeSpan(parse_args));
-
+      if (tl_traffic_logger.log_file) {
+        if (IsMain()) {  // log only on the main interface.
+          LogTraffic(id_, has_more, absl::MakeSpan(parse_args));
+        }
+      }
       DispatchCommand(has_more, dispatch_sync, dispatch_async);
     }
     io_buf_.ConsumeInput(consumed);
@@ -1421,15 +1430,23 @@ void Connection::ShutdownSelf() {
   util::Connection::Shutdown();
 }
 
-void Connection::Migrate(util::fb2::ProactorBase* dest) {
+bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   // Migrate is used only by replication, so it doesn't have properties of full-fledged
   // connections
   CHECK(!cc_->async_dispatch);
-  CHECK_EQ(cc_->subscriptions, 0);    // are bound to thread local caches
-  CHECK_EQ(self_.use_count(), 1u);    // references cache our thread and backpressure
-  CHECK(!dispatch_fb_.IsJoinable());  // can't move once it started
+  CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
+  CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
+  if (dispatch_fb_.IsJoinable()) {  // can't move once it started
+    return false;
+  }
 
   listener()->Migrate(this, dest);
+  // After we migrate, it could be the case the connection was shut down. We should
+  // act accordingly.
+  if (!socket()->IsOpen()) {
+    return false;
+  }
+  return true;
 }
 
 Connection::WeakRef Connection::Borrow() {
@@ -1503,8 +1520,9 @@ void Connection::SendAsync(MessageHandle msg) {
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
-  if (!cc_->conn_closing)
+  if (!cc_->conn_closing) {
     LaunchDispatchFiberIfNeeded();
+  }
 
   DCHECK_NE(phase_, PRECLOSE);  // No more messages are processed after this point
 

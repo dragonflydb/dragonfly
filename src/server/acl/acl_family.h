@@ -59,7 +59,7 @@ class AclFamily final {
   void EvictOpenConnectionsOnAllProactorsWithRegistry(const UserRegistry::RegistryType& registry);
 
   // Helper function that loads the acl state of an acl file into the user registry
-  std::optional<facade::ErrorReply> LoadToRegistryFromFile(std::string_view full_path, bool init);
+  GenericError LoadToRegistryFromFile(std::string_view full_path, ConnectionContext* init);
 
   std::string RegistryToString() const;
 
