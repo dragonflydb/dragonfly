@@ -482,7 +482,7 @@ bool SortedMap::DfImpl::Delete(sds ele) {
 
 size_t SortedMap::DfImpl::MallocSize() const {
   // TODO: add malloc used to BPTree.
-  return score_map->SetMallocUsed() + score_map->ObjMallocUsed() + score_tree->Size() * 256;
+  return score_map->SetMallocUsed() + score_map->ObjMallocUsed() + score_tree->NodeCount() * 256;
 }
 
 bool SortedMap::DfImpl::Reserve(size_t sz) {
