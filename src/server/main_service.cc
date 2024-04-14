@@ -594,7 +594,7 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFami
                                                 : "Disabled");
 
   if (ClusterConfig::IsEnabledOrEmulated()) {
-    print_kb("Lock on hashtags", KeyLockArgs::IsLockHashTagEnabled());
+    print_kb("Lock on hashtags", KeyLockArgs::GetLockTagOptions().enabled);
   }
 
   if (ClusterConfig::IsEnabled()) {

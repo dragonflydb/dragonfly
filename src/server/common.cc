@@ -26,8 +26,25 @@ extern "C" {
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
+// We've generalized "hashtags" so that users can specify custom delimiter and closures, see below.
+// If I had a time machine, I'd rename this to lock_on_tags.
 ABSL_FLAG(bool, lock_on_hashtags, false,
-          "When true, locks are done in the {hashtag} level instead of key level.");
+          "When true, locks are done in the {hashtag} level instead of key level. Hashtag "
+          "extraction can be further configured with locktag_* flags.");
+
+// We would have used `char` instead of `string`, but that's impossible.
+ABSL_FLAG(
+    std::string, locktag_delimiter, "",
+    "If set, this char is used to extract a lock tag by looking at delimiters, like hash tags. If "
+    "unset, regular hashtag extraction is done (with {}). Must be used with --lock_on_hashtags");
+
+ABSL_FLAG(unsigned, locktag_skip_n_end_delimiters, 0,
+          "How many closing tag delimiters should we skip when extracting lock tags. 0 for no "
+          "skipping. For example, when delimiter is ':' and this flag is 2, the locktag for "
+          "':a:b:c:d:e' will be 'a:b:c'.");
+
+ABSL_FLAG(std::string, locktag_prefix, "",
+          "Only keys with this prefix participate in tag extraction.");
 
 namespace dfly {
 
@@ -36,26 +53,42 @@ using namespace util;
 
 namespace {
 // Thread-local cache with static linkage.
-thread_local std::optional<bool> is_enabled_flag_cache;
+thread_local std::optional<LockTagOptions> locktag_lock_options;
 }  // namespace
 
-void TEST_InvalidateLockHashTag() {
-  is_enabled_flag_cache = nullopt;
+void TEST_InvalidateLockTagOptions() {
+  locktag_lock_options = nullopt;  // For test main thread
   CHECK(shard_set != nullptr);
   shard_set->pool()->Await(
-      [](ShardId shard, ProactorBase* proactor) { is_enabled_flag_cache = nullopt; });
+      [](ShardId shard, ProactorBase* proactor) { locktag_lock_options = nullopt; });
 }
 
-bool KeyLockArgs::IsLockHashTagEnabled() {
-  if (!is_enabled_flag_cache.has_value()) {
-    is_enabled_flag_cache = absl::GetFlag(FLAGS_lock_on_hashtags);
+/* static */ LockTagOptions KeyLockArgs::GetLockTagOptions() {
+  if (!locktag_lock_options.has_value()) {
+    string delimiter = absl::GetFlag(FLAGS_locktag_delimiter);
+    if (delimiter.empty()) {
+      delimiter = "{}";
+    } else if (delimiter.size() == 1) {
+      delimiter += delimiter;  // Copy delimiter (e.g. "::") so that it's easier to use below
+    } else {
+      LOG(ERROR) << "Invalid value for locktag_delimiter - must be a single char";
+      exit(-1);
+    }
+
+    locktag_lock_options = {
+        .enabled = absl::GetFlag(FLAGS_lock_on_hashtags),
+        .open_locktag = delimiter[0],
+        .close_locktag = delimiter[1],
+        .skip_n_end_delimiters = absl::GetFlag(FLAGS_locktag_skip_n_end_delimiters),
+        .prefix = absl::GetFlag(FLAGS_locktag_prefix),
+    };
   }
 
-  return *is_enabled_flag_cache;
+  return *locktag_lock_options;
 }
 
 string_view KeyLockArgs::GetLockKey(string_view key) {
-  if (IsLockHashTagEnabled()) {
+  if (GetLockTagOptions().enabled) {
     return ClusterConfig::KeyTag(key);
   }
 
