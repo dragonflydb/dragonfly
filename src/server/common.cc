@@ -40,7 +40,7 @@ ABSL_FLAG(
 
 ABSL_FLAG(unsigned, locktag_skip_n_end_delimiters, 0,
           "How many closing tag delimiters should we skip when extracting lock tags. 0 for no "
-          "skipping. For example, when delimiter is ':' and this flag is 2, the hashtag for "
+          "skipping. For example, when delimiter is ':' and this flag is 2, the locktag for "
           "':a:b:c:d:e' will be 'a:b:c'.");
 
 ABSL_FLAG(std::string, locktag_prefix, "",
