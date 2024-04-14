@@ -1544,9 +1544,11 @@ async def test_replicate_redis_cluster(redis_cluster, df_local_factory, df_seede
     await c_replica.execute_command(
         "REPLICAOF localhost " + str(redis_cluster_nodes[0].port) + " 0 5460"
     )
+    await asyncio.sleep(0.5)
     await c_replica.execute_command(
         "ADDREPLICAOF localhost " + str(redis_cluster_nodes[1].port) + " 5461 10922"
     )
+    await asyncio.sleep(0.5)
     await c_replica.execute_command(
         "ADDREPLICAOF localhost " + str(redis_cluster_nodes[2].port) + " 10923 16383"
     )
