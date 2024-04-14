@@ -162,7 +162,7 @@ bool OutgoingMigration::FinishMigration(long attempt) {
                      << facade::ToSV(LastResponseArgs().front().GetBuf());
         return false;
       }
-      attempt_res = get<long>(LastResponseArgs().front().u);
+      attempt_res = get<int64_t>(LastResponseArgs().front().u);
     } while (attempt_res != attempt);
 
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
