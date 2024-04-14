@@ -274,7 +274,7 @@ class CommandGenerator:
         # Shrink has a roughly twice as large expected number of changed keys than grow
         return [
             max(self.base_diff_prob - self.diff_speed * dist, self.min_diff_prob),
-            1.0,
+            15.0,
             max(self.base_diff_prob + 2 * self.diff_speed * dist, self.min_diff_prob),
         ]
 
@@ -291,7 +291,6 @@ class CommandGenerator:
             if cmd is not None:
                 cmds.append(cmd)
                 self.key_cnt += delta
-
         return cmds, self.key_cnt / self.key_cnt_target
 
 
@@ -476,7 +475,9 @@ class DflySeeder:
                 return False
             if target_ops is not None and submitted >= target_ops:
                 return False
-            if target_deviation is not None and abs(1 - deviation) < target_deviation:
+            if target_deviation is not None and (
+                deviation > 1 or abs(1 - deviation) < target_deviation
+            ):
                 return False
             return True
 

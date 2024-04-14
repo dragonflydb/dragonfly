@@ -1496,10 +1496,8 @@ async def test_replicate_disconnect_cluster(
 def is_offset_eq_master_repl_offset(replication_info: str):
     offset = re.findall("offset=([0-9]+),", replication_info)
     assert len(offset) == 1
-    print("current offset =", offset)
     master_repl_offset = re.findall("master_repl_offset:([0-9]+)\r\n", replication_info)
     assert len(master_repl_offset) == 1
-    print("current master_repl_offset =", master_repl_offset)
     return int(offset[0]) == int(master_repl_offset[0])
 
 
@@ -1546,15 +1544,110 @@ async def test_replicate_redis_cluster(redis_cluster, df_local_factory, df_seede
     await c_replica.execute_command(
         "REPLICAOF localhost " + str(redis_cluster_nodes[0].port) + " 0 5460"
     )
+    await asyncio.sleep(0.5)
     await c_replica.execute_command(
         "ADDREPLICAOF localhost " + str(redis_cluster_nodes[1].port) + " 5461 10922"
     )
+    await asyncio.sleep(0.5)
     await c_replica.execute_command(
         "ADDREPLICAOF localhost " + str(redis_cluster_nodes[2].port) + " 10923 16383"
     )
 
     # give seeder time to run.
     await asyncio.sleep(0.5)
+    # Stop seeder
+    seeder.stop()
+    await fill_task
+
+    # wait for replication to finish
+    await asyncio.gather(*(asyncio.create_task(await_eq_offset(client)) for client in node_clients))
+
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, replica.port)
+
+    await disconnect_clients(c_replica, *node_clients)
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_replicate_disconnect_redis_cluster(
+    redis_cluster, df_local_factory, df_seeder_factory
+):
+    """
+    Create redis cluster of 3 nodes.
+    Create dragonfly server in emulated mode.
+    Replicate the redis cluster into a single dragonfly node.
+    Send traffic before replication start and while replicating.
+    Close connection between dfly replica and one of master nodes and reconnect
+    Send more traffic
+    Promote the replica to master and check data consistency between cluster and single dragonfly node.
+    """
+    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+
+    # Start instances and connect clients
+    df_local_factory.start_all([replica])
+
+    redis_cluster_nodes = redis_cluster
+    node_clients = [
+        aioredis.Redis(decode_responses=True, host="localhost", port=node.port)
+        for node in redis_cluster_nodes
+    ]
+
+    c_replica = replica.client()
+
+    seeder = df_seeder_factory.create(
+        keys=1000, port=redis_cluster_nodes[0].port, cluster_mode=True
+    )
+    await seeder.run(target_deviation=0.1)
+
+    fill_task = asyncio.create_task(seeder.run())
+
+    proxy = Proxy("127.0.0.1", 1114, "127.0.0.1", redis_cluster_nodes[1].port)
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    # Start replication
+    await c_replica.execute_command(
+        "REPLICAOF localhost " + str(redis_cluster_nodes[0].port) + " 0 5460"
+    )
+    await c_replica.execute_command("ADDREPLICAOF localhost " + str(proxy.port) + " 5461 10922")
+    await c_replica.execute_command(
+        "ADDREPLICAOF localhost " + str(redis_cluster_nodes[2].port) + " 10923 16383"
+    )
+
+    # give seeder time to run.
+    await asyncio.sleep(1)
+
+    # break connection between second node and replica
+    await proxy.close(proxy_task)
+    await asyncio.sleep(3)
+
+    # check second node connection is down
+    info = await c_replica.execute_command("INFO REPLICATION")
+    statuses = re.findall("master_link_status:(down|up)\r\n", info)
+    assert len(statuses) == 3
+    assert statuses[0] == "up"
+    assert statuses[1] == "down"
+    assert statuses[2] == "up"
+
+    # start connection again
+    await proxy.start()
+    proxy_task = asyncio.create_task(proxy.serve())
+
+    # give seeder more time to run
+    await asyncio.sleep(1)
+
+    # check second node connection is up
+    info = await c_replica.execute_command("INFO REPLICATION")
+    statuses = re.findall("master_link_status:(down|up)\r\n", info)
+    assert len(statuses) == 3
+    assert statuses[0] == "up"
+    assert statuses[1] == "up"
+    assert statuses[2] == "up"
+
+    # give seeder time to run.
+    await asyncio.sleep(1)
+
     # Stop seeder
     seeder.stop()
     await fill_task
