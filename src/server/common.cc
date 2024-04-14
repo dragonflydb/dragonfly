@@ -51,23 +51,23 @@ using namespace util;
 
 namespace {
 // Thread-local cache with static linkage.
-thread_local std::optional<LocktagsLockOptions> locktag_lock_options;
+thread_local std::optional<LockTagOptions> locktag_lock_options;
 }  // namespace
 
-void TEST_InvalidateLocktagOptions() {
+void TEST_InvalidateLockTagOptions() {
   locktag_lock_options = nullopt;  // For test main thread
   CHECK(shard_set != nullptr);
   shard_set->pool()->Await(
       [](ShardId shard, ProactorBase* proactor) { locktag_lock_options = nullopt; });
 }
 
-/* static */ LocktagsLockOptions KeyLockArgs::GetLocktagOptions() {
+/* static */ LockTagOptions KeyLockArgs::GetLockTagOptions() {
   if (!locktag_lock_options.has_value()) {
     string delimiter = absl::GetFlag(FLAGS_locktag_delimiter);
     if (delimiter.empty()) {
       delimiter = "{}";
     } else if (delimiter.size() == 1) {
-      delimiter = delimiter + delimiter;
+      delimiter += delimiter;  // Copy delimiter (e.g. "::") so that it's easier to use below
     } else {
       LOG(ERROR) << "Invalid value for locktag_delimiter - must be a single char";
       exit(-1);
@@ -86,7 +86,7 @@ void TEST_InvalidateLocktagOptions() {
 }
 
 string_view KeyLockArgs::GetLockKey(string_view key) {
-  if (GetLocktagOptions().enabled) {
+  if (GetLockTagOptions().enabled) {
     return ClusterConfig::KeyTag(key);
   }
 

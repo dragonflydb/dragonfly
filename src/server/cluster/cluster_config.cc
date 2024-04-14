@@ -56,7 +56,7 @@ bool ClusterConfig::IsEmulated() {
 }
 
 string_view ClusterConfig::KeyTag(string_view key) {
-  auto options = KeyLockArgs::GetLocktagOptions();
+  auto options = KeyLockArgs::GetLockTagOptions();
 
   if (!absl::StartsWith(key, options.prefix)) {
     return key;
