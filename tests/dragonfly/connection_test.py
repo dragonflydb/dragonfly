@@ -658,6 +658,16 @@ async def test_unix_domain_socket(df_local_factory, tmp_dir):
     assert await r.ping()
 
 
+async def test_unix_socket_only(df_local_factory, tmp_dir):
+    server = df_local_factory.create(proactor_threads=1, port=0, unixsocket="./df.sock")
+    server._start()
+
+    await asyncio.sleep(1)
+
+    r = aioredis.Redis(unix_socket_path=tmp_dir / "df.sock")
+    assert await r.ping()
+
+
 """
 Test nested pauses. Executing CLIENT PAUSE should be possible even if another write-pause is active.
 It should prolong the pause for all current commands.

@@ -67,7 +67,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal
 }
 
 void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
-  VLOG(2) << "RestoreStreamer start";
+  VLOG(1) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
@@ -100,8 +100,7 @@ void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
 }
 
 void RestoreStreamer::SendFinalize() {
-  VLOG(2) << "DFLYMIGRATE FINALIZE for "
-          << " : " << db_slice_->shard_id();
+  VLOG(1) << "RestoreStreamer FIN opcode for : " << db_slice_->shard_id();
   journal::Entry entry(journal::Op::FIN, 0 /*db_id*/, 0 /*slot_id*/);
 
   JournalWriter writer{this};

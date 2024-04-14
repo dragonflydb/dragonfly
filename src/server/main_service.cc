@@ -1506,7 +1506,9 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
 
-  if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
+  if (peer->IsUDS()) {
+    res->req_auth = false;
+  } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
     res->req_auth = !user_registry_.AuthUser("default", "");
