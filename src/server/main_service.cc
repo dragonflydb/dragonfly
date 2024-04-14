@@ -26,8 +26,8 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
-#include "facade/resp_expr.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
 #include "server/acl/user_registry.h"
@@ -290,6 +290,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   unsigned num_elems_ = 0;
 };
 
+// Serialized result of script invocation to Redis protocol
 class EvalSerializer : public ObjectExplorer {
  public:
   EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
@@ -325,6 +326,13 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnArrayEnd() final {
+  }
+
+  void OnMapStart(unsigned len) final {
+    rb_->StartCollection(len, RedisReplyBuilder::MAP);
+  }
+
+  void OnMapEnd() final {
   }
 
   void OnNil() final {
@@ -586,7 +594,7 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFami
                                                 : "Disabled");
 
   if (ClusterConfig::IsEnabledOrEmulated()) {
-    print_kb("Lock on hashtags", KeyLockArgs::IsLockHashTagEnabled());
+    print_kb("Lock on hashtags", KeyLockArgs::GetLockTagOptions().enabled);
   }
 
   if (ClusterConfig::IsEnabled()) {
@@ -1498,7 +1506,9 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
 
-  if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
+  if (peer->IsUDS()) {
+    res->req_auth = false;
+  } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
     res->req_auth = !user_registry_.AuthUser("default", "");

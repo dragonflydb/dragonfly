@@ -64,7 +64,7 @@ class ClusterConfig {
   }
 
   static bool IsShardedByTag() {
-    return IsEnabledOrEmulated() || KeyLockArgs::IsLockHashTagEnabled();
+    return IsEnabledOrEmulated() || KeyLockArgs::GetLockTagOptions().enabled;
   }
 
   // If the key contains the {...} pattern, return only the part between { and }

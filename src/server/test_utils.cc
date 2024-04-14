@@ -178,12 +178,9 @@ void BaseFamilyTest::TearDown() {
   LOG(INFO) << "Finishing " << test_info->name();
 }
 
-// Test hook defined in common.cc.
-void TEST_InvalidateLockHashTag();
-
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
-    TEST_InvalidateLockHashTag();
+    TEST_InvalidateLockTagOptions();
 
     ShutdownService();
   }
