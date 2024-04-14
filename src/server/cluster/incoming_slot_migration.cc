@@ -110,11 +110,15 @@ void IncomingSlotMigration::Join() {
 
 void IncomingSlotMigration::Cancel() {
   cntx_.Cancel();
-  for (auto& flow : shard_flows_) {
-    if (flow != nullptr) {
-      flow->Cancel();
+
+  auto cb = [this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      if (auto& flow = shard_flows_[shard->shard_id()]; flow) {
+        flow->Cancel();
+      }
     }
-  }
+  };
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
