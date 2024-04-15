@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/strings/numbers.h>
+
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -186,7 +188,30 @@ struct CmdArgParser {
       error_ = {type, idx};
   }
 
-  template <typename T> T Num(size_t idx);
+  template <typename T> T Num(size_t idx) {
+    auto arg = SafeSV(idx);
+    T out;
+    if constexpr (std::is_same_v<T, float>) {
+      if (absl::SimpleAtof(arg, &out))
+        return out;
+    } else if constexpr (std::is_same_v<T, double>) {
+      if (absl::SimpleAtod(arg, &out))
+        return out;
+    } else if constexpr (std::is_integral_v<T> && sizeof(T) >= sizeof(int32_t)) {
+      if (absl::SimpleAtoi(arg, &out))
+        return out;
+    } else if constexpr (std::is_integral_v<T> && sizeof(T) < sizeof(int32_t)) {
+      int32_t tmp;
+      if (absl::SimpleAtoi(arg, &tmp)) {
+        out = tmp;  // out can not store the whole tmp
+        if (tmp == out)
+          return out;
+      }
+    }
+
+    Report(INVALID_INT, idx);
+    return {};
+  }
 
   void ToUpper(size_t i);
 
