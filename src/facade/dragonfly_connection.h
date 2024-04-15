@@ -307,6 +307,8 @@ class Connection : public util::Connection {
   // Get quick debug info for logs
   std::string DebugInfo() const;
 
+  bool IsHttp() const;
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
