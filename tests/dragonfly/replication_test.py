@@ -1643,7 +1643,7 @@ async def test_df_crash_on_memcached_error(df_local_factory):
     await wait_for_replica_status(c_replica, status="up")
     await c_replica.close()
 
-    memcached_client = pymemcache.Client(f"localhost:{replica.mc_port}")
+    memcached_client = pymemcache.Client(f"127.0.0.1:{replica.mc_port}")
 
     with pytest.raises(pymemcache.exceptions.MemcacheServerError):
         memcached_client.set("key", "data", noreply=False)
