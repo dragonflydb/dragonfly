@@ -701,6 +701,7 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   EXPECT_EQ(1, stats.tx_normal_cnt);  // move is global
 }
 
+#ifndef SANITIZERS
 TEST_F(MultiTest, ScriptFlagsCommand) {
   if (auto flags = absl::GetFlag(FLAGS_default_lua_flags); flags != "") {
     GTEST_SKIP() << "Skipped ScriptFlagsCommand test because default_lua_flags is set";
@@ -736,6 +737,7 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
     EXPECT_THAT(Run({"eval", kUndeclared2, "0"}), "works");
   }
 }
+#endif
 
 TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
