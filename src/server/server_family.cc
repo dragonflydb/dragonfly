@@ -1069,6 +1069,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
+  AppendMetricHeader("memory_fiberstack_vms_bytes", "virtual memory size used by all the fibers",
+                     MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("memory_fiberstack_vms_bytes", "", m.worker_fiber_stack_size,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
