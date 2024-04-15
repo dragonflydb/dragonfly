@@ -1471,6 +1471,20 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
+async def test_ipv6_replication(df_local_factory: DflyInstanceFactory):
+    """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
+    master = df_local_factory.create(proactor_threads=1, bind="::1", port=1111)
+    replica = df_local_factory.create(proactor_threads=1, bind="::1", port=1112)
+
+    df_local_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    assert await c_master.ping()
+    assert await c_replica.ping()
+    assert await c_replica.execute_command("REPLICAOF", master["bind"], master["port"]) == "OK"
+
+
 # busy wait for 'replica' instance to have replication status 'status'
 async def wait_for_replica_status(
     replica: aioredis.Redis, status: str, wait_for_seconds=0.01, timeout=20
@@ -1629,7 +1643,7 @@ async def test_df_crash_on_memcached_error(df_local_factory):
     await wait_for_replica_status(c_replica, status="up")
     await c_replica.close()
 
-    memcached_client = pymemcache.Client(f"localhost:{replica.mc_port}")
+    memcached_client = pymemcache.Client(f"127.0.0.1:{replica.mc_port}")
 
     with pytest.raises(pymemcache.exceptions.MemcacheServerError):
         memcached_client.set("key", "data", noreply=False)
