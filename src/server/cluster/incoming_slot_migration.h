@@ -25,7 +25,7 @@ class IncomingSlotMigration {
   void Join();
 
   MigrationState GetState() const {
-    return state_;
+    return state_.load();
   }
 
   const SlotRanges& GetSlots() const {
@@ -41,7 +41,7 @@ class IncomingSlotMigration {
   Service& service_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   SlotRanges slots_;
-  MigrationState state_ = MigrationState::C_NO_STATE;
+  std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
   Context cntx_;
 
   util::fb2::BlockingCounter bc_;

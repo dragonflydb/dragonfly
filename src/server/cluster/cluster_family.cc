@@ -834,6 +834,14 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   }
 
   VLOG(1) << "DFLYMIGRATE ACK" << args;
+  auto in_migrations = tl_cluster_config->GetIncomingMigrations();
+  auto m_it = std::find_if(in_migrations.begin(), in_migrations.end(),
+                           [source_id](const auto& m) { return m.node_id == source_id; });
+  if (m_it == in_migrations.end()) {
+    LOG(WARNING) << "migration isn't in config";
+    return cntx->SendLong(OutgoingMigration::kInvalidAttempt);
+  }
+
   auto migration = GetIncomingMigration(source_id);
   if (!migration)
     return cntx->SendError(kIdNotFound);
@@ -847,8 +855,9 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   }
 
   UpdateConfig(migration->GetSlots(), true);
+  VLOG(1) << "Config is updated for " << MyID();
 
-  cntx->SendLong(attempt);
+  return cntx->SendLong(attempt);
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);

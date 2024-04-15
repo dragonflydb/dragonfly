@@ -892,9 +892,8 @@ async def test_cluster_native_client(
     await close_clients(client, *c_masters, *c_masters_admin, *c_replicas, *c_replicas_admin)
 
 
-@pytest.mark.skip(reason="Test needs refactoring because of cluster design change")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
+async def test_config_consistency(df_local_factory: DflyInstanceFactory):
     # Check slot migration from one node to another
     nodes = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
@@ -928,10 +927,8 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    status = await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", "127.0.0.1", str(nodes[0].admin_port)
-    )
-    assert "NO_STATE" == status
+    for node in c_nodes_admin:
+        assert await node.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
 
     migation_config = f"""
       [
@@ -950,12 +947,46 @@ async def test_cluster_slot_migration(df_local_factory: DflyInstanceFactory):
       ]
     """
 
+    # push config only to source node
     await push_config(
         migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        [c_nodes_admin[0]],
+    )
+
+    assert await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [
+        f"""out {node_ids[1]} SYNC keys:0"""
+    ]
+
+    assert await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [
+        f"""in {node_ids[0]} SYNC keys:0"""
+    ]
+
+    # migration shouldn't be finished until we set the same config to target node
+    await asyncio.sleep(0.5)
+
+    # push config to target node
+    await push_config(
+        migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        [c_nodes_admin[1]],
+    )
+
+    while "FINISHED" not in await c_nodes_admin[1].execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
+    ):
+        await asyncio.sleep(0.05)
+
+    assert await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [
+        f"""out {node_ids[1]} FINISHED keys:0"""
+    ]
+
+    # remove finished migrations
+    await push_config(
+        config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
         c_nodes_admin,
     )
 
-    # TODO add a check for correct results after the same config apply
+    for node in c_nodes_admin:
+        assert await node.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
 
     await close_clients(*c_nodes, *c_nodes_admin)
 

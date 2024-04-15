@@ -49,6 +49,8 @@ class OutgoingMigration : private ProtocolClient {
     return migration_info_;
   }
 
+  static constexpr long kInvalidAttempt = -1;
+
  private:
   MigrationState GetStateImpl() const;
   // SliceSlotMigration manages state and data transfering for the corresponding shard

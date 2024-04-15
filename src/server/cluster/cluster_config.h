@@ -102,6 +102,10 @@ class ClusterConfig {
   std::vector<MigrationInfo> GetFinishedIncomingMigrations(
       const std::shared_ptr<ClusterConfig>& prev) const;
 
+  std::vector<MigrationInfo> GetIncomingMigrations() const {
+    return my_incoming_migrations_;
+  }
+
  private:
   struct SlotEntry {
     const ClusterShardInfo* shard = nullptr;
