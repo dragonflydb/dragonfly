@@ -973,6 +973,7 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
     while "FINISHED" not in await c_nodes_admin[1].execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
     ):
+        logging.debug("SLOT-MIGRATION-STATUS is not FINISHED")
         await asyncio.sleep(0.05)
 
     assert await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [

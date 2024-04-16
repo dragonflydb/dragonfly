@@ -17,7 +17,7 @@
 #include "server/journal/streamer.h"
 #include "server/server_family.h"
 
-ABSL_FLAG(int, connection_timeout_ms, 2000, "Timeout for network operations");
+ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000, "Timeout for network operations");
 
 using namespace std;
 using namespace facade;
@@ -36,7 +36,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   std::error_code Start(const std::string& node_id, uint32_t shard_id) {
-    RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_connection_timeout_ms) * 1ms, &cntx_));
+    RETURN_ON_ERR(
+        ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_));
     ResetParser(/*server_mode=*/false);
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
@@ -149,7 +150,7 @@ bool OutgoingMigration::FinishMigration(long attempt) {
     long attempt_res = kInvalidAttempt;
     do {  // we can have response from previos time so we need to read until get response for the
           // last attempt
-      auto resp = ReadRespReply(absl::GetFlag(FLAGS_connection_timeout_ms));
+      auto resp = ReadRespReply(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
 
       if (!resp) {
         LOG(WARNING) << resp.error();
@@ -200,7 +201,7 @@ std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
 
   VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_connection_timeout_ms) * 1ms, &cntx_);
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
   VLOG(1) << "Migration initiating";
