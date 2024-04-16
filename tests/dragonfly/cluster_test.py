@@ -1290,7 +1290,7 @@ async def test_cluster_fuzzymigration(
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
-    # Check data migration from one node to another
+    """Check data migration from one node to another."""
     instances = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
         for i in range(2)
@@ -1312,6 +1312,7 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     nodes[0].slots = [(0, 8000)]
     nodes[1].slots = [(8001, 16383)]
 
+    logging.debug("Pushing data to slot 6XXX")
     SIZE = 10_000
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
     for i in range(SIZE):
@@ -1321,6 +1322,7 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].port, [(6000, 8000)], nodes[1].id)
     ]
+    logging.debug("Migrating slots 6000-8000")
     await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
     await asyncio.sleep(0.1)
     assert await nodes[0].client.dbsize() == SIZE

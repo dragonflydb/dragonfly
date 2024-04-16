@@ -739,9 +739,12 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
                            [&m](const auto& om) { return m == om->GetMigrationInfo(); });
     DCHECK(it != outgoing_migration_jobs_.end());
     DCHECK(it->get() != nullptr);
-    if (it->get()->GetState() != MigrationState::C_FINISHED) {
-      LOG(INFO) << "Migration cancelled.";  // TODO: add more info: node, slots, etc
-      it->get()->CancelAll();
+    OutgoingMigration& migration = *it->get();
+    if (migration.GetState() != MigrationState::C_FINISHED) {
+      LOG(INFO) << "Outgoing migration cancelled: slots "
+                << SlotRange::ToString(migration.GetSlots()) << " to " << migration.GetHostIp()
+                << ":" << migration.GetPort();
+      migration.CancelAll();
     }
     outgoing_migration_jobs_.erase(it);
   }
@@ -763,6 +766,7 @@ void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& m
     SlotSet migration_slots(it->get()->GetSlots());
     SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
+    // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
     it->get()->Cancel();
 
     if (!removed.Empty()) {
@@ -771,11 +775,9 @@ void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& m
           << "Flushing slots of removed FINISHED migration " << it->get()->GetSourceID()
           << ", slots: " << SlotRange::ToString(*removed_ranges);
       shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
-        EngineShard* shard = EngineShard::tlocal();
-        if (!shard) {
-          return;
+        if (EngineShard* shard = EngineShard::tlocal(); shard) {
+          shard->db_slice().FlushSlots(*removed_ranges);
         }
-        shard->db_slice().FlushSlots(*removed_ranges);
       });
     }
 

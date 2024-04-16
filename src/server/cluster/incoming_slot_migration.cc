@@ -54,7 +54,7 @@ class ClusterShardMigration {
   void Cancel() {
     if (socket_ != nullptr) {
       socket_->proactor()->Dispatch([s = socket_, sid = source_shard_id_]() {
-        s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further reads/writes.
+        s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
       });
     }
   }
@@ -103,6 +103,7 @@ void IncomingSlotMigration::Join() {
 }
 
 void IncomingSlotMigration::Cancel() {
+  LOG(INFO) << "Cancelling incoming migration of slots " << SlotRange::ToString(slots_);
   cntx_.Cancel();
 
   auto cb = [this](util::ProactorBase* pb) {
