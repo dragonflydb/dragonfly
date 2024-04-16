@@ -761,18 +761,19 @@ void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& m
         });
     DCHECK(it != incoming_migrations_jobs_.end());
     DCHECK(it->get() != nullptr);
+    IncomingSlotMigration& migration = *it->get();
 
     // Flush non-owned migrations
-    SlotSet migration_slots(it->get()->GetSlots());
+    SlotSet migration_slots(migration.GetSlots());
     SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
     // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
-    it->get()->Cancel();
+    migration.Cancel();
 
     if (!removed.Empty()) {
       auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
-      LOG_IF(WARNING, it->get()->GetState() == MigrationState::C_FINISHED)
-          << "Flushing slots of removed FINISHED migration " << it->get()->GetSourceID()
+      LOG_IF(WARNING, migration.GetState() == MigrationState::C_FINISHED)
+          << "Flushing slots of removed FINISHED migration " << migration.GetSourceID()
           << ", slots: " << SlotRange::ToString(*removed_ranges);
       shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
         if (EngineShard* shard = EngineShard::tlocal(); shard) {
