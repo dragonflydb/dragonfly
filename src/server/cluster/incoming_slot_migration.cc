@@ -106,14 +106,9 @@ void IncomingSlotMigration::Cancel() {
   LOG(INFO) << "Cancelling incoming migration of slots " << SlotRange::ToString(slots_);
   cntx_.Cancel();
 
-  auto cb = [this](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      if (auto& flow = shard_flows_[shard->shard_id()]; flow) {
-        flow->Cancel();
-      }
-    }
-  };
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+  for (auto& flow : shard_flows_) {
+    flow->Cancel();
+  }
 }
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
