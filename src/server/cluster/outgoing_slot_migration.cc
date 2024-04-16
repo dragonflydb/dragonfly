@@ -17,8 +17,7 @@
 #include "server/journal/streamer.h"
 #include "server/server_family.h"
 
-ABSL_FLAG(int, source_connect_timeout_ms, 20000,
-          "Timeout for establishing connection to a source node");
+ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000, "Timeout for network operations");
 
 using namespace std;
 using namespace facade;
@@ -37,7 +36,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   std::error_code Start(const std::string& node_id, uint32_t shard_id) {
-    RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
+    RETURN_ON_ERR(
+        ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_));
     ResetParser(/*server_mode=*/false);
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
@@ -86,6 +86,7 @@ MigrationState OutgoingMigration::GetState() const {
 }
 
 void OutgoingMigration::SyncFb() {
+  state_.store(MigrationState::C_SYNC);
   auto start_cb = [this](util::ProactorBase* pb) {
     if (auto* shard = EngineShard::tlocal(); shard) {
       server_family_->journal()->StartInThread();
@@ -146,10 +147,10 @@ bool OutgoingMigration::FinishMigration(long attempt) {
   LOG_IF(WARNING, err) << err;
 
   if (!err) {
-    long attempt_res = -1;
+    long attempt_res = kInvalidAttempt;
     do {  // we can have response from previos time so we need to read until get response for the
           // last attempt
-      auto resp = ReadRespReply(absl::GetFlag(FLAGS_source_connect_timeout_ms));
+      auto resp = ReadRespReply(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
 
       if (!resp) {
         LOG(WARNING) << resp.error();
@@ -163,6 +164,9 @@ bool OutgoingMigration::FinishMigration(long attempt) {
         return false;
       }
       attempt_res = get<int64_t>(LastResponseArgs().front().u);
+      if (attempt_res == kInvalidAttempt) {
+        return false;
+      }
     } while (attempt_res != attempt);
 
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
@@ -172,6 +176,7 @@ bool OutgoingMigration::FinishMigration(long attempt) {
 
     state_.store(MigrationState::C_FINISHED);
     cf_->UpdateConfig(migration_info_.slot_ranges, false);
+    VLOG(1) << "Config is updated for " << cf_->MyID();
     return true;
   } else {
     // TODO implement connection issue error processing
@@ -196,7 +201,7 @@ std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
 
   VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
   VLOG(1) << "Migration initiating";
