@@ -34,9 +34,7 @@ class ClusterShardMigration {
       if (cntx->IsCancelled())
         break;
 
-      // LOG(ERROR) << "XXX Reading tx for " << source_shard_id_;
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
-      // LOG(ERROR) << "XXX Finished reading a tx for " << source_shard_id_;
       if (!tx_data) {
         VLOG(1) << "No tx data";
         break;
@@ -59,7 +57,6 @@ class ClusterShardMigration {
       socket_->proactor()->Dispatch([s = socket_, sid = source_shard_id_]() {
         LOG(ERROR) << "XXX Closing socket for " << sid;
         s->Shutdown(SHUT_RDWR);
-        s->Close();
         LOG(ERROR) << "XXX socket closed for " << sid;
       });
     }

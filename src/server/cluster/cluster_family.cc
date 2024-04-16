@@ -778,6 +778,11 @@ void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
     LOG(ERROR) << "XXX Checking whether to flush slots";
     SlotSet migration_slots(it->get()->GetSlots());
     SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
+
+    LOG(ERROR) << "XXX Cancelling migration";
+    it->get()->Cancel();
+    LOG(ERROR) << "XXX Migration cancelled";
+
     if (!removed.Empty()) {
       auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
       LOG(ERROR) << "XXX Flushing slots " << SlotRange::ToString(*removed_ranges);
@@ -794,14 +799,9 @@ void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
       LOG(ERROR) << "XXX Done dispatching flush slots";
     }
 
-    LOG(ERROR) << "XXX Cancelling migration";
-    it->get()->Cancel();
-    LOG(ERROR) << "XXX Migration cancelled";
-
     incoming_migrations_jobs_.erase(it);
     LOG(ERROR) << "XXX Migration erased";
   }
-  LOG(ERROR) << "XXX Exiting";
 }
 
 void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
