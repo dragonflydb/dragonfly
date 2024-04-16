@@ -785,6 +785,8 @@ bool TieredStorage::CanExternalizeEntry(PrimeIterator it) {
 }
 
 class TieredStorageV2::ShardOpManager : public tiering::OpManager {
+  friend class TieredStorageV2;
+
  public:
   ShardOpManager(TieredStorageV2* ts, DbSlice* db_slice) : ts_{ts}, db_slice_{db_slice} {
     cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_v2_cache_fetched);
@@ -795,6 +797,8 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     if (auto pv = Find(key); pv) {
       pv->SetIoPending(false);
       pv->SetExternal(segment.offset, segment.length);  // TODO: Handle memory stats
+
+      stats_.total_stashes++;
     }
   }
 
@@ -808,6 +812,8 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     if (auto pv = Find(key); pv) {
       pv->Reset();  // TODO: account for memory
       pv->SetString(value);
+
+      stats_.total_fetches++;
     }
   }
 
@@ -838,6 +844,12 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     }
   }
 
+  TieredStatsV2 GetStats() const {
+    auto stats = stats_;
+    stats.allocated_bytes = OpManager::storage_.GetStats().allocated_bytes;
+    return stats;
+  }
+
  private:
   PrimeValue* Find(std::string_view key) {
     // TODO: Get DbContext for transaction for correct dbid and time
@@ -846,6 +858,9 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   }
 
   bool cache_fetched_ = false;
+
+  TieredStatsV2 stats_;
+
   TieredStorageV2* ts_;
   DbSlice* db_slice_;
 };
@@ -901,6 +916,10 @@ void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
       op_manager_->Delete(*bin);
     }
   }
+}
+
+TieredStatsV2 TieredStorageV2::GetStats() const {
+  return op_manager_->GetStats();
 }
 
 }  // namespace dfly

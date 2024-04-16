@@ -250,9 +250,12 @@ class DflyInstance:
             p = children[0]
 
         ports = set()
-        for connection in p.connections():
-            if connection.status == "LISTEN":
-                ports.add(connection.laddr.port)
+        try:
+            for connection in p.connections():
+                if connection.status == "LISTEN":
+                    ports.add(connection.laddr.port)
+        except psutil.AccessDenied:
+            raise RuntimeError("Access denied")
 
         ports.difference_update({self.admin_port, self.mc_port})
         assert len(ports) < 2, "Open ports detection found too many ports"

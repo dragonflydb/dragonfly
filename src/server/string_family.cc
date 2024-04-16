@@ -537,6 +537,28 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   return response;
 }
 
+// Either string or future from tiered storage
+struct StringValue {
+  StringValue() : v_{} {
+  }
+  StringValue(std::string s) : v_{std::move(s)} {
+  }
+  StringValue(util::fb2::Future<std::string> f) : v_{std::move(f)} {
+  }
+
+  std::string Get() && {
+    DCHECK(!holds_alternative<monostate>(v_));
+
+    auto prev = exchange(v_, monostate{});
+    if (holds_alternative<string>(prev))
+      return std::move(std::get<string>(prev));
+    return std::get<util::fb2::Future<std::string>>(prev).get();
+  }
+
+ private:
+  std::variant<std::monostate, std::string, util::fb2::Future<std::string>> v_;
+};
+
 }  // namespace
 
 OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
@@ -623,6 +645,10 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
       TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
     shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it.GetInnerIt(),
                                                          key);
+  }
+
+  if (shard->tiered_storage_v2()) {  // external storage enabled
+    shard->tiered_storage_v2()->Stash(key, &it->second);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -848,53 +874,32 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
+  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
+    auto it_res = es->db_slice().FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    if (!it_res.ok())
+      return it_res.status();
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
-    auto op_args = t->GetOpArgs(shard);
-    DbSlice& db_slice = op_args.shard->db_slice();
-
-    OpResult<DbSlice::ConstIterator> res;
-
-    // A temporary code that allows running dragonfly without filling up memory store
-    // when reading data from disk.
-    if (TieredStorage* tiered = shard->tiered_storage();
-        tiered && absl::GetFlag(FLAGS_tiered_skip_prefetch)) {
-      res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
-      if (res && (*res)->second.IsExternal()) {
-        auto [offset, size] = (*res)->second.GetExternalSlice();
-        string blob(size, '\0');
-        auto ec = tiered->Read(offset, size, blob.data());
-        CHECK(!ec) << "TBD";
-        return blob;
-      }
+    if (const PrimeValue& pv = (*it_res)->second; pv.IsExternal()) {
+      return {es->tiered_storage_v2()->Read(key, pv)};
     } else {
-      res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+      std::string buf;
+      pv.GetString(&buf);
+      return {std::move(buf)};
     }
-
-    if (!res) {
-      return res.status();
-    }
-    return GetString((*res)->second);
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
-  Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
+  auto res = cntx->transaction->ScheduleSingleHopT(cb);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result) {
-    DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    rb->SendBulkString(*result);
-  } else {
-    switch (result.status()) {
-      case OpStatus::WRONG_TYPE:
-        rb->SendError(kWrongTypeErr);
-        break;
-      default:
-        DVLOG(1) << "GET " << key << " nil";
-        rb->SendNull();
-    }
+  switch (res.status()) {
+    case OpStatus::OK:
+      rb->SendBulkString(std::move(res.value()).Get());
+      break;
+    case OpStatus::WRONG_TYPE:
+      rb->SendError(kWrongTypeErr);
+      break;
+    default:
+      rb->SendNull();
   }
 }
 

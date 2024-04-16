@@ -72,4 +72,8 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   return io_mgr_.WriteAsync(offset, io::View(bytes), std::move(io_cb));
 }
 
+DiskStorage::Stats DiskStorage::GetStats() const {
+  return {alloc_.allocated_bytes()};
+}
+
 }  // namespace dfly::tiering

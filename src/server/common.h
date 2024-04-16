@@ -153,6 +153,14 @@ struct TieredStats {
   TieredStats& operator+=(const TieredStats&);
 };
 
+struct TieredStatsV2 {
+  size_t total_stashes = 0;
+  size_t total_fetches = 0;
+  size_t allocated_bytes = 0;
+
+  TieredStatsV2& operator+=(const TieredStatsV2&);
+};
+
 struct SearchStats {
   size_t used_memory = 0;
   size_t num_indices = 0;

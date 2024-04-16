@@ -1583,6 +1583,10 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   const PrimeValue& pv = del_it->second;
   RemoveFromTiered(del_it, table);
 
+  if (pv.IsExternal() && shard_owner()->tiered_storage_v2()) {
+    shard_owner()->tiered_storage_v2()->Delete(del_it.key(), &del_it->second);
+  }
+
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
   AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -del_it->first.MallocUsed(),
