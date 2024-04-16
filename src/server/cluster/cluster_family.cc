@@ -768,7 +768,9 @@ void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& m
     SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
     // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
-    migration.Cancel();
+    if (migration.GetState() != MigrationState::C_FINISHED) {
+      migration.Cancel();
+    }
 
     if (!removed.Empty()) {
       auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());

@@ -1314,26 +1314,26 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
 
     logging.debug("Pushing data to slot 6XXX")
     SIZE = 10_000
-    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     for i in range(SIZE):
-        assert await nodes[0].client.set(f"{{key50}}:{i}", i)  # key50 belongs to slot 6686
-    assert [SIZE, 0] == [await node.client.dbsize() for node in nodes]
+        assert await nodes[0].admin_client.set(f"{{key50}}:{i}", i)  # key50 belongs to slot 6686
+    assert [SIZE, 0] == [await node.admin_client.dbsize() for node in nodes]
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].port, [(6000, 8000)], nodes[1].id)
     ]
     logging.debug("Migrating slots 6000-8000")
-    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     await asyncio.sleep(0.1)
-    assert await nodes[0].client.dbsize() == SIZE
-    assert await nodes[1].client.dbsize(), "weak test case" < SIZE
+    assert await nodes[0].admin_client.dbsize() == SIZE
+    assert await nodes[1].admin_client.dbsize(), "weak test case" < SIZE
 
     logging.debug("Cancelling migration")
     nodes[0].migrations = []
-    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     while True:
-        db_size = await nodes[1].client.dbsize()
-        if db_size < 20:
+        db_size = await nodes[1].admin_client.dbsize()
+        if db_size == 0:
             break
         # logging.debug("db sizes ", ', '.join(map(str, db_sizes)))
         logging.debug(f"db sizes {db_size}")
@@ -1343,11 +1343,11 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", instances[1].port, [(6001, 8000)], nodes[1].id)
     )
-    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     await asyncio.sleep(0.1)
-    assert SIZE == await nodes[0].client.dbsize()
+    assert SIZE == await nodes[0].admin_client.dbsize()
     for i in range(100):
-        if SIZE == await nodes[1].client.dbsize():
+        if SIZE == await nodes[1].admin_client.dbsize():
             break
         await asyncio.sleep(0.1)
     else:
@@ -1357,11 +1357,13 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     nodes[0].migrations = []
     nodes[0].slots = [(0, 6000)]
     nodes[1].slots = [(6001, 16383)]
-    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    logging.debug("Migration finalized")
+
     await asyncio.sleep(0.1)
-    assert [0, SIZE] == [await node.client.dbsize() for node in nodes]
+    assert [0, SIZE] == [await node.admin_client.dbsize() for node in nodes]
     for i in range(SIZE):
-        assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
+        assert str(i) == await nodes[1].admin_client.get(f"{{key50}}:{i}")
 
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 

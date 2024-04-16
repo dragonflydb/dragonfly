@@ -115,17 +115,12 @@ void OutgoingMigration::SyncFb() {
     migration->WaitForSnapshotFinished();
   }
 
-  if (state_.load() == MigrationState::C_CANCELLED) {
-    LOG(INFO) << "Outgoing migration cancelled";
-    return;
-  }
-
   VLOG(1) << "Migrations snapshot is finished";
 
   // TODO implement blocking on migrated slots only
 
   long attempt = 0;
-  while (!FinishMigration(++attempt)) {
+  while (state_.load() != MigrationState::C_CANCELLED && !FinishMigration(++attempt)) {
     // process commands that were on pause and try again
     ThisFiber::SleepFor(500ms);
   }
@@ -141,7 +136,7 @@ bool OutgoingMigration::FinishMigration(long attempt) {
     LOG(WARNING) << "Cluster migration finalization time out";
   }
 
-  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
+  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt]() {
     is_block_active = false;
     pause_fb_opt->JoinIfNeeded();
   });
