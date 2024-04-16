@@ -53,11 +53,8 @@ class ClusterShardMigration {
 
   void Cancel() {
     if (socket_ != nullptr) {
-      LOG(ERROR) << "XXX Cancelling incoming migration " << source_shard_id_;
       socket_->proactor()->Dispatch([s = socket_, sid = source_shard_id_]() {
-        LOG(ERROR) << "XXX Closing socket for " << sid;
-        s->Shutdown(SHUT_RDWR);
-        LOG(ERROR) << "XXX socket closed for " << sid;
+        s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further reads/writes.
       });
     }
   }

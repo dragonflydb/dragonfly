@@ -46,11 +46,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
     LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
 
-    sync_fb_ = fb2::Fiber("slot-snapshot", [this] {
-      LOG(ERROR) << "XXX Outdoing migration worker fiber started";
-      streamer_.Start(Sock());
-      LOG(ERROR) << "XXX Outdoing migration worker fiber finished";
-    });
+    sync_fb_ = fb2::Fiber("slot-snapshot", [this] { streamer_.Start(Sock()); });
     return {};
   }
 
@@ -101,7 +97,6 @@ MigrationState OutgoingMigration::GetState() const {
 }
 
 void OutgoingMigration::SyncFb() {
-  LOG(ERROR) << "XXX OutgoingMigration fiber start";
   auto start_cb = [this](util::ProactorBase* pb) {
     if (auto* shard = EngineShard::tlocal(); shard) {
       server_family_->journal()->StartInThread();
@@ -115,12 +110,9 @@ void OutgoingMigration::SyncFb() {
   state_.store(MigrationState::C_SYNC);
 
   shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
-  LOG(ERROR) << "XXX OutgoingMigration fiber finished start";
 
   for (auto& migration : slot_migrations_) {
-    LOG(ERROR) << "XXX Waiting for snapshot";
     migration->WaitForSnapshotFinished();
-    LOG(ERROR) << "XXX Waiting done";
   }
 
   if (state_.load() == MigrationState::C_CANCELLED) {
@@ -132,7 +124,6 @@ void OutgoingMigration::SyncFb() {
 
   // TODO implement blocking on migrated slots only
 
-  LOG(ERROR) << "XXX Pausing";
   long attempt = 0;
   while (!FinishMigration(++attempt)) {
     // process commands that were on pause and try again
@@ -163,9 +154,7 @@ bool OutgoingMigration::FinishMigration(long attempt) {
     }
   };
 
-  LOG(ERROR) << "XXX Finalizing";
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-  LOG(ERROR) << "XXX Finalizing done";
 
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
   VLOG(1) << "send " << cmd;
@@ -199,14 +188,11 @@ bool OutgoingMigration::FinishMigration(long attempt) {
     });
 
     state_.store(MigrationState::C_FINISHED);
-    LOG(ERROR) << "XXX Updating config";
     cf_->UpdateConfig(migration_info_.slot_ranges, false);
-    LOG(ERROR) << "XXX Config updated";
     return true;
   } else {
     // TODO implement connection issue error processing
   }
-  LOG(ERROR) << "XXX fiber done";
   return false;
 }
 

@@ -498,8 +498,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config), cntx)) {
     return cntx->SendError("Can't start the migration");
   }
-  RemoveOutgoingMigrations(*new_config);
-  RemoveIncomingMigrations(*new_config);
+  RemoveOutgoingMigrations(new_config->GetFinishedOutgoingMigrations(tl_cluster_config));
+  RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
 
   SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
 
@@ -528,16 +528,10 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
-    LOG(ERROR) << "XXX XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX XXX";
-    LOG(ERROR) << "XXX Before slots " << SlotRange::ToString(before.ToSlotRanges());
-    LOG(ERROR) << "XXX After slots " << SlotRange::ToString(after.ToSlotRanges());
-    LOG(ERROR) << "XXX Deleting slots " << SlotRange::ToString(deleted_slots);
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
-    LOG(ERROR) << "XXX Done deleting slots";
   }
 
-  LOG(ERROR) << "XXX Replying OK";
   return cntx->SendOk();
 }
 
@@ -738,33 +732,24 @@ std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
   return nullptr;
 }
 
-void ClusterFamily::RemoveOutgoingMigrations(const ClusterConfig& new_config) {
-  auto migrations = new_config.GetFinishedOutgoingMigrations(tl_cluster_config);
-  LOG(ERROR) << "XXX Inside RemoveOutgoingMigrations " << migrations.size();
-  LOG(ERROR) << "XXX Inside RemoveOutgoingMigrations " << migrations.size();
-
+void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& migrations) {
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
     auto it = std::find_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
                            [&m](const auto& om) { return m == om->GetMigrationInfo(); });
     DCHECK(it != outgoing_migration_jobs_.end());
     DCHECK(it->get() != nullptr);
-    LOG(ERROR) << "XXX Removing mig";
     if (it->get()->GetState() != MigrationState::C_FINISHED) {
       LOG(INFO) << "Migration cancelled.";  // TODO: add more info: node, slots, etc
       it->get()->CancelAll();
     }
     outgoing_migration_jobs_.erase(it);
-    LOG(ERROR) << "XXX Removed mig";
   }
 
   // Flushing of removed slots is done outside this function.
 }
 
-void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
-  auto migrations = new_config.GetFinishedIncomingMigrations(tl_cluster_config);
-  LOG(ERROR) << "XXX Inside RemoveIncomingMigrations " << migrations.size();
-
+void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
     auto it = std::find_if(
@@ -775,17 +760,13 @@ void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
     DCHECK(it->get() != nullptr);
 
     // Flush non-owned migrations
-    LOG(ERROR) << "XXX Checking whether to flush slots";
     SlotSet migration_slots(it->get()->GetSlots());
     SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
-    LOG(ERROR) << "XXX Cancelling migration";
     it->get()->Cancel();
-    LOG(ERROR) << "XXX Migration cancelled";
 
     if (!removed.Empty()) {
       auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
-      LOG(ERROR) << "XXX Flushing slots " << SlotRange::ToString(*removed_ranges);
       LOG_IF(WARNING, it->get()->GetState() == MigrationState::C_FINISHED)
           << "Flushing slots of removed FINISHED migration " << it->get()->GetSourceID()
           << ", slots: " << SlotRange::ToString(*removed_ranges);
@@ -796,11 +777,9 @@ void ClusterFamily::RemoveIncomingMigrations(const ClusterConfig& new_config) {
         }
         shard->db_slice().FlushSlots(*removed_ranges);
       });
-      LOG(ERROR) << "XXX Done dispatching flush slots";
     }
 
     incoming_migrations_jobs_.erase(it);
-    LOG(ERROR) << "XXX Migration erased";
   }
 }
 
