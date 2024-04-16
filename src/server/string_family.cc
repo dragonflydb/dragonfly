@@ -641,6 +641,12 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
     it->first.SetSticky(true);
   }
 
+  if (shard->tiered_storage() &&
+      TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
+    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it.GetInnerIt(),
+                                                         key);
+  }
+
   if (shard->tiered_storage_v2()) {  // external storage enabled
     shard->tiered_storage_v2()->Stash(key, &it->second);
   }
