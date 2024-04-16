@@ -477,8 +477,8 @@ class DbSlice {
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
-  // Releases a single key. `key` must have been normalized by GetLockKey().
-  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, std::string_view key);
+  // Releases a single tag.
+  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, LockTag tag);
 
  private:
   void PreUpdate(DbIndex db_ind, Iterator it);

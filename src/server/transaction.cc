@@ -84,7 +84,7 @@ uint16_t trans_id(const Transaction* ptr) {
 
 bool CheckLocks(const DbSlice& db_slice, IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
+    string_view s = lock_args.args[i];
     if (!db_slice.CheckLock(mode, lock_args.db_index, s))
       return false;
   }
@@ -262,7 +262,7 @@ void Transaction::LaunderKeyStorage(CmdArgVec* keys) {
   m_keys.reserve(keys->size());
 
   for (MutableSlice key : *keys) {
-    string_view key_s = KeyLockArgs::GetLockKey(facade::ToSV(key));
+    string_view key_s = string_view(LockTag{facade::ToSV(key)});
     // Insert copied string view, not original. This is why "try insert" is not allowed
     if (!m_keys_set.contains(key_s))
       m_keys_set.insert(m_keys.emplace_back(key_s));
@@ -633,7 +633,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
         CHECK_EQ(largs.key_step, 1u);
-        bcontroller->FinalizeWatched(largs.args, this);
+        bcontroller->FinalizeWatched(GetShardArgs(idx), this);
       }
 
       // Wake only if no tx queue head is currently running
@@ -1310,7 +1310,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const std::string_view> sharded_
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
   } else {
     for (const auto& key : sharded_keys) {
-      shard->db_slice().ReleaseNormalized(*multi_->lock_mode, db_index_, key);
+      shard->db_slice().ReleaseNormalized(*multi_->lock_mode, db_index_, LockTag{key});
     }
   }
 

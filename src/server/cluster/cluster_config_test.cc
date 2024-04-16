@@ -27,43 +27,47 @@ class ClusterConfigTest : public BaseFamilyTest {
   const string kMyId = "my-id";
 };
 
+inline string_view GetTag(string_view key) {
+  return LockTagOptions::instance().Tag(key);
+}
+
 TEST_F(ClusterConfigTest, KeyTagTest) {
   SetTestFlag("lock_on_hashtags", "true");
 
-  EXPECT_EQ(ClusterConfig::KeyTag("{user1000}.following"), "user1000");
+  EXPECT_EQ(GetTag("{user1000}.following"), "user1000");
 
-  EXPECT_EQ(ClusterConfig::KeyTag("foo{{bar}}zap"), "{bar");
+  EXPECT_EQ(GetTag("foo{{bar}}zap"), "{bar");
 
-  EXPECT_EQ(ClusterConfig::KeyTag("foo{bar}{zap}"), "bar");
+  EXPECT_EQ(GetTag("foo{bar}{zap}"), "bar");
 
   string_view key = " foo{}{bar}";
-  EXPECT_EQ(key, ClusterConfig::KeyTag(key));
+  EXPECT_EQ(key, GetTag(key));
 
   key = "{}foo{bar}{zap}";
-  EXPECT_EQ(key, ClusterConfig::KeyTag(key));
+  EXPECT_EQ(key, GetTag(key));
 
   SetTestFlag("locktag_delimiter", ":");
   TEST_InvalidateLockTagOptions();
 
   key = "{user1000}.following";
-  EXPECT_EQ(ClusterConfig::KeyTag(key), key);
+  EXPECT_EQ(GetTag(key), key);
 
-  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue1:123"), "queue1");
-  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:1:123"), "queue");
-  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:1:123:456:789:1000"), "queue");
+  EXPECT_EQ(GetTag("bull:queue1:123"), "queue1");
+  EXPECT_EQ(GetTag("bull:queue:1:123"), "queue");
+  EXPECT_EQ(GetTag("bull:queue:1:123:456:789:1000"), "queue");
 
   key = "bull::queue:1:123";
-  EXPECT_EQ(ClusterConfig::KeyTag(key), key);
+  EXPECT_EQ(GetTag(key), key);
 
   SetTestFlag("locktag_delimiter", ":");
   SetTestFlag("locktag_skip_n_end_delimiters", "0");
   SetTestFlag("locktag_prefix", "bull");
   TEST_InvalidateLockTagOptions();
-  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:123"), "queue");
-  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:123:456:789:1000"), "queue");
+  EXPECT_EQ(GetTag("bull:queue:123"), "queue");
+  EXPECT_EQ(GetTag("bull:queue:123:456:789:1000"), "queue");
 
   key = "not-bull:queue1:123";
-  EXPECT_EQ(ClusterConfig::KeyTag(key), key);
+  EXPECT_EQ(GetTag(key), key);
 
   SetTestFlag("locktag_delimiter", ":");
   SetTestFlag("locktag_skip_n_end_delimiters", "1");
@@ -71,19 +75,19 @@ TEST_F(ClusterConfigTest, KeyTagTest) {
   TEST_InvalidateLockTagOptions();
 
   key = "bull:queue1:123";
-  EXPECT_EQ(ClusterConfig::KeyTag(key), key);
-  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:1:123"), "queue:1");
-  EXPECT_EQ(ClusterConfig::KeyTag("bull:queue:1:123:456:789:1000"), "queue:1");
+  EXPECT_EQ(GetTag(key), key);
+  EXPECT_EQ(GetTag("bull:queue:1:123"), "queue:1");
+  EXPECT_EQ(GetTag("bull:queue:1:123:456:789:1000"), "queue:1");
 
   key = "bull::queue:1:123";
-  EXPECT_EQ(ClusterConfig::KeyTag(key), key);
+  EXPECT_EQ(GetTag(key), key);
 
   SetTestFlag("locktag_delimiter", "|");
   SetTestFlag("locktag_skip_n_end_delimiters", "2");
   SetTestFlag("locktag_prefix", "");
   TEST_InvalidateLockTagOptions();
 
-  EXPECT_EQ(ClusterConfig::KeyTag("|a|b|c|d|e"), "a|b|c");
+  EXPECT_EQ(GetTag("|a|b|c|d|e"), "a|b|c");
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {

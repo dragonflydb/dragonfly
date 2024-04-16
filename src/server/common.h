@@ -48,6 +48,7 @@ using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
 constexpr DbIndex kMaxDbId = 1024;  // Reasonable starting point.
+using LockFp = uint64_t;            // a key fingerprint used by the LockTable.
 
 class CommandId;
 class Transaction;
@@ -59,14 +60,14 @@ struct LockTagOptions {
   char close_locktag = '}';
   unsigned skip_n_end_delimiters = 0;
   std::string prefix;
+
+  // Returns the tag according to the rules defined by this options object.
+  std::string_view Tag(std::string_view key) const;
+
+  static const LockTagOptions& instance();
 };
 
 struct KeyLockArgs {
-  static LockTagOptions GetLockTagOptions();
-
-  // Before acquiring and releasing keys, one must "normalize" them via GetLockKey().
-  static std::string_view GetLockKey(std::string_view key);
-
   DbIndex db_index = 0;
   ArgSlice args;
   unsigned key_step = 1;
@@ -114,6 +115,33 @@ struct OpArgs {
 
   OpArgs(EngineShard* s, const Transaction* tx, const DbContext& cntx)
       : shard(s), tx(tx), db_cntx(cntx) {
+  }
+};
+
+// A strong type for a lock tag. Helps to disambiguide between keys and the parts of the
+// keys that are used for locking.
+class LockTag {
+  std::string_view str_;
+
+ public:
+  using is_stackonly = void;  // marks that this object does not use heap.
+
+  LockTag() = default;
+  explicit LockTag(std::string_view key);
+
+  explicit operator std::string_view() const {
+    return str_;
+  }
+
+  LockFp Fingerprint() const;
+
+  // To make it hashable.
+  template <typename H> friend H AbslHashValue(H h, const LockTag& tag) {
+    return H::combine(std::move(h), tag.str_);
+  }
+
+  bool operator==(const LockTag& o) const {
+    return str_ == o.str_;
   }
 };
 

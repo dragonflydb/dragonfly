@@ -4,8 +4,6 @@
 
 #include "server/table.h"
 
-#include <xxhash.h>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_config.h"
@@ -60,36 +58,23 @@ SlotStats& SlotStats::operator+=(const SlotStats& o) {
   return *this;
 }
 
-size_t LockTable::Size() const {
-  return locks_.size();
-}
-
-LockFp LockTable::Fingerprint(string_view key) {
-  return XXH64(key.data(), key.size(), 0x1C69B3F74AC4AE35UL);
-}
-
-std::optional<const IntentLock> LockTable::Find(string_view key) const {
-  DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
-
-  LockFp fp = Fingerprint(key);
+std::optional<const IntentLock> LockTable::Find(LockTag tag) const {
+  LockFp fp = tag.Fingerprint();
   if (auto it = locks_.find(fp); it != locks_.end())
     return it->second;
   return std::nullopt;
 }
 
-bool LockTable::Acquire(string_view key, IntentLock::Mode mode) {
-  DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
-  LockFp fp = Fingerprint(key);
+bool LockTable::Acquire(LockTag tag, IntentLock::Mode mode) {
+  LockFp fp = tag.Fingerprint();
   auto [it, inserted] = locks_.try_emplace(fp);
   return it->second.Acquire(mode);
 }
 
-void LockTable::Release(string_view key, IntentLock::Mode mode) {
-  DCHECK_EQ(KeyLockArgs::GetLockKey(key), key);
-
-  LockFp fp = Fingerprint(key);
+void LockTable::Release(LockTag tag, IntentLock::Mode mode) {
+  LockFp fp = tag.Fingerprint();
   auto it = locks_.find(fp);
-  DCHECK(it != locks_.end()) << key;
+  DCHECK(it != locks_.end()) << string_view(tag);
 
   it->second.Release(mode);
   if (it->second.IsFree())

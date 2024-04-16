@@ -148,6 +148,7 @@ class BaseFamilyTest : public ::testing::Test {
   static void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
                                            absl::Duration timeout = absl::Seconds(10));
   util::fb2::Fiber ExpectConditionWithSuspension(const std::function<bool()>& condition);
+  util::fb2::Fiber ExpectUsedKeys(const std::vector<std::string_view>& keys);
 
   static unsigned NumLocked();
 
