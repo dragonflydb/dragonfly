@@ -728,7 +728,7 @@ void Transaction::ScheduleInternal() {
       if (!ScheduleInShard(EngineShard::tlocal(), can_run_immediately)) {
         schedule_fails.fetch_add(1, memory_order_relaxed);
       }
-      run_barrier_.Dec();
+      FinishHop();
     };
 
     run_barrier_.Start(unique_shard_cnt_);
