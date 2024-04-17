@@ -918,6 +918,7 @@ class AclCheckerClient : public ProtocolClient {
       LOG(INFO) << "Failed to connect with acl client " << ec.message();
       cntx_->Cancel();
     }
+    SetSocketTimeout(4000);
   }
 
   Context* cntx_;
