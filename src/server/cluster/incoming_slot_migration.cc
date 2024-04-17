@@ -49,12 +49,16 @@ class ClusterShardMigration {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
+
+    socket_ = nullptr;
   }
 
   void Cancel() {
     if (socket_ != nullptr) {
-      socket_->proactor()->Dispatch([s = socket_, sid = source_shard_id_]() {
-        s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
+      socket_->proactor()->Await([s = socket_, sid = source_shard_id_]() {
+        if (s->IsOpen()) {
+          s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
+        }
       });
     }
   }

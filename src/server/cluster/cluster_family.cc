@@ -740,12 +740,9 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
     DCHECK(it != outgoing_migration_jobs_.end());
     DCHECK(it->get() != nullptr);
     OutgoingMigration& migration = *it->get();
-    if (migration.GetState() != MigrationState::C_FINISHED) {
-      LOG(INFO) << "Outgoing migration cancelled: slots "
-                << SlotRange::ToString(migration.GetSlots()) << " to " << migration.GetHostIp()
-                << ":" << migration.GetPort();
-      migration.CancelAll();
-    }
+    LOG(INFO) << "Outgoing migration cancelled: slots " << SlotRange::ToString(migration.GetSlots())
+              << " to " << migration.GetHostIp() << ":" << migration.GetPort();
+    migration.Cancel();
     outgoing_migration_jobs_.erase(it);
   }
 
@@ -768,9 +765,7 @@ void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& m
     SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
     // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
-    if (migration.GetState() != MigrationState::C_FINISHED) {
-      migration.Cancel();
-    }
+    migration.Cancel();
 
     if (!removed.Empty()) {
       auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());

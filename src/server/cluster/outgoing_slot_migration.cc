@@ -81,7 +81,7 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
-void OutgoingMigration::CancelAll() {
+void OutgoingMigration::Cancel() {
   state_.store(MigrationState::C_CANCELLED);
 
   auto start_cb = [this](util::ProactorBase* pb) {

@@ -31,7 +31,7 @@ class OutgoingMigration : private ProtocolClient {
   // should be run for all shards
   void StartFlow(journal::Journal* journal, io::Sink* dest);
 
-  void CancelAll();
+  void Cancel();
 
   MigrationState GetState() const;
 
