@@ -21,8 +21,13 @@ class IncomingSlotMigration {
   ~IncomingSlotMigration();
 
   // process data from FDLYMIGRATE FLOW cmd
+  // executes until Cancel called or connection closed
   void StartFlow(uint32_t shard, util::FiberSocketBase* source);
+
   // wait untill all flows are got FIN opcode
+  // Join can be called several times and connection isn't closed
+  // Connection can be closed automatically, or using Cancel
+  // After Join we still can get data due to error situation
   void Join();
 
   void Cancel();
