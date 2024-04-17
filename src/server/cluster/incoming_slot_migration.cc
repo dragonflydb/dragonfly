@@ -25,7 +25,8 @@ class ClusterShardMigration {
     executor_ = std::make_unique<JournalExecutor>(service);
   }
 
-  void Start(Context* cntx, io::Source* source) {
+  void Start(Context* cntx, util::FiberSocketBase* source) {
+    socket_ = source;
     JournalReader reader{source, 0};
     TransactionReader tx_reader{false};
 
@@ -48,6 +49,18 @@ class ClusterShardMigration {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     }
+
+    socket_ = nullptr;
+  }
+
+  void Cancel() {
+    if (socket_ != nullptr) {
+      socket_->proactor()->Await([s = socket_, sid = source_shard_id_]() {
+        if (s->IsOpen()) {
+          s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
+        }
+      });
+    }
   }
 
  private:
@@ -68,6 +81,7 @@ class ClusterShardMigration {
 
  private:
   uint32_t source_shard_id_;
+  util::FiberSocketBase* socket_ = nullptr;
   std::unique_ptr<JournalExecutor> executor_;
 };
 
@@ -85,7 +99,6 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 }
 
 IncomingSlotMigration::~IncomingSlotMigration() {
-  sync_fb_.JoinIfNeeded();
 }
 
 void IncomingSlotMigration::Join() {
@@ -93,7 +106,16 @@ void IncomingSlotMigration::Join() {
   state_ = MigrationState::C_FINISHED;
 }
 
-void IncomingSlotMigration::StartFlow(uint32_t shard, io::Source* source) {
+void IncomingSlotMigration::Cancel() {
+  LOG(INFO) << "Cancelling incoming migration of slots " << SlotRange::ToString(slots_);
+  cntx_.Cancel();
+
+  for (auto& flow : shard_flows_) {
+    flow->Cancel();
+  }
+}
+
+void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   VLOG(1) << "Start flow for shard: " << shard;
   state_.store(MigrationState::C_SYNC);
 

@@ -209,7 +209,7 @@ auto RedisParser::ParseNum(Buffer str, int64_t* res) -> Result {
   if (str.size() < 4) {
     return INPUT_PENDING;
   }
-  DCHECK(str[0] == '$' || str[0] == '*' || str[0] == '%');
+  DCHECK(str[0] == '$' || str[0] == '*' || str[0] == '%' || str[0] == '~');
 
   char* s = reinterpret_cast<char*>(str.data() + 1);
   char* pos = reinterpret_cast<char*>(memchr(s, '\n', str.size() - 1));

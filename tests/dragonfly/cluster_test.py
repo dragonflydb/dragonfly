@@ -1135,6 +1135,30 @@ class NodeInfo:
     id: str
 
 
+def generate_config(nodes):
+    return [
+        {
+            "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
+            "master": {
+                "id": node.id,
+                "ip": "127.0.0.1",
+                "port": node.instance.port,
+            },
+            "replicas": [],
+            "migrations": [
+                {
+                    "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
+                    "node_id": m.node_id,
+                    "ip": m.ip,
+                    "port": m.port,
+                }
+                for m in node.migrations
+            ],
+        }
+        for node in nodes
+    ]
+
+
 @pytest.mark.skip(reason="Failing on github regression action")
 @pytest.mark.parametrize(
     "node_count, segments, keys",
@@ -1174,36 +1198,13 @@ async def test_cluster_fuzzymigration(
         for instance in instances
     ]
 
-    async def generate_config():
-        return [
-            {
-                "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
-                "master": {
-                    "id": node.id,
-                    "ip": "127.0.0.1",
-                    "port": node.instance.port,
-                },
-                "replicas": [],
-                "migrations": [
-                    {
-                        "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
-                        "node_id": m.node_id,
-                        "ip": m.ip,
-                        "port": m.port,
-                    }
-                    for m in node.migrations
-                ],
-            }
-            for node in nodes
-        ]
-
     # Generate equally sized ranges and distribute by nodes
     step = 16400 // segments
     for slot_range in [(s, min(s + step - 1, 16383)) for s in range(0, 16383, step)]:
         nodes[random.randint(0, node_count - 1)].slots.append(slot_range)
 
     # Push config to all nodes
-    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     # Fill instances with some data
     seeder = df_seeder_factory.create(keys=keys, port=nodes[0].instance.port, cluster_mode=True)
@@ -1269,7 +1270,7 @@ async def test_cluster_fuzzymigration(
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
 
-    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     iterations = 0
     while True:
@@ -1296,7 +1297,7 @@ async def test_cluster_fuzzymigration(
 
     # TODO this config should be pushed with new slots
     # Push new config
-    await push_config(json.dumps(await generate_config()), [node.admin_client for node in nodes])
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     # Transfer nodes
     for node in nodes:
@@ -1317,6 +1318,86 @@ async def test_cluster_fuzzymigration(
     await close_clients(
         cluster_client, *[node.admin_client for node in nodes], *[node.client for node in nodes]
     )
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
+    """Check data migration from one node to another."""
+    instances = [
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        for i in range(2)
+    ]
+    df_local_factory.start_all(instances)
+
+    nodes = [
+        NodeInfo(
+            instance=instance,
+            client=instance.client(),
+            admin_client=instance.admin_client(),
+            slots=[],
+            next_slots=[],
+            migrations=[],
+            id=await get_node_id(instance.admin_client()),
+        )
+        for instance in instances
+    ]
+    nodes[0].slots = [(0, 8000)]
+    nodes[1].slots = [(8001, 16383)]
+
+    logging.debug("Pushing data to slot 6XXX")
+    SIZE = 10_000
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    for i in range(SIZE):
+        assert await nodes[0].admin_client.set(f"{{key50}}:{i}", i)  # key50 belongs to slot 6686
+    assert [SIZE, 0] == [await node.admin_client.dbsize() for node in nodes]
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", instances[1].port, [(6000, 8000)], nodes[1].id)
+    ]
+    logging.debug("Migrating slots 6000-8000")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    await asyncio.sleep(0.1)
+    assert await nodes[0].admin_client.dbsize() == SIZE
+    assert await nodes[1].admin_client.dbsize(), "weak test case" < SIZE
+
+    logging.debug("Cancelling migration")
+    nodes[0].migrations = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    while True:
+        db_size = await nodes[1].admin_client.dbsize()
+        if db_size == 0:
+            break
+        # logging.debug("db sizes ", ', '.join(map(str, db_sizes)))
+        logging.debug(f"db sizes {db_size}")
+        await asyncio.sleep(0.1)
+
+    logging.debug("Reissuing migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", instances[1].port, [(6001, 8000)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    await asyncio.sleep(0.1)
+    assert SIZE == await nodes[0].admin_client.dbsize()
+    for i in range(100):
+        if SIZE == await nodes[1].admin_client.dbsize():
+            break
+        await asyncio.sleep(0.1)
+    else:
+        assert False, "Target node not synced"
+
+    logging.debug("Finalizing migration")
+    nodes[0].migrations = []
+    nodes[0].slots = [(0, 6000)]
+    nodes[1].slots = [(6001, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    logging.debug("Migration finalized")
+
+    await asyncio.sleep(0.1)
+    assert [0, SIZE] == [await node.admin_client.dbsize() for node in nodes]
+    for i in range(SIZE):
+        assert str(i) == await nodes[1].admin_client.get(f"{{key50}}:{i}")
+
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 def parse_lag(replication_info: str):
