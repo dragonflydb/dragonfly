@@ -879,7 +879,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
 
   migration->Join();
 
-  VLOG(1) << "Migration is Join for " << source_id;
+  VLOG(1) << "Migration is joined for " << source_id;
 
   UpdateConfig(migration->GetSlots(), true);
   VLOG(1) << "Config is updated for " << MyID();

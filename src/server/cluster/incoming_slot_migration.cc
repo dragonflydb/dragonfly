@@ -48,14 +48,14 @@ class ClusterShardMigration {
       }
 
       while (tx_data->opcode == journal::Op::FIN) {
-        VLOG(2) << "Attemot to finalize flow " << source_shard_id_;
+        VLOG(2) << "Attempt to finalize flow " << source_shard_id_;
         bc->Dec();  // we can Join the flow now
         // if we get new data attempt is failed
         if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
-          VLOG(1) << "Correct finish for flow " << source_shard_id_;
+          VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
-        bc->Add();  // the flow isn't finihed so we lock it again
+        bc->Add();  // the flow isn't finished so we lock it again
       }
       if (tx_data->opcode == journal::Op::PING) {
         // TODO check about ping logic

@@ -24,9 +24,9 @@ class IncomingSlotMigration {
   // executes until Cancel called or connection closed
   void StartFlow(uint32_t shard, util::FiberSocketBase* source);
 
-  // wait untill all flows are got FIN opcode
-  // Join can be called several times and connection isn't closed
-  // Connection can be closed automatically, or using Cancel
+  // Waits until all flows got FIN opcode.
+  // Join can't be finished if after FIN opcode we get new data
+  // Connection can be closed by another side, or using Cancel
   // After Join we still can get data due to error situation
   void Join();
 
