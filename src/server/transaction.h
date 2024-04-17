@@ -348,7 +348,7 @@ class Transaction {
   void Refurbish();
 
   // Get keys multi transaction was initialized with, normalized and unique
-  const absl::flat_hash_set<std::string_view>& GetMultiKeys() const;
+  const absl::flat_hash_set<std::pair<ShardId, LockFp>>& GetMultiFps() const;
 
   // Send journal EXEC opcode after a series of MULTI commands on the currently active shard
   void FIX_ConcludeJournalExec();
@@ -421,9 +421,8 @@ class Transaction {
     MultiMode mode;
     std::optional<IntentLock::Mode> lock_mode;
 
-    // Unique normalized keys used for scheduling the multi transaction.
-    std::vector<std::string> frozen_keys;
-    absl::flat_hash_set<std::string_view> frozen_keys_set;  // point to frozen_keys
+    // Unique normalized fingerprints used for scheduling the multi transaction.
+    absl::flat_hash_set<std::pair<ShardId, LockFp>> tag_fps;
 
     // Set if the multi command is concluding to avoid ambiguity with COORD_CONCLUDING
     bool concluding = false;
@@ -448,6 +447,7 @@ class Transaction {
   struct PerShardCache {
     std::vector<std::string_view> args;
     std::vector<uint32_t> original_index;
+    unsigned key_step = 1;
 
     void Clear() {
       args.clear();
@@ -496,9 +496,8 @@ class Transaction {
   // Store all key index keys in args_. Used only for single shard initialization.
   void StoreKeysInArgs(const KeyIndex& key_index);
 
-  // Multi transactions unlock asynchronously, so they need to keep a copy of all they keys.
-  // "Launder" keys by filtering uniques and replacing pointers with same lifetime as transaction.
-  void LaunderKeyStorage(CmdArgVec* keys);
+  // Multi transactions unlock asynchronously, so they need to keep fingerprints of keys.
+  void PrepareMultiFps(const CmdArgVec& keys);
 
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
@@ -536,7 +535,7 @@ class Transaction {
   // If journaling is enabled, report final exec opcode to finish the chain of commands.
   void MultiReportJournalOnShard(EngineShard* shard) const;
 
-  void UnlockMultiShardCb(absl::Span<const std::string_view> sharded_keys, EngineShard* shard);
+  void UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* shard);
 
   // In a multi-command transaction, we determine the number of shard journals that we wrote entries
   // to by updating the shard_journal_write vector during command execution. The total number of
@@ -597,6 +596,7 @@ class Transaction {
   // We need values as well since we reorder keys, and we need to know what value corresponds
   // to what key.
   absl::InlinedVector<std::string_view, 4> kv_args_;
+  absl::InlinedVector<uint64_t, 4> kv_fp_;
 
   // Stores the full undivided command.
   CmdArgList full_args_;

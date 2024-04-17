@@ -65,16 +65,15 @@ std::optional<const IntentLock> LockTable::Find(LockTag tag) const {
   return std::nullopt;
 }
 
-bool LockTable::Acquire(LockTag tag, IntentLock::Mode mode) {
-  LockFp fp = tag.Fingerprint();
-  auto [it, inserted] = locks_.try_emplace(fp);
-  return it->second.Acquire(mode);
+std::optional<const IntentLock> LockTable::Find(uint64_t fp) const {
+  if (auto it = locks_.find(fp); it != locks_.end())
+    return it->second;
+  return std::nullopt;
 }
 
-void LockTable::Release(LockTag tag, IntentLock::Mode mode) {
-  LockFp fp = tag.Fingerprint();
+void LockTable::Release(uint64_t fp, IntentLock::Mode mode) {
   auto it = locks_.find(fp);
-  DCHECK(it != locks_.end()) << string_view(tag);
+  DCHECK(it != locks_.end()) << fp;
 
   it->second.Release(mode);
   if (it->second.IsFree())

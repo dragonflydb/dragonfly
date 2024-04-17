@@ -69,7 +69,7 @@ struct LockTagOptions {
 
 struct KeyLockArgs {
   DbIndex db_index = 0;
-  ArgSlice args;
+  absl::Span<const LockFp> fps;
   unsigned key_step = 1;
 };
 
@@ -159,6 +159,8 @@ void RecordExpiry(DbIndex dbid, std::string_view key);
 // Trigger journal write to sink, no journal record will be added to journal.
 // Must be called from shard thread of journal to sink.
 void TriggerJournalWriteToSink();
+
+bool IsLockHashTagEnabled();
 
 struct IoMgrStats {
   uint64_t read_total = 0;

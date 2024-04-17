@@ -629,9 +629,9 @@ vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   return res;
 }
 
-absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
+vector<LockFp> BaseFamilyTest::GetLastFps() {
   fb2::Mutex mu;
-  absl::flat_hash_set<string> result;
+  vector<LockFp> result;
 
   auto add_keys = [&](ProactorBase* proactor) {
     EngineShard* shard = EngineShard::tlocal();
@@ -640,8 +640,8 @@ absl::flat_hash_set<string> BaseFamilyTest::GetLastUsedKeys() {
     }
 
     lock_guard lk(mu);
-    for (string_view key : shard->db_slice().TEST_GetLastLockedKeys()) {
-      result.insert(string(key));
+    for (auto fp : shard->db_slice().TEST_GetLastLockedFps()) {
+      result.push_back(fp);
     }
   };
   shard_set->pool()->AwaitFiberOnAll(add_keys);
@@ -678,13 +678,15 @@ fb2::Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<boo
 }
 
 util::fb2::Fiber BaseFamilyTest::ExpectUsedKeys(const std::vector<std::string_view>& keys) {
-  absl::flat_hash_set<string> own_keys;
+  vector<LockFp> key_fps;
   for (const auto& k : keys) {
-    own_keys.insert(string(k));
+    key_fps.push_back(LockTag(k).Fingerprint());
   }
+  sort(key_fps.begin(), key_fps.end());
   auto cb = [=] {
-    auto last_keys = GetLastUsedKeys();
-    return last_keys == own_keys;
+    auto last_fps = GetLastFps();
+    sort(last_fps.begin(), last_fps.end());
+    return last_fps == key_fps;
   };
 
   return ExpectConditionWithSuspension(std::move(cb));

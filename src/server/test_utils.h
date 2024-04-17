@@ -144,7 +144,7 @@ class BaseFamilyTest : public ::testing::Test {
   const facade::Connection::InvalidationMessage& GetInvalidationMessage(std::string_view conn_id,
                                                                         size_t index) const;
 
-  static absl::flat_hash_set<std::string> GetLastUsedKeys();
+  static std::vector<LockFp> GetLastFps();
   static void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
                                            absl::Duration timeout = absl::Seconds(10));
   util::fb2::Fiber ExpectConditionWithSuspension(const std::function<bool()>& condition);

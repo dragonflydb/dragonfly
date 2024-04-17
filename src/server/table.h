@@ -87,8 +87,11 @@ class LockTable {
   std::optional<const IntentLock> Find(LockTag tag) const;
   std::optional<const IntentLock> Find(LockFp fp) const;
 
-  bool Acquire(LockTag tag, IntentLock::Mode mode);
-  void Release(LockTag tag, IntentLock::Mode mode);
+  bool Acquire(LockFp fp, IntentLock::Mode mode) {
+    return locks_[fp].Acquire(mode);
+  }
+
+  void Release(LockFp fp, IntentLock::Mode mode);
 
   auto begin() const {
     return locks_.cbegin();
