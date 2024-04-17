@@ -348,18 +348,6 @@ void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
   }
 }
 
-// See comment for SetCmd::Set() for when and how OpResult's value (i.e. optional<string>) is set.
-OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, string_view key,
-                    string_view value, bool manual_journal) {
-  DCHECK(cntx->transaction);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(t->GetOpArgs(shard), manual_journal);
-    return sg.Set(sparams, key, value);
-  };
-  return cntx->transaction->ScheduleSingleHop(std::move(cb));
-}
-
 // emission_interval_ms assumed to be positive
 // limit is assumed to be positive
 OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
@@ -691,6 +679,17 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
+// Wrapper to call SetCmd::Set in ScheduleSingleHop
+OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, string_view key,
+                    string_view value) {
+  DCHECK(cntx->transaction);
+
+  bool manual_journal = cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  return cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), manual_journal).Set(sparams, key, value);
+  });
+}
+
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
 
@@ -770,7 +769,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
 
-  OpStatus result = SetGeneric(cntx, sparams, key, value, true);
+  OpStatus result = SetGeneric(cntx, sparams, key, value);
 
   if (result == OpStatus::WRONG_TYPE) {
     return cntx->SendError(kWrongTypeErr);
@@ -819,7 +818,8 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
-  const auto results{SetGeneric(cntx, std::move(sparams), key, value, false)};
+  const auto results{SetGeneric(cntx, sparams, key, value)};
+
   SinkReplyBuilder* builder = cntx->reply_builder();
   if (results == OpStatus::OK) {
     return builder->SendLong(1);  // this means that we successfully set the value
@@ -897,13 +897,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
 
   SetCmd::SetParams sparams;
   sparams.prev_val = &prev_val;
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd cmd(t->GetOpArgs(shard), false);
-
-    return cmd.Set(sparams, key, value);
-  };
-  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpStatus status = SetGeneric(cntx, sparams, key, value);
 
   if (status != OpStatus::OK) {
     cntx->SendError(status);
@@ -1159,13 +1153,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
     sparams.expire_after_ms = unit_vals;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(t->GetOpArgs(shard), true);
-    return sg.Set(sparams, key, value);
-  };
-
-  OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  return cntx->SendError(result);
+  cntx->SendError(SetGeneric(cntx, sparams, key, value));
 }
 
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
