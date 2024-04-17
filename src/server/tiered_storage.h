@@ -49,6 +49,8 @@ class TieredStorageV2 {
   // Delete value. Must either have pending IO or be offloaded (of external type)
   void Delete(std::string_view key, PrimeValue* value);
 
+  void Modify(std::function<void(std::string*)> modf);
+
   TieredStatsV2 GetStats() const;
 
  private:

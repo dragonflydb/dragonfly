@@ -808,8 +808,8 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   }
 
   // Find entry by key and store it's up-to-date value in place of external segment
-  void SetInMemory(std::string_view key, std::string_view value) {
-    if (auto pv = Find(key); pv) {
+  void SetInMemory(std::string_view key, std::string_view value, tiering::DiskSegment segment) {
+    if (auto pv = Find(key); pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       pv->Reset();  // TODO: account for memory
       pv->SetString(value);
 
@@ -833,7 +833,7 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     if (!cache_fetched_)
       return;
 
-    SetInMemory(get<string_view>(id), value);
+    SetInMemory(get<string_view>(id), value, segment);
 
     // Delete value
     if (segment.length >= TieredStorageV2::kMinValueSize) {
@@ -887,6 +887,8 @@ util::fb2::Future<std::string> TieredStorageV2::Read(string_view key, const Prim
 }
 
 void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
+  DCHECK(!value->IsExternal() && !value->HasIoPending());
+
   string buf;
   string_view value_sv = value->GetSlice(&buf);
   value->SetIoPending(true);
@@ -909,12 +911,15 @@ void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
     } else if (auto bin = bins_->Delete(segment); bin) {
       op_manager_->Delete(*bin);
     }
+    value->Reset();
   } else {
+    DCHECK(value->HasIoPending());
     if (value->Size() >= kMinValueSize) {
       op_manager_->Delete(key);
     } else if (auto bin = bins_->Delete(key); bin) {
       op_manager_->Delete(*bin);
     }
+    value->SetIoPending(false);
   }
 }
 

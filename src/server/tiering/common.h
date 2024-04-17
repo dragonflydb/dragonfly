@@ -37,6 +37,10 @@ struct DiskSegment {
   DiskSegment(std::pair<size_t, size_t> p) : offset{p.first}, length(p.second) {
   }
 
+  bool operator==(const DiskSegment& other) const {
+    return offset == other.offset && length == other.length;
+  }
+
   size_t offset = 0, length = 0;
 };
 

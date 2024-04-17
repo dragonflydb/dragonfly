@@ -96,8 +96,10 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
 
   for (auto& ko : info->key_ops) {
     auto key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+
     for (auto& fut : ko.futures)
       fut.set_value(std::string{key_value});
+
     ReportFetched(Borrowed(ko.id), key_value, ko.segment);
   }
 

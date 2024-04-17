@@ -67,7 +67,10 @@ SmallBins::FilledBin SmallBins::FlushBin() {
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
   auto key_list = pending_bins_.extract(id);
-  return SmallBins::KeySegmentList{key_list.mapped().begin(), key_list.mapped().end()};
+  auto segment_list = SmallBins::KeySegmentList{key_list.mapped().begin(), key_list.mapped().end()};
+  for (auto& [_, sub_segment] : segment_list)
+    sub_segment.offset += segment.offset;
+  return segment_list;
 }
 
 std::vector<std::string> SmallBins::ReportStashAborted(BinId id) {
@@ -82,6 +85,10 @@ std::vector<std::string> SmallBins::ReportStashAborted(BinId id) {
 }
 
 std::optional<SmallBins::BinId> SmallBins::Delete(std::string_view key) {
+  if (current_bin_.erase(key)) {
+    return std::nullopt;
+  }
+
   for (auto& [id, keys] : pending_bins_) {
     if (keys.erase(key))
       return keys.empty() ? std::make_optional(id) : std::nullopt;
