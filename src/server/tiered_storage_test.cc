@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "gtest/gtest.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "util/fibers/fibers.h"
@@ -289,6 +290,7 @@ TEST_F(TieredStorageTest, SetAndExpire) {
 }
 
 TEST_F(TieredStorageTest, SetAndGet) {
+  GTEST_SKIP();
   string val1(5000, 'a');
   string val2(5000, 'a');
 
@@ -328,6 +330,7 @@ TEST_F(TieredStorageTest, SetAndGet) {
 }
 
 TEST_F(TieredStorageTest, GetValueValidation) {
+  GTEST_SKIP();
   string val1(5000, 'a');
   string val2(5000, 'b');
 

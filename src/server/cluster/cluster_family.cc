@@ -827,13 +827,21 @@ void ClusterFamily::UpdateConfig(const std::vector<SlotRange>& slots, bool enabl
 
 void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
-  auto source_id = parser.Next<std::string_view>();
+  auto [source_id, attempt] = parser.Next<std::string_view, long>();
 
   if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());
   }
 
   VLOG(1) << "DFLYMIGRATE ACK" << args;
+  auto in_migrations = tl_cluster_config->GetIncomingMigrations();
+  auto m_it = std::find_if(in_migrations.begin(), in_migrations.end(),
+                           [source_id](const auto& m) { return m.node_id == source_id; });
+  if (m_it == in_migrations.end()) {
+    LOG(WARNING) << "migration isn't in config";
+    return cntx->SendLong(OutgoingMigration::kInvalidAttempt);
+  }
+
   auto migration = GetIncomingMigration(source_id);
   if (!migration)
     return cntx->SendError(kIdNotFound);
@@ -847,8 +855,9 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   }
 
   UpdateConfig(migration->GetSlots(), true);
+  VLOG(1) << "Config is updated for " << MyID();
 
-  cntx->SendOk();
+  return cntx->SendLong(attempt);
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);

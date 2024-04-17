@@ -564,6 +564,8 @@ error_code Replica::ConsumeRedisStream() {
   io::NullSink null_sink;  // we never reply back on the commands.
   ConnectionContext conn_context{&null_sink, nullptr};
   conn_context.is_replicating = true;
+  conn_context.journal_emulated = true;
+  conn_context.skip_acl_validation = true;
   ResetParser(true);
 
   // Master waits for this command in order to start sending replication stream.
@@ -577,6 +579,15 @@ error_code Replica::ConsumeRedisStream() {
   // buffer gets disposed of already processed commands, this is done in a separate fiber.
   error_code ec;
   LOG(INFO) << "Transitioned into stable sync";
+
+  // Set new error handler.
+  auto err_handler = [this](const auto& ge) {
+    // Trigger ack-fiber
+    replica_waker_.notifyAll();
+    DefaultErrorHandler(ge);
+  };
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
+
   facade::CmdArgVec args_vector;
 
   acks_fb_ = fb2::Fiber("redis_acks", &Replica::RedisStreamAcksFb, this);
@@ -585,6 +596,7 @@ error_code Replica::ConsumeRedisStream() {
     auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
       VLOG(1) << "ConsumeRedisStream finished";
+      cntx_.ReportError(response.error());
       acks_fb_.JoinIfNeeded();
       return response.error();
     }

@@ -605,6 +605,7 @@ void Connection::HandleRequests() {
     DCHECK_EQ(res, 0);
   }
 
+  stats_ = &tl_facade_stats->conn_stats;
   auto remote_ep = RemoteEndpointStr();
 
   FiberSocketBase* peer = socket_.get();
@@ -826,8 +827,6 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 }
 
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
-  stats_ = &tl_facade_stats->conn_stats;
-
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
@@ -1642,6 +1641,10 @@ void Connection::StartTrafficLogging(string_view path) {
 void Connection::StopTrafficLogging() {
   lock_guard lk(tl_traffic_logger.mutex);
   tl_traffic_logger.ResetLocked();
+}
+
+bool Connection::IsHttp() const {
+  return is_http_;
 }
 
 Connection::MemoryUsage Connection::GetMemoryUsage() const {

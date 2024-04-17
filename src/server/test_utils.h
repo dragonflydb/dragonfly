@@ -20,6 +20,9 @@ using namespace facade;
 using util::fb2::Fiber;
 using util::fb2::Launch;
 
+// Test hook defined in common.cc.
+void TEST_InvalidateLockTagOptions();
+
 class TestConnection : public facade::Connection {
  public:
   TestConnection(Protocol protocol, io::StringSink* sink);
@@ -145,6 +148,7 @@ class BaseFamilyTest : public ::testing::Test {
   static void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
                                            absl::Duration timeout = absl::Seconds(10));
   util::fb2::Fiber ExpectConditionWithSuspension(const std::function<bool()>& condition);
+  util::fb2::Fiber ExpectUsedKeys(const std::vector<std::string_view>& keys);
 
   static unsigned NumLocked();
 

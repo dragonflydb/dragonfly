@@ -79,7 +79,9 @@ struct Metrics {
 
   facade::FacadeStats facade_stats;  // client stats and buffer sizes
   TieredStats tiered_stats;          // stats for tiered storage
-  IoMgrStats disk_stats;             // disk stats for io_mgr
+  TieredStatsV2 tiered_stats_v2;
+
+  IoMgrStats disk_stats;  // disk stats for io_mgr
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;

@@ -95,6 +95,7 @@ void IncomingSlotMigration::Join() {
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, io::Source* source) {
   VLOG(1) << "Start flow for shard: " << shard;
+  state_.store(MigrationState::C_SYNC);
 
   shard_flows_[shard]->Start(&cntx_, source);
   bc_->Dec();

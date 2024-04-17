@@ -17,8 +17,7 @@
 #include "server/journal/streamer.h"
 #include "server/server_family.h"
 
-ABSL_FLAG(int, source_connect_timeout_ms, 20000,
-          "Timeout for establishing connection to a source node");
+ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000, "Timeout for network operations");
 
 using namespace std;
 using namespace facade;
@@ -37,7 +36,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   std::error_code Start(const std::string& node_id, uint32_t shard_id) {
-    RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_));
+    RETURN_ON_ERR(
+        ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_));
     ResetParser(/*server_mode=*/false);
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
@@ -81,19 +81,12 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
-void OutgoingMigration::Finalize(uint32_t shard_id) {
-  slot_migrations_[shard_id]->Finalize();
-}
-
-void OutgoingMigration::Cancel(uint32_t shard_id) {
-  slot_migrations_[shard_id]->Cancel();
-}
-
 MigrationState OutgoingMigration::GetState() const {
   return state_.load();
 }
 
 void OutgoingMigration::SyncFb() {
+  state_.store(MigrationState::C_SYNC);
   auto start_cb = [this](util::ProactorBase* pb) {
     if (auto* shard = EngineShard::tlocal(); shard) {
       server_family_->journal()->StartInThread();
@@ -115,6 +108,14 @@ void OutgoingMigration::SyncFb() {
 
   // TODO implement blocking on migrated slots only
 
+  long attempt = 0;
+  while (!FinishMigration(++attempt)) {
+    // process commands that were on pause and try again
+    ThisFiber::SleepFor(500ms);
+  }
+}
+
+bool OutgoingMigration::FinishMigration(long attempt) {
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt = Pause(server_family_->GetNonPriviligedListeners(), nullptr,
@@ -133,42 +134,54 @@ void OutgoingMigration::SyncFb() {
     if (const auto* shard = EngineShard::tlocal(); shard) {
       // TODO add error processing to move back into STABLE_SYNC state
       VLOG(1) << "FINALIZE outgoing migration" << shard->shard_id();
-      Finalize(shard->shard_id());
+      slot_migrations_[shard->shard_id()]->Finalize();
     }
   };
 
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
-  auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID());
+  auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
   VLOG(1) << "send " << cmd;
 
-  auto err = SendCommandAndReadResponse(cmd);
+  auto err = SendCommand(cmd);
   LOG_IF(WARNING, err) << err;
 
   if (!err) {
-    LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
+    long attempt_res = kInvalidAttempt;
+    do {  // we can have response from previos time so we need to read until get response for the
+          // last attempt
+      auto resp = ReadRespReply(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+
+      if (!resp) {
+        LOG(WARNING) << resp.error();
+        // TODO implement connection issue error processing
+        return false;
+      }
+
+      if (!CheckRespFirstTypes({RespExpr::INT64})) {
+        LOG(WARNING) << "Incorrect response type: "
+                     << facade::ToSV(LastResponseArgs().front().GetBuf());
+        return false;
+      }
+      attempt_res = get<int64_t>(LastResponseArgs().front().u);
+      if (attempt_res == kInvalidAttempt) {
+        return false;
+      }
+    } while (attempt_res != attempt);
 
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (const auto* shard = EngineShard::tlocal(); shard)
-        Cancel(shard->shard_id());
+        slot_migrations_[shard->shard_id()]->Cancel();
     });
 
     state_.store(MigrationState::C_FINISHED);
+    cf_->UpdateConfig(migration_info_.slot_ranges, false);
+    VLOG(1) << "Config is updated for " << cf_->MyID();
+    return true;
+  } else {
+    // TODO implement connection issue error processing
   }
-
-  cf_->UpdateConfig(migration_info_.slot_ranges, false);
-}
-
-void OutgoingMigration::Ack() {
-  auto cb = [this](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      Cancel(shard->shard_id());
-    }
-  };
-
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-
-  state_.store(MigrationState::C_FINISHED);
+  return false;
 }
 
 std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
@@ -188,7 +201,7 @@ std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
 
   VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_source_connect_timeout_ms) * 1ms, &cntx_);
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_);
   RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
 
   VLOG(1) << "Migration initiating";

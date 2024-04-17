@@ -10,6 +10,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "server/test_utils.h"
 
 using namespace std;
 using namespace testing;
@@ -21,26 +22,72 @@ MATCHER_P(NodeMatches, expected, "") {
   return arg.id == expected.id && arg.ip == expected.ip && arg.port == expected.port;
 }
 
-class ClusterConfigTest : public ::testing::Test {
+class ClusterConfigTest : public BaseFamilyTest {
  protected:
   const string kMyId = "my-id";
 };
 
+inline string_view GetTag(string_view key) {
+  return LockTagOptions::instance().Tag(key);
+}
+
 TEST_F(ClusterConfigTest, KeyTagTest) {
-  string key = "{user1000}.following";
-  ASSERT_EQ("user1000", ClusterConfig::KeyTag(key));
+  SetTestFlag("lock_on_hashtags", "true");
 
-  key = " foo{}{bar}";
-  ASSERT_EQ(key, ClusterConfig::KeyTag(key));
+  EXPECT_EQ(GetTag("{user1000}.following"), "user1000");
 
-  key = "foo{{bar}}zap";
-  ASSERT_EQ("{bar", ClusterConfig::KeyTag(key));
+  EXPECT_EQ(GetTag("foo{{bar}}zap"), "{bar");
 
-  key = "foo{bar}{zap}";
-  ASSERT_EQ("bar", ClusterConfig::KeyTag(key));
+  EXPECT_EQ(GetTag("foo{bar}{zap}"), "bar");
+
+  string_view key = " foo{}{bar}";
+  EXPECT_EQ(key, GetTag(key));
 
   key = "{}foo{bar}{zap}";
-  ASSERT_EQ(key, ClusterConfig::KeyTag(key));
+  EXPECT_EQ(key, GetTag(key));
+
+  SetTestFlag("locktag_delimiter", ":");
+  TEST_InvalidateLockTagOptions();
+
+  key = "{user1000}.following";
+  EXPECT_EQ(GetTag(key), key);
+
+  EXPECT_EQ(GetTag("bull:queue1:123"), "queue1");
+  EXPECT_EQ(GetTag("bull:queue:1:123"), "queue");
+  EXPECT_EQ(GetTag("bull:queue:1:123:456:789:1000"), "queue");
+
+  key = "bull::queue:1:123";
+  EXPECT_EQ(GetTag(key), key);
+
+  SetTestFlag("locktag_delimiter", ":");
+  SetTestFlag("locktag_skip_n_end_delimiters", "0");
+  SetTestFlag("locktag_prefix", "bull");
+  TEST_InvalidateLockTagOptions();
+  EXPECT_EQ(GetTag("bull:queue:123"), "queue");
+  EXPECT_EQ(GetTag("bull:queue:123:456:789:1000"), "queue");
+
+  key = "not-bull:queue1:123";
+  EXPECT_EQ(GetTag(key), key);
+
+  SetTestFlag("locktag_delimiter", ":");
+  SetTestFlag("locktag_skip_n_end_delimiters", "1");
+  SetTestFlag("locktag_prefix", "bull");
+  TEST_InvalidateLockTagOptions();
+
+  key = "bull:queue1:123";
+  EXPECT_EQ(GetTag(key), key);
+  EXPECT_EQ(GetTag("bull:queue:1:123"), "queue:1");
+  EXPECT_EQ(GetTag("bull:queue:1:123:456:789:1000"), "queue:1");
+
+  key = "bull::queue:1:123";
+  EXPECT_EQ(GetTag(key), key);
+
+  SetTestFlag("locktag_delimiter", "|");
+  SetTestFlag("locktag_skip_n_end_delimiters", "2");
+  SetTestFlag("locktag_prefix", "");
+  TEST_InvalidateLockTagOptions();
+
+  EXPECT_EQ(GetTag("|a|b|c|d|e"), "a|b|c");
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {

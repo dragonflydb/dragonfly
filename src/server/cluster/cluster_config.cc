@@ -10,6 +10,7 @@ extern "C" {
 #include <shared_mutex>
 #include <string_view>
 
+#include "absl/strings/match.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_config.h"
@@ -54,20 +55,8 @@ bool ClusterConfig::IsEmulated() {
   return cluster_mode == ClusterMode::kEmulatedCluster;
 }
 
-string_view ClusterConfig::KeyTag(string_view key) {
-  size_t start = key.find('{');
-  if (start == key.npos) {
-    return key;
-  }
-  size_t end = key.find('}', start + 1);
-  if (end == key.npos || end == start + 1) {
-    return key;
-  }
-  return key.substr(start + 1, end - start - 1);
-}
-
 SlotId ClusterConfig::KeySlot(string_view key) {
-  string_view tag = KeyTag(key);
+  string_view tag = LockTagOptions::instance().Tag(key);
   return crc16(tag.data(), tag.length()) & kMaxSlotNum;
 }
 

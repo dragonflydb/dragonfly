@@ -34,6 +34,8 @@ ABSL_FLAG(string, tiered_prefix, "",
           " associated with tiered storage. Stronly advised to use "
           "high performance NVME ssd disks for this.");
 
+ABSL_FLAG(string, tiered_prefix_v2, "", "tiered_prefix v2");
+
 ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "
           "0 - means the program will automatically determine its maximum file size. "
@@ -171,21 +173,19 @@ class RoundRobinSharder {
   static fb2::Mutex mutex_;
 };
 
-bool HasContendedLocks(unsigned shard_id, Transaction* trx, const DbTable* table) {
-  auto is_contended = [table](string_view key) {
-    return table->trans_locks.Find(key)->IsContended();
-  };
+bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table) {
+  auto is_contended = [table](LockTag tag) { return table->trans_locks.Find(tag)->IsContended(); };
 
   if (trx->IsMulti()) {
     auto keys = trx->GetMultiKeys();
     for (string_view key : keys) {
-      if (Shard(key, shard_set->size()) == shard_id && is_contended(key))
+      if (Shard(key, shard_set->size()) == shard_id && is_contended(LockTag{key}))
         return true;
     }
   } else {
     KeyLockArgs lock_args = trx->GetLockArgs(shard_id);
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      if (is_contended(KeyLockArgs::GetLockKey(lock_args.args[i])))
+      if (is_contended(LockTag{lock_args.args[i]}))
         return true;
     }
   }
@@ -414,6 +414,15 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
     shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_, max_file_size));
     error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
+  }
+
+  if (string backing_prefix = GetFlag(FLAGS_tiered_prefix_v2); !backing_prefix.empty()) {
+    LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
+        << "Only ioring based backing storage is supported. Exiting...";
+
+    shard_->tiered_storage_v2_.reset(new TieredStorageV2{&shard_->db_slice_});
+    error_code ec = shard_->tiered_storage_v2_->Open(backing_prefix);
+    CHECK(!ec) << ec.message();
   }
 
   RoundRobinSharder::Init();
@@ -857,7 +866,7 @@ void EngineShardSet::TEST_EnableCacheMode() {
 
 ShardId Shard(string_view v, ShardId shard_num) {
   if (ClusterConfig::IsShardedByTag()) {
-    v = ClusterConfig::KeyTag(v);
+    v = LockTagOptions::instance().Tag(v);
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);

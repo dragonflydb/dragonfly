@@ -1069,6 +1069,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
+  AppendMetricHeader("memory_fiberstack_vms_bytes", "virtual memory size used by all the fibers",
+                     MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("memory_fiberstack_vms_bytes", "", m.worker_fiber_stack_size,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
@@ -1841,8 +1843,13 @@ Metrics ServerFamily::GetMetrics() const {
         result.disk_stats += shard->tiered_storage()->GetDiskStats();
       }
 
-      if (shard->search_indices())
+      if (shard->tiered_storage_v2()) {
+        result.tiered_stats_v2 += shard->tiered_storage_v2()->GetStats();
+      }
+
+      if (shard->search_indices()) {
         result.search_stats += shard->search_indices()->GetStats();
+      }
 
       result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
@@ -2059,6 +2066,12 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_aborted_writes", m.tiered_stats.aborted_write_cnt);
     append("tiered_flush_skipped", m.tiered_stats.flush_skip_cnt);
     append("tiered_throttled_writes", m.tiered_stats.throttled_write_cnt);
+  }
+
+  if (should_enter("TIERED_V2", true)) {
+    append("tiered_v2_total_stashes", m.tiered_stats_v2.total_stashes);
+    append("tiered_v2_total_fetches", m.tiered_stats_v2.total_fetches);
+    append("tiered_v2_allocated_bytes", m.tiered_stats_v2.allocated_bytes);
   }
 
   if (should_enter("PERSISTENCE", true)) {

@@ -178,12 +178,9 @@ void BaseFamilyTest::TearDown() {
   LOG(INFO) << "Finishing " << test_info->name();
 }
 
-// Test hook defined in common.cc.
-void TEST_InvalidateLockHashTag();
-
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
-    TEST_InvalidateLockHashTag();
+    TEST_InvalidateLockTagOptions();
 
     ShutdownService();
   }
@@ -678,6 +675,19 @@ fb2::Fiber BaseFamilyTest::ExpectConditionWithSuspension(const std::function<boo
         tx.Terminate();
       });
   return fb;
+}
+
+util::fb2::Fiber BaseFamilyTest::ExpectUsedKeys(const std::vector<std::string_view>& keys) {
+  absl::flat_hash_set<string> own_keys;
+  for (const auto& k : keys) {
+    own_keys.insert(string(k));
+  }
+  auto cb = [=] {
+    auto last_keys = GetLastUsedKeys();
+    return last_keys == own_keys;
+  };
+
+  return ExpectConditionWithSuspension(std::move(cb));
 }
 
 void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {

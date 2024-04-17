@@ -48,17 +48,26 @@ using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
 constexpr DbIndex kMaxDbId = 1024;  // Reasonable starting point.
+using LockFp = uint64_t;            // a key fingerprint used by the LockTable.
 
 class CommandId;
 class Transaction;
 class EngineShard;
 
+struct LockTagOptions {
+  bool enabled = false;
+  char open_locktag = '{';
+  char close_locktag = '}';
+  unsigned skip_n_end_delimiters = 0;
+  std::string prefix;
+
+  // Returns the tag according to the rules defined by this options object.
+  std::string_view Tag(std::string_view key) const;
+
+  static const LockTagOptions& instance();
+};
+
 struct KeyLockArgs {
-  static bool IsLockHashTagEnabled();
-
-  // Before acquiring and releasing keys, one must "normalize" them via GetLockKey().
-  static std::string_view GetLockKey(std::string_view key);
-
   DbIndex db_index = 0;
   ArgSlice args;
   unsigned key_step = 1;
@@ -109,6 +118,33 @@ struct OpArgs {
   }
 };
 
+// A strong type for a lock tag. Helps to disambiguide between keys and the parts of the
+// keys that are used for locking.
+class LockTag {
+  std::string_view str_;
+
+ public:
+  using is_stackonly = void;  // marks that this object does not use heap.
+
+  LockTag() = default;
+  explicit LockTag(std::string_view key);
+
+  explicit operator std::string_view() const {
+    return str_;
+  }
+
+  LockFp Fingerprint() const;
+
+  // To make it hashable.
+  template <typename H> friend H AbslHashValue(H h, const LockTag& tag) {
+    return H::combine(std::move(h), tag.str_);
+  }
+
+  bool operator==(const LockTag& o) const {
+    return str_ == o.str_;
+  }
+};
+
 // Record non auto journal command with own txid and dbid.
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
                    uint32_t shard_cnt = 1, bool multi_commands = false);
@@ -143,6 +179,14 @@ struct TieredStats {
   uint64_t throttled_write_cnt = 0;
 
   TieredStats& operator+=(const TieredStats&);
+};
+
+struct TieredStatsV2 {
+  size_t total_stashes = 0;
+  size_t total_fetches = 0;
+  size_t allocated_bytes = 0;
+
+  TieredStatsV2& operator+=(const TieredStatsV2&);
 };
 
 struct SearchStats {

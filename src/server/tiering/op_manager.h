@@ -50,7 +50,7 @@ class OpManager {
   // Report that an entry was successfully fetched
   virtual void ReportFetched(EntryId id, std::string_view value, DiskSegment segment) = 0;
 
- private:
+ protected:
   // Describes pending futures for a single entry
   struct EntryOps {
     EntryOps(OwnedEntryId id, DiskSegment segment) : id{std::move(id)}, segment{segment} {
@@ -84,7 +84,7 @@ class OpManager {
   // Called once Stash finished
   void ProcessStashed(EntryId id, unsigned version, DiskSegment segment);
 
- private:
+ protected:
   DiskStorage storage_;
 
   absl::flat_hash_map<size_t /* offset */, ReadOp> pending_reads_;

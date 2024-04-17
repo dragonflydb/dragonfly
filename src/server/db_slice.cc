@@ -198,7 +198,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     string scratch;
     string_view key = last_slot_it->first.GetSlice(&scratch);
     // do not evict locked keys
-    if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
+    if (lt.Find(LockTag(key)).has_value())
       return 0;
 
     // log the evicted keys to journal.
@@ -998,16 +998,16 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   bool lock_acquired = true;
 
   if (lock_args.args.size() == 1) {
-    string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
-    lock_acquired = lt.Acquire(key, mode);
-    uniq_keys_ = {key};  // needed only for tests.
+    LockTag tag(lock_args.args.front());
+    lock_acquired = lt.Acquire(tag, mode);
+    uniq_keys_ = {string_view(tag)};  // needed only for tests.
   } else {
     uniq_keys_.clear();
 
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      if (uniq_keys_.insert(s).second) {
-        lock_acquired &= lt.Acquire(s, mode);
+      LockTag tag(lock_args.args[i]);
+      if (uniq_keys_.insert(string_view(tag)).second) {
+        lock_acquired &= lt.Acquire(tag, mode);
       }
     }
   }
@@ -1018,13 +1018,12 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   return lock_acquired;
 }
 
-void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, std::string_view key) {
-  DCHECK_EQ(key, KeyLockArgs::GetLockKey(key));
+void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, LockTag tag) {
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " "
-           << " for " << key;
+           << " for " << string_view(tag);
 
   auto& lt = db_arr_[db_index]->trans_locks;
-  lt.Release(KeyLockArgs::GetLockKey(key), mode);
+  lt.Release(tag, mode);
 }
 
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
@@ -1034,15 +1033,15 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
-    string_view key = KeyLockArgs::GetLockKey(lock_args.args.front());
-    ReleaseNormalized(mode, lock_args.db_index, key);
+    string_view key = lock_args.args.front();
+    ReleaseNormalized(mode, lock_args.db_index, LockTag{key});
   } else {
     auto& lt = db_arr_[lock_args.db_index]->trans_locks;
     uniq_keys_.clear();
     for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      string_view s = KeyLockArgs::GetLockKey(lock_args.args[i]);
-      if (uniq_keys_.insert(s).second) {
-        lt.Release(s, mode);
+      LockTag tag(lock_args.args[i]);
+      if (uniq_keys_.insert(string_view(tag)).second) {
+        lt.Release(tag, mode);
       }
     }
   }
@@ -1051,9 +1050,9 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) const {
   const auto& lt = db_arr_[dbid]->trans_locks;
-  string_view s = KeyLockArgs::GetLockKey(key);
+  LockTag tag(key);
 
-  auto lock = lt.Find(s);
+  auto lock = lt.Find(tag);
   if (lock) {
     return lock->Check(mode);
   }
@@ -1322,7 +1321,7 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
           // check if the key is locked by looking up transaction table.
           const auto& lt = db_table->trans_locks;
           string_view key = evict_it->first.GetSlice(&tmp);
-          if (lt.Find(KeyLockArgs::GetLockKey(key)).has_value())
+          if (lt.Find(LockTag(key)).has_value())
             continue;
 
           if (auto journal = owner_->journal(); journal) {
@@ -1582,6 +1581,10 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
   RemoveFromTiered(del_it, table);
+
+  if (pv.IsExternal() && shard_owner()->tiered_storage_v2()) {
+    shard_owner()->tiered_storage_v2()->Delete(del_it.key(), &del_it->second);
+  }
 
   size_t value_heap_size = pv.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();

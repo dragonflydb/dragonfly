@@ -29,8 +29,14 @@ namespace dfly {
 
 namespace heap_size_detail {
 
+template <class, class = void> struct has_marked_stackonly : std::false_type {};
+
+template <class T>
+struct has_marked_stackonly<T, std::void_t<typename T::is_stackonly>> : std::true_type {};
+
 template <typename T> constexpr bool StackOnlyType() {
-  return std::is_trivial_v<T> || std::is_same_v<T, std::string_view>;
+  return std::is_trivial_v<T> || std::is_same_v<T, std::string_view> ||
+         has_marked_stackonly<T>::value;
 }
 
 template <typename T, typename = void> struct has_used_mem : std::false_type {};
