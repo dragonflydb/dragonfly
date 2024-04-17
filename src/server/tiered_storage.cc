@@ -807,14 +807,17 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
       pv->SetIoPending(false);
   }
 
-  // Find entry by key and store it's up-to-date value in place of external segment
-  void SetInMemory(std::string_view key, std::string_view value, tiering::DiskSegment segment) {
+  // Find entry by key and store it's up-to-date value in place of external segment.
+  // Returns false if the value is outdated, true otherwise
+  bool SetInMemory(std::string_view key, std::string_view value, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       pv->Reset();  // TODO: account for memory
       pv->SetString(value);
 
       stats_.total_fetches++;
+      return true;
     }
+    return false;
   }
 
   void ReportStashed(EntryId id, tiering::DiskSegment segment) override {
@@ -833,7 +836,8 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     if (!cache_fetched_)
       return;
 
-    SetInMemory(get<string_view>(id), value, segment);
+    if (!SetInMemory(get<string_view>(id), value, segment))
+      return;
 
     // Delete value
     if (segment.length >= TieredStorageV2::kMinValueSize) {
