@@ -247,7 +247,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   };
 
  private:
-  void SendStringArrInternal(WrappedStrSpan arr, CollectionType type);
+  void SendStringArrInternal(size_t size, absl::FunctionRef<std::string_view(unsigned)> producer,
+                             CollectionType type);
 
   bool is_resp3_ = false;
 };
