@@ -36,10 +36,8 @@ runs:
         # used by PyTests
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-        for i in $(seq 1 10);
-        do
-          timeout 20m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
-        done
+
+        timeout 20m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
@@ -51,6 +49,36 @@ runs:
         if [[ $code -ne 0 ]]; then
           exit 1
         fi
+
+    - name: Run PyTests replication test
+      id: second
+      if: ${{ inputs.run-only-on-ubuntu-latest == 'true' || (inputs.run-only-on-ubuntu-latest == 'false' && matrix.runner == 'ubuntu-latest') }}
+      shell: bash
+      run: |
+        echo "Running PyTests replication test"
+        cd ${GITHUB_WORKSPACE}/tests
+        # used by PyTests
+        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
+
+        run_pytest_with_args() {
+          timeout 20m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report \
+            --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO \
+            --df alsologtostderr $1 $2 || code=$?
+
+          # timeout returns 124 if we exceeded the timeout duration
+          if [[ $code -eq 124 ]]; then
+            echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # when a test fails in pytest it returns 1 but there are other return codes as well so we just check if the code is non zero
+          if [[ $code -ne 0 ]]; then
+            exit 1
+          fi
+        }
+
+        (run_pytest_with_args --df enable_multi_shard_sync=true)
+        (run_pytest_with_args --df enable_multi_shard_sync=false)
 
     - name: Print last log on timeout
       if: failure()
