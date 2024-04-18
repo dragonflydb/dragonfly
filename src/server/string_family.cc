@@ -542,7 +542,8 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
       } else {
         return OpStatus::SKIPPED;
       }
-    } else /* SET_IF_NOTEXIST */ {
+    } else {
+      DCHECK(params.flags & SET_IF_NOTEXIST) << params.flags;
       if (IsValid(find_res.it)) {
         return OpStatus::SKIPPED;
       }  // else AddNew() below
