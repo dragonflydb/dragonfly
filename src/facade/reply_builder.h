@@ -246,6 +246,10 @@ class RedisReplyBuilder : public SinkReplyBuilder {
     std::string_view operator[](size_t index) const;
   };
 
+  bool is_resp3() const {
+    return is_resp3_;
+  }
+
  private:
   void SendStringArrInternal(size_t size, absl::FunctionRef<std::string_view(unsigned)> producer,
                              CollectionType type);

@@ -281,6 +281,8 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendBulkString(std::string_view str) final;
 
   void StartCollection(unsigned len, CollectionType type) final;
+  void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+                       bool with_scores) final;
 
  private:
   void PostItem();
@@ -454,6 +456,31 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   } else {
     array_len_.emplace_back(num_elems_ + 1, len);
     num_elems_ = 0;
+  }
+}
+
+void InterpreterReplier::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+                                         bool with_scores) {
+  if (with_scores) {
+    if (is_resp3()) {
+      StartCollection(arr.size(), CollectionType::ARRAY);
+      for (size_t i = 0; i < arr.size(); ++i) {
+        StartArray(2);
+        SendBulkString(arr[i].first);
+        SendDouble(arr[i].second);
+      }
+    } else {
+      StartCollection(arr.size() * 2, CollectionType::ARRAY);
+      for (size_t i = 0; i < arr.size(); ++i) {
+        SendBulkString(arr[i].first);
+        SendDouble(arr[i].second);
+      }
+    }
+  } else {
+    StartCollection(arr.size(), CollectionType::ARRAY);
+    for (size_t i = 0; i < arr.size(); ++i) {
+      SendBulkString(arr[i].first);
+    }
   }
 }
 
