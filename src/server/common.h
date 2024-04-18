@@ -118,7 +118,7 @@ struct OpArgs {
   }
 };
 
-// A strong type for a lock tag. Helps to disambiguide between keys and the parts of the
+// A strong type for a lock tag. Helps to disambiguate between keys and the parts of the
 // keys that are used for locking.
 class LockTag {
   std::string_view str_;
