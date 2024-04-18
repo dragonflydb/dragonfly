@@ -112,9 +112,12 @@ RestoreStreamer::~RestoreStreamer() {
 }
 
 void RestoreStreamer::Cancel() {
-  fiber_cancellation_.Cancel();
-  db_slice_->UnregisterOnChange(snapshot_version_);
-  JournalStreamer::Cancel();
+  if (snapshot_version_ != 0) {
+    fiber_cancellation_.Cancel();
+    db_slice_->UnregisterOnChange(snapshot_version_);
+    JournalStreamer::Cancel();
+    snapshot_version_ = 0;
+  }
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {

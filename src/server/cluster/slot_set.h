@@ -6,7 +6,11 @@
 
 #include <bitset>
 #include <memory>
+#include <string>
 #include <vector>
+
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 
 namespace dfly {
 
@@ -23,6 +27,16 @@ struct SlotRange {
   bool IsValid() {
     return start <= end && start <= kMaxSlotId && end <= kMaxSlotId;
   }
+
+  std::string ToString() const {
+    return absl::StrCat("[", start, ", ", end, "]");
+  }
+
+  static std::string ToString(const std::vector<SlotRange>& ranges) {
+    return absl::StrJoin(ranges, ", ", [](std::string* out, SlotRange range) {
+      absl::StrAppend(out, range.ToString());
+    });
+  }
 };
 
 using SlotRanges = std::vector<SlotRange>;
@@ -30,17 +44,22 @@ using SlotRanges = std::vector<SlotRange>;
 class SlotSet {
  public:
   static constexpr SlotId kSlotsNumber = SlotRange::kMaxSlotId + 1;
+  using TBitSet = std::bitset<kSlotsNumber>;
 
-  SlotSet(bool full_house = false) : slots_(std::make_unique<BitsetType>()) {
+  SlotSet(bool full_house = false) {
     if (full_house)
       slots_->flip();
   }
 
-  SlotSet(const SlotRanges& slot_ranges) : SlotSet() {
+  SlotSet(const SlotRanges& slot_ranges) {
     Set(slot_ranges, true);
   }
 
-  SlotSet(const SlotSet& s) : SlotSet() {
+  SlotSet(const TBitSet& s) {
+    *slots_ = s;
+  }
+
+  SlotSet(const SlotSet& s) {
     *slots_ = *s.slots_;
   }
 
@@ -73,10 +92,8 @@ class SlotSet {
   }
 
   // Get SlotSet that are absent in the slots
-  SlotSet GetRemovedSlots(SlotSet slots) {
-    slots.slots_->flip();
-    *slots.slots_ &= *slots_;
-    return slots;
+  SlotSet GetRemovedSlots(const SlotSet& slots) const {
+    return *slots_ & ~*slots.slots_;
   }
 
   SlotRanges ToSlotRanges() const {
@@ -97,8 +114,7 @@ class SlotSet {
   }
 
  private:
-  using BitsetType = std::bitset<kSlotsNumber>;
-  std::unique_ptr<BitsetType> slots_;
+  std::unique_ptr<TBitSet> slots_{std::make_unique<TBitSet>()};
 };
 
 }  // namespace dfly

@@ -619,6 +619,8 @@ static string_view StateToStr(MigrationState state) {
       return "SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
+    case MigrationState::C_CANCELLED:
+      return "CANCELLED"sv;
     case MigrationState::C_MAX_INVALID:
       break;
   }
@@ -736,8 +738,15 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
     auto it = std::find_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
                            [&m](const auto& om) { return m == om->GetMigrationInfo(); });
     DCHECK(it != outgoing_migration_jobs_.end());
+    DCHECK(it->get() != nullptr);
+    OutgoingMigration& migration = *it->get();
+    LOG(INFO) << "Outgoing migration cancelled: slots " << SlotRange::ToString(migration.GetSlots())
+              << " to " << migration.GetHostIp() << ":" << migration.GetPort();
+    migration.Cancel();
     outgoing_migration_jobs_.erase(it);
   }
+
+  // Flushing of removed slots is done outside this function.
 }
 
 void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
@@ -748,6 +757,28 @@ void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& m
           return m.node_id == im->GetSourceID() && m.slot_ranges == im->GetSlots();
         });
     DCHECK(it != incoming_migrations_jobs_.end());
+    DCHECK(it->get() != nullptr);
+    IncomingSlotMigration& migration = *it->get();
+
+    // Flush non-owned migrations
+    SlotSet migration_slots(migration.GetSlots());
+    SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
+
+    // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
+    migration.Cancel();
+
+    if (!removed.Empty()) {
+      auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
+      LOG_IF(WARNING, migration.GetState() == MigrationState::C_FINISHED)
+          << "Flushing slots of removed FINISHED migration " << migration.GetSourceID()
+          << ", slots: " << SlotRange::ToString(*removed_ranges);
+      shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
+        if (EngineShard* shard = EngineShard::tlocal(); shard) {
+          shard->db_slice().FlushSlots(*removed_ranges);
+        }
+      });
+    }
+
     incoming_migrations_jobs_.erase(it);
   }
 }
@@ -848,11 +879,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
 
   migration->Join();
 
-  VLOG(1) << "Migration is finished for " << source_id;
-
-  if (migration->GetState() != MigrationState::C_FINISHED) {
-    return cntx->SendError("Migration process is not in C_FINISHED state");
-  }
+  VLOG(1) << "Migration is joined for " << source_id;
 
   UpdateConfig(migration->GetSlots(), true);
   VLOG(1) << "Config is updated for " << MyID();

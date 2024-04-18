@@ -4,6 +4,7 @@
 #pragma once
 
 #include "helio/io/io.h"
+#include "helio/util/fiber_socket_base.h"
 #include "server/cluster/cluster_config.h"
 
 namespace dfly {
@@ -20,9 +21,16 @@ class IncomingSlotMigration {
   ~IncomingSlotMigration();
 
   // process data from FDLYMIGRATE FLOW cmd
-  void StartFlow(uint32_t shard, io::Source* source);
-  // wait untill all flows are got FIN opcode
+  // executes until Cancel called or connection closed
+  void StartFlow(uint32_t shard, util::FiberSocketBase* source);
+
+  // Waits until all flows got FIN opcode.
+  // Join can't be finished if after FIN opcode we get new data
+  // Connection can be closed by another side, or using Cancel
+  // After Join we still can get data due to error situation
   void Join();
+
+  void Cancel();
 
   MigrationState GetState() const {
     return state_.load();
@@ -45,7 +53,6 @@ class IncomingSlotMigration {
   Context cntx_;
 
   util::fb2::BlockingCounter bc_;
-  util::fb2::Fiber sync_fb_;
 };
 
 }  // namespace dfly

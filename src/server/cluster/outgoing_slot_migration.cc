@@ -81,6 +81,17 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
+void OutgoingMigration::Cancel() {
+  state_.store(MigrationState::C_CANCELLED);
+
+  auto start_cb = [this](util::ProactorBase* pb) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      slot_migrations_[shard->shard_id()]->Cancel();
+    }
+  };
+  shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
+}
+
 MigrationState OutgoingMigration::GetState() const {
   return state_.load();
 }
@@ -104,12 +115,13 @@ void OutgoingMigration::SyncFb() {
   for (auto& migration : slot_migrations_) {
     migration->WaitForSnapshotFinished();
   }
-  VLOG(1) << "Migrations snapshot is finihed";
+
+  VLOG(1) << "Migrations snapshot is finished";
 
   // TODO implement blocking on migrated slots only
 
   long attempt = 0;
-  while (!FinishMigration(++attempt)) {
+  while (state_.load() != MigrationState::C_CANCELLED && !FinishMigration(++attempt)) {
     // process commands that were on pause and try again
     ThisFiber::SleepFor(500ms);
   }
@@ -125,7 +137,7 @@ bool OutgoingMigration::FinishMigration(long attempt) {
     LOG(WARNING) << "Cluster migration finalization time out";
   }
 
-  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt] {
+  absl::Cleanup cleanup([&is_block_active, &pause_fb_opt]() {
     is_block_active = false;
     pause_fb_opt->JoinIfNeeded();
   });
