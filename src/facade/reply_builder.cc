@@ -285,10 +285,6 @@ void RedisReplyBuilder::SetResp3(bool is_resp3) {
   is_resp3_ = is_resp3;
 }
 
-bool RedisReplyBuilder::IsResp3() const {
-  return is_resp3_;
-}
-
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   VLOG(1) << "Error: " << str;
 
@@ -380,21 +376,33 @@ void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string,
                                         bool with_scores) {
   ReplyAggregator agg(this);
   if (!with_scores) {
-    StartArray(arr.size());
-    for (const auto& p : arr) {
-      SendBulkString(p.first);
-    }
+    auto cb = [&](size_t indx) -> string_view { return arr[indx].first; };
+
+    SendStringArrInternal(arr.size(), std::move(cb), CollectionType::ARRAY);
     return;
   }
+
+  char buf[DoubleToStringConverter::kBase10MaximalLength * 3];  // to be on the safe side.
+
   if (!is_resp3_) {  // RESP2 formats withscores as a flat array.
-    StartArray(arr.size() * 2);
-    for (const auto& p : arr) {
-      SendBulkString(p.first);
-      SendDouble(p.second);
-    }
+    auto cb = [&](size_t indx) -> string_view {
+      if (indx % 2 == 0)
+        return arr[indx / 2].first;
+
+      // NOTE: we reuse the same buffer, assuming that SendStringArrInternal does not reference
+      // previous string_views. The assumption holds for small strings like
+      // doubles because SendStringArrInternal employs small string optimization.
+      // It's a bit hacky but saves allocations.
+      return FormatDouble(arr[indx / 2].second, buf, sizeof(buf));
+    };
+
+    SendStringArrInternal(arr.size() * 2, std::move(cb), CollectionType::ARRAY);
     return;
   }
+
   // Resp3 formats withscores as array of (key, score) pairs.
+  // TODO: to implement efficient serializing by extending SendStringArrInternal to support
+  // 2-level arrays.
   StartArray(arr.size());
   for (const auto& p : arr) {
     StartArray(2);
@@ -406,15 +414,13 @@ void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string,
 void RedisReplyBuilder::SendDouble(double val) {
   char buf[64];
 
-  StringBuilder sb(buf, sizeof(buf));
-  CHECK(dfly_conv.ToShortest(val, &sb));
+  char* start = FormatDouble(val, buf, sizeof(buf));
 
   if (!is_resp3_) {
-    SendBulkString(sb.Finalize());
+    SendBulkString(start);
   } else {
     // RESP3
-    string str = absl::StrCat(",", sb.Finalize(), kCRLF);
-    SendRaw(str);
+    SendRaw(absl::StrCat(",", start, kCRLF));
   }
 }
 
@@ -576,10 +582,11 @@ void RedisReplyBuilder::SendStringArrInternal(
   }
 
   // When vector length is too long, Send returns EMSGSIZE.
-  size_t vec_len = std::min<size_t>(128u, size);
+  size_t vec_len = std::min<size_t>(124u, size);
 
   absl::FixedArray<iovec, 16> vec(vec_len * 2 + 2);
-  absl::FixedArray<char, 64> meta((vec_len + 1) * 16);  // 16 bytes per length.
+  absl::FixedArray<char, 128> meta(vec_len * 32 + 64);  // 32 bytes per element + spare space
+
   char* next = meta.data();
 
   auto serialize_len = [&](char prefix, size_t len) {
@@ -598,18 +605,27 @@ void RedisReplyBuilder::SendStringArrInternal(
   for (unsigned i = 0; i < size; ++i) {
     src = producer(i);
     serialize_len('$', src.size());
+
     // add serialized len blob
     vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
     DCHECK_GT(next - start, 0);
 
     start = next;
 
-    vec[vec_indx++] = IoVec(src);
-
+    // copy data either by referencing via an iovec or copying inline into meta buf.
+    if (src.size() >= 30) {
+      vec[vec_indx++] = IoVec(src);
+    } else if (src.size() > 0) {
+      memcpy(next, src.data(), src.size());
+      vec[vec_indx - 1].iov_len += src.size();  // extend the reference
+      next += src.size();
+      start = next;
+    }
     *next++ = '\r';
     *next++ = '\n';
 
-    if (vec_indx + 1 >= vec.size()) {
+    // we keep at least 40 bytes to have enough place for a small string as well as its length.
+    if (vec_indx + 1 >= vec.size() || (meta.end() - next < 40)) {
       // Flush the iovec array.
       if (i < size - 1 || vec_indx == vec.size()) {
         Send(vec.data(), vec_indx);
