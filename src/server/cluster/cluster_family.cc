@@ -501,6 +501,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
       config_update_mu_);  // to prevent simultaneous update config from outgoing migration
 
   SlotRanges enable_slots, disable_slots;
+
   {
     std::lock_guard lk(migration_mu_);
     // If migration state is changed simultaneously, the changes to config will be applied after

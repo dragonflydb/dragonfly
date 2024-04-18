@@ -1358,7 +1358,7 @@ async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     while "FINISHED" not in await nodes[1].admin_client.execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
     ):
         logging.debug("SLOT-MIGRATION-STATUS is not FINISHED")
         await asyncio.sleep(0.05)
