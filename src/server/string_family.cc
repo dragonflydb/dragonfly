@@ -878,6 +878,7 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
 
     auto value = StringValue::Read(key, it_res->it->second, es);
     es->db_slice().Del(tx->GetDbIndex(), it_res->it);
+    it_res->post_updater.Cancel();
     return value;
   };
 
