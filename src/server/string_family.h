@@ -17,6 +17,7 @@ class CommandRegistry;
 using facade::OpResult;
 using facade::OpStatus;
 
+// Stores a string, the pending result of a tiered read or nothing
 struct StringValue {
   StringValue() : v_{} {
   }
@@ -25,9 +26,11 @@ struct StringValue {
   StringValue(util::fb2::Future<std::string> f) : v_{std::move(f)} {
   }
 
+  // Get and consume value. If backed by a future, blocks until resolved.
   std::string Get() &&;
 
-  bool IsNull() const;
+  // If no value is stored
+  bool IsEmpty() const;
 
   // Read string from prime value - either from memory or issue tiered storage read
   static StringValue Read(std::string_view key, const PrimeValue& pv, EngineShard* es);

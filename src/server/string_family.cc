@@ -521,7 +521,7 @@ struct StringReplies {
   }
 
   void Send(StringValue&& val) const {
-    if (val.IsNull()) {
+    if (val.IsEmpty()) {
       rb->SendNull();
     } else {
       rb->SendBulkString(std::move(val).Get());
@@ -547,7 +547,7 @@ string StringValue::Get() && {
   return std::get<util::fb2::Future<std::string>>(prev).get();
 }
 
-bool StringValue::IsNull() const {
+bool StringValue::IsEmpty() const {
   return holds_alternative<monostate>(v_);
 }
 
@@ -721,6 +721,7 @@ OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, s
   });
 }
 
+// With tieringV2 support
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
 
