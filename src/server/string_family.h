@@ -16,12 +16,10 @@ class CommandRegistry;
 using facade::OpResult;
 using facade::OpStatus;
 
+// Helper for performing SET operations with various options
 class SetCmd {
-  const OpArgs op_args_;
-  bool manual_journal_;
-
  public:
-  explicit SetCmd(const OpArgs& op_args, bool manual_journal)
+  explicit SetCmd(OpArgs op_args, bool manual_journal)
       : op_args_(op_args), manual_journal_{manual_journal} {
   }
 
@@ -38,26 +36,29 @@ class SetCmd {
   struct SetParams {
     uint16_t flags = SET_ALWAYS;
     uint16_t memcache_flags = 0;
-    // Relative value based on now. 0 means no expiration.
-    uint64_t expire_after_ms = 0;
-    mutable std::optional<std::string>* prev_val = nullptr;  // GETSET option
+    uint64_t expire_after_ms = 0;  // Relative value based on now. 0 means no expiration.
+    std::optional<std::string>* prev_val = nullptr;  // If set, previous value is stored at pointer
 
     constexpr bool IsConditionalSet() const {
       return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
     }
   };
 
-  // OpResult's value (i.e. optional<string>) is set in the case `params.flags` has SET_GET bit on,
-  // in which case the previous value (or nullopt if none) is returned. Otherwise, OpResult only
-  // contains a status.
-  OpResult<std::optional<std::string>> Set(const SetParams& params, std::string_view key,
-                                           std::string_view value);
+  OpStatus Set(const SetParams& params, std::string_view key, std::string_view value);
 
  private:
   OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
                        std::string_view key, std::string_view value);
 
+  void AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
+              std::string_view key, std::string_view value);
+
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
+
+  OpStatus CachePrevIfNeeded(const SetParams& params, DbSlice::Iterator it);
+
+  const OpArgs op_args_;
+  bool manual_journal_;
 };
 
 class StringFamily {

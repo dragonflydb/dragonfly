@@ -879,11 +879,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
 
   migration->Join();
 
-  VLOG(1) << "Migration is finished for " << source_id;
-
-  if (migration->GetState() != MigrationState::C_FINISHED) {
-    return cntx->SendError("Migration process is not in C_FINISHED state");
-  }
+  VLOG(1) << "Migration is joined for " << source_id;
 
   UpdateConfig(migration->GetSlots(), true);
   VLOG(1) << "Config is updated for " << MyID();
