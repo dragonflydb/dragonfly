@@ -462,7 +462,7 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
 void InterpreterReplier::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                          bool with_scores) {
   if (with_scores) {
-    if (is_resp3()) {
+    if (IsResp3()) {
       StartCollection(arr.size(), CollectionType::ARRAY);
       for (size_t i = 0; i < arr.size(); ++i) {
         StartArray(2);

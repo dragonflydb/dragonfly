@@ -285,10 +285,6 @@ void RedisReplyBuilder::SetResp3(bool is_resp3) {
   is_resp3_ = is_resp3;
 }
 
-bool RedisReplyBuilder::IsResp3() const {
-  return is_resp3_;
-}
-
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   VLOG(1) << "Error: " << str;
 
@@ -386,8 +382,7 @@ void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string,
     return;
   }
 
-  // DoubleToStringConverter::kBase10MaximalLength is 17.
-  char buf[64];
+  char buf[DoubleToStringConverter::kBase10MaximalLength * 3];  // to be on the safe side.
 
   if (!is_resp3_) {  // RESP2 formats withscores as a flat array.
     auto cb = [&](size_t indx) -> string_view {
