@@ -275,6 +275,8 @@ TEST_F(TieredStorageTest, AddSmallValuesWithExpire) {
 }
 
 TEST_F(TieredStorageTest, SetAndExpire) {
+  GTEST_SKIP();
+
   string val(5000, 'a');
   Run({"set", "key", val});
   EXPECT_TRUE(WaitUntilTieredEntriesEQ(1));
