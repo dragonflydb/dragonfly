@@ -78,6 +78,7 @@ Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
 Replica::~Replica() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  acl_check_fb_.JoinIfNeeded();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -657,9 +658,9 @@ error_code Replica::ConsumeDflyStream() {
   if (master_context_.version >= DflyVersion::VER3) {
     acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
   }
-  acl_check_fb_.JoinIfNeeded();
 
   JoinDflyFlows();
+  acl_check_fb_.JoinIfNeeded();
 
   last_journal_LSNs_.emplace();
   for (auto& flow : shard_flows_) {
