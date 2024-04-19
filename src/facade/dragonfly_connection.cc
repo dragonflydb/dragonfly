@@ -12,6 +12,7 @@
 #include <numeric>
 #include <variant>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
@@ -652,7 +653,16 @@ void Connection::HandleRequests() {
 
   http_res = CheckForHttpProto(peer);
 
-  if (http_res) {
+  // We need to check if the socket is open because the server might be
+  // shutting down. During the shutdown process, the server iterates over
+  // the connections of each shard and shuts down their socket. Since the
+  // main listener dispatches the connection into the next proactor, we
+  // allow a schedule order that first shuts down the socket and then calls
+  // this function which triggers a DCHECK on the socket while it tries to
+  // RegisterOnErrorCb. Furthermore, we can get away with one check here
+  // because both Write and Recv internally check if the socket was shut
+  // down and return with an error accordingly.
+  if (http_res && socket_->IsOpen()) {
     cc_.reset(service_->CreateContext(peer, this));
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
