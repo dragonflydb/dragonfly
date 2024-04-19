@@ -112,11 +112,12 @@ RestoreStreamer::~RestoreStreamer() {
 }
 
 void RestoreStreamer::Cancel() {
-  if (snapshot_version_ != 0) {
+  auto sver = snapshot_version_;
+  snapshot_version_ = 0;  // to prevent double cancel in another fiber
+  if (sver != 0) {
     fiber_cancellation_.Cancel();
-    db_slice_->UnregisterOnChange(snapshot_version_);
+    db_slice_->UnregisterOnChange(sver);
     JournalStreamer::Cancel();
-    snapshot_version_ = 0;
   }
 }
 
