@@ -79,8 +79,8 @@ spec:
           livenessProbe:
             exec:
               command:
-                - /bin/sh
-                - /usr/local/bin/healthcheck.sh
+              - /bin/sh
+              - /usr/local/bin/healthcheck.sh
             failureThreshold: 3
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -89,8 +89,8 @@ spec:
           readinessProbe:
             exec:
               command:
-                - /bin/sh
-                - /usr/local/bin/healthcheck.sh
+              - /bin/sh
+              - /usr/local/bin/healthcheck.sh
             failureThreshold: 3
             initialDelaySeconds: 10
             periodSeconds: 10
