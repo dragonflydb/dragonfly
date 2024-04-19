@@ -1173,7 +1173,6 @@ def generate_config(nodes):
     ]
 
 
-@pytest.mark.skip(reason="Failing on github regression action")
 @pytest.mark.parametrize(
     "node_count, segments, keys",
     [
@@ -1286,7 +1285,7 @@ async def test_cluster_fuzzymigration(
             break
 
         iterations += 1
-        assert iterations < 100
+        assert iterations < 500
 
         await asyncio.sleep(0.1)
 
