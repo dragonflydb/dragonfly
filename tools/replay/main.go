@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"sync"
@@ -86,7 +87,7 @@ func NewClient(w *FileWorker) *ClientWorker {
 
 func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	clients := make(map[uint32]*ClientWorker, 0)
-	parseRecords(file, func(r Record) bool {
+	err := parseRecords(file, func(r Record) bool {
 		client, ok := clients[r.Client]
 		if !ok {
 			client = NewClient(w)
@@ -97,6 +98,10 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 		client.incoming <- r
 		return true
 	})
+
+	if err != nil {
+		log.Fatalf("Could not parse records!")
+	}
 
 	for _, client := range clients {
 		close(client.incoming)
