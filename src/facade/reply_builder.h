@@ -208,7 +208,9 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   RedisReplyBuilder(::io::Sink* stream);
 
   void SetResp3(bool is_resp3);
-  bool IsResp3() const;
+  bool IsResp3() const {
+    return is_resp3_;
+  }
 
   void SendError(std::string_view str, std::string_view type = {}) override;
   using SinkReplyBuilder::SendError;
@@ -247,7 +249,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   };
 
  private:
-  void SendStringArrInternal(WrappedStrSpan arr, CollectionType type);
+  void SendStringArrInternal(size_t size, absl::FunctionRef<std::string_view(unsigned)> producer,
+                             CollectionType type);
 
   bool is_resp3_ = false;
 };

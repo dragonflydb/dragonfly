@@ -2327,6 +2327,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     rb->SetResp3(false);
   }
 
+  SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartCollection(7, RedisReplyBuilder::MAP);
   rb->SendBulkString("server");
   rb->SendBulkString("redis");
