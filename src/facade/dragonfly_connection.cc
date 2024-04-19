@@ -12,7 +12,6 @@
 #include <numeric>
 #include <variant>
 
-#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
