@@ -1135,6 +1135,20 @@ class NodeInfo:
     id: str
 
 
+async def create_node_info(instance):
+    admin_client = instance.admin_client()
+    ninfo = NodeInfo(
+        instance=instance,
+        client=instance.client(),
+        admin_client=admin_client,
+        slots=[],
+        next_slots=[],
+        migrations=[],
+        id=await get_node_id(admin_client),
+    )
+    return ninfo
+
+
 def generate_config(nodes):
     return [
         {
@@ -1185,18 +1199,7 @@ async def test_cluster_fuzzymigration(
     ]
     df_local_factory.start_all(instances)
 
-    nodes = [
-        NodeInfo(
-            instance=instance,
-            client=instance.client(),
-            admin_client=instance.admin_client(),
-            slots=[],
-            next_slots=[],
-            migrations=[],
-            id=await get_node_id(instance.admin_client()),
-        )
-        for instance in instances
-    ]
+    nodes = [(await create_node_info(instance)) for instance in instances]
 
     # Generate equally sized ranges and distribute by nodes
     step = 16400 // segments
@@ -1329,18 +1332,7 @@ async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
     ]
     df_local_factory.start_all(instances)
 
-    nodes = [
-        NodeInfo(
-            instance=instance,
-            client=instance.client(),
-            admin_client=instance.admin_client(),
-            slots=[],
-            next_slots=[],
-            migrations=[],
-            id=await get_node_id(instance.admin_client()),
-        )
-        for instance in instances
-    ]
+    nodes = [await create_node_info(instance) for instance in instances]
     nodes[0].slots = [(0, 8000)]
     nodes[1].slots = [(8001, 16383)]
 
@@ -1397,18 +1389,7 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     ]
     df_local_factory.start_all(instances)
 
-    nodes = [
-        NodeInfo(
-            instance=instance,
-            client=instance.client(),
-            admin_client=instance.admin_client(),
-            slots=[],
-            next_slots=[],
-            migrations=[],
-            id=await get_node_id(instance.admin_client()),
-        )
-        for instance in instances
-    ]
+    nodes = [await create_node_info(instance) for instance in instances]
     nodes[0].slots = [(0, 8000)]
     nodes[1].slots = [(8001, 16383)]
 

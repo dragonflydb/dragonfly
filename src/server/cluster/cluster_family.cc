@@ -496,7 +496,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   RemoveOutgoingMigrations(new_config->GetFinishedOutgoingMigrations(tl_cluster_config));
   RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
-  
+
   lock_guard config_update_lk(
       config_update_mu_);  // to prevent simultaneous update config from outgoing migration
 
