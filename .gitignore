@@ -16,3 +16,4 @@ genfiles/*
 _deps
 releases
 .DS_Store
+.idea/*

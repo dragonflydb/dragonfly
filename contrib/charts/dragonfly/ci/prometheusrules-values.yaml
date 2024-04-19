@@ -1,0 +1,16 @@
+serviceMonitor:
+  enabled: true
+prometheusRule:
+  enabled: true
+  namespace: default
+  spec:
+    - alert: RedisDown
+      expr: absent(dragonfly_master > 0)
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: Redis instance is down
+        description: >
+          "Redis instance is down"
+        runbook_url: "https://octopus.com/docs/runbooks/runbook-examples"
