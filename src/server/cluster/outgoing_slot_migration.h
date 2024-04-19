@@ -28,10 +28,8 @@ class OutgoingMigration : private ProtocolClient {
   // start migration process, sends INIT command to the target node
   std::error_code Start(ConnectionContext* cntx);
 
-  // should be run for all shards
-  void StartFlow(journal::Journal* journal, io::Sink* dest);
-
-  void Cancel();
+  // mark migration as FINISHED and cancel migration if it's not finished yet
+  void Finish();
 
   MigrationState GetState() const;
 
@@ -54,18 +52,21 @@ class OutgoingMigration : private ProtocolClient {
   static constexpr long kInvalidAttempt = -1;
 
  private:
+  // should be run for all shards
+  void StartFlow(journal::Journal* journal, io::Sink* dest);
+
   MigrationState GetStateImpl() const;
   // SliceSlotMigration manages state and data transfering for the corresponding shard
   class SliceSlotMigration;
 
   void SyncFb();
-  bool FinishMigration(long attempt);
+  bool FinalyzeMigration(long attempt);
 
  private:
   MigrationInfo migration_info_;
   Context cntx_;
-  mutable util::fb2::Mutex flows_mu_;
-  std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_ ABSL_GUARDED_BY(flows_mu_);
+  mutable util::fb2::Mutex finish_mu_;
+  std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
   ServerFamily* server_family_;
   ClusterFamily* cf_;
 

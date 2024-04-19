@@ -494,6 +494,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
+  lock_guard config_update_lk(
+      config_update_mu_);  // to prevent simultaneous update config from outgoing migration
   // TODO we shouldn't provide cntx into StartSlotMigrations
   if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config), cntx)) {
     return cntx->SendError("Can't start the migration");
@@ -706,19 +708,17 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-IncomingSlotMigration* ClusterFamily::CreateIncomingMigration(std::string source_id,
-                                                              SlotRanges slots,
-                                                              uint32_t shards_num) {
+std::shared_ptr<IncomingSlotMigration> ClusterFamily::CreateIncomingMigration(std::string source_id,
+                                                                              SlotRanges slots,
+                                                                              uint32_t shards_num) {
   lock_guard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (mj->GetSourceID() == source_id) {
       return nullptr;
     }
   }
-  return incoming_migrations_jobs_
-      .emplace_back(make_shared<IncomingSlotMigration>(
-          std::move(source_id), &server_family_->service(), std::move(slots), shards_num))
-      .get();
+  return incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
+      std::move(source_id), &server_family_->service(), std::move(slots), shards_num));
 }
 
 std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
@@ -742,7 +742,7 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
     OutgoingMigration& migration = *it->get();
     LOG(INFO) << "Outgoing migration cancelled: slots " << SlotRange::ToString(migration.GetSlots())
               << " to " << migration.GetHostIp() << ":" << migration.GetPort();
-    migration.Cancel();
+    migration.Finish();
     outgoing_migration_jobs_.erase(it);
   }
 
@@ -833,8 +833,10 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   cntx->conn()->SetName(absl::StrCat("migration_flow_", source_id));
 
   auto migration = GetIncomingMigration(source_id);
-  if (!migration)
+  if (!migration) {
+    // TODO process error when migration is canceled
     return cntx->SendError(kIdNotFound);
+  }
 
   DCHECK(cntx->sync_dispatch);
   // we do this to be ignored by the dispatch tracker
@@ -847,7 +849,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::UpdateConfig(const std::vector<SlotRange>& slots, bool enable) {
-  lock_guard gu(set_config_mu);
+  lock_guard gu(config_update_mu_);
 
   auto new_config = tl_cluster_config->CloneWithChanges(slots, enable);
 
@@ -870,6 +872,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
                            [source_id](const auto& m) { return m.node_id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
+    // TODO process error if migration was canceled
     return cntx->SendLong(OutgoingMigration::kInvalidAttempt);
   }
 

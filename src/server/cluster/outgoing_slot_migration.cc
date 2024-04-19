@@ -81,15 +81,12 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
-void OutgoingMigration::Cancel() {
-  state_.store(MigrationState::C_CANCELLED);
-
-  auto start_cb = [this](util::ProactorBase* pb) {
-    if (auto* shard = EngineShard::tlocal(); shard) {
+void OutgoingMigration::Finish() {
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard)
       slot_migrations_[shard->shard_id()]->Cancel();
-    }
-  };
-  shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
+  });
+  state_.store(MigrationState::C_FINISHED);
 }
 
 MigrationState OutgoingMigration::GetState() const {
@@ -108,8 +105,6 @@ void OutgoingMigration::SyncFb() {
     }
   };
 
-  state_.store(MigrationState::C_SYNC);
-
   shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
 
   for (auto& migration : slot_migrations_) {
@@ -121,13 +116,13 @@ void OutgoingMigration::SyncFb() {
   // TODO implement blocking on migrated slots only
 
   long attempt = 0;
-  while (state_.load() != MigrationState::C_CANCELLED && !FinishMigration(++attempt)) {
+  while (state_.load() != MigrationState::C_FINISHED && !FinalyzeMigration(++attempt)) {
     // process commands that were on pause and try again
     ThisFiber::SleepFor(500ms);
   }
 }
 
-bool OutgoingMigration::FinishMigration(long attempt) {
+bool OutgoingMigration::FinalyzeMigration(long attempt) {
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt = Pause(server_family_->GetNonPriviligedListeners(), nullptr,
@@ -181,12 +176,8 @@ bool OutgoingMigration::FinishMigration(long attempt) {
       }
     } while (attempt_res != attempt);
 
-    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (const auto* shard = EngineShard::tlocal(); shard)
-        slot_migrations_[shard->shard_id()]->Cancel();
-    });
+    Finish();
 
-    state_.store(MigrationState::C_FINISHED);
     cf_->UpdateConfig(migration_info_.slot_ranges, false);
     VLOG(1) << "Config is updated for " << cf_->MyID();
     return true;

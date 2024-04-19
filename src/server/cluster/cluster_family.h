@@ -73,8 +73,9 @@ class ClusterFamily {
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
   // create a IncomingSlotMigration entity which will execute migration
-  IncomingSlotMigration* CreateIncomingMigration(std::string source_id, SlotRanges slots,
-                                                 uint32_t shards_num);
+  std::shared_ptr<IncomingSlotMigration> CreateIncomingMigration(std::string source_id,
+                                                                 SlotRanges slots,
+                                                                 uint32_t shards_num);
 
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id);
 
@@ -96,6 +97,8 @@ class ClusterFamily {
 
  private:
   ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
+
+  mutable util::fb2::Mutex config_update_mu_;
 
   std::string id_;
 
