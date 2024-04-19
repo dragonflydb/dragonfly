@@ -338,10 +338,11 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
   return CreateFromConfig(my_id, config.value());
 }
 
-std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithChanges(const std::vector<SlotRange>& slots,
-                                                               bool enable) const {
+std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithChanges(
+    const SlotRanges& enable_slots, const SlotRanges& disable_slots) const {
   auto new_config = std::make_shared<ClusterConfig>(*this);
-  new_config->my_slots_.Set(slots, enable);
+  new_config->my_slots_.Set(enable_slots, true);
+  new_config->my_slots_.Set(disable_slots, false);
   return new_config;
 }
 

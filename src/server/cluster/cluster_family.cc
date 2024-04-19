@@ -494,14 +494,39 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
-  lock_guard config_update_lk(
-      config_update_mu_);  // to prevent simultaneous update config from outgoing migration
-  // TODO we shouldn't provide cntx into StartSlotMigrations
-  if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config), cntx)) {
-    return cntx->SendError("Can't start the migration");
-  }
   RemoveOutgoingMigrations(new_config->GetFinishedOutgoingMigrations(tl_cluster_config));
   RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
+
+  lock_guard config_update_lk(
+      config_update_mu_);  // to prevent simultaneous update config from outgoing migration
+
+  SlotRanges enable_slots, disable_slots;
+
+  {
+    std::lock_guard lk(migration_mu_);
+    // If migration state is changed simultaneously, the changes to config will be applied after
+    // set_config_mu is unlocked and even if we apply the same changes 2 times it's not a problem
+    for (const auto& m : incoming_migrations_jobs_) {
+      if (m->GetState() == MigrationState::C_FINISHED) {
+        const auto& slots = m->GetSlots();
+        enable_slots.insert(enable_slots.end(), slots.begin(), slots.end());
+      }
+    }
+    for (const auto& m : outgoing_migration_jobs_) {
+      if (m->GetState() == MigrationState::C_FINISHED) {
+        const auto& slots = m->GetSlots();
+        disable_slots.insert(disable_slots.end(), slots.begin(), slots.end());
+      }
+    }
+  }
+
+  new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
+
+  // TODO we shouldn't provide cntx into StartSlotMigrations
+  if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config), cntx)) {
+    // TODO it shouldn't be an error
+    return cntx->SendError("Can't start the migration");
+  }
 
   SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
 
@@ -851,7 +876,8 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 void ClusterFamily::UpdateConfig(const std::vector<SlotRange>& slots, bool enable) {
   lock_guard gu(config_update_mu_);
 
-  auto new_config = tl_cluster_config->CloneWithChanges(slots, enable);
+  auto new_config = enable ? tl_cluster_config->CloneWithChanges(slots, {})
+                           : tl_cluster_config->CloneWithChanges({}, slots);
 
   shard_set->pool()->AwaitFiberOnAll(
       [&new_config](util::ProactorBase* pb) { tl_cluster_config = new_config; });

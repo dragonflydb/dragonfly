@@ -1135,6 +1135,20 @@ class NodeInfo:
     id: str
 
 
+async def create_node_info(instance):
+    admin_client = instance.admin_client()
+    ninfo = NodeInfo(
+        instance=instance,
+        client=instance.client(),
+        admin_client=admin_client,
+        slots=[],
+        next_slots=[],
+        migrations=[],
+        id=await get_node_id(admin_client),
+    )
+    return ninfo
+
+
 def generate_config(nodes):
     return [
         {
@@ -1185,18 +1199,7 @@ async def test_cluster_fuzzymigration(
     ]
     df_local_factory.start_all(instances)
 
-    nodes = [
-        NodeInfo(
-            instance=instance,
-            client=instance.client(),
-            admin_client=instance.admin_client(),
-            slots=[],
-            next_slots=[],
-            migrations=[],
-            id=await get_node_id(instance.admin_client()),
-        )
-        for instance in instances
-    ]
+    nodes = [(await create_node_info(instance)) for instance in instances]
 
     # Generate equally sized ranges and distribute by nodes
     step = 16400 // segments
@@ -1321,7 +1324,7 @@ async def test_cluster_fuzzymigration(
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
+async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
     """Check data migration from one node to another."""
     instances = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
@@ -1329,18 +1332,7 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     ]
     df_local_factory.start_all(instances)
 
-    nodes = [
-        NodeInfo(
-            instance=instance,
-            client=instance.client(),
-            admin_client=instance.admin_client(),
-            slots=[],
-            next_slots=[],
-            migrations=[],
-            id=await get_node_id(instance.admin_client()),
-        )
-        for instance in instances
-    ]
+    nodes = [await create_node_info(instance) for instance in instances]
     nodes[0].slots = [(0, 8000)]
     nodes[1].slots = [(8001, 16383)]
 
@@ -1352,7 +1344,64 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     assert [SIZE, 0] == [await node.admin_client.dbsize() for node in nodes]
 
     nodes[0].migrations = [
-        MigrationInfo("127.0.0.1", instances[1].port, [(6000, 8000)], nodes[1].id)
+        MigrationInfo("127.0.0.1", instances[1].admin_port, [(6000, 8000)], nodes[1].id)
+    ]
+    logging.debug("Migrating slots 6000-8000")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    while "FINISHED" not in await nodes[1].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+    ):
+        logging.debug("SLOT-MIGRATION-STATUS is not FINISHED")
+        await asyncio.sleep(0.05)
+
+    assert await nodes[0].admin_client.dbsize() == SIZE
+    assert await nodes[1].admin_client.dbsize() == SIZE
+
+    logging.debug("Reapply config with migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await asyncio.sleep(0.1)
+    assert await nodes[0].admin_client.dbsize() == SIZE
+    assert await nodes[1].admin_client.dbsize() == SIZE
+
+    logging.debug("Finalizing migration")
+    nodes[0].migrations = []
+    nodes[0].slots = [(0, 6000)]
+    nodes[1].slots = [(6001, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    logging.debug("Migration finalized")
+
+    await asyncio.sleep(0.1)
+    assert [0, SIZE] == [await node.admin_client.dbsize() for node in nodes]
+    for i in range(SIZE):
+        assert str(i) == await nodes[1].admin_client.get(f"{{key50}}:{i}")
+
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
+    """Check data migration from one node to another."""
+    instances = [
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        for i in range(2)
+    ]
+    df_local_factory.start_all(instances)
+
+    nodes = [await create_node_info(instance) for instance in instances]
+    nodes[0].slots = [(0, 8000)]
+    nodes[1].slots = [(8001, 16383)]
+
+    logging.debug("Pushing data to slot 6XXX")
+    SIZE = 10_000
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    for i in range(SIZE):
+        assert await nodes[0].admin_client.set(f"{{key50}}:{i}", i)  # key50 belongs to slot 6686
+    assert [SIZE, 0] == [await node.admin_client.dbsize() for node in nodes]
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", instances[1].admin_port, [(6000, 8000)], nodes[1].id)
     ]
     logging.debug("Migrating slots 6000-8000")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
@@ -1373,7 +1422,7 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
 
     logging.debug("Reissuing migration")
     nodes[0].migrations.append(
-        MigrationInfo("127.0.0.1", instances[1].port, [(6001, 8000)], nodes[1].id)
+        MigrationInfo("127.0.0.1", instances[1].admin_port, [(6001, 8000)], nodes[1].id)
     )
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     await asyncio.sleep(0.1)

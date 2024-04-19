@@ -77,8 +77,8 @@ class ClusterConfig {
   static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
                                                          std::string_view json_config);
 
-  std::shared_ptr<ClusterConfig> CloneWithChanges(const std::vector<SlotRange>& slots,
-                                                  bool enable) const;
+  std::shared_ptr<ClusterConfig> CloneWithChanges(const SlotRanges& enable_slots,
+                                                  const SlotRanges& disable_slots) const;
 
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
