@@ -1,4 +1,13 @@
 ---
+# Source: dragonfly/templates/extra-manifests.yaml
+apiVersion: scheduling.k8s.io/v1
+description: This priority class should be used only for tests.
+globalDefault: false
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+---
 # Source: dragonfly/templates/serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -70,8 +79,8 @@ spec:
           livenessProbe:
             exec:
               command:
-              - /bin/sh
-              - /usr/local/bin/healthcheck.sh
+                - /bin/sh
+                - /usr/local/bin/healthcheck.sh
             failureThreshold: 3
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -80,8 +89,8 @@ spec:
           readinessProbe:
             exec:
               command:
-              - /bin/sh
-              - /usr/local/bin/healthcheck.sh
+                - /bin/sh
+                - /usr/local/bin/healthcheck.sh
             failureThreshold: 3
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -92,12 +101,3 @@ spec:
           resources:
             limits: {}
             requests: {}
----
-# Source: dragonfly/templates/extra-manifests.yaml
-apiVersion: scheduling.k8s.io/v1
-description: This priority class should be used only for tests.
-globalDefault: false
-kind: PriorityClass
-metadata:
-  name: high-priority
-value: 1000000
