@@ -992,7 +992,6 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.fps.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return true;
   }
-  DCHECK_GT(lock_args.key_step, 0u);
 
   auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   bool lock_acquired = true;
@@ -1003,7 +1002,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   } else {
     uniq_fps_.clear();
 
-    for (size_t i = 0; i < lock_args.fps.size(); i += lock_args.key_step) {
+    for (size_t i = 0; i < lock_args.fps.size(); ++i) {
       uint64_t fp = lock_args.fps[i];
       if (uniq_fps_.insert(fp).second) {
         lock_acquired &= lt.Acquire(fp, mode);
@@ -1029,7 +1028,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
     lt.Release(fp, mode);
   } else {
     uniq_fps_.clear();
-    for (size_t i = 0; i < lock_args.fps.size(); i += lock_args.key_step) {
+    for (size_t i = 0; i < lock_args.fps.size(); ++i) {
       uint64_t fp = lock_args.fps[i];
       if (uniq_fps_.insert(fp).second) {
         lt.Release(fp, mode);

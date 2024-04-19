@@ -397,6 +397,8 @@ class Transaction {
 
     uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
     uint32_t arg_count = 0;
+    uint32_t fp_start = 0;
+    uint32_t fp_count = 0;
 
     // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
     TxQueue::Iterator pq_pos = TxQueue::kEnd;
@@ -410,7 +412,7 @@ class Transaction {
     } stats;
 
     // Prevent "false sharing" between cache lines: occupy a full cache line (64 bytes)
-    char pad[64 - 5 * sizeof(uint32_t) - sizeof(Stats)];
+    char pad[64 - 7 * sizeof(uint32_t) - sizeof(Stats)];
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
@@ -596,7 +598,9 @@ class Transaction {
   // We need values as well since we reorder keys, and we need to know what value corresponds
   // to what key.
   absl::InlinedVector<std::string_view, 4> kv_args_;
-  absl::InlinedVector<uint64_t, 4> kv_fp_;
+
+  // Fingerprints of keys, precomputed once during the transaction initialization.
+  absl::InlinedVector<LockFp, 4> kv_fp_;
 
   // Stores the full undivided command.
   CmdArgList full_args_;

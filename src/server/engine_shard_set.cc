@@ -184,7 +184,7 @@ bool HasContendedLocks(ShardId shard_id, Transaction* trx, const DbTable* table)
     }
   } else {
     KeyLockArgs lock_args = trx->GetLockArgs(shard_id);
-    for (size_t i = 0; i < lock_args.fps.size(); i += lock_args.key_step) {
+    for (size_t i = 0; i < lock_args.fps.size(); ++i) {
       if (is_contended(lock_args.fps[i]))
         return true;
     }

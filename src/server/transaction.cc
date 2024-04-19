@@ -83,7 +83,7 @@ uint16_t trans_id(const Transaction* ptr) {
 }
 
 bool CheckLocks(const DbSlice& db_slice, IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  for (size_t i = 0; i < lock_args.fps.size(); i += lock_args.key_step) {
+  for (size_t i = 0; i < lock_args.fps.size(); ++i) {
     auto fp = lock_args.fps[i];
     if (!db_slice.CheckLock(mode, lock_args.db_index, fp))
       return false;
@@ -219,6 +219,7 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShar
 void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
                                 bool rev_mapping) {
   kv_args_.reserve(num_args);
+  DCHECK(kv_fp_.empty());
   kv_fp_.reserve(num_args);
 
   if (rev_mapping)
@@ -232,6 +233,8 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
 
     sd.arg_count = si.args.size();
     sd.arg_start = kv_args_.size();
+    sd.fp_start = kv_fp_.size();
+    sd.fp_count = 0;
 
     // Multi transactions can re-initialize on different shards, so clear ACTIVE flag.
     DCHECK_EQ(sd.local_mask & ACTIVE, 0);
@@ -249,8 +252,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
       kv_args_.push_back(arg);
       if (si.key_step == 1 || j % si.key_step == 0) {
         kv_fp_.push_back(LockTag(arg).Fingerprint());
-      } else {
-        kv_fp_.push_back(0);
+        sd.fp_count++;
       }
       if (rev_mapping)
         reverse_index_.push_back(si.original_index[j]);
@@ -277,6 +279,7 @@ void Transaction::PrepareMultiFps(const CmdArgVec& keys) {
 void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
   DCHECK(!key_index.bonus);
   DCHECK(key_index.step == 1u || key_index.step == 2u);
+  DCHECK(kv_fp_.empty());
 
   // even for a single key we may have multiple arguments per key (MSET).
   for (unsigned j = key_index.start; j < key_index.end; j++) {
@@ -399,6 +402,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   DCHECK_EQ(unique_shard_cnt_, 0u);
   DCHECK(kv_args_.empty());
+  DCHECK(kv_fp_.empty());
 
   OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
   if (!key_index)
@@ -488,6 +492,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   unique_shard_cnt_ = 0;
 
   kv_args_.clear();
+  kv_fp_.clear();
   reverse_index_.clear();
 
   cid_ = cid;
@@ -638,7 +643,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     //    of the queue and notify the next one.
     if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
-        CHECK_EQ(largs.key_step, 1u);
         bcontroller->FinalizeWatched(GetShardArgs(idx), this);
       }
 
@@ -1019,13 +1023,13 @@ optional<SlotId> Transaction::GetUniqueSlotId() const {
 KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;
-  res.key_step = cid_->opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1;
 
   if (unique_shard_cnt_ == 1) {
     res.fps = {kv_fp_.data(), kv_fp_.size()};
   } else {
     const auto& sd = shard_data_[sid];
-    res.fps = {kv_fp_.data() + sd.arg_start, sd.arg_count};
+    DCHECK_LE(sd.fp_start + sd.fp_count, kv_fp_.size());
+    res.fps = {kv_fp_.data() + sd.fp_start, sd.fp_count};
   }
   return res;
 }
