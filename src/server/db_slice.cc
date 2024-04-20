@@ -1002,8 +1002,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   } else {
     uniq_fps_.clear();
 
-    for (size_t i = 0; i < lock_args.fps.size(); ++i) {
-      uint64_t fp = lock_args.fps[i];
+    for (LockFp fp : lock_args.fps) {
       if (uniq_fps_.insert(fp).second) {
         lock_acquired &= lt.Acquire(fp, mode);
       }
@@ -1028,8 +1027,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
     lt.Release(fp, mode);
   } else {
     uniq_fps_.clear();
-    for (size_t i = 0; i < lock_args.fps.size(); ++i) {
-      uint64_t fp = lock_args.fps[i];
+    for (LockFp fp : lock_args.fps) {
       if (uniq_fps_.insert(fp).second) {
         lt.Release(fp, mode);
       }

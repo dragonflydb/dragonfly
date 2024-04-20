@@ -83,8 +83,7 @@ uint16_t trans_id(const Transaction* ptr) {
 }
 
 bool CheckLocks(const DbSlice& db_slice, IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  for (size_t i = 0; i < lock_args.fps.size(); ++i) {
-    auto fp = lock_args.fps[i];
+  for (LockFp fp : lock_args.fps) {
     if (!db_slice.CheckLock(mode, lock_args.db_index, fp))
       return false;
   }
@@ -262,7 +261,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
   DCHECK_EQ(kv_args_.size(), num_args);
 }
 
-void Transaction::PrepareMultiFps(const CmdArgVec& keys) {
+void Transaction::PrepareMultiFps(CmdArgList keys) {
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
   DCHECK_GT(keys.size(), 0u);
 
@@ -289,7 +288,6 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
 
     if (key_index.step == 2) {
       kv_args_.push_back(ArgS(full_args_, ++j));
-      kv_fp_.push_back(0);
     }
   }
 
@@ -451,8 +449,7 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   ScheduleInternal();
 }
 
-// TODO: remove by value.
-void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys, bool skip_scheduling) {
+void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys, bool skip_scheduling) {
   DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
 
   DCHECK(multi_);
@@ -463,7 +460,7 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys, bool skip_
 
   PrepareMultiFps(keys);
 
-  InitBase(dbid, absl::MakeSpan(keys));
+  InitBase(dbid, keys);
   InitByKeys(KeyIndex::Range(0, keys.size()));
 
   if (!skip_scheduling)
@@ -1320,10 +1317,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
   if (multi_->mode == GLOBAL) {
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
   } else {
-    KeyLockArgs lock_args;
-    lock_args.db_index = db_index_;
-    lock_args.fps = fps;
-    shard->db_slice().Release(*multi_->lock_mode, lock_args);
+    shard->db_slice().Release(*multi_->lock_mode, KeyLockArgs{db_index_, fps});
   }
 
   ShardId sid = shard->shard_id();

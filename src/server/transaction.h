@@ -232,7 +232,7 @@ class Transaction {
   void StartMultiGlobal(DbIndex dbid);
 
   // Start multi in LOCK_AHEAD mode with given keys.
-  void StartMultiLockedAhead(DbIndex dbid, CmdArgVec keys, bool skip_scheduling = false);
+  void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys, bool skip_scheduling = false);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
@@ -397,6 +397,8 @@ class Transaction {
 
     uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
     uint32_t arg_count = 0;
+
+    // span into kv_fp_
     uint32_t fp_start = 0;
     uint32_t fp_count = 0;
 
@@ -499,7 +501,7 @@ class Transaction {
   void StoreKeysInArgs(const KeyIndex& key_index);
 
   // Multi transactions unlock asynchronously, so they need to keep fingerprints of keys.
-  void PrepareMultiFps(const CmdArgVec& keys);
+  void PrepareMultiFps(CmdArgList keys);
 
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
