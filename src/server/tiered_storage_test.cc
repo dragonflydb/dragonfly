@@ -35,16 +35,12 @@ class TieredStorageV2Test : public BaseFamilyTest {
     num_threads_ = 1;
   }
 
-  static void SetUpTestSuite() {
+  void SetUp() override {
     if (absl::GetFlag(FLAGS_force_epoll)) {
       LOG(WARNING) << "Can't run tiered tests on EPOLL";
       exit(0);
     }
 
-    BaseFamilyTest::SetUpTestSuite();
-  }
-
-  void SetUp() override {
     absl::SetFlag(&FLAGS_tiered_prefix, "");
     absl::SetFlag(&FLAGS_tiered_prefix_v2, "/tmp/tiered_storage_test");
     absl::SetFlag(&FLAGS_tiered_storage_v2_cache_fetched, true);
