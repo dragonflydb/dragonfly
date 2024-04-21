@@ -885,6 +885,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
     else
       return cntx->SendLong(result.value());
   } else {
+    // Memcached skips if key is missing
     DCHECK(cntx->protocol() == Protocol::MEMCACHE);
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
