@@ -1088,6 +1088,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   if (sdata_res.has_value()) {
     size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("swap_memory_bytes", "", sdata_res->vm_swap, MetricType::GAUGE,
+                              &resp->body());
   } else {
     LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
                            << sdata_res.error().message();

@@ -989,70 +989,56 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
 }
 
 bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  if (lock_args.args.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
+  if (lock_args.fps.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return true;
   }
-  DCHECK_GT(lock_args.key_step, 0u);
 
   auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   bool lock_acquired = true;
 
-  if (lock_args.args.size() == 1) {
-    LockTag tag(lock_args.args.front());
-    lock_acquired = lt.Acquire(tag, mode);
-    uniq_keys_ = {string_view(tag)};  // needed only for tests.
+  if (lock_args.fps.size() == 1) {
+    lock_acquired = lt.Acquire(lock_args.fps.front(), mode);
+    uniq_fps_ = {lock_args.fps.front()};  // needed only for tests.
   } else {
-    uniq_keys_.clear();
+    uniq_fps_.clear();
 
-    for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      LockTag tag(lock_args.args[i]);
-      if (uniq_keys_.insert(string_view(tag)).second) {
-        lock_acquired &= lt.Acquire(tag, mode);
+    for (LockFp fp : lock_args.fps) {
+      if (uniq_fps_.insert(fp).second) {
+        lock_acquired &= lt.Acquire(fp, mode);
       }
     }
   }
 
-  DVLOG(2) << "Acquire " << IntentLock::ModeName(mode) << " for " << lock_args.args[0]
+  DVLOG(2) << "Acquire " << IntentLock::ModeName(mode) << " for " << lock_args.fps[0]
            << " has_acquired: " << lock_acquired;
 
   return lock_acquired;
 }
 
-void DbSlice::ReleaseNormalized(IntentLock::Mode mode, DbIndex db_index, LockTag tag) {
-  DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " "
-           << " for " << string_view(tag);
-
-  auto& lt = db_arr_[db_index]->trans_locks;
-  lt.Release(tag, mode);
-}
-
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  if (lock_args.args.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
+  if (lock_args.fps.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return;
   }
 
-  DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
-  if (lock_args.args.size() == 1) {
-    string_view key = lock_args.args.front();
-    ReleaseNormalized(mode, lock_args.db_index, LockTag{key});
+  DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.fps[0];
+  auto& lt = db_arr_[lock_args.db_index]->trans_locks;
+  if (lock_args.fps.size() == 1) {
+    uint64_t fp = lock_args.fps.front();
+    lt.Release(fp, mode);
   } else {
-    auto& lt = db_arr_[lock_args.db_index]->trans_locks;
-    uniq_keys_.clear();
-    for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-      LockTag tag(lock_args.args[i]);
-      if (uniq_keys_.insert(string_view(tag)).second) {
-        lt.Release(tag, mode);
+    uniq_fps_.clear();
+    for (LockFp fp : lock_args.fps) {
+      if (uniq_fps_.insert(fp).second) {
+        lt.Release(fp, mode);
       }
     }
   }
-  uniq_keys_.clear();
+  uniq_fps_.clear();
 }
 
-bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) const {
+bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const {
   const auto& lt = db_arr_[dbid]->trans_locks;
-  LockTag tag(key);
-
-  auto lock = lt.Find(tag);
+  auto lock = lt.Find(fp);
   if (lock) {
     return lock->Check(mode);
   }

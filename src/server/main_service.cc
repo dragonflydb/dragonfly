@@ -1810,7 +1810,7 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
       trans->StartMultiGlobal(dbid);
       return true;
     case Transaction::LOCK_AHEAD:
-      trans->StartMultiLockedAhead(dbid, CmdArgVec{keys.begin(), keys.end()});
+      trans->StartMultiLockedAhead(dbid, keys);
       return true;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
@@ -2087,9 +2087,10 @@ void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
       break;
-    case Transaction::LOCK_AHEAD:
-      trans->StartMultiLockedAhead(dbid, CollectAllKeys(exec_info));
-      break;
+    case Transaction::LOCK_AHEAD: {
+      auto vec = CollectAllKeys(exec_info);
+      trans->StartMultiLockedAhead(dbid, absl::MakeSpan(vec));
+    } break;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
       break;

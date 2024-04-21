@@ -362,11 +362,13 @@ class DbSlice {
   void OnCbFinish();
 
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
-
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
   // Returns true if the key can be locked under m. Does not lock.
-  bool CheckLock(IntentLock::Mode m, DbIndex dbid, std::string_view key) const;
+  bool CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const;
+  bool CheckLock(IntentLock::Mode mode, DbIndex dbid, std::string_view key) const {
+    return CheckLock(mode, dbid, LockTag(key).Fingerprint());
+  }
 
   size_t db_array_size() const {
     return db_arr_.size();
@@ -448,8 +450,8 @@ class DbSlice {
   }
 
   // Test hook to inspect last locked keys.
-  absl::flat_hash_set<std::string_view> TEST_GetLastLockedKeys() const {
-    return uniq_keys_;
+  const auto& TEST_GetLastLockedFps() const {
+    return uniq_fps_;
   }
 
   void RegisterWatchedKey(DbIndex db_indx, std::string_view key,
@@ -476,9 +478,6 @@ class DbSlice {
   // Delete a key referred by its iterator.
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
-
-  // Releases a single tag.
-  void ReleaseNormalized(IntentLock::Mode m, DbIndex db_index, LockTag tag);
 
  private:
   void PreUpdate(DbIndex db_ind, Iterator it);
@@ -552,7 +551,7 @@ class DbSlice {
   DbTableArray db_arr_;
 
   // Used in temporary computations in Acquire/Release.
-  mutable absl::flat_hash_set<std::string_view> uniq_keys_;
+  mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
   // ordered from the smallest to largest version.
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;

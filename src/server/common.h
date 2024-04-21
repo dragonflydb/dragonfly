@@ -69,8 +69,7 @@ struct LockTagOptions {
 
 struct KeyLockArgs {
   DbIndex db_index = 0;
-  ArgSlice args;
-  unsigned key_step = 1;
+  absl::Span<const LockFp> fps;
 };
 
 // Describes key indices.
@@ -118,7 +117,7 @@ struct OpArgs {
   }
 };
 
-// A strong type for a lock tag. Helps to disambiguide between keys and the parts of the
+// A strong type for a lock tag. Helps to disambiguate between keys and the parts of the
 // keys that are used for locking.
 class LockTag {
   std::string_view str_;
