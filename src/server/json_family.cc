@@ -40,6 +40,7 @@ namespace dfly {
 using namespace std;
 using namespace jsoncons;
 using facade::kSyntaxErrType;
+using facade::WrongNumArgsError;
 
 using JsonExpression = jsonpath::jsonpath_expression<JsonType>;
 using OptBool = optional<bool>;
@@ -1355,6 +1356,24 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+// JSON.MSET key path value [key path value ...]
+void JsonFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
+  DCHECK_GE(args.size(), 3u);
+  if (args.size() % 3 != 0) {
+    return cntx->SendError(facade::WrongNumArgsError("json.mset"));
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    ArgSlice args = t->GetShardArgs(shard->shard_id());
+    LOG(INFO) << shard->shard_id() << " " << args;
+    return OpStatus::OK;
+  };
+
+  Transaction* trans = cntx->transaction;
+  trans->ScheduleSingleHop(cb);
+  cntx->SendOk();
+}
+
 void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = DefaultJsonPath;
@@ -2026,9 +2045,12 @@ void JsonFamily::Register(CommandRegistry* registry) {
       ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(ArrIndex);
   // TODO: Support negative first_key index to revive the debug sub-command
-  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -3, 2, 2, acl::JSON}.HFUNC(Debug);
-  *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp);
-  *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set);
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -3, 2, 2, acl::JSON}.HFUNC(Debug)
+            << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
+            << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
+            << CI{"JSON.MSET", CO::WRITE | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS, -4, 1, -1,
+                  acl::JSON}
+                   .HFUNC(MSet);
 }
 
 }  // namespace dfly
