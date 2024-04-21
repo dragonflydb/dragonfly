@@ -1057,6 +1057,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
 
   // Clients metrics
   const auto& conn_stats = m.facade_stats.conn_stats;
+  AppendMetricWithoutLabels("max_clients", "Maximal number of clients", GetFlag(FLAGS_maxclients),
+                            MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("connected_clients", "", conn_stats.num_conns, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("client_read_buffer_bytes", "", conn_stats.read_buf_capacity,
@@ -1939,6 +1941,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("CLIENTS")) {
     append("connected_clients", m.facade_stats.conn_stats.num_conns);
+    append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
     append("dispatch_queue_entries", m.facade_stats.conn_stats.dispatch_queue_entries);
